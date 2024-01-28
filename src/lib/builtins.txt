@@ -1,0 +1,250 @@
+// These are all intrinsic candidates. 
+
+fn defer(fn());
+
+for T with bytes_size(T) i64 {
+    fn array() Array(T);
+    fn set(arr: &Array(T), i: i64, v: T);
+    fn get(arr: &Array(T), i: i64) &T;
+    fn len(arr: &Array(T)) i64;
+    fn push(arr: &Array(T), v: T);
+    fn drop(arr: Array(T));
+    
+    fn if(cond: bool, a: fn() T, b: fn() T);
+}
+
+for (Arr, T) with and(fn get(Arr, i64) T, fn length(Arr) i64) {
+    fn foreach(arr: Arr, body: fn(&T)) {
+        let i = 0;
+        while(fn { lt(i, len(arr)) }, fn { let v = get(arr, i); body(v); i = add(i, 1); })
+    }
+}
+
+fn while(cond: fn() bool, body: fn()) {
+    if cond() {
+        body();
+        while(cond, body);
+    }
+}
+
+for T in [f64, i64, Angle, u8] {
+    fn add(a: T, b: T) T;
+    fn sub(a: T, b: T) T;
+    fn neg(n: T) T = sub(0, n);
+    fn eq(a: T, b: T) bool;
+}
+
+for (T, U) with eq(T, U) bool {
+    // Functions with 'auto' have a default implementation but can be replaced by other code 
+    @auto fn eq(a: U, b: T) bool = eq(b, a);
+    @auto fn ne(a: T, b: U) bool = not(eq(a, b));
+    @auto fn ne(a: U, b: T) bool = not(eq(a, b));
+}
+
+for T with and(fn lt(T, T) bool, fn eq(T, T) bool) {
+    fn lt(a: T, b: T) bool;
+    @auto fn gt(a: T, b: T) bool = not(le(a, b));
+    @auto fn le(a: T, b: T) bool = or(eq(a, b), lt(a, b));
+    @auto fn ge(a: T, b: T) bool = or(eq(a, b), gt(a, b));
+}
+
+for T in [f64, i64, u8] {
+    fn mul(a: T, b: T) T;
+    fn div(a: T, b: T) T {
+        sanity(fn { ne(b, 0) });
+        div_unchecked(a, b)
+    }
+    fn mod(a: T, b: T) T;
+    fn pow(a: T, b: T) T {
+        sanity(fn { or(ge(b, 0), ge(a, 1)) });
+        pow_unchecked(a, b)
+    }
+
+    fn sqrt(n: f64) T = pow(n, 0.5);
+    
+    fn asin(n: T) Angle;
+    fn acos(n: T) Angle;
+    fn atan(n: T) Angle;
+    fn degs(degs: T) Angle;
+    fn rads(reds: T) Angle;
+}
+
+fn sin(n: Angle) f64;
+fn cos(n: Angle) f64;
+fn tan(n: Angle) f64 = div(sin(n), cos(n));
+
+fn pi() f64 {
+    3.1415926535897
+}
+
+// 'from' is called implicitly by the compiler
+fn from(v: Angle) f64;
+fn try_from(v: f64) ?i64;
+fn try_from(v: i64) ?f64;
+fn from(v: u8) i64;
+fn from(v: u8) f64;
+fn try_from(v: f64) ?u8;
+fn try_from(v: i64) ?u8;
+
+fn bits(v: f64) i64;
+
+for T in [bool, i64] {
+    fn and(a: T, b: T) T;
+    fn or(a: T, b: T) T;
+    fn xor(a: T, b: T) T;
+    fn not(a: T) T;
+    
+    fn hash(v: T, hasher: fn(i64));
+}
+
+// A unique type to hang methods off 
+struct StupidHash = (i64);
+
+// Note the extra parens to destructure self 
+fn hash_i64((self): &StupidHash, h: i64) {
+    set(self, xor(get(self), h))
+}
+
+fn hash_i64((self): &StupidHash) i64 {
+    swap(self, 0)
+}
+
+// Syntax sugar for un-named traits: 
+//     for (X) with fn name(X) { ... }
+//     trait __X(X) = fn name(X); for (X) with __X(X) { ... }
+trait Hasher(H) = and(fn pop_hash(&H) i64, fn hash_i64(&H, i64));
+
+@comptime fn and(a: Trait, b: Trait) Trait;
+
+for (K, V, H) with and(and(Hasher(H), fn hash(V, fn(i64)), fn eq(K, K))) {
+    fn get_hash(hasher: &H, v: T) i64 {
+        hash(v, fn(n) { hash_i64(hasher, n) })
+        pop_hash(hasher)
+    }
+    
+    fn hashmap(hasher: H) HashMap(K, V, H);
+    fn get(&HashMap(K, V, H), &K) ?&T;
+    fn insert(&HashMap(K, V, H), K, V) ?T;
+    fn len(&HashMap(K, V, H)) i64;
+    fn drop(arr: HashMap(K, V, H));
+    
+    if (K, V) with and(and(clone(K) K), clone(V) V) {
+        fn clone(&HashMap(K, V, H)) &HashMap(K, V, H);
+    }
+    
+    // Generic structs are really just comptime functions 
+    // @comptime fn HashSet(K: Type, H: Type) Type = HashMap(K, Unit, H);
+    struct HashSet(K, H) = HashMap(K, Unit, H);
+    fn hashset(Array(K)) HashSet(K, H)
+}
+
+for T {
+    fn nil() ?T;
+    fn is_nil(?T) bool;
+    
+    fn move(T);
+    fn copy(ptr: &T) &T = ptr;
+    
+    // You can still overload with a different return type 
+    fn deref(ptr: &T) &T = ptr;
+    
+    fn from(v: T) T = T;
+    
+    @comptime fn comptime(fn() T) T;
+    @comptime fn reflect(T) TypeInfo;
+    @auto fn debug(&T) Str;
+}
+
+for T with move(T) {
+    fn box(T) Box(T);
+    fn drop(Box(T));
+    fn deref(&Box(T)) &T;
+    
+    fn rc(T) Rc(T);
+    fn clone(&Rc(T)) Rc(T);
+    fn deref(&Rc(T)) &T;
+    fn strong_count(&Rc(T)) i64;
+    fn weak_count(&Rc(T)) i64;
+    fn take(Rc(T)) ?T;
+    fn drop(Rc(T));
+    
+    fn weak(Rc(T)) Weak(T);
+    fn clone(&Weak(T)) Weak(T);
+    fn deref(Weak(T)) ?&T;
+    fn drop(Weak(T));
+    
+    fn gc(T) Gc(T);
+    fn deref(Gc(T)) &T;
+    fn copy(Gc(T)) Gc(T);
+    
+    @auto fn swap(ptr: &T, new: T) T {
+        let old = get(ptr)
+        set(ptr, new)
+        old
+    }
+    
+    fn set(ptr: &T, new: T);
+    fn get(ptr: &T) T;
+    fn any(T) Any;
+    fn as(Any) ?T;
+    
+    // This will be called implicitly in prototyping builds
+    fn unwrap(maybe: ?T) T;
+}
+
+
+for T {
+    // No doubles
+    fn combinations(Array(T)) Array((T, T));
+    
+    // Syntax sugar
+    fn from(&T) Ptr(T);
+    fn from(Ptr(T)) &T;
+    fn from(?T) Option(T);
+    fn from(Option(T)) ?T;
+    
+}
+
+for (From, To) in combinations([Gc, Rc, Box, Ptr]) {
+    fn alloc(From) To;
+}
+
+for (Ptr, T) with deref(Ptr) &T {
+    @auto fn from(ptr: Ptr) &T = deref(ptr)
+}
+
+fn unreachable() Never;
+
+// This will be optimised out in release builds. 
+fn sanity(cond: fn() Bool) = assert(cond(), "Safety check failed.")
+
+// This will NOT be optimised out in release builds. 
+fn assert(cond: Bool, msg: Str) = assert(fn { msg })
+fn assert(cond: Bool, msg: fn() Str) {
+    if cond {
+        print(msg())
+    }
+}
+
+for T in [bool, i64, f64, Angle, u8] {
+    fn copy(&T) T;
+    
+    fn clone(&T) T = T;
+}
+
+enum Str = Static(&Array(u8)) | Array(u8) | Rc(Array(u8)) | Char(Int)
+
+fn concat(Str, Str) Str;
+fn print(Str);
+fn append(&Str, &Str);
+fn len_bytes(&Str);
+
+enum Target = Interp | C | Browser; 
+@comptime fn get_target() Target;
+@comptime fn is_comptime() bool;
+@comptime fn include_bytes(filepath: Str) Array(u8);
+@comptime fn import(src_filepath: Str);
+
+for T {
+    @comptime fn eval(Str) T;
+}

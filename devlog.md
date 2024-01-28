@@ -14,3 +14,5 @@ fixed that with a wrapper that does the unsafe deref.
 tried to make it generic over anything that was already hash+eq but couldn't figure out how to express the bound that `&T: Hash`
 actually no, thats not the problem, its that you need the `T: ?Sized` on the impl as well as the main struct generic. Similarly, you can't derive Copy/Clone 
 because it implicitly adds that bound. 
+
+
