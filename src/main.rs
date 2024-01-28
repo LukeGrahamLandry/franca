@@ -2,7 +2,10 @@
 
 use tree_sitter::Parser;
 
+use crate::{interp::Interp, parse::WalkParser, pool::StringPool};
+
 mod ast;
+mod interp;
 mod parse;
 mod pool;
 
@@ -20,9 +23,10 @@ fn main() {
         
         call(fn(a: Int) = { a });
         
-        fn call(fn(Int));
+        // fn call(fn(Int));
+        // call(fn = { $0 });
     "#;
-    let tree = p.parse(src, None).unwrap();
-
-    println!("{}", tree.root_node().to_sexp());
+    let pool = StringPool::default();
+    let p = WalkParser::parse(p, src, &pool);
+    let interp = Interp::new(&pool);
 }

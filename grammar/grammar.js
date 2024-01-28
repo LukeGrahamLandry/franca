@@ -22,7 +22,7 @@ module.exports = grammar({
         seq(
           "fn",
           field("name", $.identifier),
-          $.func_proto,
+          field("proto", $.func_proto),
           field("body", choice(";", seq("=", $._expr))),
         ),
       ),
@@ -42,7 +42,16 @@ module.exports = grammar({
     names: ($) => prec(2, choice($.identifier, seq("(", list($.names), ")"))),
 
     _expr: ($) =>
-      choice($.identifier, $.call_expr, $.type_expr, $.block, $.closure_expr),
+      choice(
+        $.identifier,
+        $.call_expr,
+        $.type_expr,
+        $.block,
+        $.closure_expr,
+        $.number,
+        $.anon_arg,
+      ),
+    anon_arg: ($) => prec(5, seq("$", $.number)),
     call_expr: ($) => prec(2, seq($._expr, $.tupple)),
     type_expr: ($) =>
       prec(
@@ -54,7 +63,11 @@ module.exports = grammar({
           seq("fn", $.func_proto),
         ),
       ),
-    closure_expr: ($) => seq("fn", $.func_proto, "=", field("body", $._expr)),
+    closure_expr: ($) =>
+      choice(
+        seq("fn", field("proto", $.func_proto), "=", field("body", $._expr)),
+        seq("fn", "=", field("body", $._expr)),
+      ),
     tupple: ($) => seq("(", list($._expr), ")"),
 
     identifier: (_) => /[_\p{XID_Start}][_\p{XID_Continue}]*/,
@@ -62,8 +75,6 @@ module.exports = grammar({
     number: ($) => /\d+/,
   },
 });
-
-// fn ((hello,
 
 // Optional trailing comma
 function list(e) {

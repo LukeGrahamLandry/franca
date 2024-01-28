@@ -2,21 +2,69 @@
 
 fn defer(fn());
 
-for T with bytes_size(T) i64 {
-    fn array() Array(T);
-    fn set(arr: &Array(T), i: i64, v: T);
-    fn get(arr: &Array(T), i: i64) &T;
-    fn len(arr: &Array(T)) i64;
-    fn push(arr: &Array(T), v: T);
-    fn drop(arr: Array(T));
+// TODO: Box and Rc should be generic over alloc
+trait Allocator = and(allocate(&A, i64) Ptr(Unit), free(&A, Ptr(Unit), i64))
+
+@comptime fn stride(Type) ?i64;
+
+for T with ne(stride(T), nil()) {
+    struct Slice(T) = { len: i64, data: &T };
     
+    fn set(arr: Slice(T), i: i64, v: T) {
+        sanity(fn = and(ge(i, 0), lt(i, arr.len)), "OOB");
+        let ptr = offset(arr.data, i);
+        set(ptr, v);
+    }
+    
+    fn get(arr: Slice(T), i: i64) &T {
+        sanity(fn = and(ge(i, 0), lt(i, arr.len)), "OOB");
+        offset(arr.data, i)
+    }
+    
+    fn len(arr: Slice(T)) i64 = arr.len;
+    
+    for A with Allocator(A) {
+        struct Array(T, A) = { len: i64, data: &T, capacity: i64, alloc: &A };
+        
+        fn cast(arr: Array(T, A)) Slice(T) = Slice({ arr.len, arr.data })
+        
+        fn array(alloc: &A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, data: nil() })
+        fn array(alloc: &A, capacity: i64) Array(T, A) = {
+            let data = allocate(alloc, mul(stride(T), capacity));
+            Array({ len: 0, capacity, alloc, data })
+        }
+        
+        fn reserve(arr: &Array(T, A), extra: i64) {
+            if(lt(arr.capacity, total), fn = {
+                let cap = max(max(add(arr.capacity, extra), mul(arr.capacity, 2)), 4);
+                let new = array(arr.alloc, cap);
+                enumerate(arr, fn(i, e) = set(new, i, e));
+                free(arr);
+                set(arr, new);
+            }, fn=())
+        }
+        
+        fn push(arr: &Array(T, A), v: T) = {
+            reserve(arr, 1);
+            set(len(arr), v);
+        }
+        
+        fn drop(arr: Array(T, A)) = free(arr.data, mul(stride(T), arr.capacity))
+    }
+}
+
+for T {
+    // I don't support escaping captures, a function accepting a closure is always inlined. 
     fn if(cond: bool, a: fn() T, b: fn() T);
 }
 
 for (Arr, T) with and(fn get(Arr, i64) T, fn length(Arr) i64) {
-    fn foreach(arr: Arr, body: fn(&T)) {
+    fn foreach(arr: &Arr, body: fn(&T)) = 
+        enumerate(arr, fn (_, v) = body(v))
+    
+    fn enumerate(arr: &Arr, body: fn(i64, &T)) {
         let i = 0;
-        while(fn { lt(i, len(arr)) }, fn { let v = get(arr, i); body(v); i = add(i, 1); })
+        while(fn { lt(i, len(arr)) }, fn { let v = get(arr, i); body(i, v); i = add(i, 1); })
     }
 }
 
@@ -69,12 +117,54 @@ for T in [f64, i64, u8] {
     fn rads(reds: T) Angle;
 }
 
+struct Angle = (f64);
+
 fn sin(n: Angle) f64;
 fn cos(n: Angle) f64;
 fn tan(n: Angle) f64 = div(sin(n), cos(n));
 
 fn pi() f64 {
     3.1415926535897
+}
+
+for T {
+    enum Option(T) = Some(T) | None;
+    
+    // This will be called implicitly in prototyping builds
+    fn unwrap(maybe: ?T) T;
+    
+}
+
+for (A, I(A)) with next(I(A)) ?T {
+    fn filter(I(A), fn(&A) Bool) I(A);
+    fn len(I(A)) i64;
+    
+    for B {
+        fn map(iter: I, f: fn(A) B)) I(B);
+    }
+}
+
+@comptime fn is_enum(Type) Bool;
+@comptime fn Tag(Type) Type;
+@comptime fn tags(Type) Slice(Tag(Type));
+@comptime fn Payload(Type, Tag(Type)) Type;
+
+for (E, T) with is_enum(E){
+    let MatchArg(T) = map(tags(E), fn (tag) = (Tag(E), fn(Payload(E, tag)) T));
+    
+    fn match(MatchArg(T)) T;
+}
+
+for R, E {
+    enum Result(R, E) = Ok(R) | Err(E);
+    
+    // This will be called implicitly in prototyping builds
+    fn unwrap(r: Result(R, E)) R {
+        match([
+            (Ok, fn(r: R) R = e),
+            (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
+        ])
+    }
 }
 
 // 'cast' is called implicitly by the compiler
@@ -156,9 +246,17 @@ for T {
 }
 
 for T with move(T) {
+    @comptime @auto fn safe_to_leak(T) bool = true 
+
     fn box(T) Box(T);
     fn drop(Box(T));
     fn deref(&Box(T)) &T;
+    
+    if safe_to_leak(T) {
+        fn raw(Box(T)) &T;
+    } else {
+        @unsafe fn raw(Box(T)) &T;
+    }
     
     fn rc(T) Rc(T);
     fn clone(&Rc(T)) Rc(T);
@@ -184,14 +282,9 @@ for T with move(T) {
     }
     
     fn set(ptr: &T, new: T);
+    fn set(ptr: &T, new: &T) = set(ptr, get(new))
     fn get(ptr: &T) T;
-    fn any(T) Any;
-    fn as(Any) ?T;
-    
-    // This will be called implicitly in prototyping builds
-    fn unwrap(maybe: ?T) T;
 }
-
 
 for T {
     // No doubles
@@ -202,11 +295,36 @@ for T {
     fn cast(Ptr(T)) &T;
     fn cast(?T) Option(T);
     fn cast(Option(T)) ?T;
+    fn cast(T) ?T = T;
+}
+
+
+@comptime fn type_for(TypeId) Type;
+@comptime fn type_id(T) TypeId;
+
+// Note: Any is not generic over the inner type, just the pointer type. 
+for Ref in [Gc, Rc, Box, Ptr] {
+    struct Any(Ref) = (TypeId, Ref(Unit))
     
+    fn type_id((id, _): Any(Ref)) TypeId = id;
+    
+    for T {
+        fn cast(Ref(T)) Ref(Unit);
+        
+        fn any(ptr: Ref(T)) Any(Ref) = Any(type_id(T), ptr);
+        
+        fn try_cast((id, ptr): Any(Ref)) ?Ref(T) = 
+            if(eq(type_id(T), id), fn = transmute(ptr), fn = nil())
+    }
+}
+
+for (A, B) with eq(size_of(A), size_of(B)) {
+    @unsafe fn transmute(A) B;
 }
 
 for (From, To) in combinations([Gc, Rc, Box, Ptr]) {
     fn from(From) To;
+    fn from(Any(From)) Any(To);
 }
 
 for (Ptr, T) with deref(Ptr) &T {
@@ -215,15 +333,19 @@ for (Ptr, T) with deref(Ptr) &T {
 
 fn unreachable() Never;
 
-// This will be optimised out in release builds. 
-fn sanity(cond: fn() Bool) = assert(cond(), "Safety check failed.")
+@safety fn sanity(cond: fn() Bool) = sanity(cond(), fn = "Safety check failed.")
+@safety fn sanity(cond: fn() Bool, msg: fn() Str) = assert(cond(), msg)
 
-// This will NOT be optimised out in release builds. 
-fn assert(cond: Bool, msg: Str) = assert(fn { msg })
+fn assert(cond: Bool, msg: Str) = assert(cond, fn = msg)
 fn assert(cond: Bool, msg: fn() Str) {
     if cond {
-        print(msg())
+        panic(msg())
     }
+}
+
+fn panic(msg: Str) Never {
+    print(msg);
+    unreachable();
 }
 
 for T in [bool, i64, f64, Angle, u8] {
@@ -232,19 +354,21 @@ for T in [bool, i64, f64, Angle, u8] {
     fn clone(&T) T = T;
 }
 
-enum Str = Static(&Array(u8)) | Array(u8) | Rc(Array(u8)) | Char(Int)
+enum Str = Static(Slice(u8)) | Array(u8) | Rc(Array(u8)) | Char(Int)
 
 fn concat(Str, Str) Str;
 fn print(Str);
 fn append(&Str, &Str);
 fn len_bytes(&Str);
 
-enum Target = Interp | C | Browser; 
+enum Target = Interp | Jit | C | Browser; 
 @comptime fn get_target() Target;
 @comptime fn is_comptime() bool;
-@comptime fn include_bytes(filepath: Str) Array(u8);
-@comptime fn import(src_filepath: Str);
+@comptime fn include_bytes(filepath: Str) Slice(u8);
+@comptime fn include(filepath: Str);
+@comptime fn include_c(filepath: Str);
+@comptime fn include_c_src(code: Str);
 
 for T {
-    @comptime fn eval(Str) T;
+    @comptime fn eval(code: Str) T;
 }

@@ -20,7 +20,7 @@ impl<'pool> StringPool<'pool> {
         unsafe { &*(v.get(i.0).expect("Valid Ident").0) }
     }
 
-    pub fn intern(&self, s: &str) -> Ident {
+    pub fn intern(&self, s: &str) -> Ident<'pool> {
         let temp: *const str = s;
         let temp = temp as *mut str;
 
