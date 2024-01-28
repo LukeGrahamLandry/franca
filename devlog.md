@@ -1,4 +1,7 @@
 
+## Tree Sitter (Jan 28)
+
+I need to figure out what the `•` symbol precicly means in error messages. Brackets not in quotes are like s-expression where the first thing in the list is the name of the production and the rest are its arguments. I think `•` is a sequence separator. So `(call_expr _expr  • tupple)  <-> call_expr(seq(_expr, tupple)`
 
 ## Side Tracked (Jan 27)
 
