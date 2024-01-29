@@ -1,0 +1,328 @@
+
+/////////////////////////
+/// Compilation Model ///
+// 
+// - Order of function and type declarations in source files doesn't matter. Everything is parsed before overload resolution begins. 
+// - Top level statements (like the calls to assert_eq in these examples) will run (in order) at compile time.
+// - Running the compiled executable will invoke the function called main.
+// - Functions are compiled lazily. Only those reachable from main() will be present in the final executable. 
+// 
+
+fn main() {
+    print("Hello World");
+}
+
+/////////////////
+/// Functions ///
+
+// Blocks are an expression consisting of a list of statements and returning the value of the last expression. 
+fn succ1(n: i64) i64 = {
+    let one = 1;
+    let result = add(n, one);
+    result
+}
+
+// The body can be any expression, it doesn't need to be a block with braces. 
+fn succ2(n: i64) i64 = add(n, 1);
+
+assert_eq(succ1(10), succ2(10));
+
+///////////////////
+/// Overloading ///
+// 
+// Which function is being called is determined by name, argument types and return type. 
+//
+// assign to let binding if want local function with no overloading. 
+
+/////////////////////////
+/// Default Arguments ///
+
+// This definition with default arguments: 
+fn multiply1(a: i64, b: i64 = 0) = mul(a, b);
+// will desugar to something like this:
+fn multiply2(a: i64, b: i64) = mul(a, b);
+fn multiply2(a: i64) = mul(a, 0);
+// They're the same. 
+assert_eq(multiply1(5), multiply2(5));
+assert_eq(multiply1(3, 4), multiply2(3, 4));
+
+//////////////////////
+/// Closure Values ///
+// Closures capturing values from thier surrounding scope is not actually supported. 
+// Any time a closure literal is passed as an argument, that call is inlined. 
+// Closures have no runtime representation, they only exist at compile time. 
+// However, a closure with no captures will implicitly cast to a function pointer 
+// which is a normal value with a runtime representation. 
+//
+// `if`, `while`, and `match` are defined as functions that accept closures 
+// but have identical performance characteristics as those constructs in other languages. 
+
+fn get_five(f: fn (i64)) {
+    f(5)
+}
+
+fn test1() {
+    let a = 10;
+    get_five(fn (n: i64) = {
+        assert_eq(n, 5);
+        a = add(a, 5);
+    );
+    assert_eq(a, 10);
+}
+
+///////////////////
+/// Type Values ///
+// 
+// TLDR: it's like Zig.  
+//
+// Like closures, types have no runtime representation. The final compiled output is statically typed like a c program. 
+// However, types can be manipulated as values during compile time execution. 
+// Type specifiers (like function parameters and returns) can be any expression that can be fully evaluated to a type at compile time. 
+// 
+// A return type expression can use the values of comptime parameters. 
+//
+
+///////////////////////////
+/// Function Qualifiers ///
+// 
+// - `@comptime`: Force all calls to the function to be evalutated during compilation. All arguments must be comptime known (const). 
+//                Note: you can still call non-comptime functions at comptime (if the compiler can determine thier argument values). 
+//
+// - `@runtime`: Prevent any calls to the function from being evalutated during compilation. 
+//               This is transitive and doesn't not need to be redundantly specified. 
+//
+// - `@auto`: The body of this function may be replaced later by defining one with the same name and types. 
+//            It allows for providing generic default implementations that can be speciallized. 
+//            For example, `gt` is automaticlly defined as the negation of `le` but sane native targets 
+//            can do that operation on integers in one instruction so a speciclized definition can replace the dumb one. 
+//            But custom types that overload a few comparison operators can get useful defaults for the rest and avoid a rule of 5 situation. 
+//            
+// - `@intrinsic`: The body of this function is stupid and the compiler (hopefully) has a special case to replace it with a better one. 
+//                 Kinda like @auto but we know the compiler will override it. 
+//                 The body just serves as documentation on function's expected behaviour. 
+//                 Also I think its cool to make the minimal technically working compiler smaller. 
+//
+// - `@safety`: Calls to this function are removed when building in unchecked mode. 
+//              Expressions passed as arguments should not have side effects since they may not be observed. 
+//              Accepting closures often makes this behaviour more self documenting. 
+//
+
+@safety require_four(n: fn() i64) {
+    if(eq(n(), 4), fn = {}, fn = panic("not 4!"))
+}
+
+fn get_four_slowly() i64 {
+    // Do some side effects... blow up the moon or whatever
+    print("heisenbug!");
+    4
+}
+
+require_four(fn = get_four_slowly());
+
+//
+// - `@pure`: This function must have no side effects.
+//            Calling `log` is a special case allowed by the compiler. 
+//
+// - `@unsafe`: Does nothing but documents that callers of the function are making a pinky promise to the universe. 
+//              According to the c++ specification breaking your pinky promise is undefined behaviour. 
+//
+// - `@c`: generate this function using the target's standard c ABI without name mangling 
+//         Export it even if it isn't called by the program so it can be used from ffi. 
+//         It may not participate in overload resolution. 
+//
+// - `@test`: This function will be called automatically when running the test target. It cannot be manually called. It's name does not have to be unique. 
+//            `|Expr1| Expr2` is shorthand for `@test fn = assert_eq(Expr1, Expr2);` TODO: ill probably get rid of this 
+//
+// - `@private`: See the Visibility section. 
+// - `@relax`: See the Relaxed Mode section.
+//
+
+// TODO: UFCS enabled by object_oriented_is_when_dot_syntax()
+
+//////////////
+/// Tuples ///
+
+///////////////
+/// Structs ///
+
+// Structs can also have the `@c` annotation to require using the c ABI layout and allow use in ffi. 
+
+/////////////////////
+/// Tagged Unions ///
+//
+// TLDR: It's like Rust
+//
+
+struct Case1 = { a: f64, b: f64 };
+
+enum Name = Case1 | Case2 | Case3(f64) | Case4({ a: f64 });
+
+// can always access fields of shared but must switch to access cases
+struct Shared = { id: i64 }; 
+struct NameExtra = using(Shared, Name);
+
+////////////////
+/// Generics ///
+
+////////////////
+/// Pointers ///
+// 
+// There are two types of pointers, both are mutable. 
+//  
+// - `&T`: A reference that does not escape the current function. 
+//         The caller promises the reference is valid until the callee returns. 
+//         The callee promises that references it returns have the same lifetime as references you gave it. 
+//         It is unsafe for the callee to cast it to a raw pointer and store it somewhere for later 
+//         (you really probably shouldn't, you can just take a raw pointer as an argument instead). 
+//
+// - `*T`: A raw pointer that is unsafe to use. Simply don't make a mistake and there won't be a problem. 
+//         It is unsafe to cast it to a reference and give it to someone (that doesn't mean you can't). 
+// 
+// This lifetime system is much less powerful than Rust's but the escape hatch is much closer at hand. 
+//
+
+//////////////////////
+/// Smart Pointers ///
+// 
+// If you just want the program to run without dealing with it, the standard library has Rc and Gc smart pointers. 
+// My goal is to be able to quickly write a program and then once it works, 
+// be able to swap out parts with more performant implementations without switching languages. 
+//
+// - Box: Pointer to a heap allocation. 
+// - Rc: Reference counting pointer. Guarenteed to call drop(T) when all the references are gone. 
+// - Gc: Garbage collected pointer. 
+//       Will call drop(T) at an unpredictable time. Just never freeing anything would be a valid (but tragic) implementation. 
+//       This one's implementation magic and depends on the target.
+//
+
+//////////////////
+/// Allocators ///
+//
+// TLDR: It's like Zig but not ugly. 
+//
+// An allocator is an interface to request a dynamic amount of memory from the operating system. 
+// The default allocator is probably whatever libc's malloc does. 
+// If that's good enough for you you'll never have to think about it. 
+//
+// If you want more control, every function has a magic implicit parameter for passing which allocator it should use. 
+// let capital_i_integer = box(10, @alloc=&my_allocator_variable); 
+// 
+// Nothing enforces that functions use the current default allocator. 
+// - They might choose to make thier own. 
+// - They might choose to wrap yours with thier own. 
+// - They might choose to call a c function that does whatever it wants.  
+// Most standard library functions will respect it tho. 
+// The Gc smart pointer is a notable exception since the collector generally needs to be intimately linked with the allocator. 
+//
+
+//////////////////////
+/// Implicit Calls ///
+// 
+// - `cast(F) T`: Called to coerce types as needed for resolving overloads. 
+//                The expectation is that calling this is free. You should not be doing allocation. 
+//
+// - `move(T) T`: Called when assigning to a variable or passing to a function when the caller does not need to use the value any more. 
+//                Self-referential types probably shouldn't implement this. 
+//                The expectation is that calling this is free. You should not be doing allocation. 
+//
+// - `copy(T) T`: Called when assigning to a variable or passing to a function. 
+//                Types that own dynamically allocated memory probably shouldn't implement this. 
+//                The expectation is that calling this is free. You should not be doing allocation. 
+// 
+// - `drop(T)`: Called when it goes out of scope. 
+//              Types that implement copy should probably implement this as a noop. 
+//              Self-referential types shouldn't implement one that takes by value. 
+// 
+
+////////////////////
+/// Relaxed Mode ///
+// 
+// This is an optional feature that can be enabled on a per function basis by adding the qualifier `@relax` to a function. 
+// It can also be enabled for an entire file by calling `set_default_relaxed(true);` in top-level at the beginning of your file. 
+// 
+// It's useful for prototyping when you just want to outline the happy path of your program. 
+// It causes the following functions to be called implicitly during overload resolution: 
+// 
+// - `clone(&T) T`: Relaxed mode uses this when you try to copy a value that doesn't implement copy. 
+//                  The expectation is that mutating the new value will not affect the old one. 
+//
+// - `from(F) T`: A version of `cast(F) T` that may need to do slow things like reallocated a collection. 
+//
+// - `try_cast(F) ?T`: A version of `cast(F) T` that may fail. 
+//
+// - `try_from(F) ?T`: A version of `from(F) T` that may fail. 
+
+assert_eq(try_from(as(i64, 1)), as(u8, 1));
+assert_eq(try_from(as(i64, -1)), as(?u8, nil()));
+// Note: The above uses `as(T, f) T` to cast literals to specific types. 
+
+// 
+// - `unwrap(?T) T`: Assume an optional value is present and crash otherwise. 
+//
+// When not in relaxed mode, the above functions exist but you must explicitly call them and handle error cases. 
+// 
+
+//////////////////
+/// Modifiers ///
+//
+// Modifiers are comptime functions with long sarcastic names 
+// that change what actions are comppile errors in different sections of your program when called at top level. 
+//
+//// Relaxed Mode
+//
+// correctness_is_when_opening_a_file_is_like_20_lines_of_code()
+//      This is the default state. 
+//      Use `@relax` to enable relaxed mode for a single function. 
+// 
+// expressive_is_when_it_just_crashes_sometimes()
+//      Functions default to relaxed mode. 
+//      Use `@strict` to disable it for a single function. 
+//
+//// Visibility
+//
+// simple_is_when_everyone_can_change_your_stuff()
+//      This is the default state. 
+//      Functions, types, and type fields default to public. 
+//      You can use the `@private` qualifier on something to make it only accessable in the current file. 
+// 
+// object_oriented_is_when_private_field()
+//      Functions, types, and type fields default to private and are only accessable in the current file. 
+//      You can use the `@public` qualifier on something to make it only accessable in the current file. 
+//      Note: nothing really inforces private fields, if someone knows your struct layout they can always cast a 
+//            pointer to bytes can get stuff out that way, but it is unsafe to do so. 
+//
+// Private functions cannot overload public ones (name must be unique). 
+// Names of public structs must be unique. 
+// 
+//// Memory Safety
+//
+// simple_is_when_it_just_crashes_sometimes()
+//      This is the default state. 
+//      Simply don't make a mistake and everything will be fine. 
+// 
+// memory_safety_is_when_everything_is_highlighted_in_red()
+//      It is a compile error to call an unsafe function from a safe one without marking the expression as `@unsafe` as well. 
+//      It is a compile error to mark an expression as `@unsafe` without a comment above in the form `// # Safety: I swear to Zeus that I'm not doing crimes.`
+//      These restrictions will not be very limiting since you aren't doing very many crimes... right? 
+// 
+//// Overloading
+// 
+// expressive_is_when_expression_takes_2000ms_to_typecheck()
+//      This is the default state.
+//      Function declarations can participate in overloading. 
+//
+// simple_is_when_its_easier_to_compile()
+//      Function declarations must have unique names and cannot participate in overloading. 
+//      You can still call overloaded functions, you just can't create them (or implement them on your own types). 
+// 
+
+/////////////////// 
+/// Collections ///
+// 
+// TLDR: It's what you'd expect. 
+//
+// - Array: a growable list of elements 
+// - Slice: a view into a sub-part of array. 
+// - HashMap
+// - HashSet
+// 

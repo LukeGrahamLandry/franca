@@ -101,19 +101,20 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 let mut entries = node.children_by_field_name("proto", &mut cursor);
                 let node = entries.next().unwrap();
                 assert!(entries.next().is_none());
-    
+
                 let mut cursor = node.walk();
-    
+
                 let mut entries = node.children_by_field_name("return_type", &mut cursor);
                 let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
                 assert!(entries.next().is_none());
-    
-                Stmt::DeclFunc {
-                    name,
-                    return_type,
-                    body: None,
-                }
-                Expr::Func()
+
+                // Stmt::DeclFunc {
+                //     name,
+                //     return_type,
+                //     body: None,
+                // }
+                // Expr::Func()
+                todo!()
             }
             _ => todo!("parse expr for {}: {:?}", node.kind(), node.to_sexp()),
         }
