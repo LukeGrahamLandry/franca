@@ -6,7 +6,7 @@ trait Allocator(A) = and(allocate(&A, i64) Ptr(Unit), free(&A, Ptr(Unit), i64))
 @comptime fn stride(Type) ?i64;
 
 for T with ne(stride(T), nil()) {
-    struct Slice(T) = { len: i64, data: *T };
+    struct Slice(T) = { len: i64, ptr: *T };
     
     @intrinsic fn memcpy(dest: Slice(T), src: Slice(T)) = {
         sanity(eq(dest.len, src.len), fn = "memcpy mismatch");
@@ -16,36 +16,36 @@ for T with ne(stride(T), nil()) {
     fn slice(arr: Slice(T), start: i64, end: i64) = {
         sanity(fn = and(ge(start, 0), lt(start, arr.len)), fn = "OOB start");
         sanity(fn = and(ge(end, start), lt(end, arr.len)), fn = "OOB end");
-        let data = offset(arr.data, start);
-        Slice({ len: sub(start, end), data })
+        var ptr = offset(arr.ptr, start);
+        Slice({ len: sub(start, end), ptr })
     }
     
-    fn set(arr: Slice(T), i: i64, v: T) {
+    fn set(arr: Slice(T), i: i64, v: T) = {
         sanity(fn = and(ge(i, 0), lt(i, arr.len)), fn = "OOB");
-        let ptr = offset(arr.data, i);
+        var ptr = offset(arr.ptr, i);
         set(ptr, v);
     }
     
     // Result safety: don't resize the array while you're still holding the pointer. 
-    fn get(arr: &Slice(T), i: i64) &T {
+    fn get(arr: &Slice(T), i: i64) &T = {
         sanity(fn = and(ge(i, 0), lt(i, arr.len)), fn = "OOB");
-        offset(arr.data, i)
+        offset(arr.ptr, i)
     }
     
     fn len(arr: Slice(T)) i64 = arr.len;
     
     for A with Allocator(A) {
-        struct Array(T, A) = { len: i64, data: *T, capacity: i64, alloc: *A };
+        struct Array(T, A) = { len: i64, ptr: *T, capacity: i64, alloc: *A };
         
-        fn cast(arr: Array(T, A)) Slice(T) = Slice({ arr.len, arr.data })
+        fn cast(arr: Array(T, A)) Slice(T) = Slice({ arr.len, arr.ptr })
         
-        fn array(alloc: *A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, data: nil() })
+        fn array(alloc: *A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, ptr: nil() })
         fn array(alloc: *A, capacity: i64) Array(T, A) = {
-            let data = allocate(alloc, mul(stride(T), capacity));
-            Array({ len: 0, capacity, alloc, data })
+            var ptr = allocate(alloc, mul(stride(T), capacity));
+            Array({ len: 0, capacity, alloc, ptr })
         }
         
-        fn reserve(arr: &Array(T, A), extra: i64) {
+        fn reserve(arr: &Array(T, A), extra: i64) = {
             if(lt(arr.capacity, total), fn = {
                 let cap = max(max(add(arr.capacity, extra), mul(arr.capacity, 2)), 4);
                 let new = array(arr.alloc, cap);
@@ -60,30 +60,33 @@ for T with ne(stride(T), nil()) {
             set(len(arr), v);
         }
         
-        fn drop(arr: Array(T, A)) = free(arr.data, mul(stride(T), arr.capacity))
+        fn drop(arr: Array(T, A)) = free(arr.ptr, mul(stride(T), arr.capacity));
     }
 }
 
 for T {
     // I don't support escaping captures, a function accepting a closure is always inlined. 
-    fn if(cond: bool, a: fn() T, b: fn() T);
+    fn if(cond: bool, a: fn() T, b: fn() T) T;
+    
+    fn if(cond: bool, a: fn() T) ?T = if(cond, a, fn = nil());
 }
 
 for (Arr, T) with and(fn get(Arr, i64) T, fn length(Arr) i64) {
     fn foreach(arr: &Arr, body: fn(&T)) = 
         enumerate(arr, fn (_, v) = body(v))
     
-    fn enumerate(arr: &Arr, body: fn(i64, &T)) {
-        let i = 0;
-        while(fn { lt(i, len(arr)) }, fn { let v = get(arr, i); body(i, v); i = add(i, 1); })
+    fn enumerate(arr: &Arr, body: fn(i64, &T)) = {
+        var i = 0;
+        while(fn { lt(i, len(arr)) }, fn { var v = get(arr, i); body(i, v); i = add(i, 1); })
     }
 }
 
 for T {
-    enum Flow = Continue | Break(?T);
+    enum Flow(T) = Continue | Break(?T);
+    fn from(Unit) Flow(T) = Continue;
     
     // This is guarenteed to compile to a c while loop.
-    @intrinsic fn while(cond: fn() bool, body: fn() Flow(T)) ?T {
+    @intrinsic fn while(cond: fn() bool, body: fn() Flow(T)) ?T = {
         if(cond(), fn = {
             match(body(), [
                 (Continue, fn = while(cond, body)),
@@ -106,11 +109,7 @@ for (T, U) with eq(T, U) bool {
     @auto fn ne(a: T, b: U) bool = not(eq(a, b));
     @auto fn ne(a: U, b: T) bool = not(eq(a, b));
     
-    fn assert_eq(a: T, b: U) {
-        if ne(a, b) {
-            panic(concat(concat(debug(a), " != "), debug(b)));
-        }
-    }
+    fn assert_eq(a: T, b: U) = if(ne(a, b), fn = panic(concat(concat(debug(a), " != "), debug(b))));
 }
 
 for T with and(fn lt(T, T) bool, fn eq(T, T) bool) {
@@ -121,12 +120,12 @@ for T with and(fn lt(T, T) bool, fn eq(T, T) bool) {
 
 for T in [f64, i64, u8] {
     fn mul(a: T, b: T) T;
-    fn div(a: T, b: T) T {
+    fn div(a: T, b: T) T = {
         sanity(fn { ne(b, 0) });
         div_unchecked(a, b)
     }
     fn mod(a: T, b: T) T;
-    fn pow(a: T, b: T) T {
+    fn pow(a: T, b: T) T = {
         sanity(fn { or(ge(b, 0), ge(a, 1)) });
         pow_unchecked(a, b)
     }
@@ -148,20 +147,16 @@ fn sin(n: Angle) f64;
 fn cos(n: Angle) f64;
 @intrinsic fn tan(n: Angle) f64 = div(sin(n), cos(n));
 
-fn pi() f64 {
-    3.1415926535897
-}
+fn pi() f64 = 3.1415926535897;
 
 for T {
     enum Option(T) = Some(T) | None;
     
     // This will be called implicitly in prototyping builds
-    fn unwrap(maybe: ?T) T = {
-        match(maybe, [
-            (Some, fn(v: T) T = v),
-            (None, fn = panic(concat("Unwrap failed: ", type_name(T)))),
-        ])
-    }
+    fn unwrap(maybe: ?T) T = match(maybe, [
+        (Some, fn(v: T) T = v),
+        (None, fn = panic(concat("Unwrap failed: ", type_name(T)))),
+    ]);
 }
 
 for (A, I(A)) with next(I(A)) ?T {
@@ -188,12 +183,10 @@ for R, E {
     enum Result(R, E) = Ok(R) | Err(E);
     
     // This will be called implicitly in prototyping builds
-    fn unwrap(r: Result(R, E)) R {
-        match(r, [
-            (Ok, fn(r: R) R = e),
-            (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
-        ])
-    }
+    fn unwrap(r: Result(R, E)) R = match(r, [
+        (Ok, fn(r: R) R = e),
+        (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
+    ]);
 }
 
 // 'cast' is called implicitly by the compiler
@@ -220,13 +213,9 @@ for T in [bool, i64] {
 struct StupidHash = (i64);
 
 // Note the extra parens to destructure self 
-fn hash_i64((self): &StupidHash, h: i64) {
-    set(self, xor(get(self), h))
-}
+fn hash_i64((self): &StupidHash, h: i64) = set(self, xor(get(self), h));
 
-fn hash_i64((self): &StupidHash) i64 {
-    swap(self, 0)
-}
+fn hash_i64((self): &StupidHash) i64 = swap(self, 0);
 
 // Syntax sugar for un-named traits: 
 //     for (X) with fn name(X) { ... }
@@ -236,8 +225,8 @@ trait Hasher(H) = and(fn pop_hash(&H) i64, fn hash_i64(&H, i64));
 @comptime fn and(a: Trait, b: Trait) Trait;
 
 for (K, V, H) with and(and(Hasher(H), fn hash(V, fn(i64)), fn eq(K, K))) {
-    fn get_hash(hasher: &H, v: T) i64 {
-        hash(v, fn(n) { hash_i64(hasher, n) })
+    fn get_hash(hasher: &H, v: T) i64 = {
+        hash(v, fn(n) { hash_i64(hasher, n) });
         pop_hash(hasher)
     }
     
@@ -254,7 +243,7 @@ for (K, V, H) with and(and(Hasher(H), fn hash(V, fn(i64)), fn eq(K, K))) {
     // Generic structs are really just comptime functions 
     // @comptime fn HashSet(K: Type, H: Type) Type = unique(HashMap(K, Unit, H));
     struct HashSet(K, H) = HashMap(K, Unit, H);
-    fn hashset(Array(K)) HashSet(K, H)
+    fn hashset(Array(K)) HashSet(K, H);
 }
 
 for T {
@@ -264,7 +253,7 @@ for T {
     fn move(T);
     fn copy(ptr: &T) &T = ptr;
     
-    fn cast(v: T) T = T;
+    fn cast(v: T) T = v;
     
     @comptime fn comptime(fn() T) T;
     @comptime fn reflect(T) TypeInfo;
@@ -272,12 +261,12 @@ for T {
 }
 
 // This is just a way to give a type hint
-fn as(T: Type, v: T) T = v
+fn as(T: Type, v: T) T = v;
 
 // Intention is 'copy' and 'cast' are free and pure whereas 'clone' and 'from' might be slow, do allocations etc. 
 
 for T with move(T) {
-    @comptime @auto fn safe_to_leak(T) bool = true 
+    @comptime @auto fn safe_to_leak(T) bool = true;
 
     fn box(T) Box(T);
     fn drop(Box(T));
@@ -308,7 +297,7 @@ for T with move(T) {
     fn cast(&Gc(T)) &T;
     fn copy(Gc(T)) Gc(T);
     
-    @auto fn swap(ptr: &T, new: T) T {
+    @auto fn swap(ptr: &T, new: T) T = {
         let old = get(ptr)
         set(ptr, new)
         old
@@ -331,13 +320,12 @@ for T {
     fn cast(T) ?T = T;
 }
 
-
 @comptime fn type_for(TypeId) Type;
 @comptime fn type_id(T) TypeId;
 
 // Note: Any is not generic over the inner type, just the pointer type. 
 for Ref in [Gc, Rc, Box, Ptr] {
-    struct Any(Ref) = (TypeId, Ref(Unit))
+    struct Any(Ref) = (TypeId, Ref(Unit));
     
     fn type_id((id, _): Any(Ref)) TypeId = id;
     
@@ -370,9 +358,9 @@ for (T, V) with and(fn get_vtable(&T) &V, VTable(V)) {
         
         fn get_vtable((v, _): Dyn(V, Ref)) &V = v;
         
-        fn get((v, _): &Dyn(V), name: fields(V), Arg: Type, Ret: Type) FnPtr((&T, Arg), Ret) = {
+        fn get((v, _): &Dyn(V), name: fields(V), Arg: Type, Ret: Type) FnPtr((&T, Arg), Ret) = 
             get(v, name, (&T, Arg), Ret)
-        }
+        
         
         // trait A(T) = fn name(&T, Arg) Ret;
         // trait B(T) = get(&T, name, Arg, Ret) FnPtr((&T, Arg), Ret);
@@ -394,20 +382,16 @@ fn exit(status: i64) Never;
 @safety @intrinsic fn sanity(cond: fn() Bool) = sanity(cond(), fn = "Safety check failed.")
 @safety @intrinsic fn sanity(cond: fn() Bool, msg: fn() Str) = assert(cond(), msg)
 
-fn is_unchecked() bool {
+fn is_unchecked() bool = {
     let r = true;
     (@safety fn = { r = false })();
     r
 }
 
-fn assert(cond: Bool, msg: Str) = assert(cond, fn = msg)
-fn assert(cond: Bool, msg: fn() Str) {
-    if cond {
-        panic(msg())
-    }
-}
+fn assert(cond: Bool, msg: Str) = assert(cond, fn = msg);
+fn assert(cond: Bool, msg: fn() Str) = if(cond, fn = panic(msg()));
 
-fn panic(msg: Str) Never {
+fn panic(msg: Str) Never = {
     print(msg);
     unreachable();
 }
@@ -418,7 +402,7 @@ for T in [bool, i64, f64, Angle, u8] {
     fn clone(&T) T = T;
 }
 
-enum Str = Static(Slice(u8)) | Array(u8) | Rc(Array(u8)) | Char(Int)
+enum Str = Static(Slice(u8)) | Array(u8) | Rc(Array(u8)) | Char(Int); 
 
 fn concat(Str, Str) Str;
 fn print(Str);
@@ -439,3 +423,20 @@ for T {
 // Combine the fields from both types into one
 // using(A, B) C implies from(C) A
 @comptime fn using(Type, Type) Type;
+
+enum BuildType = Run | Test | Build;
+
+@explicit_comptime fn cli_args() Slice(Str);
+@explicit_comptime fn system(Str) ProcessResult;
+@explicit_comptime fn system(Str(Slice)) ProcessResult;
+struct ProcessResult = using({stdout: Str, stderr: Str}, Result(Unit, i64));
+fn splitlines(s: Str) Array(Str) = split(s, "\n");
+fn hex(Str) i64;
+fn split(Str, Str) Array(Str);
+fn endswith(haystack: Str, needle: Str) bool;
+fn startswith(haystack: Str, needle: Str) bool;
+fn sort_inplace(Slice(T), fn (T) i64);
+
+// TODO: a program that walks something and removes one type anotation at a tyime and tries to compile again and sees how 
+//       many can be removed before it doesnt compile in a reasonable amount of time. 
+//

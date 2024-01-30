@@ -6,9 +6,11 @@
 // - Top level statements (like the calls to assert_eq in these examples) will run (in order) at compile time.
 // - Running the compiled executable will invoke the function called main.
 // - Functions are compiled lazily. Only those reachable from main() will be present in the final executable. 
+// - Arbitrary compiletime execution (including accessing the file system/network and spawning other processes). 
+//   DO NOT COMPILE UNTRUSTED PROGRAMS. 
 // 
 
-fn main() {
+@entry fn main() {
     print("Hello World");
 }
 
@@ -132,9 +134,13 @@ require_four(fn = get_four_slowly());
 //
 // - `@test`: This function will be called automatically when running the test target. It cannot be manually called. It's name does not have to be unique. 
 //            `|Expr1| Expr2` is shorthand for `@test fn = assert_eq(Expr1, Expr2);` TODO: ill probably get rid of this 
+// - `@script`: Treat the whole source of the file as the body of the main() function and enable relaxed mode (see below). 
+// - `@explicit_comptime`: This function can only run at comptime if the callsite is marked @comptime.
+//                         It can be called normally at runtime. 
+//                         This is useful for things that observe the current environment (like starting a process or getting commandline arguments). 
 //
-// - `@private`: See the Visibility section. 
-// - `@relax`: See the Relaxed Mode section.
+// More with detailed description elsewhere: 
+// - @private, @relax, @entry,
 //
 
 // TODO: UFCS enabled by object_oriented_is_when_dot_syntax()
@@ -180,40 +186,8 @@ struct NameExtra = using(Shared, Name);
 // 
 // This lifetime system is much less powerful than Rust's but the escape hatch is much closer at hand. 
 //
-
-//////////////////////
-/// Smart Pointers ///
+// The standard library has some useful Smart Pointers, see below. 
 // 
-// If you just want the program to run without dealing with it, the standard library has Rc and Gc smart pointers. 
-// My goal is to be able to quickly write a program and then once it works, 
-// be able to swap out parts with more performant implementations without switching languages. 
-//
-// - Box: Pointer to a heap allocation. 
-// - Rc: Reference counting pointer. Guarenteed to call drop(T) when all the references are gone. 
-// - Gc: Garbage collected pointer. 
-//       Will call drop(T) at an unpredictable time. Just never freeing anything would be a valid (but tragic) implementation. 
-//       This one's implementation magic and depends on the target.
-//
-
-//////////////////
-/// Allocators ///
-//
-// TLDR: It's like Zig but not ugly. 
-//
-// An allocator is an interface to request a dynamic amount of memory from the operating system. 
-// The default allocator is probably whatever libc's malloc does. 
-// If that's good enough for you you'll never have to think about it. 
-//
-// If you want more control, every function has a magic implicit parameter for passing which allocator it should use. 
-// let capital_i_integer = box(10, @alloc=&my_allocator_variable); 
-// 
-// Nothing enforces that functions use the current default allocator. 
-// - They might choose to make thier own. 
-// - They might choose to wrap yours with thier own. 
-// - They might choose to call a c function that does whatever it wants.  
-// Most standard library functions will respect it tho. 
-// The Gc smart pointer is a notable exception since the collector generally needs to be intimately linked with the allocator. 
-//
 
 //////////////////////
 /// Implicit Calls ///
@@ -269,6 +243,8 @@ assert_eq(try_from(as(i64, -1)), as(?u8, nil()));
 // that change what actions are comppile errors in different sections of your program when called at top level. 
 //
 //// Relaxed Mode
+// 
+// Enable implicit allocations and unwrapping (see sesction above). 
 //
 // correctness_is_when_opening_a_file_is_like_20_lines_of_code()
 //      This is the default state. 
@@ -315,6 +291,62 @@ assert_eq(try_from(as(i64, -1)), as(?u8, nil()));
 //      Function declarations must have unique names and cannot participate in overloading. 
 //      You can still call overloaded functions, you just can't create them (or implement them on your own types). 
 // 
+
+///////////////////////////
+/// Compilation Targets ///
+//
+// Compiletime execution currently runs on a very slow tree walking interpreter. 
+// It's meant for doing some type fiddling not like rendering fractals or whatever. 
+// 
+// The default target is c source code that must be compiled by a seperate c compiler. 
+// This allows for cross compilation as long as your c compiler does. 
+// 
+
+////////////////////
+/// Entry Points ///
+//
+// The philosophy is that the entire information needed to build your program should be contained in the text of your program. 
+// No like house of cards makefile and commandline flags that won't work on the next compiler version. 
+//
+// - `@entry fn main()`
+// - `@entry fn test(Slice(fn()))`
+// - `@entry @comptime fn build(args: Slice(Str)) fn()`
+// 
+// TODO: if im changing model to be order independednt and have no top level statements i need to change how modifiers work 
+
+//////////////////////
+/// Smart Pointers ///
+// 
+// If you just want the program to run without dealing with it, the standard library has Rc and Gc smart pointers. 
+// My goal is to be able to quickly write a program and then once it works, 
+// be able to swap out parts with more performant implementations without switching languages. 
+//
+// - Box: Pointer to a heap allocation. 
+// - Rc: Reference counting pointer. Guarenteed to call drop(T) when all the references are gone. 
+// - Gc: Garbage collected pointer. 
+//       Will call drop(T) at an unpredictable time. Just never freeing anything would be a valid (but tragic) implementation. 
+//       This one's implementation magic and depends on the target.
+//
+
+//////////////////
+/// Allocators ///
+//
+// TLDR: It's like Zig but not ugly. 
+//
+// An allocator is an interface to request a dynamic amount of memory from the operating system. 
+// The default allocator is probably whatever libc's malloc does. 
+// If that's good enough for you you'll never have to think about it. 
+//
+// If you want more control, every function has a magic implicit parameter for passing which allocator it should use. 
+// let capital_i_integer = box(10, @alloc=&my_allocator_variable); 
+// 
+// Nothing enforces that functions use the current default allocator. 
+// - They might choose to make thier own. 
+// - They might choose to wrap yours with thier own. 
+// - They might choose to call a c function that does whatever it wants.  
+// Most standard library functions will respect it tho. 
+// The Gc smart pointer is a notable exception since the collector generally needs to be intimately linked with the allocator. 
+//
 
 /////////////////// 
 /// Collections ///

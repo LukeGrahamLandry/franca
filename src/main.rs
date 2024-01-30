@@ -27,6 +27,6 @@ fn main() {
         // call(fn = { $0 });
     "#;
     let pool = StringPool::default();
-    let p = WalkParser::parse(p, src, &pool);
+    WalkParser::parse(p, src, &pool);
     let interp = Interp::new(&pool);
 }
