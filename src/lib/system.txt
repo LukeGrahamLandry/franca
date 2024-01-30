@@ -6,24 +6,68 @@ fn from((s): Path) Str = s;
 fn try_from(Str) ?Path;
 
 struct Pid = (i64);
-enum Forked = InParent { child: Pid} | InChild;
+enum Forked = InParent { child: Pid } | InChild;
+struct Url = (Str);
 
-when has_libc() {
-    @explicit_comptime fn cli_args() Slice(Str);
-    @explicit_comptime fn exit(status: i64) Never;
+@module(name=process, impl=libc) when @module(libc) {
+    @pub @explicit_comptime 
+    fn system(Str) ProcessResult;
     
-    @explicit_comptime fn system(Str) ProcessResult;
-    @explicit_comptime fn system(Str(Slice)) ProcessResult;
+    @pub @explicit_comptime 
+    fn system(Str(Slice)) ProcessResult;
     
-    @explicit_comptime fn read_all(Path) Result(Array(u8), FileErr);
-    @explicit_comptime fn write_all(Str, Path, create: bool = true) Result((), FileErr);
+    @pub @runtime 
+    fn fork() Forked;
+}
+
+@module(name=io, impl=libc) when @module(libc) {
+    @pub @explicit_comptime 
+    fn cli_args() Slice(Str);
     
-    @runtime fn fork() Forked;
+    /// At comptime, call compile error instead. 
+    @pub @runtime 
+    fn exit(status: i64) Never;
     
-    struct Thread = @intrinsic;
+    /// Read from stdin. Block the thread until there's a new line character. 
+    @pub @explicit_comptime 
+    fn read_line() String;
+    
+    @pub 
+    fn input(msg: Str) String = {
+        print(msg);
+        read_line()
+    }
+}
+
+@module(name=files, impl=libc) when @module(libc) {
+    @pub @explicit_comptime 
+    fn read_all(Path) Result(Array(u8), FileErr);
+    
+    @pub @explicit_comptime 
+    fn write_all(Str, Path, create: bool = true) Result((), FileErr);
+}
+
+@module(name=files, impl=libc, cond=RuntimeOnly) when @module(libc) {
+    @pub struct Thread; 
     
     /// Safety: do not share mutable data between threads. 
-    @runtime @unsafe fn thread(fn()) Thread;
-    @runtime fn join(Thread);
-    @runtime fn detatch(Thread);
+    @pub @unsafe fn thread(fn()) Thread;
+    
+    /// Returns an error if the other thread panics/
+    @pub fn join(Thread) Result((), ());
+    
+    @pub fn detatch(Thread);
+}
+
+@module(name=time, impl=libc) when @module(libc) {
+    @pub struct Timer; 
+    
+    @pub fn start_timer() Timer;
+    @pub fn end_timer(Timer) Duration;
+}
+
+enum HttpErr = Status(i64) | Other;
+@module(name=requests, impl=libcurl) when @module(libcurl) {
+    @pub @explicit_comptime 
+    fn request_get(Url) Result(Array(u8), HttpErr);
 }

@@ -11,6 +11,7 @@
 @comptime fn Payload(Type, Tag(Type)) Type;
 @comptime fn type_for(TypeId) Type;
 @comptime fn type_id(T) TypeId;
+@comptime fn for_all_fields(Type, Trait) bool;
 
 // Combine the fields from both types into one
 // using(A, B) C implies from(C) A
@@ -20,6 +21,31 @@ for T {
     @comptime fn comptime(fn() T) T;
     @comptime fn reflect(T) TypeInfo;
     @comptime @auto fn safe_to_leak(T) bool = true;
+}
+
+@comptime fn FlagSet(E: Type) Type = {
+    // TODO: fancier type system so you can't call this incorrectly. 
+    assert(is_enum(E), "FlagSet can only be made from enum.");  
+    @intrinsic
+}
+
+@comptime backing_int(Type with FlagSet(E)) Type;
+
+for E with is_enum(E) {
+    let Flags = FlagSet(E);
+    let BInt = backing_int(Flags);
+    
+    fn from(bool) Flags;
+    fn cast(E) Flags;
+    fn set(&Flags, E, bool);
+    fn get(&Flags, E) bool;
+    fn cast(BInt) Flags;
+    fn cast(Flags) BInt;
+}
+
+for T with ne(stride(T), nil()) {
+    /// This is not the same thing as default()!
+    @unsafe zero_init() T;
 }
 
 ////////////////////
@@ -37,20 +63,20 @@ for T {
 
 @comptime enum BuildType = Run() | Test() | Build();
 
-// TODO: a program that walks something and removes one type anotation at a tyime and tries to compile again and sees how 
+// TODO: a program that walks something and removes one type anotation at a time and tries to compile again and sees how 
 //       many can be removed before it doesnt compile in a reasonable amount of time. 
 //
 
 @comptime enum Target = Interp | C | Rust | Zig;
 @comptime fn get_target() Target;
 @comptime fn set_target(Target);
-@comptime fn get_gc_algo() GcAlgo;
-@comptime fn set_gc_algo(GcAlgo);
-@comptime fn has_libc() bool = true;
 
-fn is_comptime() bool;
+@comptime fn targeting(acceptable: FlagSet(Target)) bool = contains(acceptable, get_target());
 
-@comptime enum GcAlgo = Rc | Epsilon | Deny;
+// Lookup an external C ABI function by name. 
+// Something else in your meta program must ensure that the symbol is linked. 
+// This is the same as a definition `@c fn <name>(<Arg>) <T>` but can be called programmatically by the meta program. 
+@comptime fn get_c(name: Str, Arg, T) FnPtr(@c fn(Arg) T);
 
 when or(eq(get_target(), C), eq(get_target(), Zig)) {
     @comptime fn import_c(code: Str, mangled: bool);
@@ -59,32 +85,156 @@ when or(eq(get_target(), C), eq(get_target(), Zig)) {
 when eq(get_target(), Rust) {
     @comptime fn import_rust(code: Str);
     
-    // These types are @rust when true and use the rust standard library instead of the code in this file. 
+    // These types are @rust when enabled and use the rust standard library instead of the code here. 
     // This will change behaviour! Hash algos, growth strats, etc.
-    @unsafe @comptime use_rust_std_impls(default: bool = false, {
-        result = default,
-        option = default,
-        slice = default,
-        
-        // These types are only @rust if using the default allocator. 
-        box = default,
-        array = default,
-        rc = default,
-        hash_map = default,
-    });
+    // These types with allocators are only @rust if using the default allocator. 
+    for name in (result | option | slice | array | box | rc | hash_map) {
+        @module(name=name, impl=zig);
+    }
 }
 
 when eq(get_target(), Zig) {
     @comptime fn import_zig(code: Str);
     
-    // These types are @zig when true and use the zig standard library instead of the code in this file. 
+    // These types are @zig when enabled and use the zig standard library instead of the code here. 
     // This will change behaviour! Hash algos, growth strats, etc.
-    @unsafe @comptime use_zig_std_impls(default: bool = false, {
-        option = default,
-        slice = default,
-        
-        // These types are only @zig if using the default allocator or one imported from Zig. 
-        array = default,
-        hash_map = default,
-    });
+    // The types with allocators are only @zig if using the default allocator. 
+    for name in (option | slice | array | hash_map | alloc) {
+        @module(name=name, impl=zig);
+    }
 }
+
+//
+// TODO: docs
+// * realized this is a common goal, not a special case for collections.
+//      you often want a bag of functions/types and dont really care about the implementation.
+//      and the best impl depends on what the plaform provides. 
+//      like roc platforms but i dont want the implementations to be a magic seperate thing 
+//      written in a different host language, tho this system does allow that if that's the best option. 
+// * all module impls must have same interface but I dont force writing out the signetures an extra time 
+// * optional version number (SemVer)
+// * every module can have @comptime build() that can fetch dependency git repos, invoke c compiler, etc. 
+// * modules declare dependencies on other modules by having @module(...) expressions in thier when block. 
+// * changing which impl of a module you use will affect the entire tree. 
+//   you are only be allowed one runtime module impl in a program
+//   the compiletime impl may change since your program controls itself. 
+//   instead one module could depend on a different impl of the same module? 
+// * Modules are not namespaces. Thier functions participate in overload resolution. 
+// * Depending on the target, some modules have implementations directly exposing the host's standard library. 
+// * Different implementations of the same module will have performace characteristics and often observably different behaviour. 
+//   But that's kinda the point. Test thoroughly when switching implementations. 
+// * The main entry point of the program is expressed as a module with no default implementation.
+// * TODO: functions/types inside modules default to private and must be marked part of the public interface with @pub
+//
+
+// TODO: put these around the right blocks in impl files
+@module(name=option, impl=core);
+@module(name=result, impl=core);
+@module(name=ops, impl=src, cond=RuntimeOnly);
+@module(name=math, impl=libc) when @module(libc);
+@module(name=default_alloc, impl=libc) when @module(libc);
+@module(name=alloc, impl=core) when @module(default_alloc);
+@module(name=hash_map, impl=core) when @module(alloc);
+@module(name=array, impl=core) when @module(alloc);
+@module(name=hash_map, impl=core) when @module(alloc);
+@module(name=box, impl=core) when @module(alloc);
+@module(name=rc, impl=core) when @module(alloc);
+@module(name=gc, impl=rc) when @module(rc);
+@module(name=gc, impl=epsilon) when @module(alloc);
+@module(name=any, impl=core);
+@module(name=io, impl=libc) when @module(libc);
+@module(name=file, impl=libc) when @module(libc);
+@module(name=thread, impl=libc) when @module(libc);
+@module(name=requests, impl=libcurl) when @module(libcurl);
+@module(name=libc, impl=include);
+@module(name=libcurl, impl=include);
+
+@module(name=main) {
+    /// This is the entry point the user program must define. 
+    fn main();
+}
+
+let ComptimeOnly = @comptime fn(e: ExecTime) bool = eq(e, Comptime);
+let RuntimeOnly = @comptime fn(e: ExecTime) bool = eq(e, Runtime);
+@module(name=ops, impl=interp, cond=ComptimeOnly);
+
+// This can be called in place of a function or struct body. 
+// When the compiler tries to emit that item, it inlines the string of source code you gave it. 
+// This allows the standard library to easily define basic operations like addition on floats. 
+// # Safety
+// - The code must be valid for the current target.
+// - It must produce a type or a block (with a return statement) depending on the context. 
+@unsafe @comptime fn embed_src(Str) @intrinsic;
+
+enum ExecTime = Runtime | Comptime;
+@comptime fn has_module_impl(name: ModId, impl: ModId, w: ExecType = Runtime) bool;
+@comptime fn set_module_impl(name: ModId, impl: ?ModId, w: ExecType = Runtime) Result((), String);
+
+// TODO: move to meta.txt
+// TODO: document that struct default fields go in @auto default() T; and add that to the list of implicit functions (in relaxed mode). 
+struct SemVer = { major: i64 = 0, minor: i64 = 1, patch: i64 = 0 };
+@comptime struct ModId = (Str, SemVer);
+// TODO: document .. operator means call default() and then change some fields. 
+fn from(name: Str) ModId = (name, ..);
+fn from(major: i64) SemVer = { major, .. };
+
+@comptime fn bake(T) Static(T);
+
+@comptime struct ModuleDecl = { 
+    name: ModId,  // What interface is exposed?  
+    impl: ModId,  // What implementation is used? 
+    cond: @comptime fn(ExecTime) bool = true,   // When is this implementation supported? 
+};
+
+struct Loc = { module: ?ModuleDecl, file: Path, line: ?i64, col: ?i64 };
+struct FnType = { name: Str, arg: Type, ret: Type };
+struct FnDecl = (FnType, Loc);
+
+// Start trying to compile `m` (and its dependencies) and report errors that occur. 
+// Some errors can be resolved by the meta program in which case compilation will continue. 
+// `f` will be called once for each error that occurs until it returns nil or `m` is successfully compiled. 
+// Compilation will abort without calling `f` if comptime code panics. 
+@comptime 
+fn run_compilation(m: ModuleDecl, f: ?fn(CompileError) ?CompileSolution = nil());
+
+@comptime 
+enum CompileError = using({ fatal: bool, at: Loc }, 
+    UndeclaredIdentifier(Str)                                             // None
+    | MissingModule(ModId, ExecTime)                                      // (Module)
+    | OverloadConflict({ name: Str, expr: Ast, options: Slice(FnDecl)}),  // (FnDecl)
+    | TypeInferenceFailed({ expr: Ast, at: Loc, options: Slice(Type) })   // (Type)
+    | ModuleConflict(Array(ModuleDecl)),                                  // (Module)
+    | TypeNameConflict(Array({ name: Str, expr: Ast, at: Loc })),         // (Type)
+    | Custom(Any)                                                         // (Custom(Any))
+);
+
+@comptime 
+enum CompileSolution = Type | FnDecl | ModuleDecl | Custom(Any); 
+
+@comptime 
+fn custom_compile_error(Any) Any;
+
+for T {
+    @comptime fn run_with_quota(Duration, @comptime fn() T) ?T;
+}
+
+enum Implicit = OptIn | OptOut; 
+
+// The intention is to make the compiler's auto traits less magical. 
+// Thier definitions are a normal meta program in auto_trait.txt.
+// The only special thing about the builtin ones is the compiler knows when its allowed to implicitly call them. 
+// The `for <types> with <cond> { <decls> }` syntax conceptually desugars to a call to this function. 
+// It is important that the callback be fast because the compiler might call it many times during overload resolution. 
+// During type inference, the full type of the callsite might not be known. 
+// The callback may recieve `arg` or `ret` or both, if its not enough information to infer the other type, just return nil. 
+// When there are multiple derive functions for the same name, they are all called and xor-ed together.  
+@comptime @intrinsic 
+fn derive_auto_fn(name: Str, i: Implicit = OptIn, fn(arg: ?Type, ret: ?Type) ?FnType); 
+
+@comptime @intrinsic 
+fn derive(name: Str, arg: Type, ret: Type); 
+
+@comptime @intrinsic 
+fn underive(name: Str, arg: Type, ret: Type); 
+
+// TODO: control which things are called implictly so you can have faster overload resolution by not letting the compiler call cast in a certain module. 

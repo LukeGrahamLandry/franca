@@ -1,0 +1,125 @@
+
+// TODO: fine grained control over which can be called implicity? 
+// TODO: docs Passing Arguments: passing an argument to a function may call copy or move or cast or neither (if not mutated) or clone (if relaxed mode) or from (if relaxed mode)
+// TODO: i plan to only implement the rust backend in rust and then that allows good rust ffi 
+//       so it can pass me the ast and i can write other backends in this language as comptime programs.  
+//       actually maybe its better to write the manual code for passing the ast over and then i can write the rust backend here too
+//       and just bootstrap with the comptime interpreter. 
+//       that becomes a little bit hard to think about. 
+//       maybe a @bootstrapped qualifier for a function that should be precompiled when possible. 
+//       or big functions (that arent comptime) jit to mir c when called at comptime. 
+//       @no_interp 
+
+/////////////////
+/// Base Case ///
+/////////////////
+
+for T with copy(T) T {
+    // TODO: doc
+    // For example, an Rc smart pointer would probably override this to not bother updating the count. 
+    @auto fn move(t: T) T = t;
+
+    @auto fn cast(t: T) T = panic("ICE: redundant self cast. broken type inference loop?");
+    
+    // Be very careful when implementing drop for types that dont implement copy, it will probably get called a lot. 
+    @unsafe @auto 
+    fn drop(T) = {
+        // no op
+    }
+    
+    @auto fn clone(t: T) T = t;
+}
+
+for T {
+    // Pointers are always copy, regardless of the target type, so these are not @auto. 
+    fn copy(t: &T) &T = t;
+    fn copy(t: *T) *T = t;
+}
+
+@intrinsic 
+fn builtin_stride(T: Type) ?i64 = {
+    match(T, [
+        (&_, 8),
+        (*_, 8),
+        (i64, 8),
+        (f64, 8),
+        (u8, 1),
+        (bool, 1),
+        (_, nil())
+    ])
+}
+
+/////////////////
+/// Recursive ///
+/////////////////
+
+for T with for_all_fields(T, fn(F: Type) bool = fn copy(F) F) {
+    @intrinsic @auto 
+    fn copy(t: T) T;
+}
+
+for T with for_all_fields(T, fn(F: Type) bool = fn move(F) F) {
+    @auto fn move(t: T) T = t;
+}
+
+for T with for_all_fields(T, fn(F: Type) bool = fn clone(F) T)) {
+    @auto fn clone(T) T;
+}
+
+@intrinsic 
+fn stride(T: Type) ?i64 {
+    or(fn = builtin_stride(T), fn = 
+        if(for_all_fields(T, fn(F) = ne(stride(F), nil()), fn = {
+            var s = 0;
+            for_all_fields(T, fn(F) = s = add(s, unwrap(stride(f))));
+            s
+        }, fn = nil())
+}
+
+for T with ) {
+    // TODO: how to express this? stride(T) = sum(stride(fields)). maybe it needs to go in the compiler for now. 
+}
+
+for T with for_all_fields(T, fn(F: Type) bool = fn eq(F, F) bool)) {
+    @auto fn eq(T) T;
+}
+
+// TODO: if you override, does it still call drop on your fields? 
+for T with for_all_fields(T, fn(F: Type) bool = fn drop(F))) {
+    @auto fn drop(T) T;
+}
+
+for T with for_all_fields(T, fn(F: Type) bool = fn debug(F) String)) {
+    @auto fn debug(T) String;
+}
+
+/////////////////////
+/// Serialization ///
+/////////////////////
+
+enum Json = String(String) | Num(f64) | Null | Box(Json);
+
+@module(name=json, impl=core) when @module(alloc) {
+    fn to_string(Json) String;
+    fn parse(Str) Json;
+}
+
+@module(name=serialize, impl=core) when @module(array) {
+    for T {
+        // The implementation is required to include a version number and a type id. 
+        @pub @auto @unsafe
+        fn serialize_unstable(T) Array(u8);
+        
+        // The implemenetation may assume correct type and current version. 
+        @pub @auto @unsafe
+        fn raw_serialize_unstable(T) Array(u8);
+        
+        // The implementation is required to expect a version number and a type id. 
+        @pub @auto @unsafe 
+        fn deserialize_unstable(Slice(u8)) T;
+        
+        // The implemenetation may assume correct type and current version. 
+        @pub @auto @unsafe
+        fn raw_deserialize_unstable(T) Array(u8);
+    }
+}

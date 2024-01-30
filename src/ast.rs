@@ -19,12 +19,17 @@ pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub param: TypeId,
     pub returns: TypeId,
+}
+
+pub struct FuncFlags {
     // Calls must complete and produce a value at compile time.
     pub comptime: bool,
     // I don't support escaping captures. Calls must be inlined.
     pub has_captures: bool,
     // Used for imported c functions.
     pub no_overloads: bool,
+    // This is a special one the compiler might have a better implementation for.
+    pub intrinsic: bool,
 }
 
 #[derive(Clone, PartialEq, Hash, Eq)]
@@ -81,7 +86,7 @@ pub struct Func<'p> {
 #[derive(Copy, Clone, PartialEq)]
 pub struct FuncId(usize);
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Program<'p> {
     pub types: Vec<TypeInfo>,
     pub func_lookup: HashMap<(Ident<'p>, TypeId), FuncId>,

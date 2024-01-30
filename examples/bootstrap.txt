@@ -1,0 +1,100 @@
+//
+// The compiler frontend is written in rust.
+// Which is very convient because... they have a compiler that... you know, actually exists.
+// The only backend written is rust is the intrpreter used for comptime execution. 
+// The other backends that compile to c/rust/zig source code are written in this language. 
+// When you run the compiler on a program, it executes the meta program on that interpter written in rust. 
+// When meta program decides which language it wants to target for the main program, 
+// the backend written in this language just runs on that interpreter like any other comptime function. 
+// Unfortunatly the interpreter is much slower than a real AOT rust/c/zig/whatever program. 
+//
+// The solution to this problem is use the interpreter running the rust backend 
+// to compile the rust backend itself into rust source code that implements the rust backend. 
+// So we started with (Compiled Rust Interpreter, Rust Backend Source Code written in this lang) and 
+// used that to produce (Rust Backend Source Code written in Rust). 
+// Now, use cargo to recompile the front end and include the rust backend which is now just a normal rust program. 
+// Now when a meta program tries to run the rust backend at compile time, 
+// the interpreter just calls the precompiled native version it already has and returns the result from that. 
+// Now use the same trick to compile all the other backends to rust source code. 
+// Then recompile the frontend and include all the backends. 
+// Now you have a fully featured compiler executable that can run all the backends at compile time but not on the interpreter. 
+//
+// In general, you'll likely have an old build of the compiler that can compile the new version and won't have to deal with this. 
+// But its astetically pleasing to be able to bootstrap from a rust compiler in a constant number of steps. 
+//
+
+//
+// TODO: add a main function so you can get to the point of just
+// git clone https://github.com/LukeGrahamLandry/Inferd && cd Inferd-main && cargo run -- examples/bootstrap.txt
+//
+
+// This compiles to a normal rust program,
+// which invokes the compiler repeatedly to go through the steps outlined above. 
+fn main() {
+    system("cargo run --features stage1 -- examples/bootstrap.txt -- stage1");
+    
+    system("cargo run --features stage2 -- examples/bootstrap.txt -- stage2");
+    
+    // Now we have two copies of the rust backend crate. 
+    assert_same("inferd_rust_stage2", "inferd_rust_stage2");
+    
+    // As a sanity check, build everything again. 
+    // We expect identical source code to the first time. 
+    system("cargo run --features rust_backend -- examples/bootstrap.txt -- stage3");
+    
+    assert_same("inferd_rust_stage2", "inferd_rust");
+    assert_same("inferd_zig_stage2", "inferd_zig");
+    assert_same("inferd_c_stage2", "inferd_c");
+}
+
+fn assert_same(old: String, new: String) {
+    let before = join([lib_output_path(), old, "src", "lib.rs"]);
+    let after = join([lib_output_path(), new, "src", "lib.rs"]);
+    assert_eq(read_to_string(before), read_to_string(after));
+}
+
+fn build() {
+    let args = @comptime env_args();
+    if(eq(len(args), 0), fn = {
+        assert(contains(read_to_string("Cargo.toml"), "infered"), "CWD must be the compiler crate.");
+        build_and_run(Rust, main, cwd=@comptime env_cwd());
+    }, fn = match(get(args, 0), [
+        ("stage1", fn = {
+            // This runs rust_backend() on the comptime interpreter.
+            // It outputs rust source code for a crate that provides one function: run_rust_backend. 
+            build_lib(Rust, @module(rust_backend), "inferd_rust_stage1");
+        }),
+        ("stage2", fn = {
+            // Now when we call rust_backend(), its precompiled and fast. 
+            // It outputs rust source code for crates that provide all the backends. 
+            build_lib(Rust, @module(rust_backend), "inferd_rust_stage2");
+            build_lib(Rust, @module(c_backend), "inferd_c_stage2");
+            build_lib(Rust, @module(zig_backend), "inferd_zig_stage2");
+        }),
+        ("stage3", fn = {
+            build_lib(Rust, @module(rust_backend), "inferd_rust");
+            build_lib(Rust, @module(rust_backend), "inferd_zig");
+            build_lib(Rust, @module(rust_backend), "inferd_c");
+        }),
+    ]));
+}
+
+// TODO: move to meta
+@comptime fn build_lib(Target, ModuleDecl, ?Str) Goal;
+@comptime fn wait(Goal);
+@comptime fn get_source_code(FnRef) Str;
+
+@module(rust_backend) {
+    @pub @rust 
+    fn run_rust_backend(Ast) String;
+}
+
+@module(rust_backend) {
+    @pub @rust 
+    fn run_c_backend(Ast) String;
+}
+
+@module(zig_backend) {
+    @pub @rust 
+    fn run_zig_backend(Ast) String;
+}

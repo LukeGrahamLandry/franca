@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use ast::Program;
 use tree_sitter::Parser;
 
 use crate::{interp::Interp, parse::WalkParser, pool::StringPool};
@@ -28,5 +29,6 @@ fn main() {
     "#;
     let pool = StringPool::default();
     WalkParser::parse(p, src, &pool);
-    let interp = Interp::new(&pool);
+    let mut program = Program::default();
+    let interp = Interp::new(&pool, &mut program);
 }
