@@ -1,0 +1,205 @@
+// TODO: Box and Rc should be generic over alloc
+trait Allocator(A) = and(allocate(&A, i64) Ptr(Unit), free(&A, Ptr(Unit), i64))
+
+for T with ne(stride(T), nil()) {
+    @intrinsic @c
+    struct Slice(T) = { len: i64, ptr: *T };
+    
+    @intrinsic fn memcpy(dest: Slice(T), src: Slice(T)) = {
+        sanity(eq(dest.len, src.len), fn = "memcpy mismatch");
+        enumerate(src, fn(i, e) = set(dest, i, e))
+    }
+    
+    fn slice(arr: Slice(T), start: i64, end: i64) = {
+        sanity(fn = and(ge(start, 0), lt(start, arr.len)), fn = "OOB start");
+        sanity(fn = and(ge(end, start), lt(end, arr.len)), fn = "OOB end");
+        var ptr = offset(arr.ptr, start);
+        Slice({ len: sub(start, end), ptr })
+    }
+    
+    fn set(arr: Slice(T), i: i64, v: T) = {
+        sanity(fn = and(ge(i, 0), lt(i, arr.len)), fn = "OOB");
+        var ptr = offset(arr.ptr, i);
+        set(ptr, v);
+    }
+    
+    // Result safety: don't resize the array while you're still holding the pointer. 
+    fn get(arr: &Slice(T), i: i64) &T = {
+        sanity(fn = and(ge(i, 0), lt(i, arr.len)), fn = "OOB");
+        offset(arr.ptr, i)
+    }
+    
+    fn len(arr: Slice(T)) i64 = arr.len;
+    
+    for A with Allocator(A) {
+        @intrinsic 
+        struct Array(T, A) = { len: i64, ptr: *T, capacity: i64, alloc: *A };
+        
+        fn cast(arr: Array(T, A)) Slice(T) = Slice({ arr.len, arr.ptr })
+        
+        fn array(alloc: *A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, ptr: nil() })
+        fn array(alloc: *A, capacity: i64) Array(T, A) = {
+            var ptr = allocate(alloc, mul(stride(T), capacity));
+            Array({ len: 0, capacity, alloc, ptr })
+        }
+        
+        fn reserve(arr: &Array(T, A), extra: i64) = {
+            if(lt(arr.capacity, total), fn = {
+                let cap = max(max(add(arr.capacity, extra), mul(arr.capacity, 2)), 4);
+                let new = array(arr.alloc, cap);
+                memcpy(slice(new, 0, len(arr)), arr);
+                free(arr);
+                set(arr, new);
+            }, fn=())
+        }
+        
+        fn push(arr: &Array(T, A), v: T) = {
+            reserve(arr, 1);
+            set(len(arr), v);
+        }
+        
+        fn drop(arr: Array(T, A)) = free(arr.ptr, mul(stride(T), arr.capacity));
+    }
+}
+
+
+// A unique type to hang methods off 
+struct StupidHash = (i64);
+
+// Note the extra parens to destructure self 
+fn hash_i64((self): &StupidHash, h: i64) = set(self, xor(get(self), h));
+
+fn hash_i64((self): &StupidHash) i64 = replace(self, 0);
+
+// Syntax sugar for un-named traits: 
+//     for (X) with fn name(X) { ... }
+//     trait __X(X) = fn name(X); for (X) with __X(X) { ... }
+trait Hasher(H) = and(fn pop_hash(&H) i64, fn hash_i64(&H, i64));
+
+for (K, V, H) with and(and(Hasher(H), fn hash(V, fn(i64)), fn eq(K, K))) {
+    fn get_hash(hasher: &H, v: T) i64 = {
+        hash(v, fn(n) { hash_i64(hasher, n) });
+        pop_hash(hasher)
+    }
+    
+    fn hashmap(hasher: H) HashMap(K, V, H);
+    fn get(&HashMap(K, V, H), &K) ?&T;
+    fn insert(&HashMap(K, V, H), K, V) ?T;
+    fn len(&HashMap(K, V, H)) i64;
+    fn drop(arr: HashMap(K, V, H));
+    
+    if (K, V) with and(and(clone(K) K), clone(V) V) {
+        fn clone(&HashMap(K, V, H)) &HashMap(K, V, H);
+    }
+    
+    // Generic structs are really just comptime functions 
+    // @comptime fn HashSet(K: Type, H: Type) Type = unique(HashMap(K, Unit, H));
+    struct HashSet(K, H) = HashMap(K, Unit, H);
+    fn hashset(Array(K)) HashSet(K, H);
+}
+
+for T with move(T) {
+    @intrinsic 
+    struct Box(T) = (*T);
+    
+    fn box(T) Box(T);
+    fn drop(Box(T));
+    fn cast(&Box(T)) &T;
+    
+    if safe_to_leak(T) {
+        fn raw(Box(T)) *T;
+    } else {
+        @unsafe fn raw(Box(T)) *T;
+    }
+    
+    @unsafe fn from_raw(*T) Box(T);
+    
+    @private @intrinsic 
+    struct RcInner(T) = { strong: i64, weak: i64, value: T };
+    
+    @intrinsic 
+    struct Rc(T) = (*);
+    
+    fn rc(T) Rc(T);
+    fn clone(&Rc(T)) Rc(T);
+    fn cast(&Rc(T)) &T;
+    fn strong_count(&Rc(T)) i64;
+    fn weak_count(&Rc(T)) i64;
+    fn take(Rc(T)) ?T;
+    fn drop(Rc(T));
+    
+    fn weak(Rc(T)) Weak(T);
+    fn clone(&Weak(T)) Weak(T);
+    fn try_cast(Weak(T)) ?*T;
+    fn drop(Weak(T));
+    
+    @intrinsic struct Gc(T);
+    fn gc(T) Gc(T);
+    fn cast(&Gc(T)) &T;
+    fn copy(Gc(T)) Gc(T);
+    
+    @auto fn swap(a: &T, b: &T) = {
+        let bv = replace(b, get(a));
+        set(a, bv);
+    }
+    
+    @auto fn replace(ptr: &T, new: T) T = {
+        let old = get(ptr)
+        set(ptr, new)
+        old
+    }
+    
+    fn set(ptr: &T, new: T);
+    fn set(ptr: &T, new: &T) = set(ptr, get(new));
+    fn get(ptr: &T) T;
+}
+
+trait PtrLike(Ref) = for V: and(and(deref(Ref(V)) &V, fn unsafe_cast(Ref(V)) Ref(Unit)), fn unsafe_cast(Ref(Unit)) Ref(V));
+
+for Ref with PtrLike(Ref) {
+    // Note: Any is not generic over the inner type, just the pointer type. 
+    struct Any(Ref) = (TypeId, Ref(Unit));
+    
+    fn type_id((id, _): Any(Ref)) TypeId = id;
+    
+    for T {
+        fn any(ptr: Ref(T)) Any(Ref) = Any(type_id(T), unsafe_cast(ptr));
+        
+        fn try_cast((id, ptr): Any(Ref)) ?Ref(T) = 
+            if(eq(type_id(T), id), fn = unsafe_cast(ptr), fn = nil())
+    }
+}
+
+for Ref in [Gc, Rc, Box, Ptr] {
+    for T {
+        @unsafe fn unsafe_cast(ptr: Ref(T)) Ref(Unit) = transmute(ptr);
+        @unsafe fn unsafe_cast(ptr: Ref(Unit)) Ref(T) = transmute(ptr);
+    }
+}
+
+for (From, To) in combinations([Gc, Rc, Box, Ptr]) {
+    fn from(From) To;
+    
+    // TODO: generic impl for inner from. 
+    fn from(Any(From)) Any(To);
+}
+
+enum String = Array(u8) | Cow(Str); 
+enum Str = Slice(u8) | Static(Slice(u8)) | Char(Int) | Rc(String); 
+struct NullTerminated = String | Str;
+
+fn cast(String) Str;
+fn from(Str) String;
+
+fn concat(Str, Str) String;
+fn from((a, b): (Str, Str)) String = concat(a, b);
+fn print(Str);
+fn append(String, &Str);
+fn len_bytes(Str);
+
+fn splitlines(s: Str) Array(Str) = split(s, "\n");
+fn hex(Str) i64;
+fn split(Str, Str) Array(Str);
+fn endswith(haystack: Str, needle: Str) bool;
+fn startswith(haystack: Str, needle: Str) bool;
+fn sort_inplace(Slice(T), fn (T) i64);

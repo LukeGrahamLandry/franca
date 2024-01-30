@@ -1,68 +1,12 @@
-fn defer(fn());
+struct f64 = @intrinsic;
+struct i64 = @intrinsic;
+struct u8 = @intrinsic;
+struct bool = @intrinsic;
+let Unit = ();
 
-// TODO: Box and Rc should be generic over alloc
-trait Allocator(A) = and(allocate(&A, i64) Ptr(Unit), free(&A, Ptr(Unit), i64))
-
-@comptime fn stride(Type) ?i64;
-
-for T with ne(stride(T), nil()) {
-    struct Slice(T) = { len: i64, ptr: *T };
-    
-    @intrinsic fn memcpy(dest: Slice(T), src: Slice(T)) = {
-        sanity(eq(dest.len, src.len), fn = "memcpy mismatch");
-        enumerate(src, fn(i, e) = set(dest, i, e))
-    }
-    
-    fn slice(arr: Slice(T), start: i64, end: i64) = {
-        sanity(fn = and(ge(start, 0), lt(start, arr.len)), fn = "OOB start");
-        sanity(fn = and(ge(end, start), lt(end, arr.len)), fn = "OOB end");
-        var ptr = offset(arr.ptr, start);
-        Slice({ len: sub(start, end), ptr })
-    }
-    
-    fn set(arr: Slice(T), i: i64, v: T) = {
-        sanity(fn = and(ge(i, 0), lt(i, arr.len)), fn = "OOB");
-        var ptr = offset(arr.ptr, i);
-        set(ptr, v);
-    }
-    
-    // Result safety: don't resize the array while you're still holding the pointer. 
-    fn get(arr: &Slice(T), i: i64) &T = {
-        sanity(fn = and(ge(i, 0), lt(i, arr.len)), fn = "OOB");
-        offset(arr.ptr, i)
-    }
-    
-    fn len(arr: Slice(T)) i64 = arr.len;
-    
-    for A with Allocator(A) {
-        struct Array(T, A) = { len: i64, ptr: *T, capacity: i64, alloc: *A };
-        
-        fn cast(arr: Array(T, A)) Slice(T) = Slice({ arr.len, arr.ptr })
-        
-        fn array(alloc: *A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, ptr: nil() })
-        fn array(alloc: *A, capacity: i64) Array(T, A) = {
-            var ptr = allocate(alloc, mul(stride(T), capacity));
-            Array({ len: 0, capacity, alloc, ptr })
-        }
-        
-        fn reserve(arr: &Array(T, A), extra: i64) = {
-            if(lt(arr.capacity, total), fn = {
-                let cap = max(max(add(arr.capacity, extra), mul(arr.capacity, 2)), 4);
-                let new = array(arr.alloc, cap);
-                memcpy(slice(new, 0, len(arr)), arr);
-                free(arr);
-                set(arr, new);
-            }, fn=())
-        }
-        
-        fn push(arr: &Array(T, A), v: T) = {
-            reserve(arr, 1);
-            set(len(arr), v);
-        }
-        
-        fn drop(arr: Array(T, A)) = free(arr.ptr, mul(stride(T), arr.capacity));
-    }
-}
+////////////////////
+/// Control Flow ///
+////////////////////
 
 for T {
     // I don't support escaping captures, a function accepting a closure is always inlined. 
@@ -71,18 +15,8 @@ for T {
     fn if(cond: bool, a: fn() T) ?T = if(cond, a, fn = nil());
 }
 
-for (Arr, T) with and(fn get(Arr, i64) T, fn length(Arr) i64) {
-    fn foreach(arr: &Arr, body: fn(&T)) = 
-        enumerate(arr, fn (_, v) = body(v))
-    
-    fn enumerate(arr: &Arr, body: fn(i64, &T)) = {
-        var i = 0;
-        while(fn { lt(i, len(arr)) }, fn { var v = get(arr, i); body(i, v); i = add(i, 1); })
-    }
-}
-
 for T {
-    enum Flow(T) = Continue | Break(?T);
+    enum Flow(T) = Continue() | Break(?T);
     fn from(Unit) Flow(T) = Continue;
     
     // This is guarenteed to compile to a c while loop.
@@ -95,6 +29,70 @@ for T {
         }, fn = nil())
     }
 }
+
+for (E, T) with is_enum(E){
+    let MatchArg(T) = map(tags(E), fn (tag) = (Tag(E), fn(Payload(E, tag)) T));
+    
+    fn match(E, MatchArg(T)) T;
+}
+
+for (Arr, T) with and(fn get(Arr, i64) T, fn length(Arr) i64) {
+    fn foreach(arr: &Arr, body: fn(&T)) = 
+        enumerate(arr, fn (_, v) = body(v))
+    
+    fn enumerate(arr: &Arr, body: fn(i64, &T)) = {
+        var i = 0;
+        while(fn { lt(i, len(arr)) }, fn { var v = get(arr, i); body(i, v); i = add(i, 1); })
+    }
+}
+
+for (A, I(A)) with next(I(A)) ?T {
+    fn filter(I(A), fn(&A) Bool) I(A);
+    fn len(I(A)) i64;
+    
+    for B {
+        fn map(iter: I, f: fn(A) B)) I(B);
+    }
+}
+
+@intrinsic fn defer(fn());
+@intrinsic fn err_defer(fn());
+
+//////////////////
+/// Falibility ///
+//////////////////
+
+for T {
+    @intrinsic enum Option(T) = Some(T) | None();
+    
+    fn nil() ?T = None;
+    fn is_nil(t: ?T) bool = match(t, [
+        (Some, fn(_) = false),
+        (None, fn = true),
+    ]);
+    
+    // This will be called implicitly in prototyping builds
+    fn unwrap(maybe: ?T) T = match(maybe, [
+        (Some, fn(v: T) T = v),
+        (None, fn = panic(concat("Unwrap failed: ", type_name(T)))),
+    ]);
+}
+
+for R, E {
+    @intrinsic enum Result(R, E) = Ok(R) | Err(E);
+    
+    // This will be called implicitly in prototyping builds
+    fn unwrap(r: Result(R, E)) R = match(r, [
+        (Ok, fn(r: R) R = e),
+        (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
+    ]);
+    
+    // TODO: fn whatever() Result(T, _) { ... } to infer error type from callees. 
+}
+
+/////////////////
+/// Operators ///
+/////////////////
 
 for T in [f64, i64, Angle, u8] {
     fn add(a: T, b: T) T;
@@ -149,56 +147,17 @@ fn cos(n: Angle) f64;
 
 fn pi() f64 = 3.1415926535897;
 
-for T {
-    enum Option(T) = Some(T) | None;
-    
-    // This will be called implicitly in prototyping builds
-    fn unwrap(maybe: ?T) T = match(maybe, [
-        (Some, fn(v: T) T = v),
-        (None, fn = panic(concat("Unwrap failed: ", type_name(T)))),
-    ]);
-}
-
-for (A, I(A)) with next(I(A)) ?T {
-    fn filter(I(A), fn(&A) Bool) I(A);
-    fn len(I(A)) i64;
-    
-    for B {
-        fn map(iter: I, f: fn(A) B)) I(B);
-    }
-}
-
-@comptime fn is_enum(Type) Bool;
-@comptime fn Tag(Type) Type;
-@comptime fn tags(Type) Slice(Tag(Type));
-@comptime fn Payload(Type, Tag(Type)) Type;
-
-for (E, T) with is_enum(E){
-    let MatchArg(T) = map(tags(E), fn (tag) = (Tag(E), fn(Payload(E, tag)) T));
-    
-    fn match(E, MatchArg(T)) T;
-}
-
-for R, E {
-    enum Result(R, E) = Ok(R) | Err(E);
-    
-    // This will be called implicitly in prototyping builds
-    fn unwrap(r: Result(R, E)) R = match(r, [
-        (Ok, fn(r: R) R = e),
-        (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
-    ]);
-}
-
-// 'cast' is called implicitly by the compiler
-fn cast(v: Angle) f64;
-fn try_from(v: f64) ?i64;
-fn try_from(v: i64) ?f64;
 fn cast(v: u8) i64;
 fn cast(v: u8) f64;
+fn cast(v: Angle) f64;
+fn bits(v: f64) i64;
+fn try_from(v: f64) ?i64;
+fn try_from(v: i64) ?f64;
 fn try_from(v: f64) ?u8;
 fn try_from(v: i64) ?u8;
 
-fn bits(v: f64) i64;
+// I want to reserve extra NaNs for niche optimisation tricks.  
+@unsafe fn bits(v: i64) f64;
 
 for T in [bool, i64] {
     fn and(a: T, b: T) T;
@@ -209,104 +168,19 @@ for T in [bool, i64] {
     fn hash(v: T, hasher: fn(i64));
 }
 
-// A unique type to hang methods off 
-struct StupidHash = (i64);
-
-// Note the extra parens to destructure self 
-fn hash_i64((self): &StupidHash, h: i64) = set(self, xor(get(self), h));
-
-fn hash_i64((self): &StupidHash) i64 = swap(self, 0);
-
-// Syntax sugar for un-named traits: 
-//     for (X) with fn name(X) { ... }
-//     trait __X(X) = fn name(X); for (X) with __X(X) { ... }
-trait Hasher(H) = and(fn pop_hash(&H) i64, fn hash_i64(&H, i64));
-
-@comptime fn and(a: Trait, b: Trait) Trait;
-
-for (K, V, H) with and(and(Hasher(H), fn hash(V, fn(i64)), fn eq(K, K))) {
-    fn get_hash(hasher: &H, v: T) i64 = {
-        hash(v, fn(n) { hash_i64(hasher, n) });
-        pop_hash(hasher)
-    }
-    
-    fn hashmap(hasher: H) HashMap(K, V, H);
-    fn get(&HashMap(K, V, H), &K) ?&T;
-    fn insert(&HashMap(K, V, H), K, V) ?T;
-    fn len(&HashMap(K, V, H)) i64;
-    fn drop(arr: HashMap(K, V, H));
-    
-    if (K, V) with and(and(clone(K) K), clone(V) V) {
-        fn clone(&HashMap(K, V, H)) &HashMap(K, V, H);
-    }
-    
-    // Generic structs are really just comptime functions 
-    // @comptime fn HashSet(K: Type, H: Type) Type = unique(HashMap(K, Unit, H));
-    struct HashSet(K, H) = HashMap(K, Unit, H);
-    fn hashset(Array(K)) HashSet(K, H);
-}
+///////////////////
+/// Conversions ///
+///////////////////
 
 for T {
-    fn nil() ?T;
-    fn is_nil(?T) bool;
-    
     fn move(T);
     fn copy(ptr: &T) &T = ptr;
-    
     fn cast(v: T) T = v;
-    
-    @comptime fn comptime(fn() T) T;
-    @comptime fn reflect(T) TypeInfo;
-    @auto fn debug(&T) Str;
+    @auto fn debug(&T) String;
 }
 
 // This is just a way to give a type hint
 fn as(T: Type, v: T) T = v;
-
-// Intention is 'copy' and 'cast' are free and pure whereas 'clone' and 'from' might be slow, do allocations etc. 
-
-for T with move(T) {
-    @comptime @auto fn safe_to_leak(T) bool = true;
-
-    fn box(T) Box(T);
-    fn drop(Box(T));
-    fn cast(&Box(T)) &T;
-    
-    if safe_to_leak(T) {
-        fn raw(Box(T)) *T;
-    } else {
-        @unsafe fn raw(Box(T)) *T;
-    }
-    
-    @unsafe fn from_raw(*T) Box(T);
-    
-    fn rc(T) Rc(T);
-    fn clone(&Rc(T)) Rc(T);
-    fn cast(&Rc(T)) &T;
-    fn strong_count(&Rc(T)) i64;
-    fn weak_count(&Rc(T)) i64;
-    fn take(Rc(T)) ?T;
-    fn drop(Rc(T));
-    
-    fn weak(Rc(T)) Weak(T);
-    fn clone(&Weak(T)) Weak(T);
-    fn try_cast(Weak(T)) ?*T;
-    fn drop(Weak(T));
-    
-    fn gc(T) Gc(T);
-    fn cast(&Gc(T)) &T;
-    fn copy(Gc(T)) Gc(T);
-    
-    @auto fn swap(ptr: &T, new: T) T = {
-        let old = get(ptr)
-        set(ptr, new)
-        old
-    }
-    
-    fn set(ptr: &T, new: T);
-    fn set(ptr: &T, new: &T) = set(ptr, get(new));
-    fn get(ptr: &T) T;
-}
 
 for T {
     // No doubles
@@ -320,25 +194,6 @@ for T {
     fn cast(T) ?T = T;
 }
 
-@comptime fn type_for(TypeId) Type;
-@comptime fn type_id(T) TypeId;
-
-// Note: Any is not generic over the inner type, just the pointer type. 
-for Ref in [Gc, Rc, Box, Ptr] {
-    struct Any(Ref) = (TypeId, Ref(Unit));
-    
-    fn type_id((id, _): Any(Ref)) TypeId = id;
-    
-    for T {
-        fn cast(Ref(T)) Ref(Unit);
-        
-        fn any(ptr: Ref(T)) Any(Ref) = Any(type_id(T), ptr);
-        
-        fn try_cast((id, ptr): Any(Ref)) ?Ref(T) = 
-            if(eq(type_id(T), id), fn = transmute(ptr), fn = nil())
-    }
-}
-
 for (F, Args, Ret) with call(F, Args) Ret {
     fn cast(F) FnPtr(F);
     fn cast(FnPtr(T)) &Unit;
@@ -346,12 +201,10 @@ for (F, Args, Ret) with call(F, Args) Ret {
     fn call(FnPtr(F), Args) Ret;
 }
 
-@comptime fn fields(V): Type;
-
 trait VTable(V) = fn get(&V, name: fields(V), Arg: Type, Ret: Type) FnPtr((&Unit, Arg), Ret);
 
 for (T, V) with and(fn get_vtable(&T) &V, VTable(V)) {
-    for Ref in [Gc, Rc, Box, Ptr] {
+    for Ref with deref(Ref) &T {
         struct Dyn(V, Ref) = (&V, Ref(Unit));
         
         fn dyn(ptr: Ref(T)) Dyn(V, Ref) = (get_vtable(ptr), ptr);
@@ -360,7 +213,6 @@ for (T, V) with and(fn get_vtable(&T) &V, VTable(V)) {
         
         fn get((v, _): &Dyn(V), name: fields(V), Arg: Type, Ret: Type) FnPtr((&T, Arg), Ret) = 
             get(v, name, (&T, Arg), Ret)
-        
         
         // trait A(T) = fn name(&T, Arg) Ret;
         // trait B(T) = get(&T, name, Arg, Ret) FnPtr((&T, Arg), Ret);
@@ -371,12 +223,6 @@ for (A, B) with eq(size_of(A), size_of(B)) {
     @unsafe fn transmute(A) B;
 }
 
-for (From, To) in combinations([Gc, Rc, Box, Ptr]) {
-    fn from(From) To;
-    fn from(Any(From)) Any(To);
-}
-
-fn exit(status: i64) Never;
 @intrinsic fn unreachable() Never = exit(1);
 
 @safety @intrinsic fn sanity(cond: fn() Bool) = sanity(cond(), fn = "Safety check failed.")
@@ -401,42 +247,3 @@ for T in [bool, i64, f64, Angle, u8] {
     
     fn clone(&T) T = T;
 }
-
-enum Str = Static(Slice(u8)) | Array(u8) | Rc(Array(u8)) | Char(Int); 
-
-fn concat(Str, Str) Str;
-fn print(Str);
-fn append(&Str, &Str);
-fn len_bytes(&Str);
-
-enum Target = Interp | Jit | C | Browser; 
-@comptime fn get_target() Target;
-@comptime fn is_comptime() bool;
-@comptime fn include_bytes(filepath: Str) Slice(u8);
-@comptime fn import(filepath: Str);
-@comptime fn import_c(code: Str, mangled: bool);
-
-for T {
-    @comptime fn eval(code: Str) T;
-}
-
-// Combine the fields from both types into one
-// using(A, B) C implies from(C) A
-@comptime fn using(Type, Type) Type;
-
-enum BuildType = Run | Test | Build;
-
-@explicit_comptime fn cli_args() Slice(Str);
-@explicit_comptime fn system(Str) ProcessResult;
-@explicit_comptime fn system(Str(Slice)) ProcessResult;
-struct ProcessResult = using({stdout: Str, stderr: Str}, Result(Unit, i64));
-fn splitlines(s: Str) Array(Str) = split(s, "\n");
-fn hex(Str) i64;
-fn split(Str, Str) Array(Str);
-fn endswith(haystack: Str, needle: Str) bool;
-fn startswith(haystack: Str, needle: Str) bool;
-fn sort_inplace(Slice(T), fn (T) i64);
-
-// TODO: a program that walks something and removes one type anotation at a tyime and tries to compile again and sees how 
-//       many can be removed before it doesnt compile in a reasonable amount of time. 
-//
