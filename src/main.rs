@@ -9,6 +9,7 @@ mod ast;
 mod interp;
 mod parse;
 mod pool;
+mod scope;
 
 fn main() {
     let mut p = Parser::new();

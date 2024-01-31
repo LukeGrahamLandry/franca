@@ -97,12 +97,15 @@ struct CallFrame {
     return_slot: StackOffset, // relative to the previous base
 }
 
+// TODO: any time you try to call a function it might not be ready yet
+//       and compiling it might require running other comptime functions
 // TODO: bucket array for stack so you can take pointers into it
 pub struct Interp<'a, 'p> {
     pool: &'a StringPool<'p>,
     value_stack: Vec<Value>,
     call_stack: Vec<CallFrame>,
     program: &'a mut Program<'p>,
+    ready: Vec<Option<Vec<Bc>>>,
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
@@ -112,6 +115,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             value_stack: vec![],
             call_stack: vec![],
             program,
+            ready: vec![],
         }
     }
 
@@ -166,6 +170,19 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
         }
         self.value_stack.pop().unwrap()
+    }
+
+    fn ensure_compiled(&mut self, FuncId(index): FuncId) {
+        if let Some(Some(_)) = self.ready.get(index) {
+            return;
+        }
+        while self.ready.len() <= index {
+            self.ready.push(None);
+        }
+
+        let func = &self.program.funcs[index];
+
+        todo!()
     }
 
     fn next_inst(&self) -> &Bc {

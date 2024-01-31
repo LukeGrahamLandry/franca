@@ -46,28 +46,43 @@ pub enum TypeInfo {
     Enum(Vec<TypeId>),
 }
 
+#[derive(Copy, Clone, PartialEq, Hash, Eq)]
+pub struct Var(usize, usize);
+
 #[derive(Clone, PartialEq)]
 pub enum Expr<'p> {
     Num(f64),
     Call(Box<Self>, Box<Self>),
-    GetVar(Ident<'p>),
     Block(Vec<Stmt<'p>>, Box<Self>),
     IfElse(Box<Self>, Box<Self>, Box<Self>),
     Array(Vec<Self>),
     Tuple(Vec<Self>),
     RefType(Box<Self>),
+
+    // Backend only
+    GetVar(Var),
+
+    // Frontend only
+    GetNamed(Ident<'p>),
 }
 
 #[derive(Clone, PartialEq)]
 pub enum Stmt<'p> {
     Eval(Expr<'p>),
+
+    // Backend Only
+    SetVar(Var, Expr<'p>),
+    Scope(Vec<Var>, Box<Self>),
+
+    // Frontend only
     DeclVar(Ident<'p>),
-    SetVar(Ident<'p>, Expr<'p>),
+    SetNamed(Ident<'p>, Expr<'p>),
     DeclFunc {
         name: Ident<'p>,
         return_type: Option<Expr<'p>>,
         body: Option<Expr<'p>>,
     },
+
     /// for <free> with <cond> { <definitions> }
     Generic {
         free: Ident<'p>,
@@ -84,11 +99,15 @@ pub struct Func<'p> {
 }
 
 #[derive(Copy, Clone, PartialEq)]
-pub struct FuncId(usize);
+pub struct FuncId(pub usize);
 
 #[derive(Clone, Default)]
 pub struct Program<'p> {
     pub types: Vec<TypeInfo>,
+    // At the call site, you know the name but not the type.
+    // So you need to look at everybody that might be declaring the function you're trying to call.
+    pub declarations: HashMap<Ident<'p>, Vec<Stmt<'p>>>,
+    // If you already know the arg/ret type at a callsite, you can just grab the function directly.
     pub func_lookup: HashMap<(Ident<'p>, TypeId), FuncId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
@@ -100,7 +119,7 @@ impl<'p> Stmt<'p> {
         match self {
             &Stmt::DeclVar(i) => format!("let {};", pool.get(i)),
             Stmt::Eval(e) => e.log(pool),
-            Stmt::SetVar(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
+            Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
             Stmt::Generic {
                 free,
                 cond,
@@ -116,6 +135,7 @@ impl<'p> Stmt<'p> {
                 return_type.as_ref().map(|e| e.log(pool)),
                 body.as_ref().map(|e| e.log(pool))
             ),
+            _ => todo!(),
         }
     }
 }
@@ -127,7 +147,7 @@ impl<'p> Expr<'p> {
             Expr::Call(func, arg) => {
                 format!("{}({})", func.log(pool), arg.log(pool))
             }
-            &Expr::GetVar(i) => pool.get(i).to_string(),
+            &Expr::GetNamed(i) => pool.get(i).to_string(),
             Expr::Block(es, val) => {
                 let es: Vec<_> = es.iter().map(|e| e.log(pool)).collect();
                 let es = es.join("; ");
@@ -150,6 +170,7 @@ impl<'p> Expr<'p> {
                 format!("tuple({})", args)
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
+            _ => todo!(),
         }
     }
 }

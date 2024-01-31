@@ -77,7 +77,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "identifier" => {
                 let name = node.utf8_text(self.src).unwrap();
                 let name = self.pool.intern(name);
-                Expr::GetVar(name)
+                Expr::GetNamed(name)
             }
             "type_expr" => {
                 let child = node.child(0).unwrap();

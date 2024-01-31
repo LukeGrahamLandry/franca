@@ -23,30 +23,78 @@ for T {
     @comptime @auto fn safe_to_leak(T) bool = true;
 }
 
-@comptime fn FlagSet(E: Type) Type = {
-    // TODO: fancier type system so you can't call this incorrectly. 
-    assert(is_enum(E), "FlagSet can only be made from enum.");  
-    @intrinsic
-}
-
+@comptime fn FlagSet(E: Type with is_enum(E)) Type;
 @comptime backing_int(Type with FlagSet(E)) Type;
 
-for E with is_enum(E) {
+// TODO: add to niche_optimisation examples. high bits are reserved for tag. 
+// TODO: require no payload 
+for E with and(is_enum(E), le(len(fields(E)), 64)) {
     let Flags = FlagSet(E);
     let BInt = backing_int(Flags);
     
-    fn from(bool) Flags;
+    fn from(set: bool) Flags = if(set, fn = all(), fn = none());
+    
     fn cast(E) Flags;
     fn set(&Flags, E, bool);
     fn get(&Flags, E) bool;
-    fn cast(BInt) Flags;
-    fn cast(Flags) BInt;
+    // Falible cause it might not take up the whole int. 
+    fn try_cast(v: BInt) ?Flags;
+    fn cast(v: Flags) BInt = transmute(v);
+    
+    fn all() Flags = zero_leading_bits(cast(not(0), sub(bit_size(BInt), required_bits())));
+    fn none() Flags = cast(0);
+    fn any(self: Flags, options: Flags) bool = ne(none(), and(self, options));
+    fn none(self: Flags, options: Flags) bool = not(any(self, options));
+    fn all(self: Flags, options: Flags) bool = all(and(self, options), options);
+    fn and(Flags, Flags);
+    fn or(Flags);
+    fn required_bits() i64 = len(fields(E));
 }
+
+for T {
+    @comptime bit_size(T);
+}
+fn clear_leading_bits(value: i64, count: i64) i64;
 
 for T with ne(stride(T), nil()) {
     /// This is not the same thing as default()!
     @unsafe zero_init() T;
 }
+
+fn is_union(Type) bool;
+
+fn untagged_union(Type, Type) Type with is_union($0); 
+
+for U with is_union(U) {
+    for F in cases(U) {
+        fn read_union(&U) &F;
+    }
+}
+
+type EnumType = { 
+    Tag: Type, 
+    cases: Slice((?Str, Type)) 
+} with and([is_enum($0), eq(Tag($0), Tag), tag_of($0) Tag]); 
+
+let EnumLiteral = Slice((Str, Type));
+
+@intrinsic
+fn pack_enum_tag(cases: EnumLiteral) EnumInfo;
+
+@intrinsic
+fn field_type(StructType, @comptime index: u64) ?Type
+
+@intrinsic
+fn field_index(StructType, @comptime name: Str) ?i64;
+    
+for S with StructType(S) {
+    @intrinsic
+    fn get_field(&S, @comptime index: u64) &unwrap(field_type(S, index));
+}
+
+@comptime struct FnFlags = FlagSet(Intrinsic | Unsafe | RuntimeCallable | ComptimeCallable | C | Rust | Zig);
+@comptime struct FnType = { Arg: Type, Ret: Type, flags: FnFlags };
+@comptime enum Type = using({ name: Str}, EnumType | StructType | UnionType | FnType); 
 
 ////////////////////
 /// Build System ///
@@ -105,7 +153,7 @@ when eq(get_target(), Zig) {
 }
 
 //
-// TODO: docs
+// TODO: add this to docs
 // * realized this is a common goal, not a special case for collections.
 //      you often want a bag of functions/types and dont really care about the implementation.
 //      and the best impl depends on what the plaform provides. 
@@ -123,8 +171,9 @@ when eq(get_target(), Zig) {
 // * Depending on the target, some modules have implementations directly exposing the host's standard library. 
 // * Different implementations of the same module will have performace characteristics and often observably different behaviour. 
 //   But that's kinda the point. Test thoroughly when switching implementations. 
-// * The main entry point of the program is expressed as a module with no default implementation.
+// * TODO: The main entry point of the program is expressed as a module with no default implementation. @entry magically does the module boiler plate for you. 
 // * TODO: functions/types inside modules default to private and must be marked part of the public interface with @pub
+// * TODO: interface with zig and rust allocator api so choose container impl seperately 
 //
 
 // TODO: put these around the right blocks in impl files
@@ -132,8 +181,8 @@ when eq(get_target(), Zig) {
 @module(name=result, impl=core);
 @module(name=ops, impl=src, cond=RuntimeOnly);
 @module(name=math, impl=libc) when @module(libc);
-@module(name=default_alloc, impl=libc) when @module(libc);
-@module(name=alloc, impl=core) when @module(default_alloc);
+@module(name=default_alloc, impl=libc) when and(@module(libc), @module(default_alloc));
+@module(name=alloc, impl=core);
 @module(name=hash_map, impl=core) when @module(alloc);
 @module(name=array, impl=core) when @module(alloc);
 @module(name=hash_map, impl=core) when @module(alloc);
@@ -168,7 +217,10 @@ let RuntimeOnly = @comptime fn(e: ExecTime) bool = eq(e, Runtime);
 
 enum ExecTime = Runtime | Comptime;
 @comptime fn has_module_impl(name: ModId, impl: ModId, w: ExecType = Runtime) bool;
-@comptime fn set_module_impl(name: ModId, impl: ?ModId, w: ExecType = Runtime) Result((), String);
+
+// # Safety: Different implementations of the same module will have performace characteristics and often observably different behaviour. 
+@unsafe @comptime 
+fn set_module_impl(name: ModId, impl: ?ModId, w: ExecType = Runtime) Result((), String);
 
 // TODO: move to meta.txt
 // TODO: document that struct default fields go in @auto default() T; and add that to the list of implicit functions (in relaxed mode). 
@@ -177,6 +229,7 @@ struct SemVer = { major: i64 = 0, minor: i64 = 1, patch: i64 = 0 };
 // TODO: document .. operator means call default() and then change some fields. 
 fn from(name: Str) ModId = (name, ..);
 fn from(major: i64) SemVer = { major, .. };
+fn from(Str) SemVer;
 
 @comptime fn bake(T) Static(T);
 
@@ -202,6 +255,7 @@ enum CompileError = using({ fatal: bool, at: Loc },
     UndeclaredIdentifier(Str)                                             // None
     | MissingModule(ModId, ExecTime)                                      // (Module)
     | OverloadConflict({ name: Str, expr: Ast, options: Slice(FnDecl)}),  // (FnDecl)
+    | MissingFunctionBody({ f: FnDecl, expr: Ast }),                      // (FnDecl)
     | TypeInferenceFailed({ expr: Ast, at: Loc, options: Slice(Type) })   // (Type)
     | ModuleConflict(Array(ModuleDecl)),                                  // (Module)
     | TypeNameConflict(Array({ name: Str, expr: Ast, at: Loc })),         // (Type)
@@ -220,6 +274,10 @@ for T {
 
 enum Implicit = OptIn | OptOut; 
 
+//
+// TODO: im not sure if i like this. its probably better to just put it in a module. 
+//       its the same feeling of too many get/set config methods that made me think of modules in the first place. 
+//
 // The intention is to make the compiler's auto traits less magical. 
 // Thier definitions are a normal meta program in auto_trait.txt.
 // The only special thing about the builtin ones is the compiler knows when its allowed to implicitly call them. 
@@ -238,3 +296,51 @@ fn derive(name: Str, arg: Type, ret: Type);
 fn underive(name: Str, arg: Type, ret: Type); 
 
 // TODO: control which things are called implictly so you can have faster overload resolution by not letting the compiler call cast in a certain module. 
+
+
+// State which version of the compiler you expect to be compiled with. 
+// There are many implicit choices whose defaults might change in later versions. 
+// Old compilers will error when code expects a newer one. 
+// New compilers will either emulate the old version or error if its defaults are unsupported. 
+// This allows behaviour like Go where you can continue using old libraries with new compilers. 
+// Note: Just downloading an old compiler is not an acceptable implementation strategy
+//       because that would allow libraries to circumvent sandboxing improvements. 
+//       More finesse is needed to compile the old language but allow the host meta program to control permissions with old rules. 
+//
+// Calling this should be the first thing your meta program does. 
+@comptime fn request_compiler(v: SemVer) = assert_eq(v, current_compiler);
+
+// This is @private to disallow `request_compiler(current_compiler)`.
+@private let current_compiler: SemVer = "0.1.0";
+
+// allow restricting this so you can have sandboxed libraies. 
+// TODO: maybe also have it report each call to the meta program 
+@module(ffi);
+
+// disabling this for a dependency prevents it from doing interesting comptime execution.  
+// it can still use type annotations and 
+@module(impure_comptime);
+
+// another sandboxing tool. you can disable this for a library to make it less powerful. 
+@module(unsafe_code);
+
+@comptime fn compile_warning(msg: Str) = @comptime print("WARNING: ", msg);
+
+@comptime struct Niche = FlagSet(NonNilRef | Ptr48Bit | ReserveQuietNans)
+@comptime struct OptTricks = both(Niche, FlagSet());
+@comptime struct SafetyChecks = both(OptTricks, FlagSet(SliceBounds));
+
+// Check which tricks are currently enabled. 
+@comptime fn tricks(OptTricks) bool;
+@comptime fn safety(SafetyChecks) bool;
+
+// Runs the function and asserts that it triggers one of the given safety checks. 
+// Compilation fails iff a safety check does not fire. 
+@comptime fn assert_safety_checked(SafetyChecks, @comptime fn ());
+
+for T {
+    // Do not optimise out the computation that produced a value. 
+    @intrinsic fn blackbox(T) T;
+}
+
+// Goal: be able to do https://github.com/LukeGrahamLandry/yorg/blob/main/src/zazm_bindgen.zig

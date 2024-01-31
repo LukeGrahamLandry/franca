@@ -29,6 +29,10 @@ for T with ne(stride(T), nil()) {
         offset(arr.ptr, i)
     }
     
+    fn get(arr: &Slice(T), i: i64) ?&T = {
+        if(and(ge(i, 0), lt(i, arr.len)), fn = nil(), fn = offset(arr.ptr, i));
+    }
+    
     fn len(arr: Slice(T)) i64 = arr.len;
     
     for A with Allocator(A) {
@@ -46,7 +50,7 @@ for T with ne(stride(T), nil()) {
         fn reserve(arr: &Array(T, A), extra: i64) = {
             if(lt(arr.capacity, total), fn = {
                 let cap = max(max(add(arr.capacity, extra), mul(arr.capacity, 2)), 4);
-                let new = array(arr.alloc, cap);
+                var new = array(arr.alloc, cap);
                 memcpy(slice(new, 0, len(arr)), arr);
                 free(arr);
                 set(arr, new);
@@ -58,9 +62,26 @@ for T with ne(stride(T), nil()) {
             set(len(arr), v);
         }
         
-        fn drop(arr: Array(T, A)) = free(arr.ptr, mul(stride(T), arr.capacity));
+        fn drop(arr: &Array(T, A)) = free(arr.ptr, mul(stride(T), arr.capacity));
+        
+        fn slice_capacity(arr: Array(T, A)) Slice(T);
+        
+        @unsafe fn unused_capacity(arr: Array(T, A)) Slice(T);
     }
 }
+
+for T {
+    // TODO: someway to express function hiding that's not as clunky. 
+    struct NoResizeArray(T) = Array(T);
+}
+
+// An allocator that does not call drop on its entries. 
+// If you put something here that owns other memory, it will leak. 
+struct DroplessArena = { blocks: Array(ArenaChunk) };
+
+@private struct ArenaChunk = { }
+
+struct LibcAlloc = ();
 
 
 // A unique type to hang methods off 
@@ -86,7 +107,7 @@ for (K, V, H) with and(and(Hasher(H), fn hash(V, fn(i64)), fn eq(K, K))) {
     fn get(&HashMap(K, V, H), &K) ?&T;
     fn insert(&HashMap(K, V, H), K, V) ?T;
     fn len(&HashMap(K, V, H)) i64;
-    fn drop(arr: HashMap(K, V, H));
+    fn drop(arr: &HashMap(K, V, H));
     
     if (K, V) with and(and(clone(K) K), clone(V) V) {
         fn clone(&HashMap(K, V, H)) &HashMap(K, V, H);
@@ -103,7 +124,7 @@ for T with move(T) {
     struct Box(T) = (*T);
     
     fn box(T) Box(T);
-    fn drop(Box(T));
+    fn drop(&Box(T));
     fn cast(&Box(T)) &T;
     
     if safe_to_leak(T) {
@@ -126,12 +147,12 @@ for T with move(T) {
     fn strong_count(&Rc(T)) i64;
     fn weak_count(&Rc(T)) i64;
     fn take(Rc(T)) ?T;
-    fn drop(Rc(T));
+    fn drop(&Rc(T));
     
     fn weak(Rc(T)) Weak(T);
     fn clone(&Weak(T)) Weak(T);
     fn try_cast(Weak(T)) ?*T;
-    fn drop(Weak(T));
+    fn drop(&Weak(T));
     
     @intrinsic struct Gc(T);
     fn gc(T) Gc(T);

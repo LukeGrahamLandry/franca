@@ -125,14 +125,54 @@ for R, E {
 /// Operators ///
 /////////////////
 
-for T in [f64, i64, Angle, u8] {
-    fn add(a: T, b: T) T;
-    fn sub(a: T, b: T) T;
-    fn neg(n: T) T = sub(0, n);
-    fn eq(a: T, b: T) bool;
+@module(name=ops, impl=src, cond=fn = any(target(), C | Rust | Zig)) {
+    when any(target(), C){
+        @pub let f64 = embed_type("double");
+        @pub let i64 = embed_type("int64_t");
+        @pub let u8 = embed_type("uint8_t");
+        @pub let bool = embed_type("_Bool");
+        
+        @pub fn cast(n: u8) i64 = embed_expr("(int64_t)n");
+        @pub fn cast(n: u8) f64 = embed_expr("(double)n");
+    }
+    
+    when any(targets(), Rust | Zig){
+        @pub let f64 = embed_type("f64");
+        @pub let u8 = embed_type("u8");
+        @pub let bool = embed_type("bool");
+        @pub let i64 = embed_type("i64");
+    }
+    
+    // TODO: overflow?
+    when any(target(), C | Rust | Zig) {
+        for T in [f64, i64, u8] {
+            @pub fn add(T, T) T = embed_expr("$0 + $1");
+            @pub fn sub(T, T) T = embed_expr("$0 - $1");
+            @pub fn eq(T, T) bool = embed_expr("$0 == $1");
+            @pub fn mul(T, T) T = embed_expr("$0 * $1");
+            @pub fn div(a: T, b: T) T = {
+                sanity(fn { ne(b, 0) });
+                embed_expr("$0 / $1")
+            }
+            @pub fn mod(a: T, b: T) T = {
+                sanity(fn { ne(b, 0) });
+                embed_expr("$0 % $1")
+            }
+            @pub fn neg(T) T = embed_expr("-$0");
+            @pub fn lt(T, T) bool = embed_expr("$0 < $1");
+        }
+    }
 }
 
-for (T, U) with eq(T, U) bool {
+// TODO: warning if you call these outside a `when` block with a target check
+for T {
+    // Use `$n` to access the nth argument of the current function. 
+    // Seems fishy to use names if i just want to do a dumb replacement without parsing. 
+    @comptime embed_expr(Str) T;
+}
+@comptime embed_type(Str) Type;
+
+for (T, U) with fn eq(T, U) bool {
     // Functions with 'auto' have a default implementation but can be replaced by other code 
     @auto fn eq(a: U, b: T) bool = eq(b, a);
     @auto fn ne(a: T, b: U) bool = not(eq(a, b));
@@ -148,17 +188,10 @@ for T with and(fn lt(T, T) bool, fn eq(T, T) bool) {
 }
 
 for T in [f64, i64, u8] {
-    fn mul(a: T, b: T) T;
-    fn div(a: T, b: T) T = {
-        sanity(fn { ne(b, 0) });
-        div_unchecked(a, b)
-    }
-    fn mod(a: T, b: T) T;
     fn pow(a: T, b: T) T = {
         sanity(fn { or(ge(b, 0), ge(a, 1)) });
         pow_unchecked(a, b)
     }
-    fn div_unchecked(a: T, b: T) T;
     fn pow_unchecked(a: T, b: T) T;
 
     @intrinsic fn sqrt(n: f64) T = pow(n, 0.5);
@@ -166,8 +199,10 @@ for T in [f64, i64, u8] {
     fn asin(n: T) Angle;
     fn acos(n: T) Angle;
     fn atan(n: T) Angle;
-    fn degs(degs: T) Angle;
-    fn rads(reds: T) Angle;
+    fn from_degs(degs: T) Angle;
+    fn from_rads(reds: T) Angle;
+    fn as_degs(degs: Angle) T;
+    fn as_rads(reds: Angle) T;
     
     fn default() T = 0;
 }
@@ -183,9 +218,6 @@ fn cos(n: Angle) f64;
 
 fn pi() f64 = 3.1415926535897;
 
-fn cast(v: u8) i64;
-fn cast(v: u8) f64;
-fn cast(v: Angle) f64;
 fn bits(v: f64) i64;
 fn try_from(v: f64) ?i64;
 fn try_from(v: i64) ?f64;
@@ -193,7 +225,7 @@ fn try_from(v: f64) ?u8;
 fn try_from(v: i64) ?u8;
 
 // I want to reserve extra NaNs for niche optimisation tricks.  
-@unsafe fn bits(v: i64) f64;
+@unsafe fn from_bits(n: i64) f64 = transmute(n);
 
 for T in [bool, i64] {
     fn and(a: T, b: T) T;
@@ -283,14 +315,11 @@ fn panic(msg: Str) Never = {
     unreachable();
 }
 
-for T in [bool, i64, f64, Angle, u8] {
-    fn copy(&T) T;
-    
-    fn clone(&T) T = T;
-}
-
 struct Duration = (f64);
 fn as_millis(Duration) f64;
 fn from_millis(f64) Duration;
 
-fn print(s: Str) = debug(s);
+fn print(s: Str);
+for T with debug(T) String {
+    fn print(t: T) print(debug(t));
+} 

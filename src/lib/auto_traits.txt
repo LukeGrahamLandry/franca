@@ -9,32 +9,134 @@
 //       maybe a @bootstrapped qualifier for a function that should be precompiled when possible. 
 //       or big functions (that arent comptime) jit to mir c when called at comptime. 
 //       @no_interp 
+// TODO: docs: you probably dont need to think about modules if you're just writing a script. 
+//             they're really more about coordinating between libraries
+//             and controling tradeoffs between convience and correctness. 
+// TODO: docs: private functions can be overloaded within a module but cannot participate with outer functions. 
+//             it is an error to declare a private function that shadows a public one. 
+//             overloads of public are resolved for a given module without considering modules higher in the tree. 
+//             so when you depend on a module, you can't accidently break its code by changing how overloads resolve.
+//             this tunes down the spooky action at a distance 
+//
+// TODO: there are really two types of modules.
+//       the main program should be able to change what happens when a library tries to allocate or web request.
+//       but it shouldn't be able to turn off somebody's RAII
+//       so im back to you need to allow different impls in different places in the tree. 
+// 
 
-/////////////////
-/// Base Case ///
-/////////////////
+// - `@unsafe_trait`: it is unsafe to overload this function. 
 
-for T with copy(T) T {
-    // TODO: doc
-    // For example, an Rc smart pointer would probably override this to not bother updating the count. 
-    @auto fn move(t: T) T = t;
 
-    @auto fn cast(t: T) T = panic("ICE: redundant self cast. broken type inference loop?");
+//////////////////////
+/// Implicit Calls ///
+//////////////////////
+//
+// If you disable these modules, the compiler won't know to call the functions, 
+// but that doesn't make implementations elsewhere disappear so you can still call them manually. 
+// So if you don't like RAII, just disable the drop module. 
+// TODO: that's not quite true because default impls are in the module. 
+//
+// TODO: whats the story on other modules depending on these? 
+//      you dont want one guy turning it off to break libraries. 
+//
+
+@module(drop, impl=core, transitive=false, implicit=true) {
+    // The compiler calls drop when a value goes out of scope. 
+    // It takes T by reference, not by value, because T might be self-referential and thus unsafe to move. 
+    // # Safety: 
+    // - you must call drop on the fields or they will leak. 
+    // - Be very careful when implementing drop for types that implement copy, it will probably get called a lot, and must not cause a double free. 
+    @pub @unsafe_trait fn drop(&T);
     
-    // Be very careful when implementing drop for types that dont implement copy, it will probably get called a lot. 
-    @unsafe @auto 
-    fn drop(T) = {
-        // no op
+    for T with copy(T) T {
+        @auto fn drop(&T) = {};
     }
     
-    @auto fn clone(t: T) T = t;
+    for T {
+        // Pointers are always drop, regardless of the target type, so these are not @auto. 
+        fn drop(&&T) = {};
+        fn drop(&*T) = {};
+    }
+    
+    // TODO: if you override, does it still call drop on your fields? 
+    for T with for_all_fields(T, fn(F: Type) bool = fn drop(F))) {
+        @auto fn drop(&T) T;
+    }
 }
 
-for T {
-    // Pointers are always copy, regardless of the target type, so these are not @auto. 
-    fn copy(t: &T) &T = t;
-    fn copy(t: *T) *T = t;
+@module(copy, impl=core, transitive=false, implicit=true) {
+    // # Safety: 
+    // - The compiler will call `drop` on both the new and the old value. 
+    //   If you override the default, that must not cause a double free. 
+    // - T must be move or you can't return one safely. 
+    @pub @unsafe_trait fn copy(&T) T;
+    
+    for T {
+        // Pointers are always copy, regardless of the target type, so these are not @auto. 
+        fn copy(t: &&T) &T = get(t);
+        fn copy(t: &*T) *T = get(t);
+    }
+    
+    for T with for_all_fields(T, fn(F: Type) bool = fn copy(F) F) {
+        @intrinsic @auto 
+        fn copy(t: T) T;
+    }
 }
+
+@module(move, impl=core, transitive=false, implicit=true) {
+    // The compiler *may* call move instead of copy when passing to a function or assigning to a variable,
+    // when the value is not used again in the previous scope. 
+    // This depends on how good the compiler is at data flow analysis and tries to err on the side of caution. 
+    // Implimenting this but not copy allows rust-like linear types. 
+    // The clasic example is a Reference counting smart pointer would probably override this to not bother updating the count. 
+    // # Safety: 
+    // - T must not be self-referencial. 
+    @pub @unsafe_trait fn move(&T) T;
+
+    for T with copy(T) T {
+        @auto fn move(t: T) T = t;
+    }
+    
+    for T with for_all_fields(T, fn(F: Type) bool = fn move(F) F) {
+        @auto fn move(t: T) T = t;
+    }
+}
+
+@module(cast, impl=core, transitive=false, implicit=true) {
+    // Called by the compiler to coerce types during overload resolution. 
+    // Smart pointers may use this to deref and provice access to the inner type. 
+    @pub @unsafe_trait fn cast(From) To;
+    
+    for T {
+        fn cast(t: T) T = unreachable("ICE: redundant self cast. broken type inference loop?");
+    }
+}
+    
+@module(clone, impl=core, transitive=false, implicit=is_relaxed()) {
+    // Clone is called only automatically in Relaxed Mode. 
+    
+    for T with copy(T) T {
+        @auto fn clone(t: T) T = t;
+    }
+    
+    for T with for_all_fields(T, fn(F: Type) bool = fn clone(F) T)) {
+        @auto fn clone(T) T;
+    }
+}
+
+@module(default, impl=core, transitive=false, implicit=is_relaxed()) {
+    // Default is called only automatically in Relaxed Mode. 
+    
+    @pub @trait fn default() T;
+    
+    for T with for_all_fields(T, fn(F: Type) bool = fn default() F)) {
+        @auto fn default() T;
+    }
+}
+
+/////////////////
+/// Usability ///
+/////////////////
 
 @intrinsic 
 fn builtin_stride(T: Type) ?i64 = {
@@ -49,23 +151,7 @@ fn builtin_stride(T: Type) ?i64 = {
     ])
 }
 
-/////////////////
-/// Recursive ///
-/////////////////
-
-for T with for_all_fields(T, fn(F: Type) bool = fn copy(F) F) {
-    @intrinsic @auto 
-    fn copy(t: T) T;
-}
-
-for T with for_all_fields(T, fn(F: Type) bool = fn move(F) F) {
-    @auto fn move(t: T) T = t;
-}
-
-for T with for_all_fields(T, fn(F: Type) bool = fn clone(F) T)) {
-    @auto fn clone(T) T;
-}
-
+/// How much space T takes up as an array element. 
 @intrinsic 
 fn stride(T: Type) ?i64 {
     or(fn = builtin_stride(T), fn = 
@@ -76,17 +162,8 @@ fn stride(T: Type) ?i64 {
         }, fn = nil())
 }
 
-for T with ) {
-    // TODO: how to express this? stride(T) = sum(stride(fields)). maybe it needs to go in the compiler for now. 
-}
-
 for T with for_all_fields(T, fn(F: Type) bool = fn eq(F, F) bool)) {
     @auto fn eq(T) T;
-}
-
-// TODO: if you override, does it still call drop on your fields? 
-for T with for_all_fields(T, fn(F: Type) bool = fn drop(F))) {
-    @auto fn drop(T) T;
 }
 
 for T with for_all_fields(T, fn(F: Type) bool = fn debug(F) String)) {
