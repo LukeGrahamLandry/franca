@@ -23,7 +23,7 @@ module.exports = grammar({
           "fn",
           field("name", $.identifier),
           field("proto", $.func_proto),
-          field("body", choice(";", seq("=", $._expr))),
+          choice(";", seq("=", field("body", $._expr))),
         ),
       ),
     func_proto: ($) =>

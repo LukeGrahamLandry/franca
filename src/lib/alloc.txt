@@ -1,8 +1,20 @@
+trait PtrLike(Ref) = for V: and([
+    // TODO: does deref need to be a seperate thing? 
+    // Takes a reference so you have a lifetime to use for the result. 
+    fn cast(&Ref(V)) &V, 
+    // Require that you're not doing the rust thing where sometimes its a fat pointer and sometimes not. 
+    eq(stride(Ref(V)), stride(Ref(Unit))),
+    // Like casting to a void pointer in C. 
+    fn forget_type(Ref(V)) Ref(Unit), 
+    // Like casting back from a void pointer in C. 
+    fn assume_type(Ref(Unit)) Ref(V)
+]);
+
 // TODO: Box and Rc should be generic over alloc
 trait Allocator(A) = and(allocate(&A, i64) Ptr(Unit), free(&A, Ptr(Unit), i64))
 
 for T with ne(stride(T), nil()) {
-    @intrinsic @c
+    @intrinsic
     struct Slice(T) = { len: i64, ptr: *T };
     
     @intrinsic fn memcpy(dest: Slice(T), src: Slice(T)) = {
@@ -71,7 +83,7 @@ for T with ne(stride(T), nil()) {
 }
 
 for T {
-    // TODO: someway to express function hiding that's not as clunky. 
+    // TODO: someway to express function hiding that's not as clunky as unique type and redefining everything to forward. 
     struct NoResizeArray(T) = Array(T);
 }
 
@@ -173,22 +185,6 @@ for T with move(T) {
     fn set(ptr: &T, new: T);
     fn set(ptr: &T, new: &T) = set(ptr, get(new));
     fn get(ptr: &T) T;
-}
-
-trait PtrLike(Ref) = for V: and(and(deref(Ref(V)) &V, fn unsafe_cast(Ref(V)) Ref(Unit)), fn unsafe_cast(Ref(Unit)) Ref(V));
-
-for Ref with PtrLike(Ref) {
-    // Note: Any is not generic over the inner type, just the pointer type. 
-    struct Any(Ref) = (TypeId, Ref(Unit));
-    
-    fn type_id((id, _): Any(Ref)) TypeId = id;
-    
-    for T {
-        fn any(ptr: Ref(T)) Any(Ref) = Any(type_id(T), unsafe_cast(ptr));
-        
-        fn try_cast((id, ptr): Any(Ref)) ?Ref(T) = 
-            if(eq(type_id(T), id), fn = unsafe_cast(ptr), fn = nil())
-    }
 }
 
 for Ref in [Gc, Rc, Box, Ptr] {

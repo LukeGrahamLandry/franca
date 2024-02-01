@@ -2,7 +2,7 @@ use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 
 use crate::{
     ast::{Expr, Stmt},
-    pool::StringPool,
+    pool::{Ident, StringPool},
 };
 
 pub struct WalkParser<'a, 'p> {
@@ -11,7 +11,7 @@ pub struct WalkParser<'a, 'p> {
 }
 
 impl<'a, 'p> WalkParser<'a, 'p> {
-    pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) {
+    pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<Stmt<'p>> {
         let tree = p.parse(src, None).unwrap();
         let mut p = WalkParser {
             pool,
@@ -24,9 +24,10 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         while tree.goto_next_sibling() {
             stmts.push(p.parse_stmt(&mut tree));
         }
-        for s in stmts {
-            println!("{}", s.log(p.pool))
+        for s in &stmts {
+            println!("finished stmt: {}", s.log(p.pool))
         }
+        stmts
     }
 
     fn parse_stmt(&mut self, cursor: &mut TreeCursor) -> Stmt<'p> {
@@ -41,22 +42,56 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             let name = self.pool.intern(name);
             drop(entries);
 
-            println!("Parse Stmt {}", node.to_sexp());
+            println!("Parse func_def {}", node.to_sexp());
 
             let mut entries = node.children_by_field_name("proto", &mut cursor);
-            let node = entries.next().unwrap();
+            let proto = entries.next().unwrap();
             assert!(entries.next().is_none());
+
+            let mut cursor = proto.walk();
+
+            let mut entries = proto.children_by_field_name("return_type", &mut cursor);
+            let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
+            assert!(entries.next().is_none());
+            drop(entries);
+
+            let mut arg_names: Vec<Option<Ident>> = vec![];
+            let mut args = proto.children_by_field_name("params", &mut cursor);
+            for arg in args {
+                println!("Arg: {}", arg.to_sexp());
+                let (names, ty) = self.parse_binding(arg);
+                arg_names.push(names);
+            }
 
             let mut cursor = node.walk();
 
-            let mut entries = node.children_by_field_name("return_type", &mut cursor);
-            let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
+            let mut entries = node.children_by_field_name("body", &mut cursor);
+            let body = if let Some(body) = entries.next() {
+                println!("body {:?}", body.to_sexp());
+                let mut cursor = body.walk();
+                let mut stmts = body.children_by_field_name("body", &mut cursor);
+                assert!(stmts.next().is_none()); // TODO.
+                drop(stmts);
+
+                let mut entries = body.children_by_field_name("result", &mut cursor);
+                let body = if let Some(result) = entries.next() {
+                    println!("Return {:?}", result.to_sexp());
+                    Some(self.parse_expr(result.walk()))
+                } else {
+                    None
+                };
+                assert!(entries.next().is_none());
+                body
+            } else {
+                None
+            };
             assert!(entries.next().is_none());
 
             Stmt::DeclFunc {
                 name,
                 return_type,
-                body: None,
+                body,
+                arg_names,
             }
         } else if node.kind() == "call_expr" {
             let f = node.child(0).unwrap();
@@ -72,7 +107,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
 
     fn parse_expr(&mut self, mut cursor: TreeCursor) -> Expr<'p> {
         let node = cursor.node();
-        println!("{:?}", cursor.node().to_sexp());
+        println!("Parse Expr: {:?}", cursor.node().to_sexp());
         match node.kind() {
             "identifier" => {
                 let name = node.utf8_text(self.src).unwrap();
@@ -93,7 +128,9 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 let mut cursor = node.walk();
                 let args = node
                     .children(&mut cursor)
-                    .filter(|child| child.kind() != "(" && child.kind() != ")") // TODO: wtf
+                    .filter(|child| {
+                        child.kind() != "(" && child.kind() != ")" && child.kind() != ","
+                    }) // TODO: wtf
                     .map(|child| self.parse_expr(child.walk()));
                 Expr::Tuple(args.collect())
             }
@@ -116,7 +153,37 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 // Expr::Func()
                 todo!()
             }
+            "call_expr" => {
+                let f = node.child(0).unwrap();
+                let args = node.child(1).unwrap();
+                let f = self.parse_expr(f.walk());
+                let args = self.parse_expr(args.walk());
+                Expr::Call(Box::new(f), Box::new(args))
+            }
+            "names" => {
+                let mut cursor = node.walk();
+                let names: Vec<_> = node
+                    .children(&mut cursor)
+                    .map(|result| self.parse_expr(result.walk()))
+                    .collect();
+                assert_eq!(names.len(), 1);
+                names[0].clone()
+            }
             _ => todo!("parse expr for {}: {:?}", node.kind(), node.to_sexp()),
+        }
+    }
+
+    fn parse_binding(&mut self, arg: Node<'_>) -> (Option<Ident<'p>>, Option<Expr<'p>>) {
+        assert_eq!(arg.kind(), "binding_type");
+        let mut cursor = arg.walk();
+
+        let name = self.parse_expr(arg.child(0).unwrap().walk());
+        arg.child(1).map(|result| assert_eq!(result.kind(), ":")); // TODO
+        let ty = arg.child(2).map(|result| self.parse_expr(result.walk()));
+        if let Expr::GetNamed(name) = name {
+            (Some(name), ty)
+        } else {
+            panic!("expected argument name found {}", name.log(self.pool));
         }
     }
 

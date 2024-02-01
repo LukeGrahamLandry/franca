@@ -1,4 +1,12 @@
 
+## Interp (Feb 1)
+
+Having a linear type system seems very debuggable. 
+Every computation is put in a new stack slot and replaced with a Poison when passed to a function. 
+Every time you read a value, check if its poison. 
+Im sure this is super slow tho. 
+Pretty cool tho, already catching stupid things like forgot to implement add, just left builtin body empty, lol. 
+
 ## Tree Sitter (Jan 28)
 
 I need to figure out what the `•` symbol precicly means in error messages. Brackets not in quotes are like s-expression where the first thing in the list is the name of the production and the rest are its arguments. I think `•` is a sequence separator. So `(call_expr _expr  • tupple)  <-> call_expr(seq(_expr, tupple)`

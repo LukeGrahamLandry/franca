@@ -1,0 +1,78 @@
+//
+// This is different from the way rust does it. 
+// They have Any be unsized so you always have a Box<Any>, 
+// but it doesn't need a double allocation because Box can hold a fat pointer inline. 
+// So far, my pointer types don't do that. 
+// So Box<(TypeID, Box(T))> would need two alocations. 
+// You could also do it like rust's Rc so Any is unsized because its just (TypeID, T),
+// but now you have to dereference the pointer to get the metadata, 
+// and reallocate to turn a Box<T> into a Box<Any> (which is more obviously bad).
+// Both have the problem of you can't put a trait object in an any without a double allocation.  
+//
+@module(any, impl=core){
+    for Ref with PtrLike(Ref) {
+        // - Any is not generic over the inner type, just the pointer type. 
+        // - There's no object satefy restrictions, since you always cast it back to a concrete type before using. 
+        struct Any(Ref) = (TypeId, Ref(Unit));
+        
+        fn type_id((id, _): Any(Ref)) TypeId = id;
+        
+        for T {
+            fn any(ptr: Ref(T)) Any(Ref) = Any(type_id(T), forget_type(ptr));
+            
+            // Returns nil if the type in the Any is not *exactly* T. 
+            fn try_cast((id, ptr): Any(Ref)) ?Ref(T) = 
+                if(eq(type_id(T), id), fn = assume_type(ptr), fn = nil())
+        }
+    }
+    
+    let TypeMap(T) = HashMap(TypeId, T);
+    
+    for Types with eq(Types, Slice(Type)) {
+        let M = FixedAnyArray(Types);
+        
+        fn get(&M, Key: Type) Slice(Key);
+    }
+    
+    // When all cases of E have payload unit, eq(E, Tag(E));
+    for E with is_enum(E) {
+        for T {
+            // Like a HashMap(Tag(E), T) but does not need dynamic memory allocation. 
+            struct EnumMap(E, T) = @todo; 
+            fn get(self: &EnumMap(E, T), key: Tag(E)) ?&T;
+            fn set(self: &EnumMap(E, T), key: &Tag(E), value: T) ?T;
+        }
+    }
+}
+
+// The wizard installs all programs that do not install themselves. 
+// Who installs the wizard? 
+// I cry because I do not know. 
+
+trait VTable(V) = fn get(&V, name: fields(V), Arg: Type, Ret: Type) FnPtr((&Unit, Arg), Ret);
+
+// TODO: object safety 
+for (T, V) with and(fn get_vtable(&T) &V, VTable(V)) {
+    for Ref with deref(Ref) &T {
+        struct Dyn(V, Ref) = (&V, Ref(Unit));
+        
+        fn dyn(ptr: Ref(T)) Dyn(V, Ref) = (get_vtable(ptr), ptr);
+        
+        fn get_vtable((v, _): Dyn(V, Ref)) &V = v;
+        
+        fn get((v, _): &Dyn(V), name: fields(V), Arg: Type, Ret: Type) FnPtr((&T, Arg), Ret) = 
+            get(v, name, (&T, Arg), Ret)
+        
+        // trait A(T) = fn name(&T, Arg) Ret;
+        // trait B(T) = get(&T, name, Arg, Ret) FnPtr((&T, Arg), Ret);
+    }
+    
+    // TODO: DynArray where you have one array for each implementation of the trait 
+    //     
+}
+
+// TODO: inheritance
+//       if `B extends A` then `VTable(B) extends VTable(A) `
+
+
+// The bit pattern for the character w is reserved for future expansion. 

@@ -11,8 +11,8 @@ use std::{
     sync::RwLock,
 };
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq)]
-pub struct TypeId(usize);
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
+pub struct TypeId(pub usize);
 
 #[derive(Clone, PartialEq, Hash, Eq)]
 pub struct FnType {
@@ -81,6 +81,7 @@ pub enum Stmt<'p> {
         name: Ident<'p>,
         return_type: Option<Expr<'p>>,
         body: Option<Expr<'p>>,
+        arg_names: Vec<Option<Ident<'p>>>,
     },
 
     /// for <free> with <cond> { <definitions> }
@@ -96,9 +97,10 @@ pub struct Func<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
     pub body: Expr<'p>,
+    pub arg_names: Vec<Option<Ident<'p>>>,
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct FuncId(pub usize);
 
 #[derive(Clone, Default)]
@@ -106,7 +108,7 @@ pub struct Program<'p> {
     pub types: Vec<TypeInfo>,
     // At the call site, you know the name but not the type.
     // So you need to look at everybody that might be declaring the function you're trying to call.
-    pub declarations: HashMap<Ident<'p>, Vec<Stmt<'p>>>,
+    pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
     // If you already know the arg/ret type at a callsite, you can just grab the function directly.
     pub func_lookup: HashMap<(Ident<'p>, TypeId), FuncId>,
     pub funcs: Vec<Func<'p>>,
@@ -129,8 +131,9 @@ impl<'p> Stmt<'p> {
                 name,
                 return_type,
                 body,
+                ..
             } => format!(
-                "fn{} {:?} = {:?}",
+                "fn {} {:?} = {:?}",
                 pool.get(*name),
                 return_type.as_ref().map(|e| e.log(pool)),
                 body.as_ref().map(|e| e.log(pool))

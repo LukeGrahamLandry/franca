@@ -81,18 +81,21 @@ let EnumLiteral = Slice((Str, Type));
 @intrinsic
 fn pack_enum_tag(cases: EnumLiteral) EnumInfo;
 
-@intrinsic
-fn field_type(StructType, @comptime index: u64) ?Type
+@comptime @intrinsic
+fn field_type(StructType, index: u64) ?Type;
 
-@intrinsic
-fn field_index(StructType, @comptime name: Str) ?i64;
+@comptime @intrinsic
+fn field_index(StructType, name: Str) ?i64;
     
 for S with StructType(S) {
     @intrinsic
     fn get_field(&S, @comptime index: u64) &unwrap(field_type(S, index));
 }
 
-@comptime struct FnFlags = FlagSet(Intrinsic | Unsafe | RuntimeCallable | ComptimeCallable | C | Rust | Zig);
+@comptime 
+fn field_type(S: StructType, name: Str) ?Type = then(field_index(S, name), fn(i) = get_field(S, i));
+
+@comptime struct FnFlags = FlagSet(Intrinsic | Unsafe | Runtime | Comptime | C | Rust | Zig);
 @comptime struct FnType = { Arg: Type, Ret: Type, flags: FnFlags };
 @comptime enum Type = using({ name: Str}, EnumType | StructType | UnionType | FnType); 
 
@@ -119,7 +122,7 @@ for T {
 @comptime fn get_target() Target;
 @comptime fn set_target(Target);
 
-@comptime fn targeting(acceptable: FlagSet(Target)) bool = contains(acceptable, get_target());
+@comptime fn targeting(acceptable: FlagSet(Target)) bool = any(acceptable, get_target());
 
 // Lookup an external C ABI function by name. 
 // Something else in your meta program must ensure that the symbol is linked. 
@@ -177,14 +180,13 @@ when eq(get_target(), Zig) {
 //
 
 // TODO: put these around the right blocks in impl files
-@module(name=option, impl=core);
-@module(name=result, impl=core);
 @module(name=ops, impl=src, cond=RuntimeOnly);
 @module(name=math, impl=libc) when @module(libc);
 @module(name=default_alloc, impl=libc) when and(@module(libc), @module(default_alloc));
 @module(name=alloc, impl=core);
 @module(name=hash_map, impl=core) when @module(alloc);
 @module(name=array, impl=core) when @module(alloc);
+@module(name=slice, impl=core);
 @module(name=hash_map, impl=core) when @module(alloc);
 @module(name=box, impl=core) when @module(alloc);
 @module(name=rc, impl=core) when @module(alloc);
@@ -326,9 +328,11 @@ fn underive(name: Str, arg: Type, ret: Type);
 
 @comptime fn compile_warning(msg: Str) = @comptime print("WARNING: ", msg);
 
-@comptime struct Niche = FlagSet(NonNilRef | Ptr48Bit | ReserveQuietNans)
+@comptime struct Niche = FlagSet(NonNilRef | Ptr48BitEnumTag | ReserveQuietNans)
 @comptime struct OptTricks = both(Niche, FlagSet());
-@comptime struct SafetyChecks = both(OptTricks, FlagSet(SliceBounds));
+@comptime struct SafetyChecks = both(Niche, FlagSet(SliceBounds | Ptr48BitMemRegions));
+
+assert(nand(tricks(Ptr48BitEnumTag), safety(Ptr48BitMemRegions))
 
 // Check which tricks are currently enabled. 
 @comptime fn tricks(OptTricks) bool;

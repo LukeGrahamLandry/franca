@@ -63,68 +63,82 @@ for (A, I(A)) with next(I(A)) ?T {
 /// Falibility ///
 //////////////////
 
-for T {
-    @intrinsic enum Option(T) = Some(T) | None();
-    
-    fn nil() ?T = None;
-    fn is_nil(t: ?T) bool = match(t, [
-        (Some, fn(_) = false),
-        (None, fn = true),
-    ]);
-    
-    // This will be called implicitly in Relaxed Mode. 
-    fn unwrap(maybe: ?T) T = match(maybe, [
-        (Some, fn(v: T) T = v),
-        (None, fn = panic(concat("Unwrap failed: ", type_name(T)))),
-    ]);
-    
-    fn cast(self: ?T) Result(T, ()) = match(self, [
-        (Some, fn(v: T) T = v),
-        (None, fn = Err(())),
-    ]);
-    
-    fn cast(self: &?T) ?&T;
-    
-    fn default() ?T = nil();
-    
-    fn cast(t: T) ?T = Some(t);
-    
-    when fn eq(T, T) bool {
-        // Either or both same but not both different. 
-        fn xor(a: ?T, b: ?T) ?T = match(a, [
-            (Some, fn(a: T) T = match(b, [
-                (Some, fn(b: T) T = if(eq(a, b), fn = a, fn = nil())),
-                (None, fn = a),
-            ])),
-            (None, fn = match(b, [
-                (Some, fn(b: T) T = b),
-                (None, fn = nil()),
-            ])),
-        ])
+@boot(interp)
+@module(option, impl=core) {
+    for T {
+        @intrinsic enum Option(T) = Some(T) | None();
+        
+        fn nil() ?T = None;
+        fn is_nil(t: ?T) bool = match(t, [
+            (Some, fn(_) = false),
+            (None, fn = true),
+        ]);
+        
+        // This will be called implicitly in Relaxed Mode. 
+        fn unwrap(maybe: ?T) T = match(maybe, [
+            (Some, fn(v: T) T = v),
+            (None, fn = panic(concat("Unwrap failed: ", type_name(T)))),
+        ]);
+        
+        fn cast(self: ?T) Result(T, ()) = match(self, [
+            (Some, fn(v: T) T = v),
+            (None, fn = Err(())),
+        ]);
+        
+        fn cast(self: &?T) ?&T;
+        
+        fn default() ?T = nil();
+        
+        fn cast(t: T) ?T = Some(t);
+        
+        for U {
+            fn then(self: ?T, if_present: fn(T) ?U) ?U = match(self, [
+                (Some, if_present),
+                (None, fn = None),
+            ]);
+        }
+        
+        when fn eq(T, T) bool {
+            // Either or both same but not both different. 
+            fn xor(a: ?T, b: ?T) ?T = match(a, [
+                (Some, fn(a: T) T = match(b, [
+                    (Some, fn(b: T) T = if(eq(a, b), fn = a, fn = nil())),
+                    (None, fn = a),
+                ])),
+                (None, fn = match(b, [
+                    (Some, fn(b: T) T = b),
+                    (None, fn = nil()),
+                ])),
+            ])
+        }
     }
 }
 
-for R, E {
-    @intrinsic enum Result(R, E) = Ok(R) | Err(E);
-    
-    // This will be called implicitly in Relaxed Mode. 
-    fn unwrap(r: Result(R, E)) R = match(r, [
-        (Ok, fn(r: R) R = r),
-        (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
-    ]);
-    
-    fn cast(r: Result(R, E)) ?R = match(r, [
-        (Ok, fn(r: R) R = e),
-        (Err, fn(e: E) R = nil()),
-    ]);
-    
-    // TODO: fn whatever() Result(T, _) { ... } to infer error type from callees. 
+@boot(interp)
+@module(result, impl=core) {
+    for R, E {
+        @intrinsic enum Result(R, E) = Ok(R) | Err(E);
+        
+        // This will be called implicitly in Relaxed Mode. 
+        fn unwrap(r: Result(R, E)) R = match(r, [
+            (Ok, fn(r: R) R = r),
+            (Err, fn(e: E) R = panic(concat("Unwrap failed: "), debug(e))),
+        ]);
+        
+        fn cast(r: Result(R, E)) ?R = match(r, [
+            (Ok, fn(r: R) R = e),
+            (Err, fn(e: E) R = nil()),
+        ]);
+        
+        // TODO: allow fn name() Result(T, _) { ... } to infer error type from callees. comptime function to join two enums. 
+    }
 }
 
 /////////////////
 /// Operators ///
 /////////////////
 
+@boot(builtin)
 @module(name=ops, impl=src, cond=fn = any(target(), C | Rust | Zig)) {
     when any(target(), C){
         @pub let f64 = embed_type("double");
@@ -272,24 +286,6 @@ for (F, Args, Ret) with call(F, Args) Ret {
     fn cast(FnPtr(T)) &Unit;
     
     fn call(FnPtr(F), Args) Ret;
-}
-
-trait VTable(V) = fn get(&V, name: fields(V), Arg: Type, Ret: Type) FnPtr((&Unit, Arg), Ret);
-
-for (T, V) with and(fn get_vtable(&T) &V, VTable(V)) {
-    for Ref with deref(Ref) &T {
-        struct Dyn(V, Ref) = (&V, Ref(Unit));
-        
-        fn dyn(ptr: Ref(T)) Dyn(V, Ref) = (get_vtable(ptr), ptr);
-        
-        fn get_vtable((v, _): Dyn(V, Ref)) &V = v;
-        
-        fn get((v, _): &Dyn(V), name: fields(V), Arg: Type, Ret: Type) FnPtr((&T, Arg), Ret) = 
-            get(v, name, (&T, Arg), Ret)
-        
-        // trait A(T) = fn name(&T, Arg) Ret;
-        // trait B(T) = get(&T, name, Arg, Ret) FnPtr((&T, Arg), Ret);
-    }
 }
 
 for (A, B) with eq(size_of(A), size_of(B)) {

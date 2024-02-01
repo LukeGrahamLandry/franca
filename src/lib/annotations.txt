@@ -1,0 +1,65 @@
+// 
+// Annotations are macros. 
+// Writing `@name(args) target` calls `name(args, target)` at comptime. 
+// But the annotation handler recieves things as an Ast, rather than as a value. 
+// Annotation handlers are still normal functions. One may directly call another. 
+//
+// You can define when your annotation can be used by the types of its handler arguments. 
+// - `args` are the things in the brackets.
+//      If its type is Unit, the annotation must be called without brackets. 
+//      If args is not an ast subtype, it will be evaluated at comptime. 
+// - `target` is the expression or statement after the annotation invocation. 
+//      If its type is Unit, it will not consume the item after it and the value you return will replace only the invocation itself.
+//      Otherwise, the value you return will replace both the target and the invocation. 
+// - It is an error for both to be unit. 
+// - You can never recieve annother annotation invocation as an arument. They're just applied in sequence. 
+//
+// TODO: there's really two types of Type. 
+//       1) A local type in your own program that needs to be comptime only.
+//       2) The compiler working on asts but you don't want it to be running in the interpreter. 
+//       Actually thats fine. A type is just a type info and I've already thought about a strategy 
+//       where the interpreter calls into precompiled code if avaiable. 
+//       The compiler's runtime is always someone else's comptime. 
+//
+
+// These are annotations (with lowercase names) with no arguments that can be applied to function definitions. 
+// They don't have an immediate effect on the Ast but other parts of the compiler know they exist and check for them. 
+struct FnFlags = FlagSet(
+    BootBuiltin
+    | BootInterp
+    | Intrinsic 
+    | Unsafe 
+    | Runtime 
+    | Comptime
+    | Relax 
+    | Safety 
+    | Auto 
+    | Annotation
+);
+
+enum Expr = Block({ body: Array(Stmt), value: ?Box(Expr)}) | Call({ name: Str, arg: Box(Expr) }) | Ident(Str) | Tuple(Array(Expr)); 
+enum Stmt = Expr | FnDecl;
+
+// The target function is needed to compile the compiler. 
+// While bootstrapping the compiler, 
+// - Builtin: There is a version written in rust
+// - Interp: It runs in the interpreter
+// That's enough to compile the real version to rust and future builds call that directly. 
+@annotation @intrinsic
+fn boot(args: Builtin | Interp, target: FnDecl) FnDecl = match(args, [
+    (Builtin, add_flag(target, BootBuiltin)),
+    (Interp, add_flag(target, BootInterp)),
+])
+// TODO: allow @boot on a whole module and just iterate its decls. 
+
+@annotation @intrinsic
+fn module(args: Expr, target: ()) Expr;
+
+@annotation @intrinsic
+fn ffi(args: Target, target: ()) Expr;
+
+@annotation @intrinsic
+fn type_of(args: Expr, target: ()) Expr;
+
+@annotation @intrinsic
+fn addr(args: Expr, target: ()) Expr;
