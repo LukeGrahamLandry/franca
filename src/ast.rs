@@ -98,6 +98,7 @@ pub struct Func<'p> {
     pub ty: TypeId,
     pub body: Expr<'p>,
     pub arg_names: Vec<Option<Ident<'p>>>,
+    pub return_value_count: usize,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

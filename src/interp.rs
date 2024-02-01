@@ -41,67 +41,41 @@ pub enum Value {
     // Both closures and types don't have values at runtime, all uses must be inlined.
     Fn(TypeId, usize),
     Type(TypeId),
-    Unit,
     GetFn(FuncId),
     // This is unsed to represent a function's empty stack space.
     // Crash if you try to read one.
     Poison,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 struct StackOffset(usize);
 
 #[derive(Debug, Copy, Clone)]
 struct StackAbsolute(usize);
 
-#[derive(Debug, Copy, Clone)]
-enum IntrinsicFn {
-    AddI64,
-    SubI64,
-    MulI64,
-    DivI64,
-    AddF64,
-    SubF64,
-    MulF64,
-    DivF64,
-    IsNan,
-    EqI64,
-    EqF64,
-    EqBool,
-    RawEqPtr,
-    Malloc,
-    Free,
-    Transmute,
-    Debug,
-    Stride,
-    CastF64I64,
-    CastI64F64,
-    SetPtr,
-    GetPtr,
-    Unreachable,
-    System,
-    CliArgs,
-    ReadAllFile,
-    WriteAllFile,
-    GetTimestamp,
+#[derive(Copy, Clone)]
+struct StackRange {
+    first: StackOffset,
+    count: usize,
 }
 
+// TODO: smaller index sizes so can pack these?
 #[derive(Debug)]
 enum Bc<'p> {
     CallDynamic {
         f: StackOffset,
-        return_slot: StackOffset,
-        arg_slot: StackOffset,
+        ret: StackRange,
+        arg: StackRange,
     },
     CallDirect {
         f: FuncId,
-        return_slot: StackOffset,
-        arg_slot: StackOffset,
+        ret: StackRange,
+        arg: StackRange,
     },
     CallBuiltin {
         name: Ident<'p>,
-        return_slot: StackOffset,
-        arg_slot: StackOffset,
+        ret: StackRange,
+        arg: StackRange,
     },
     LoadConstant {
         slot: StackOffset,
@@ -114,10 +88,10 @@ enum Bc<'p> {
     },
     // TODO: having memory is bad!
     CreateTuple {
-        values: Vec<StackOffset>,
+        values: StackRange,
         target: StackOffset,
     },
-    Ret(StackOffset),
+    Ret(StackRange),
     // Clone, Move, and Drop are for managing linear types.
     Clone {
         from: StackOffset,
@@ -127,7 +101,7 @@ enum Bc<'p> {
         from: StackOffset,
         to: StackOffset,
     },
-    Drop(StackOffset),
+    Drop(StackRange),
 }
 
 struct CallFrame {
@@ -135,6 +109,7 @@ struct CallFrame {
     current_func: FuncId,
     current_ip: usize,
     return_slot: StackAbsolute,
+    return_count: usize,
 }
 
 struct FnBody<'p> {
@@ -216,6 +191,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         ty: TypeId(0), // TODO
                         body: body.unwrap(),
                         arg_names,
+                        return_value_count: 1, // TODO
                     });
                     // TODO: add to func_lookup
                     assert!(self.program.declarations.get(&name).is_none(), "TODO");
@@ -246,6 +222,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             current_func: f,
             current_ip: 0,
             return_slot: StackAbsolute(0),
+            return_count: 1,
         });
 
         let empty = self.current_fn_body().stack_slots;
@@ -257,11 +234,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             let i = self.next_inst();
             println!("I: {:?}", i);
             match i {
-                &Bc::CallDirect {
-                    f,
-                    return_slot,
-                    arg_slot,
-                } => todo!(),
+                &Bc::CallDirect { .. } => todo!(),
                 Bc::LoadConstant { slot, value } => {
                     let slot = *slot;
                     let value = value.clone();
@@ -283,34 +256,22 @@ impl<'a, 'p> Interp<'a, 'p> {
                         panic!("ICE: JumpIf on {:?}", cond)
                     }
                 }
-                &Bc::CallBuiltin {
-                    name,
-                    return_slot,
-                    arg_slot,
-                } => {
+                &Bc::CallBuiltin { name, ret, arg } => {
                     println!("{:?}", self.value_stack);
                     let name = self.pool.get(name);
                     // Calling Convention: arguments passed to a function are moved out of your stack.
-                    let arg = self.take_slot(arg_slot);
-                    let value = match name {
-                        "add" => bin_int!(+, arg, Value::I64),
-                        "sub" => bin_int!(-, arg, Value::I64),
-                        "mul" => bin_int!(*, arg, Value::I64),
-                        "div" => bin_int!(/, arg, Value::I64),
-                        "eq" => bin_int!(==, arg, Value::Bool),
-                        "ne" => bin_int!(!=, arg, Value::Bool),
-                        "gt" => bin_int!(>, arg, Value::Bool),
-                        "lt" => bin_int!(<, arg, Value::Bool),
-                        "ge" => bin_int!(>=, arg, Value::Bool),
-                        "le" => bin_int!(<=, arg, Value::Bool),
-                        _ => panic!("Known builtin {:?} is not implemented.", name),
+                    let arg = self.take_slots(arg);
+                    let value = if let Some(value) = runtime_builtin(name, arg) {
+                        value
+                    } else {
+                        panic!("Known builtin {:?} is not implemented.", name);
                     };
-                    *self.get_slot_mut(return_slot) = value;
+                    *self.get_slot_mut(ret.first) = value;
                     println!("{:?}", self.value_stack);
                     self.bump_ip();
                 }
                 &Bc::Ret(slot) => {
-                    let value = self.take_slot(slot);
+                    let value = self.take_slots(slot);
                     let frame = self.call_stack.pop().unwrap();
                     self.value_stack[frame.return_slot.0] = value;
                     // Release our stack space.
@@ -323,27 +284,24 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // (if they were the original rust code that called run).
                     // In that case, the loop will break.
                 }
-                Bc::CallDynamic {
-                    f,
-                    return_slot,
-                    arg_slot,
-                } => todo!(), // Dont for get to inc ip first since ret doesn't
+                Bc::CallDynamic { .. } => todo!(), // Dont for get to inc ip first since ret doesn't
                 Bc::CreateTuple { values, target } => {
-                    let values = values.clone(); // TODO: this sucks but take needs unique access.
-                    let target = *target;
-                    println!("{:?}", self.value_stack);
-                    println!("{:?}", values);
-                    // Calling Convention: values are moved into a tuple.
-                    let values: Vec<_> = values
-                        .into_iter()
-                        .map(|slot| self.take_slot(slot))
-                        .collect();
-                    let values = Value::Tuple {
-                        container_type: TypeId(0), // TODO
-                        values,
-                    };
-                    *self.get_slot_mut(target) = values;
-                    self.bump_ip();
+                    // let values = values.clone(); // TODO: this sucks but take needs unique access.
+                    // let target = *target;
+                    // println!("{:?}", self.value_stack);
+                    // println!("{:?}", values);
+                    // // Calling Convention: values are moved into a tuple.
+                    // let values: Vec<_> = values
+                    //     .into_iter()
+                    //     .map(|slot| self.take_slot(slot))
+                    //     .collect();
+                    // let values = Value::Tuple {
+                    //     container_type: TypeId(0), // TODO
+                    //     values,
+                    // };
+                    // *self.get_slot_mut(target) = values;
+                    // self.bump_ip();
+                    todo!()
                 }
                 &Bc::Move { from, to } => {
                     let v = self.take_slot(from);
@@ -356,7 +314,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                 }
                 &Bc::Drop(slot) => {
-                    let _ = self.take_slot(slot);
+                    for i in slot.first.0..slot.count {
+                        let _ = self.take_slot(StackOffset(i));
+                    }
                     self.bump_ip();
                 }
             }
@@ -367,7 +327,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         assert_eq!(self.value_stack.len(), 1);
         assert!(self.call_stack.is_empty());
         let result = self.value_stack.pop().unwrap();
-        debug_assert_ne!(result, Value::Poison);
+        assert_ne!(result, Value::Poison);
         result
     }
 
@@ -379,14 +339,30 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn clone_slot(&self, slot: StackOffset) -> Value {
         let frame = self.call_stack.last().unwrap();
         let value = &self.value_stack[frame.stack_base.0 + slot.0];
-        debug_assert_ne!(value, &Value::Poison);
+        assert_ne!(value, &Value::Poison);
         value.clone()
     }
 
     fn take_slot(&mut self, slot: StackOffset) -> Value {
         let mut value = replace(self.get_slot_mut(slot), Value::Poison);
-        debug_assert_ne!(value, Value::Poison);
+        assert_ne!(value, Value::Poison);
         value
+    }
+
+    fn take_slots(&mut self, slot: StackRange) -> Value {
+        if slot.count == 1 {
+            return self.take_slot(slot.first);
+        }
+
+        let mut values = vec![];
+        for i in 0..slot.count {
+            values.push(self.take_slot(StackOffset(slot.first.0 + i)))
+        }
+
+        Value::Tuple {
+            container_type: TypeId(0), // TODO
+            values,
+        }
     }
 
     fn get_slot_mut(&mut self, slot: StackOffset) -> &mut Value {
@@ -423,10 +399,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         let return_value = self.compile_expr(&mut result, &func.body);
 
         // We're done with our arguments, get rid of them.
-        for i in 0..result.arg_names.len() {
-            // TODO: once non-copy types are supported, this needs to get smarter.
-            result.insts.push(Bc::Drop(StackOffset(i)));
-        }
+        // TODO: once non-copy types are supported, this needs to get smarter.
+        result.insts.push(Bc::Drop(StackRange {
+            first: StackOffset(0),
+            count: result.arg_names.len(),
+        }));
 
         result.insts.push(Bc::Ret(return_value));
 
@@ -444,41 +421,41 @@ impl<'a, 'p> Interp<'a, 'p> {
         todo!()
     }
 
-    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &Expr<'p>) -> StackOffset {
+    fn return_stack_slots(&self, f: FuncId) -> usize {
+        self.program.funcs[f.0].return_value_count
+    }
+
+    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &Expr<'p>) -> StackRange {
         match expr {
             Expr::Num(_) => todo!(),
             Expr::Call(f, arg) => {
-                let arg_slot = self.compile_expr(result, arg);
-                let return_slot = StackOffset(result.stack_slots);
-                result.stack_slots += 1;
+                let arg = self.compile_expr(result, arg);
                 if let Expr::GetNamed(i) = f.as_ref() {
                     if let Some(f) = self.lookup_unique_func(*i) {
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
-                        result.insts.push(Bc::CallDirect {
-                            f,
-                            return_slot,
-                            arg_slot,
-                        });
-                        return return_slot;
+                        let ret = result.reserve_slots(self.return_stack_slots(f));
+                        result.insts.push(Bc::CallDirect { f, ret, arg });
+                        return ret;
                     } else if self.builtins.contains(i) {
-                        result.insts.push(Bc::CallBuiltin {
-                            name: *i,
-                            return_slot,
-                            arg_slot,
-                        });
-                        return return_slot;
+                        // TODO: not all builtins have 1 return value
+                        let ret = result.reserve_slots(1);
+                        result.insts.push(Bc::CallBuiltin { name: *i, ret, arg });
+                        return ret;
                     }
                     // else: fallthrough
                 }
 
                 println!("dynamic {}", f.log(self.pool));
                 let f = self.compile_expr(result, f);
+                assert_eq!(f.count, 1);
+                // TODO: not all function ptrs have 1 return value
+                let ret = result.reserve_slots(1);
                 result.insts.push(Bc::CallDynamic {
-                    f,
-                    return_slot,
-                    arg_slot,
+                    f: f.first,
+                    ret,
+                    arg,
                 });
-                return_slot
+                ret
             }
             Expr::Block(_, _) => todo!(),
             Expr::IfElse(_, _, _) => todo!(),
@@ -488,13 +465,28 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .iter()
                     .map(|v| self.compile_expr(result, v))
                     .collect();
-                let target = StackOffset(result.stack_slots);
-                result.stack_slots += 1;
-                result.insts.push(Bc::CreateTuple { values, target });
-                target
+                let ret = result.reserve_slots(values.len());
+                // TODO: they might already be consecutive
+                let base = ret.first.0;
+                let mut count = 0;
+                for v in values {
+                    for i in 0..v.count {
+                        result.insts.push(Bc::Move {
+                            from: StackOffset(v.first.0 + i),
+                            to: StackOffset(base + count),
+                        });
+                        count += 1;
+                    }
+                }
+                assert_eq!(count, ret.count);
+                ret
             }
             Expr::RefType(_) => todo!(),
-            Expr::GetVar(v) => *result.vars.get(v).unwrap(),
+            Expr::GetVar(v) => StackRange {
+                // TODO clone
+                first: *result.vars.get(v).unwrap(),
+                count: 1,
+            },
             Expr::GetNamed(i) => {
                 if let Some(index) = result
                     .arg_names
@@ -506,13 +498,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     //       but it makes interp easier to debug if you always move when consuming
                     // Function arguments are at the beginning of our stack.
                     // They might be read more than once, so need to copy the value (interp uses linear types).
-                    let result_slot = StackOffset(result.stack_slots);
-                    result.stack_slots += 1;
+                    let to = result.reserve_slots(1);
                     result.insts.push(Bc::Clone {
                         from: StackOffset(index),
-                        to: result_slot,
+                        to: to.first,
                     });
-                    result_slot
+                    to
                 } else {
                     panic!("undeclared variable {}", self.pool.get(*i))
                 }
@@ -566,53 +557,82 @@ fn load_int(v: Value) -> i64 {
     }
 }
 
+impl Debug for StackOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "${}", self.0)
+    }
+}
+
+impl Debug for StackRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let args: Vec<_> = (self.first.0..(self.first.0 + self.count))
+            .map(|i| format!("${}", i))
+            .collect();
+        let args = args.join(", ");
+        write!(f, "({args})")
+    }
+}
+
 impl Debug for FnBody<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Func BC ===")?;
         for (i, bc) in self.insts.iter().enumerate() {
             write!(f, "{i}. ");
             match bc {
-                Bc::CallDynamic {
-                    f,
-                    return_slot,
-                    arg_slot,
-                } => todo!(),
-                Bc::CallDirect {
-                    f,
-                    return_slot,
-                    arg_slot,
-                } => todo!(),
-                Bc::CallBuiltin {
-                    name,
-                    return_slot,
-                    arg_slot,
-                } => writeln!(
-                    f,
-                    "${} = builtin(i({}), ${});",
-                    return_slot.0, name.0, arg_slot.0
-                )?,
-                Bc::LoadConstant { slot, value } => writeln!(f, "${} = {:?};", slot.0, value)?,
+                Bc::CallDynamic { .. } => todo!(),
+                Bc::CallDirect { .. } => todo!(),
+                Bc::CallBuiltin { name, ret, arg } => {
+                    writeln!(f, "{ret:?} = builtin(i({}), {arg:?});", name.0)?
+                }
+                Bc::LoadConstant { slot, value } => writeln!(f, "{:?} = {:?};", slot, value)?,
                 Bc::JumpIf {
                     cond,
                     true_ip,
                     false_ip,
                 } => writeln!(
                     f,
-                    "if (${}) goto {} else goto {};",
-                    cond.0, true_ip, false_ip
+                    "if ({:?}) goto {} else goto {};",
+                    cond, true_ip, false_ip
                 )?,
                 Bc::CreateTuple { values, target } => {
-                    let args: Vec<_> = values.iter().map(|i| format!("${}", i.0)).collect();
-                    let args = args.join(", ");
-                    writeln!(f, "${} = tuple({});", target.0, args)?;
+                    writeln!(f, "{target:?} = tuple{values:?};")?;
                 }
-                Bc::Ret(i) => writeln!(f, "return ${};", i.0)?,
-                Bc::Clone { from, to } => writeln!(f, "${} = @clone(${});", to.0, from.0)?,
-                Bc::Move { from, to } => writeln!(f, "${} = move(${});", to.0, from.0)?,
-                Bc::Drop(i) => writeln!(f, "drop(${});", i.0)?,
+                Bc::Ret(i) => writeln!(f, "return {i:?};")?,
+                Bc::Clone { from, to } => writeln!(f, "{:?} = @clone({:?});", to, from)?,
+                Bc::Move { from, to } => writeln!(f, "{:?} = move({:?});", to, from)?,
+                Bc::Drop(i) => writeln!(f, "drop({:?});", i)?,
             }
         }
         writeln!(f, "===============")?;
         Ok(())
+    }
+}
+
+// These are normal functions that don't need to do scary things to the compilation context.
+fn runtime_builtin(name: &str, arg: Value) -> Option<Value> {
+    let v = match name {
+        "add" => bin_int!(+, arg, Value::I64),
+        "sub" => bin_int!(-, arg, Value::I64),
+        "mul" => bin_int!(*, arg, Value::I64),
+        "div" => bin_int!(/, arg, Value::I64),
+        "eq" => bin_int!(==, arg, Value::Bool),
+        "ne" => bin_int!(!=, arg, Value::Bool),
+        "gt" => bin_int!(>, arg, Value::Bool),
+        "lt" => bin_int!(<, arg, Value::Bool),
+        "ge" => bin_int!(>=, arg, Value::Bool),
+        "le" => bin_int!(<=, arg, Value::Bool),
+        _ => return None,
+    };
+    Some(v)
+}
+
+impl FnBody<'_> {
+    fn reserve_slots(&mut self, count: usize) -> StackRange {
+        let range = StackRange {
+            first: StackOffset(self.stack_slots),
+            count,
+        };
+        self.stack_slots += count;
+        range
     }
 }
