@@ -20,7 +20,21 @@
 //       Actually thats fine. A type is just a type info and I've already thought about a strategy 
 //       where the interpreter calls into precompiled code if avaiable. 
 //       The compiler's runtime is always someone else's comptime. 
-//
+// 
+@in(@module(ast, impl=core, vis=Public))
+
+// TODO: doc: set default visibility of items in module because its painful to put @pub everywhere. 
+// TODO: doc: `enum A = Thing` (bame = "Thing", payload = type Thing) is not the same as `enum A = Thing()` (name = "Thing", paylaod = type Unit).
+// TODO: doc: @in(...) at the top of a file for avoiding an extra indent
+
+// You don't need to declare enum payloads as seperate types like this (they can be inline). 
+// Sometimes its useful because it lets you write functions that take a specific case as a parameter.
+enum Expr = Block | Call | Ident(Str) | TupleLiteral; 
+struct Block = { body: Array(Stmt), value: ?Box(Expr) };
+struct Call = { name: Str, arg: Box(Expr) };
+struct TupleLiteral = (Array(Expr));
+
+enum Stmt = Expr | FnDecl;
 
 // These are annotations (with lowercase names) with no arguments that can be applied to function definitions. 
 // They don't have an immediate effect on the Ast but other parts of the compiler know they exist and check for them. 
@@ -29,17 +43,25 @@ struct FnFlags = FlagSet(
     | BootInterp
     | Intrinsic 
     | Unsafe 
+    // This function must execute at runtime (not compiletime). 
     | Runtime 
+    // This function must execute at compiletime (not runtime).
     | Comptime
     | Relax 
     | Safety 
     | Auto 
     | Annotation
+    // The compiler cannot reorder calls to these functions relative to eachother becasue the affect or precieve the outside world. 
+    // This is transitive, you shouldn't need to manually put this on your functions
+    // because the reason you're impure is likely that you're calling some other impure function. 
+    // FFI is always @impure. 
+    // I don't care about your crazy imbeded system where dereferencing a pointer is a side affect because ptr(18) is reserved for the breaks or whatever. 
+    | Impure
+    | TransformCallsite
+    | StackTrace
+    | LexicalCaller
 );
-
-enum Expr = Block({ body: Array(Stmt), value: ?Box(Expr)}) | Call({ name: Str, arg: Box(Expr) }) | Ident(Str) | Tuple(Array(Expr)); 
-enum Stmt = Expr | FnDecl;
-
+    
 // The target function is needed to compile the compiler. 
 // While bootstrapping the compiler, 
 // - Builtin: There is a version written in rust
@@ -63,3 +85,6 @@ fn type_of(args: Expr, target: ()) Expr;
 
 @annotation @intrinsic
 fn addr(args: Expr, target: ()) Expr;
+
+@annotation @intrinsic
+fn assert_compile_error(args: (), target: Block) Block;

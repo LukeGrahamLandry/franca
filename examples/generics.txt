@@ -1,0 +1,188 @@
+@script
+
+///////////////////////////////////
+/// Defining a Generic Function ///
+///////////////////////////////////
+
+// `for <type variables> with <signeture of a function>`
+// For each concrete type T where there is a function called name that converts n T into a Str, define a new function. 
+for T with fn name(T) Str {
+    // The only thing we know about T is that `fn name(T) Str` exists and we can call it. 
+    fn say_hi(self: T) = print("Hello ", name(self), "!");
+}
+
+// The above is really syntax sugar for this: 
+// `for <type variables> with <comptime expression returning bool>`
+// The thing on the right can be an arbirarily complicated expression. 
+// Requiring that some function exist is just a common case that looks prettier. 
+for T with func_exists({ name: "name", Arg: T, Ret: Str }) {
+    fn say_hi2(self: T) = say_hi(self);
+}
+
+////////////////////////
+/// Defining a Trait ///
+////////////////////////
+
+// Traits are a way to refer to many functions at once in a `with` condition. 
+trait Person(T) for T with {
+    fn name(T) Str;
+    fn age(T) i64;
+}
+
+// A trait name can be used as a comptime function `fn(Type) bool`
+for T with Person(T) {
+    // The only requirement for calling `say_hi` is having a `name` function which the trait gives us. 
+    fn say_hi3(self: T) = say_hi(self);
+    
+    fn drink_in_merica(self: T) bool = ge(age(self), 21);
+}
+
+// This is the desugaring of trait syntax. 
+// There's no magic representation of a trait as a unique idea. 
+fn Person2(T: Type) bool = and(
+    func_exists({ name: "name", Arg: &T, Ret: Str }),
+    func_exists({ name: "age", Arg: &T, Ret: i64 })
+);
+
+// Any concrete type that matches the condition automatically implements the trait. 
+// The trait isn't a magical thing you need to opt-in to. 
+// Which may seem like a poor choice when a chicken is a person... 
+struct Chicken = { name: Str, age: i64 };
+fn name(c: Chicken) Str = c.name;
+fn age(c: Chicken) i64 = c.age;
+assert(Person(Chicken));
+let pet: Chicken = { name: "idk bro its a chicken", age: 3 };
+// There's no vtable stuff going on for this call. Function overloads are resolved at comptime. 
+// If you need runtime polymorphism, see lib/dynamic.txt
+assert_ne(drink_in_merica(pet));
+
+///////////////////////////////
+/// Defining a Generic Type ///
+///////////////////////////////
+
+// For each concrete type that matches the condition, define some functions. 
+// In this case, we dont need specific functions, but we do need to know how big the thing is. 
+for E with ne(stride(E), nil()) {
+    // We didn't require that E have a default value and 
+    // the `new` function doesn't accept one, so it can't create an array of E from nothing. 
+    // Instead, store an array of optionals and require that the user insert one before trying to read it. 
+    struct DumbStaticArray(E) = (Array(?E)); 
+    
+    // Since its annoying to keep refering to a long name, you can define an alias. 
+    let Self = DumbStaticArray(E);
+    
+    // Since this requires the size of the array at comptime, it could be stored on the stack.
+    // However, this implementation just puts it on the heap anyway because that's not the point of this example. 
+    // Note: How'd we allocate the array? Nobody passed in an allocator... right? This will come up again when we talk about modules :)
+    fn new(@comptime count: i64) Self = array(count);
+    
+    // Since StaticArray is a new type, you can't directly call Array methods on it. 
+    // Let's expose a few that make sense, but don't allow calling ones that would resize it. 
+    fn get((arr): &Self, index: i64) &E = {
+        // `unwrap(get(arr, index))` could be one expression but I want to show the types. 
+        let found: &?E = get(arr, index);  // The array gives a pointer to an element. 
+        let as_ref: ?&E = found;  // Flipping (pointer to optional) -> (optional pointer) happens implicitly. 
+        unwrap(as_ref)  // Crash if nobody put something in the slot before trying to read it. 
+    }
+    fn set((arr): &Self, index: i64, value: E) = set(arr, index, value);
+}
+
+////////////////////////////////////////////
+/// CHANGED Types whose values are types /// 
+////////////////////////////////////////////
+//
+// TODO: I this I should remove this. 
+//       but i feel like its nice for defining stuff with function pointers in the compiler. 
+//       i guess really that should just be in the blessed Type enum. 
+
+// `type <name> = <struct literal>`
+// This defines a new type. 
+// As you'll see, doing this is a bit useless unless you're adding a new magic builtin literal to the compiler. 
+type BadStaticArray = { Element: Type, count: usize };
+
+// A function whose argument is a Type, but that type must be a BadStaticArray. 
+// Since there's no way to specify a bound on the Element type, we need to unwrap stride since it might be unsized. 
+// Since this function's only arguments are types it can only be called at comptime, and a failed unwrap will be a compile error. 
+// TODO: probably remove this. 
+//      doesn't really make since because you need some magic to say Type<BadStaticArray, not a value of BadStaticArray. 
+fn array_bytes_needed(A: type BadStaticArray) i64 = mul(unwrap(stride(A.Element)), A.count);
+
+// For each concrete type that is a BadStaticArray, we want to define some functions. 
+for A: BadStaticArray {
+    // This declaration is not ambigous, there's only one A in this context and its a StaticArray so we can access its fields. 
+    // However, its a compile error to try to *call* this function. 
+    // The compiler can't resolve the overload because there's no way for the caller to specifiy which A they mean. 
+    // The signeture of this function is always `fn() i64`. 
+    fn bad_array_bytes_needed() i64 = mul(unwrap(stride(A.Element)), A.count);
+    
+    // I want to allow the user to create a new instance of my static array, 
+    // so I'll make a function that returns an A. 
+    // Unlike before, it is possible to call this function, each instantiation has a unique return type (A) so the compiler can tell them apart. 
+    // Since array, is generic over its entry type, I use `as` to give it a bound. 
+    // Unfortunatly, it's impossible to write this function because Array(A.Element), isn't a value of my type. 
+    // In fact, there are no values of my type because I don't have a way to tell the compiler what they are. 
+    @assert_compile_error {
+        fn new() A = as(Array(A.Element), array(A.count));
+    }
+}
+
+///////////////////////////
+/// Forward Declaration /// 
+/////////////////////////// 
+// 
+// Order of function declaration doesn't matter. 
+// The whole program is parsed before overload resolution begins. 
+//
+// A function with an empty body means someone else must provide that overload. 
+// - Compiler intrinsics.
+// - Trait requirements block. 
+//
+// Related: @auto declarations. 
+//
+
+//////////////////
+/// Meta Types /// 
+//////////////////
+//
+// A meta type is the compiler's internal representation of a type whose values are types. 
+// In Zig this is called a TypeInfo which is perhaps a better name. 
+// Meta types are the payloads of the Type enum. 
+// Normal programs cannot declare new meta types but they can read the meta type of thier types. 
+//
+// This feels like a wierd house of cards where next I'll need meta-meta-types,
+// but I think it all sorta collapses and works out because meta-types are just an enum. 
+// They're not actually special. 
+// I've just invented being able to pattern match accross function declarations, just 30 years after Haskell did :)
+//
+// This syntax isn't really useful outside the compiler. 
+// It relies on adding your type as a case of the `Type` enum.
+// And it doesn't give you a way to create values of your new type, that needs to be built into the compiler as well. 
+// However, its useful for me to have a way to express a type whose values are types. 
+//
+@assert_compile_error {
+    @type Pair = { E: Type };
+    
+    // This is a comptime function whose argument is a type. 
+    // It is a compile error to call it with a Type that is not a Pair. 
+    fn size1(P: Pair) i64 = mul(unwrap(stride(P.E)), 2); 
+    
+    // For every concrete type P whose representation is a Pair, declare some functions. 
+    for P with is_type(P, Pair) {
+        fn new(pair: (P.E, P.E)) P;
+        
+        // This is a normal function whose argument is a value of type P. 
+        fn first(P) P.E;
+        fn second(P) P.E;
+        
+        // This is a comptime function whose argument is a type. 
+        // This declaration matches only when the argument is exactly P
+        // This creates a new declaration for every possible P.
+        // This does the same thing as `size1` but you can use this syntax in generic contexts where you don't know the Meta Type. 
+        fn size2(@type P) i64 = mul(unwrap(stride(P.E)), 2); 
+    }
+    
+    // The affect of the declarations above is that the compiler synthesizes implementations of these functions: 
+    // When the argument is a Pair, the versions above are used, otherwise it returns nil. 
+    fn size1(Type) ?i64;
+    fn size2(Type) ?i64;
+}

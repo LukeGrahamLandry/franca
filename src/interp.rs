@@ -392,14 +392,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         );
         let mut result = FnBody {
             insts: vec![],
-            stack_slots: 1,
+            stack_slots: func.arg_names.len(),
             vars: Default::default(),
             arg_names: func.arg_names.clone(),
         };
         let return_value = self.compile_expr(&mut result, &func.body);
 
         // We're done with our arguments, get rid of them.
-        // TODO: once non-copy types are supported, this needs to get smarter.
+        // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
         result.insts.push(Bc::Drop(StackRange {
             first: StackOffset(0),
             count: result.arg_names.len(),

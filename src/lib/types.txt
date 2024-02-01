@@ -1,0 +1,188 @@
+// 
+// Comptime functions for manipulating types as values. 
+//
+
+@type enum Type = using({ name: Str}, 
+    EnumType | StructType | UnionType | FnType
+); 
+
+fn is_type(Type, @type) bool; 
+
+@comptime fn stride(Type) ?i64;
+@comptime fn Tag(Type) Type;
+@comptime fn tags(Type) Slice(Tag(Type));
+@comptime fn Payload(Type, Tag(Type)) Type;
+@comptime fn type_for(TypeId) Type;
+@comptime fn type_id(T) TypeId;
+@comptime fn for_all_fields(Type, Trait) bool;
+
+// Combine the fields from both types into one
+// using(A, B) C implies from(C) A
+@comptime fn using(Type, Type) Type;
+
+for T {
+    @comptime fn comptime(fn() T) T;
+    @comptime fn reflect(T) TypeInfo;
+    @comptime @auto fn safe_to_leak(T) bool = true;
+}
+
+for T {
+    @comptime bit_size(T);
+}
+fn clear_leading_bits(value: i64, count: i64) i64;
+
+for T with ne(stride(T), nil()) {
+    /// This is not the same thing as default()!
+    @unsafe zero_init() T;
+}
+
+fn is_union(Type) bool;
+
+fn untagged_union(Type, Type) Type with is_union($0); 
+
+for U with is_union(U) {
+    for F in cases(U) {
+        fn read_union(&U) &F;
+    }
+}
+
+@comptime struct FnFlags = FlagSet(Intrinsic | Unsafe | Runtime | Comptime | C | Rust | Zig);
+@comptime struct FnType = { Arg: Type, Ret: Type, flags: FnFlags };
+
+@module(globals, impl=core) {
+    fn declare(T: Type, name: @comptime Str, value: T);
+    fn get(T: Type, name: @comptime Str) &T;
+}
+
+@module(thread_local, impl=core) {
+    fn declare(T: Type, name: @comptime Str, value: T);
+    fn get(T: Type, name: @comptime Str) &T;
+}
+
+//////////////
+/// Traits ///
+//////////////
+
+@comptime let Trait = fn(Type) bool;
+fn and(a: Trait, b: Trait) Trait;
+
+/////////////////
+/// Functions ///
+/////////////////
+
+@type FnType = { Arg: Type, Ret: Type };
+struct FnSig = { name: @comptime Str, type: FnType };
+struct FnDecl = { at: Loc, flags: FnFlags };
+
+@module(functions, impl=core) {
+    fn declare(FnSig, fn(Arg) Ret);
+    fn get(FnSig) fn(Arg) Ret;
+    fn infer(name: @comptime Str, Arg: ?Type, Ret: ?Type) ?FnSig;
+    
+    for F with is_type(F, FnType) {
+        struct FnPtr(F) = (*());
+        
+        // You can turn a concrete function value into a pointer. 
+        fn cast(f: F) FnPtr(F);
+        
+        // You can dereference a function pointer to call it. 
+        fn cast(ptr: FnPtr(F)) F;
+    }
+}
+
+trait Callable for F when {
+    // There must exist functions `fn(Type) Type` that do not panic when passed a Callable. 
+    fn arg_of(@type F) Type;
+    fn ret_of(@type F) Type;
+    
+    fn call(&F, arg_of(F)) ret_of(F); 
+}
+
+@module(closures, impl=core) when @module(functions) {
+    for F with is_type(F, FnType) {
+        struct Closure(F) = { f: FnPtr(F), data: Ref(Unit) };
+        
+        fn call(&Closure(F), F.Arg) F.Ret;
+        
+        fn arg_of(@type F) Type;
+        fn ret_of(@type F) Type;
+    }
+}
+
+/////////////
+/// Enums ///
+/////////////
+
+@type TagType = Slice(@comptime Str);
+@type EnumLiteral = { Tag: TagType, cases: OrderedMap(Tag, Type) };
+
+@type EnumType = { 
+    Tag: Tags, 
+    cases: Map(Tag, Type) 
+} with and([is_enum($0), eq(Tag($0), Tag), tag_of($0) Tag]); 
+
+fn is_enum(T: Type) bool = is_type(T, EnumType);
+fn Tag(E: EnumType) TagType = E.Tag;
+
+for E with is_type(E, EnumType) {
+    
+}
+
+
+@intrinsic
+fn pack_enum_tag(cases: EnumLiteral) EnumInfo;
+
+@comptime fn FlagSet(E: Type with is_enum(E)) Type;
+@comptime backing_int(Type with FlagSet(E)) Type;
+
+// TODO: add to niche_optimisation examples. high bits are reserved for tag. 
+// TODO: require no payload 
+for E with and(is_enum(E), le(len(fields(E)), 64)) {
+    let Flags = FlagSet(E);
+    let BInt = backing_int(Flags);
+    
+    fn from(set: bool) Flags = if(set, fn = all(), fn = none());
+    
+    fn cast(E) Flags;
+    fn set(&Flags, E, bool);
+    fn get(&Flags, E) bool;
+    // Falible cause it might not take up the whole int. 
+    fn try_cast(v: BInt) ?Flags;
+    fn cast(v: Flags) BInt = transmute(v);
+    
+    fn all() Flags = zero_leading_bits(cast(not(0), sub(bit_size(BInt), required_bits())));
+    fn none() Flags = cast(0);
+    fn any(self: Flags, options: Flags) bool = ne(none(), and(self, options));
+    fn none(self: Flags, options: Flags) bool = not(any(self, options));
+    fn all(self: Flags, options: Flags) bool = all(and(self, options), options);
+    fn and(Flags, Flags);
+    fn or(Flags);
+    fn required_bits() i64 = len(fields(E));
+}
+
+///////////////
+/// Structs ///
+///////////////
+
+@type StructType = (OrderedMap(TagType, Type));
+
+@comptime @intrinsic
+fn field_type(StructType, index: u64) ?Type;
+
+@comptime @intrinsic
+fn field_index(StructType, name: Str) ?i64;
+    
+for S with StructType(S) {
+    @intrinsic
+    fn get_field(&S, @comptime index: u64) &unwrap(field_type(S, index));
+}
+
+@comptime 
+fn field_type(S: StructType, name: Str) ?Type = then(field_index(S, name), fn(i) = get_field(S, i));
+
+@comptime fn fields(V): Type;
+
+
+//////////////
+/// Unions ///
+//////////////
