@@ -12,7 +12,34 @@ mod parse;
 mod pool;
 mod scope;
 
+macro_rules! check_op {
+    ($name:expr, $op:tt) => {{
+        let cases = [5, 10, -5];
+        for n in cases {
+            let src = format!("fn main(n: i64) i64 = {{ {0}(n, n) }}", $name);
+            run_main(&src, Value::I64(n), Value::I64(n $op n));
+            let src = format!("fn main(n: i64) bool = {{ {0}({0}(n, n), n) }}", $name);
+                run_main(&src, Value::I64(n), Value::I64((n $op n) $op n));
+        }
+    }};
+}
+
+macro_rules! check_cmp {
+    ($name:expr, $op:tt) => {{
+        let cases = [5, 10, -5];
+        for n in cases {
+            let src = format!("fn main(n: i64) bool = {{ {0}(n, n) }}", $name);
+            run_main(&src, Value::I64(n), Value::Bool(n $op n));
+        }
+    }};
+}
+
 fn main() {
+    run_main(
+        "fn main(n: i64) = { add(add(n, n), n)}",
+        Value::I64(5),
+        Value::I64(15),
+    );
     // let src = include_str!("lib/builtins.txt");
     // let src = r#"
     //     fn get(arr: &Array(T), i: i64) &T;
@@ -21,26 +48,27 @@ fn main() {
     //         set(ptr, new);
     //         old
     //     }
-
     //     call(fn(a: Int) = { a });
-
     //     // fn call(fn(Int));
     //     // call(fn = { $0 });
     // "#;
-    let src = r#"
-        fn main(n: i64) i64 = { add(n, n) }
-    "#;
-    assert_eq!(
-        main_int_to_int("fn main(n: i64) i64 = { add(n, n) }", Value::I64(5)),
-        Value::I64(10)
-    );
-    // assert_eq!(
-    //     main_int_to_int("fn main(n: i64) i64 = add(n, n);", Value::I64(5)),
-    //     Value::I64(10)
-    // );
 }
 
-fn main_int_to_int(src: &str, arg: Value) -> Value {
+#[test]
+fn interp_math() {
+    check_op!("add", +);
+    check_op!("sub", -);
+    check_op!("mul", *);
+    check_op!("div", /);
+    check_cmp!("eq", ==);
+    check_cmp!("ne", !=);
+    check_cmp!("gt", >);
+    check_cmp!("lt", <);
+    check_cmp!("le", <=);
+    check_cmp!("ge", >=);
+}
+
+fn run_main(src: &str, arg: Value, expect: Value) {
     let mut p = Parser::new();
     p.set_language(tree_sitter_inferd::language());
     let pool = StringPool::default();
@@ -49,7 +77,7 @@ fn main_int_to_int(src: &str, arg: Value) -> Value {
     let mut interp = Interp::new(&pool, &mut program);
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
-    let result = interp.run(f, arg);
-    println!("R: {result:?}");
-    result
+    let result = interp.run(f, arg.clone());
+    println!("{arg:?} -> {result:?}");
+    assert_eq!(result, expect);
 }

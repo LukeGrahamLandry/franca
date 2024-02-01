@@ -9,7 +9,7 @@ Pretty cool tho, already catching stupid things like forgot to implement add, ju
 
 ## Tree Sitter (Jan 28)
 
-I need to figure out what the `•` symbol precicly means in error messages. Brackets not in quotes are like s-expression where the first thing in the list is the name of the production and the rest are its arguments. I think `•` is a sequence separator. So `(call_expr _expr  • tupple)  <-> call_expr(seq(_expr, tupple)`
+I need to figure out what the `•` symbol precicly means in error messages. Brackets not in quotes are like s-expression where the first thing in the list is the name of the production and the rest are its arguments. I think `•` is a sequence separator. So `(call_expr _expr  • tuple)  <-> call_expr(seq(_expr, tuple)`
 
 ## Side Tracked (Jan 27)
 

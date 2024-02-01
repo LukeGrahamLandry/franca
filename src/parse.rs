@@ -124,7 +124,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                     todo!("Unknown typeexpr kind {kind}");
                 }
             }
-            "tupple" => {
+            "tuple" => {
                 let mut cursor = node.walk();
                 let args = node
                     .children(&mut cursor)
@@ -178,7 +178,9 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let mut cursor = arg.walk();
 
         let name = self.parse_expr(arg.child(0).unwrap().walk());
-        arg.child(1).map(|result| assert_eq!(result.kind(), ":")); // TODO
+        if let Some(result) = arg.child(1) {
+            assert_eq!(result.kind(), ":")
+        }
         let ty = arg.child(2).map(|result| self.parse_expr(result.walk()));
         if let Expr::GetNamed(name) = name {
             (Some(name), ty)

@@ -52,12 +52,12 @@ module.exports = grammar({
         $.anon_arg,
       ),
     anon_arg: ($) => prec(5, seq("$", $.number)),
-    call_expr: ($) => prec(2, seq($._expr, $.tupple)),
+    call_expr: ($) => prec(2, seq($._expr, $.tuple)),
     type_expr: ($) =>
       prec(
         1,
         choice(
-          $.tupple,
+          $.tuple,
           seq("&", $._expr),
           seq("?", $._expr),
           seq("fn", $.func_proto),
@@ -68,7 +68,7 @@ module.exports = grammar({
         seq("fn", field("proto", $.func_proto), "=", field("body", $._expr)),
         seq("fn", "=", field("body", $._expr)),
       ),
-    tupple: ($) => seq("(", list($._expr), ")"),
+    tuple: ($) => seq("(", list($._expr), ")"),
 
     identifier: (_) => /[_\p{XID_Start}][_\p{XID_Continue}]*/,
     // identifier: ($) => /[a-z]+/,

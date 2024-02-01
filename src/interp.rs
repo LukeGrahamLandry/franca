@@ -1,9 +1,20 @@
-use std::{collections::HashMap, mem::replace};
+use std::{
+    collections::HashMap,
+    fmt::{format, Debug},
+    mem::replace,
+};
 
 use crate::{
     ast::{Expr, Func, FuncId, Program, Stmt, TypeId, Var},
     pool::{Ident, StringPool},
 };
+
+macro_rules! bin_int {
+    ($op:tt, $arg:expr, $res:expr) => {{
+        let (a, b) = load_int_pair($arg);
+        $res(a $op b)
+    }};
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Value {
@@ -152,6 +163,31 @@ pub struct Interp<'a, 'p> {
     log_depth: usize,
 }
 
+// TODO: rn these eat any calls. no overload checking.
+// TODO: always put these at start of pool so can use indexes without hashmap lookup
+//       IMPORTANT: interp should probably made the pool if i do that.
+const BUILTINS: &[&str] = &[
+    "add", "sub", "mul", "div", "eq", "ne", "lt", "gt", "ge", "le",
+];
+
+// TODO: use this for op call builtin to avoid a runtime hashmap lookup.
+//       but it seems you cant put this as a match left side so it doesnt help me anyway.
+const fn builtin_i(name: &'static str) -> usize {
+    // This is insane because iter.position isn't const.
+    let mut i = 0;
+    loop {
+        if i == BUILTINS.len() {
+            break;
+        }
+        // == isnt const
+        if matches!(BUILTINS[i], name) {
+            return i;
+        }
+        i += 1;
+    }
+    1
+}
+
 impl<'a, 'p> Interp<'a, 'p> {
     pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         Self {
@@ -160,7 +196,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             call_stack: vec![],
             program,
             ready: vec![],
-            builtins: vec![pool.intern("add")],
+            builtins: BUILTINS.iter().map(|name| pool.intern(name)).collect(),
             log_depth: 0,
         }
     }
@@ -257,12 +293,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // Calling Convention: arguments passed to a function are moved out of your stack.
                     let arg = self.take_slot(arg_slot);
                     let value = match name {
-                        "add" => {
-                            // TODO: macro for operators
-                            let (a, b) = load_int_pair(arg);
-                            Value::I64(a + b)
-                        }
-                        _ => panic!("Unknown builtin {}", name),
+                        "add" => bin_int!(+, arg, Value::I64),
+                        "sub" => bin_int!(-, arg, Value::I64),
+                        "mul" => bin_int!(*, arg, Value::I64),
+                        "div" => bin_int!(/, arg, Value::I64),
+                        "eq" => bin_int!(==, arg, Value::Bool),
+                        "ne" => bin_int!(!=, arg, Value::Bool),
+                        "gt" => bin_int!(>, arg, Value::Bool),
+                        "lt" => bin_int!(<, arg, Value::Bool),
+                        "ge" => bin_int!(>=, arg, Value::Bool),
+                        "le" => bin_int!(<=, arg, Value::Bool),
+                        _ => panic!("Known builtin {:?} is not implemented.", name),
                     };
                     *self.get_slot_mut(return_slot) = value;
                     println!("{:?}", self.value_stack);
@@ -292,7 +333,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let target = *target;
                     println!("{:?}", self.value_stack);
                     println!("{:?}", values);
-                    // Calling Convention: values are moved into a tupple.
+                    // Calling Convention: values are moved into a tuple.
                     let values: Vec<_> = values
                         .into_iter()
                         .map(|slot| self.take_slot(slot))
@@ -389,6 +430,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         result.insts.push(Bc::Ret(return_value));
 
+        println!("{:?}", result);
         self.ready[index] = Some(result);
         println!(
             "{} Done JIT: {}",
@@ -508,7 +550,7 @@ fn load_int_pair(v: Value) -> (i64, i64) {
             container_type,
             mut values,
         } => {
-            assert_eq!(values.len(), 2);
+            assert_eq!(values.len(), 2, "load_int_pair wrong arity");
             let a = replace(&mut values[0], Value::Poison);
             let b = replace(&mut values[1], Value::Poison);
             (load_int(a), load_int(b))
@@ -521,5 +563,56 @@ fn load_int(v: Value) -> i64 {
     match v {
         Value::I64(i) => i,
         v => panic!("load_int {:?}", v),
+    }
+}
+
+impl Debug for FnBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== Func BC ===")?;
+        for (i, bc) in self.insts.iter().enumerate() {
+            write!(f, "{i}. ");
+            match bc {
+                Bc::CallDynamic {
+                    f,
+                    return_slot,
+                    arg_slot,
+                } => todo!(),
+                Bc::CallDirect {
+                    f,
+                    return_slot,
+                    arg_slot,
+                } => todo!(),
+                Bc::CallBuiltin {
+                    name,
+                    return_slot,
+                    arg_slot,
+                } => writeln!(
+                    f,
+                    "${} = builtin(i({}), ${});",
+                    return_slot.0, name.0, arg_slot.0
+                )?,
+                Bc::LoadConstant { slot, value } => writeln!(f, "${} = {:?};", slot.0, value)?,
+                Bc::JumpIf {
+                    cond,
+                    true_ip,
+                    false_ip,
+                } => writeln!(
+                    f,
+                    "if (${}) goto {} else goto {};",
+                    cond.0, true_ip, false_ip
+                )?,
+                Bc::CreateTuple { values, target } => {
+                    let args: Vec<_> = values.iter().map(|i| format!("${}", i.0)).collect();
+                    let args = args.join(", ");
+                    writeln!(f, "${} = tuple({});", target.0, args)?;
+                }
+                Bc::Ret(i) => writeln!(f, "return ${};", i.0)?,
+                Bc::Clone { from, to } => writeln!(f, "${} = @clone(${});", to.0, from.0)?,
+                Bc::Move { from, to } => writeln!(f, "${} = move(${});", to.0, from.0)?,
+                Bc::Drop(i) => writeln!(f, "drop(${});", i.0)?,
+            }
+        }
+        writeln!(f, "===============")?;
+        Ok(())
     }
 }
