@@ -8,7 +8,7 @@
 // For each concrete type T where there is a function called name that converts n T into a Str, define a new function. 
 for T with fn name(T) Str {
     // The only thing we know about T is that `fn name(T) Str` exists and we can call it. 
-    fn say_hi(self: T) = print("Hello ", name(self), "!");
+    fn say_hi(self: T) Str = join("Hello ", name(self), "!");
 }
 
 // The above is really syntax sugar for this: 
@@ -16,7 +16,7 @@ for T with fn name(T) Str {
 // The thing on the right can be an arbirarily complicated expression. 
 // Requiring that some function exist is just a common case that looks prettier. 
 for T with func_exists({ name: "name", Arg: T, Ret: Str }) {
-    fn say_hi2(self: T) = say_hi(self);
+    fn say_hi2(self: T) Str = say_hi(self);
 }
 
 ////////////////////////
@@ -32,7 +32,7 @@ trait Person(T) for T with {
 // A trait name can be used as a comptime function `fn(Type) bool`
 for T with Person(T) {
     // The only requirement for calling `say_hi` is having a `name` function which the trait gives us. 
-    fn say_hi3(self: T) = say_hi(self);
+    fn say_hi3(self: T) Str = say_hi(self);
     
     fn drink_in_merica(self: T) bool = ge(age(self), 21);
 }
@@ -54,7 +54,8 @@ assert(Person(Chicken));
 let pet: Chicken = { name: "idk bro its a chicken", age: 3 };
 // There's no vtable stuff going on for this call. Function overloads are resolved at comptime. 
 // If you need runtime polymorphism, see lib/dynamic.txt
-assert_ne(drink_in_merica(pet));
+assert(not(drink_in_merica(pet)));
+assert_eq(say_hi(pet), "Hello idk bro its a chicken!");
 
 ///////////////////////////////
 /// Defining a Generic Type ///
@@ -85,45 +86,6 @@ for E with ne(stride(E), nil()) {
         unwrap(as_ref)  // Crash if nobody put something in the slot before trying to read it. 
     }
     fn set((arr): &Self, index: i64, value: E) = set(arr, index, value);
-}
-
-////////////////////////////////////////////
-/// CHANGED Types whose values are types /// 
-////////////////////////////////////////////
-//
-// TODO: I this I should remove this. 
-//       but i feel like its nice for defining stuff with function pointers in the compiler. 
-//       i guess really that should just be in the blessed Type enum. 
-
-// `type <name> = <struct literal>`
-// This defines a new type. 
-// As you'll see, doing this is a bit useless unless you're adding a new magic builtin literal to the compiler. 
-type BadStaticArray = { Element: Type, count: usize };
-
-// A function whose argument is a Type, but that type must be a BadStaticArray. 
-// Since there's no way to specify a bound on the Element type, we need to unwrap stride since it might be unsized. 
-// Since this function's only arguments are types it can only be called at comptime, and a failed unwrap will be a compile error. 
-// TODO: probably remove this. 
-//      doesn't really make since because you need some magic to say Type<BadStaticArray, not a value of BadStaticArray. 
-fn array_bytes_needed(A: type BadStaticArray) i64 = mul(unwrap(stride(A.Element)), A.count);
-
-// For each concrete type that is a BadStaticArray, we want to define some functions. 
-for A: BadStaticArray {
-    // This declaration is not ambigous, there's only one A in this context and its a StaticArray so we can access its fields. 
-    // However, its a compile error to try to *call* this function. 
-    // The compiler can't resolve the overload because there's no way for the caller to specifiy which A they mean. 
-    // The signeture of this function is always `fn() i64`. 
-    fn bad_array_bytes_needed() i64 = mul(unwrap(stride(A.Element)), A.count);
-    
-    // I want to allow the user to create a new instance of my static array, 
-    // so I'll make a function that returns an A. 
-    // Unlike before, it is possible to call this function, each instantiation has a unique return type (A) so the compiler can tell them apart. 
-    // Since array, is generic over its entry type, I use `as` to give it a bound. 
-    // Unfortunatly, it's impossible to write this function because Array(A.Element), isn't a value of my type. 
-    // In fact, there are no values of my type because I don't have a way to tell the compiler what they are. 
-    @assert_compile_error {
-        fn new() A = as(Array(A.Element), array(A.count));
-    }
 }
 
 ///////////////////////////
@@ -159,6 +121,7 @@ for A: BadStaticArray {
 // And it doesn't give you a way to create values of your new type, that needs to be built into the compiler as well. 
 // However, its useful for me to have a way to express a type whose values are types. 
 //
+// TODO: specify reason for the error in the annotation. extend my giant enum of every compiler error? 
 @assert_compile_error {
     @type Pair = { E: Type };
     

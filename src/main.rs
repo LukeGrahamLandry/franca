@@ -54,6 +54,7 @@ fn main() {
     // "#;
 }
 
+// TODO: since operators are traits, i probably dont need to use a macro for this
 #[test]
 fn interp_math() {
     check_op!("add", +);

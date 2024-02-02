@@ -42,6 +42,8 @@ pub enum Value {
     Fn(TypeId, usize),
     Type(TypeId),
     GetFn(FuncId),
+    /// The empty tuple.
+    Unit,
     // This is unsed to represent a function's empty stack space.
     // Crash if you try to read one.
     Poison,
@@ -285,23 +287,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // In that case, the loop will break.
                 }
                 Bc::CallDynamic { .. } => todo!(), // Dont for get to inc ip first since ret doesn't
-                Bc::CreateTuple { values, target } => {
-                    // let values = values.clone(); // TODO: this sucks but take needs unique access.
-                    // let target = *target;
-                    // println!("{:?}", self.value_stack);
-                    // println!("{:?}", values);
-                    // // Calling Convention: values are moved into a tuple.
-                    // let values: Vec<_> = values
-                    //     .into_iter()
-                    //     .map(|slot| self.take_slot(slot))
-                    //     .collect();
-                    // let values = Value::Tuple {
-                    //     container_type: TypeId(0), // TODO
-                    //     values,
-                    // };
-                    // *self.get_slot_mut(target) = values;
-                    // self.bump_ip();
-                    todo!()
+                &Bc::CreateTuple { values, target } => {
+                    let tuple = self.take_slots(values);
+                    *self.get_slot_mut(target) = tuple;
+                    self.bump_ip();
                 }
                 &Bc::Move { from, to } => {
                     let v = self.take_slot(from);
@@ -349,19 +338,22 @@ impl<'a, 'p> Interp<'a, 'p> {
         value
     }
 
+    /// If slot ranges over multiple, return them as a tuple.
     fn take_slots(&mut self, slot: StackRange) -> Value {
-        if slot.count == 1 {
-            return self.take_slot(slot.first);
-        }
+        if slot.count == 0 {
+            Value::Unit
+        } else if slot.count == 1 {
+            self.take_slot(slot.first)
+        } else {
+            let mut values = vec![];
+            for i in 0..slot.count {
+                values.push(self.take_slot(StackOffset(slot.first.0 + i)))
+            }
 
-        let mut values = vec![];
-        for i in 0..slot.count {
-            values.push(self.take_slot(StackOffset(slot.first.0 + i)))
-        }
-
-        Value::Tuple {
-            container_type: TypeId(0), // TODO
-            values,
+            Value::Tuple {
+                container_type: TypeId(0), // TODO
+                values,
+            }
         }
     }
 
@@ -508,6 +500,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     panic!("undeclared variable {}", self.pool.get(*i))
                 }
             }
+            Expr::EnumLiteral(_) => todo!(),
+            Expr::StructLiteral(_) => todo!(),
         }
     }
 

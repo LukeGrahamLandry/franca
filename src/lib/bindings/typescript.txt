@@ -1,0 +1,96 @@
+//
+// Parse the typescript interface definitions from https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.17/specification.md
+// and generate types in this language's comptime.
+// I'm reinventing F# https://learn.microsoft.com/en-us/dotnet/fsharp/tutorials/type-providers 
+//
+
+//
+// struct TsTypes = {
+//     decls: Slice(
+//         { name: Str, cases: Array(Str) }
+//         | { name: Str, fields: { opt: bool, cases: Array(Str) } }
+//     )
+// };
+// fn parse(Str) TsTypes;
+//
+const (TsTypes, parse) = combinator(ts_type_spec());
+
+fn ts_type_spec() Grammar = Seq([
+    ("decls", many(
+        choice([ts_enum(), ts_interface()])
+    ))
+]);
+
+fn ts_enum() Grammar = seq([
+    lit("export type")
+    ("name", Str, ident),
+    lit("="),
+    ts_type(),
+    lit(";"),
+]);
+
+fn ts_interface() Grammar = Seq([
+    lit("interface"), 
+    ("name", Str, ident),
+    optional(seq([
+        lit("extends"),
+        ("parent", Str, ident),
+    ])),
+    lit("{"),
+    ("fields", Slice(_), many(
+        ("name", Str, ident),
+        ("opt", bool, is_present(optional(lit("?")))),
+        lit(":"),
+        ts_type(),
+        lit(";"),
+    )),
+    lit("}"),
+]);
+
+fn ts_type() Grammar = Seq([
+    ("cases", Slice(Str), many_sep(ident, hide(lit("|")))),
+]);
+
+///////////////////////////////////////////////////////////////
+// TODO: move to parsing/combinator.txt and also actually write an implementation 
+
+enum Grammar = 
+    (Str, Type, &Grammar) 
+    | (Str, &Grammar) 
+    | seq(Array(Grammar))
+    | optional(&Grammar)
+    | lit(Str)
+    | is_present(&Grammar)
+    | choice(Array(Grammar))
+    | many(Array(Grammar))
+    | many_sep(&Grammar, &Grammar)
+    | hide(&Grammar)
+    | ident
+;
+
+struct Parser = { T: Type, E: Type, parse: fn(Str) Result(T, E) };
+
+fn combinator(&Grammar) Parser;
+
+///////////////////////////////////////////////////////////////
+
+// For targeting js: 
+const spec = get_resource(String, sha1("3e63dbbf28c145a7bcb2fcb6ccfb8747431fda37"), url("https://raw.githubusercontent.com/microsoft/TypeScript/d69757e3d39d48eaa798e6e542dd416f8aac2c93/src/lib/dom.generated.d.ts")); 
+const js_dom = cached_type_provider(unwrap(spec), "js_dom", import_typescript_types);
+
+fn import_typescript_types(name: Str, src: String) ModuleDecl = {
+    @todo
+}
+
+// Tell me what you want and where to get it, and I'll see if they have it. 
+fn get_resource(T: Type, ?ContentHash, Url) Result(Resource(T), _);
+
+// This is overly restrictive. Many languages allow fancy unique in identifiers.
+// But it feels like when I'm generating code, I don't want to tempt fate. 
+// The goal is make sure you can't do arbitrary code injection by importing .d.ts files and generating source code off them. 
+// TODO: When importing the cached file, have a way to specify that its not allowed comptime execution or defining function bodies. 
+// TODO: can do this much faster by using character numbers
+fn is_safe_identifier(i: Str) bool = and(
+    not(starts_with_any(i, "1234567890")),
+    contains_only(i, "qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM1234567890_")
+);

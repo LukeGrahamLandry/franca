@@ -2,9 +2,14 @@
 // Comptime functions for manipulating types as values. 
 //
 
-@type enum Type = using({ name: Str}, 
-    EnumType | StructType | UnionType | FnType
-); 
+// The code in this file is special. 
+// It is the only place that directly depends on the `create_meta_types` module.
+// It's useful to keep the dependencies low so its easier to bootstrap. 
+@in(@module(reflect) when @module(create_meta_types))
+
+@type enum Type = TagType | EnumType | StructType | UnionType | FnType;
+
+fn type_name(Type) Str;
 
 fn is_type(Type, @type) bool; 
 
@@ -65,6 +70,7 @@ for U with is_union(U) {
 
 @comptime let Trait = fn(Type) bool;
 fn and(a: Trait, b: Trait) Trait;
+fn same_functions(Type) Trait;
 
 /////////////////
 /// Functions ///
@@ -79,7 +85,7 @@ struct FnDecl = { at: Loc, flags: FnFlags };
     fn get(FnSig) fn(Arg) Ret;
     fn infer(name: @comptime Str, Arg: ?Type, Ret: ?Type) ?FnSig;
     
-    for F with is_type(F, FnType) {
+    for F with and(is_type(F, FnType), none(F, HasCaptures)) {
         struct FnPtr(F) = (*());
         
         // You can turn a concrete function value into a pointer. 
@@ -109,28 +115,70 @@ trait Callable for F when {
     }
 }
 
+// These are annotations (with lowercase names) with no arguments that can be applied to function definitions. 
+struct FnFlags = FlagSet(
+    BootBuiltin
+    | BootInterp
+    | Intrinsic 
+    | Unsafe 
+    // This function must execute at runtime (not compiletime). 
+    | Runtime 
+    // This function must execute at compiletime (not runtime).
+    | Comptime
+    | Relax 
+    | Safety 
+    | Auto 
+    | Annotation
+    // The compiler cannot reorder calls to these functions relative to eachother becasue the affect or precieve the outside world. 
+    // This is transitive, you shouldn't need to manually put this on your functions
+    // because the reason you're impure is likely that you're calling some other impure function. 
+    // FFI is always @impure. 
+    // I don't care about your crazy embeded system where dereferencing a pointer is a side affect because ptr(18) is reserved for the breaks or whatever. 
+    | Impure
+    | TransformCallsite
+    | StackTrace
+    | LexicalCaller
+    /// It is a compile error to overload this function. 
+    /// Functions with @ffi(c) are @unique. 
+    | Unique
+    | HasCaptures
+    // Assigning to a `const` variable also works. 
+    | ExplicitComptime
+);
+
 /////////////
 /// Enums ///
 /////////////
 
-@type TagType = Slice(@comptime Str);
-@type EnumLiteral = { Tag: TagType, cases: OrderedMap(Tag, Type) };
+// An enum with no payloads. 
+// The type of a literal like `A | B | C` (TODO: does that need brackets to disambiguate enum with those types?)
+@type TagType = Array(@comptime Str);  
+@type EnumType = { Tag: TagType, cases: OrderedMap(Tag, Type) };
 
-@type EnumType = { 
-    Tag: Tags, 
-    cases: Map(Tag, Type) 
-} with and([is_enum($0), eq(Tag($0), Tag), tag_of($0) Tag]); 
+fn unit_payload(name: @comptime Str) (@comptime Str, Type) = (name, Unit);
 
-fn is_enum(T: Type) bool = is_type(T, EnumType);
+fn unit_payload(T: TagType) EnumType = .{ 
+    Tag: T, 
+    cases: foreach(T, unit_payload),
+};
+
+fn is_enum(T: EnumType) bool = true;
 fn Tag(E: EnumType) TagType = E.Tag;
 
 for E with is_type(E, EnumType) {
-    
+    fn tag_of(e: E) Tag(E);
 }
 
-
+// TODO: niche stuff
+// An enum is just a tagged union. 
 @intrinsic
-fn pack_enum_tag(cases: EnumLiteral) EnumInfo;
+fn pack_enum(E: EnumType) StructType = StructType({
+    FieldName: (Tag | Payload),
+    cases: {
+        Tag: E.Tag,
+        Payload: UnionType({ Names: TagType, cases: E.cases }),
+    }    
+});
 
 @comptime fn FlagSet(E: Type with is_enum(E)) Type;
 @comptime backing_int(Type with FlagSet(E)) Type;
@@ -164,7 +212,7 @@ for E with and(is_enum(E), le(len(fields(E)), 64)) {
 /// Structs ///
 ///////////////
 
-@type StructType = (OrderedMap(TagType, Type));
+@type StructType = { FieldName: TagType, OrderedMap(FieldName, Type)};
 
 @comptime @intrinsic
 fn field_type(StructType, index: u64) ?Type;
@@ -182,7 +230,110 @@ fn field_type(S: StructType, name: Str) ?Type = then(field_index(S, name), fn(i)
 
 @comptime fn fields(V): Type;
 
-
 //////////////
 /// Unions ///
 //////////////
+
+@type UnionType = { Names: TagType, cases: HashMap(Names, Type) };
+
+////////////////
+/// Pointers ///
+////////////////
+
+// If you like Rust you'll probably have a fucking field day with this. 
+// The intention is for this to be far too many options to think about. 
+// You're supposed to choose some subset to use and never produce pointers with the other restrictions. 
+// However, it lets you declare what expectations you have of a pointer, 
+// that way it can be a compile error. 
+// The real killer feature of this is, what i call sarcastically, "Fearless FFI".
+// TODO: need to define subtype relationships
+// You probably don't want to eat the branch prediction cost of using this at runtime, try to be generic over it instead. 
+const PtrFlags = FlagSet(
+    // Nobody else has a pointer to this memory. 
+    | NoAlias
+    // You can not mutate throught this pointer.
+    // However, it may be aliased and the other people might mutate it. 
+    | ConstantForMe
+    // Other copies may not mutate the value it holds (if aliased). 
+    | ConstantForOthers
+    // The constant rules are really just suggestions. 
+    | InteriorMutability
+    // The memory this points to is garbage collected (reference counted, etc).
+    // It's reasonable to just throw away the pointer and assume someone else will reclaim the memory. 
+    | Collected    
+    // This pointer does not have the value zero. 
+    | NonNull
+    // This pointer may point to invalid memory. 
+    | UnsafeDeref
+    // This pointer will be good forever. You can put it in your pockets for latter. 
+    | Static
+    // To alias this pointer, all you need to do is copy the bits. 
+    // Same as the Copy trait in rust. 
+    | BitCopy
+    // If you want to copy this pointer and give it to someone else (without cloning the value behind it),
+    // you need to call the `copy` function.   
+    // Useful for reference counting.
+    // TODO: should call the function that does this `alias` instead so its more clearly distinct that one expects mutation to be shared and one doesnt/
+    | CallCopy
+    // When you're done with this pointer, you must call the `drop` function. 
+    // Useful for reference counting or RAII owned memory. 
+    | NeedsDrop
+    // This pointer is good for some fixed amount of time, perhaps until the current call returns. 
+    // You can't just put it somewhere for later. 
+    | TrackLifetime
+    | RegionTag
+    // You can move the value out of the pointer but then you can never use it through the pointer again. 
+    | MoveOut
+    // The type behind the pointer has a trivial destructor so dereferencing can just do a bitwise copy. 
+    | CopyOut
+    | CloneOnWrite
+    // This pointer may or may not be present but you can safely check. 
+    | OptionalDeref
+);
+
+let PtrPrefix = FlagSet(Amp | Star | Arrow);
+let PtrSuffix = FlagSet(Const | Mut | Raw | Gc);
+let PtrSyntax = (PtrPrefix, ?PtrSufix);
+
+@type PtrType = { inner: Type, flags: PtrFlags };
+
+fn ptr_to(Type, PtrFlags) Type;
+
+fn get_flags(@type PtrType) PtrType;
+fn with_flags(@type PtrType, PtrFlags) Type;
+
+//////////////
+/// Arrays ///
+//////////////
+
+// TODO: doc: unnamed struct fields when unique types. 
+@type ArrayType = (PtrType, ArrayFlags);
+
+const ArrayFlags = FlagSet(
+    // Zig array list has this. 
+    RuntimeAllocatorPtr
+    // [ArrayList<Object>, ArrayList(type), Vec<T>, std::vector<T>] have this.
+    | Growable
+    | IteratorInvalidation
+    // Tuples have this. 
+    | ComptimeKnownLength
+    // Linked lists DONT have this. 
+    | RandomAccess
+    // C dynamic arrays DONT have this. 
+    | RuntimeKnownLength
+);
+
+///////////////
+/// Strings ///
+///////////////
+
+// If you like Rust you'll probably have a fucking field day with this. 
+@type StrType = (ArrayType, StrFlags, StrEncoding);
+
+const StrFlags = FlagSet(NullTerminated);
+
+enum StrEncoding = Utf8 | Utf16 | Utf32 | Ascii | Bytes | Os; 
+
+for (A, B) with and(is_type(A, StrType), is_type(B, StrType)) {
+    fn try_from(A) B;
+}

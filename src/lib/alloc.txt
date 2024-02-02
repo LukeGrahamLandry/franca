@@ -1,19 +1,10 @@
-trait PtrLike(Ref) = for V: and([
-    // TODO: does deref need to be a seperate thing? 
-    // Takes a reference so you have a lifetime to use for the result. 
-    fn cast(&Ref(V)) &V, 
-    // Require that you're not doing the rust thing where sometimes its a fat pointer and sometimes not. 
-    eq(stride(Ref(V)), stride(Ref(Unit))),
-    // Like casting to a void pointer in C. 
-    fn forget_type(Ref(V)) Ref(Unit), 
-    // Like casting back from a void pointer in C. 
-    fn assume_type(Ref(Unit)) Ref(V)
-]);
-
 // TODO: Box and Rc should be generic over alloc
 trait Allocator for A when {
     @impure fn allocate(&A, i64) Ptr(Unit);
     @impure fn free(&A, Ptr(Unit), i64));
+
+    @auto fn alloc_slice(self: &A, T: Type, count: i64) Slice(T) = allocate(self, mul(stride(T), count));
+    @auto fn free_slice(self: &A, T: Type, arr: Slice(T)) Slice(T) = free(arr.ptr, mul(stride(T), arr.len));
 }
 
 for T with ne(stride(T), nil()) {
@@ -21,6 +12,7 @@ for T with ne(stride(T), nil()) {
     struct Slice(T) = { len: i64, ptr: *T };
     
     @intrinsic fn memcpy(dest: Slice(T), src: Slice(T)) = {
+        // TODO: overlap sanity
         sanity(eq(dest.len, src.len), fn = "memcpy mismatch");
         enumerate(src, fn(i, e) = set(dest, i, e))
     }
@@ -56,19 +48,18 @@ for T with ne(stride(T), nil()) {
         
         fn cast(arr: Array(T, A)) Slice(T) = Slice({ arr.len, arr.ptr })
         
-        fn array(alloc: *A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, ptr: nil() })
+        fn array(alloc: *A) Array(T, A) = Array({ len: 0, capacity: 0, alloc, ptr: nil() });
         fn array(alloc: *A, capacity: i64) Array(T, A) = {
-            var ptr = allocate(alloc, mul(stride(T), capacity));
+            var ptr = alloc_slice(alloc, T, capacity);
             Array({ len: 0, capacity, alloc, ptr })
         }
         
         fn reserve(arr: &Array(T, A), extra: i64) = {
             if(lt(arr.capacity, total), fn = {
                 let cap = max(max(add(arr.capacity, extra), mul(arr.capacity, 2)), 4);
-                var new = array(arr.alloc, cap);
+                var new: Array(T, A) = array(arr.alloc, cap);
                 memcpy(slice(new, 0, len(arr)), arr);
-                free(arr);
-                set(arr, new);
+                let _: Array(T, A) = replace(arr, new);
             }, fn=())
         }
         
@@ -77,7 +68,7 @@ for T with ne(stride(T), nil()) {
             set(len(arr), v);
         }
         
-        fn drop(arr: &Array(T, A)) = free(arr.ptr, mul(stride(T), arr.capacity));
+        fn drop(arr: &Array(T, A)) = free_slice(arr.alloc, T, slice_capacity(arr));
         
         fn slice_capacity(arr: Array(T, A)) Slice(T);
         
@@ -97,7 +88,6 @@ struct DroplessArena = { blocks: Array(ArenaChunk) };
 @private struct ArenaChunk = { }
 
 struct LibcAlloc = ();
-
 
 // A unique type to hang methods off 
 struct StupidHash = (i64);
