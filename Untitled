@@ -99,7 +99,6 @@ struct ArgRet = { Arg: Type, Ret: Type };
 struct FnType = { ArgRet, flags: FnFlags };
 struct FnSig = { name: @comptime Str, type: FnType };
 struct FnDecl = { at: Loc, flags: FnFlags };
-struct AnyFn = { ArgRet, fn(ArgRet.Arg) ArgRet.Ret };
 
 @module(functions, impl=core) {
     fn declare(FnSig, fn(Arg) Ret);
@@ -165,9 +164,6 @@ struct FnFlags = FlagSet(
     /// Functions with @ffi(c) are @unique. 
     | Unique
     | HasCaptures
-    // This function references local variables on the callstack and calls to it must be inlined. 
-    // You can't put a value of this type in your pockets for later. 
-    | NoEscape
     // Assigning to a `const` variable also works. 
     | ExplicitComptime
     | NoPanic
@@ -176,9 +172,7 @@ struct FnFlags = FlagSet(
     // Probably should't use this if it prevents you from checking assumptions with assertions. 
     // Note: I might want to not treat infinite loops as valid for the type checker just so you can't use that to cheat. 
     // TODO: this is a bad name. it sounds like the compiler doesn't check but it means behaviour depends on build mode. 
-    | OnlySafetyPanic  // TODO: one for "behaviour differs if checked"
-    | InnerUnsafe
-    | NeedsAllocator
+    | OnlySafetyPanic
 );
 
 // A value of this type cannot be produced. 
@@ -195,15 +189,13 @@ struct FnFlags = FlagSet(
 /// Enums ///
 /////////////
 
-const Symbol = @comptime Str;
-
 // A tag is an enum with no payloads. 
 // The type of a literal like `A | B | C` (TODO: does that need brackets to disambiguate enum with those types?)
-const TagType = []Symbol;  
+@type TagType = Array(@comptime Str);  
 // A tagged union. Each branch has a unique tag and some payload. A type may appear as a payload multiple types. 
-const EnumType = { Tag: TagType, cases: OrderedMap(Tag, Type) };
+@type EnumType = { Tag: TagType, cases: OrderedMap(Tag, Type) };
 
-fn unit_payload(name: Symbol) (Symbol, Type) = (name, Unit);
+fn unit_payload(name: @comptime Str) (@comptime Str, Type) = (name, Unit);
 
 fn unit_payload(T: TagType) EnumType = .{ 
     Tag: T, 
@@ -217,10 +209,10 @@ for E with is_type(E, EnumType) {
     fn tag_of(e: &E) &Tag(E);
 }
 
-// If you can get away with using this, you wont have to generate code for all the possible cases. 
+// If you can get away with using this, you don't have to eat the cost of a branch prediction. 
 // If the tag happens to be constant for some usage of a normal enum, the optimiser should still notice. 
 // This type just gives you a compile error if it can't be done. 
-fn ComptimeTag(E: EnumType) EnumType = { Tag: @comptime E.Tag, cases: E.cases }
+fn ComptimeTag(E: EnumType) EnumType = { Tag: @comptime E.Tag, }
 
 struct LayoutEntry = { T: ?Type, padding: BitSet(bit_count) }; 
 
@@ -273,20 +265,15 @@ for (T, E) {
     @runtime fn cast(self: CResult(T, E)) T = unwrap(self);
 }
 
-fn Sealed(cases: []Type) EnumType;
-
-// Like an enum in C or Java.
-fn ValueEnum(Backing: Type, cases: [](Symbol, Backing)) Type;
-
 ///////////////
 /// Structs ///
 ///////////////
 
-enum StructLayout = C | Rust | Zig | Packed | 
+enum StructLayout = using(Target, ZigPacked);
 
-// 
-| MagicJit
-;
+let supported_layouts: Map(Target, FlagSet(StructLayout)) = [
+    (C, C), (Rust, C | Rust), (Zig, C | Zig | ZigPacked), (Wasm, C), (Interp, Interp),
+];
 
 @type StructType = { FieldName: TagType, fields: OrderedMap(FieldName, Type), layout: StructLayout };
 
@@ -393,11 +380,18 @@ fn ptr_to(Type, PtrFlags) Type;
 fn get_flags(@type PtrType) PtrType;
 fn with_flags(@type PtrType, PtrFlags) Type;
 
+for Ptr with is_type(Ptr, PtrType) {
+    
+}
+
+@type_trait Ptr for Ref {
+    
+}
+
 trait Sized for T when ne(stride(T), nil());
 
 trait Ptr for Ref(_) when {
     for V with Sized(V) {
-        // This is the same as cast but may be unsafe to call depending on the Flags(Ptr).
         fn deref(&Ref(V)) &V;
     }
     
@@ -443,13 +437,3 @@ enum StrEncoding = Utf8 | Utf16 | Utf32 | Ascii | Bytes | Os;
 for (A, B) with and(is_type(A, StrType), is_type(B, StrType)) {
     fn try_from(A) B;
 }
-
-///////////////
-/// Numbers ///
-///////////////
-
-const BestNumber;
-
-enum NumRepr = SignedInt | UnsignedInt | Float | ArbitraryPreciesion;
-enum Overflow = Undefined | Wrap | SafetyChecked | Allowed;
-struct NumType = { NumRepr, Overflow, max: BestNumber, min: BestNumber, bits: i64, indirection: ?PtrFlags };

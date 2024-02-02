@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 
 use crate::{
@@ -181,6 +183,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         if let Some(result) = arg.child(1) {
             assert_eq!(result.kind(), ":")
         }
+
         let ty = arg.child(2).map(|result| self.parse_expr(result.walk()));
         if let Expr::GetNamed(name) = name {
             (Some(name), ty)

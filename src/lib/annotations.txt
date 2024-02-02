@@ -35,13 +35,14 @@
 
 // You don't need to declare enum payloads as seperate types like this (they can be inline). 
 // Sometimes its useful because it lets you write functions that take a specific case as a parameter.
-enum Expr = Block | Call | Ident(Str) | TupleLiteral; 
+enum Expr = Block | Call | Ident(Str) | TupleLiteral | FnDeclAst; 
 struct Block = { body: Array(Stmt), value: ?Box(Expr) };
 struct Call = { name: Str, arg: Box(Expr) };
 struct TupleLiteral = (Array(Expr));
+struct FnDeclAst = @todo;
 
 enum Stmt = Expr | FnDecl;
-    
+
 // The target function is needed to compile the compiler. 
 // While bootstrapping the compiler, 
 // - Builtin: There is a version written in rust
@@ -53,6 +54,20 @@ fn boot(args: Builtin | Interp, target: FnDecl) FnDecl = match(args, [
     (Interp, add_flag(target, BootInterp)),
 ])
 // TODO: allow @boot on a whole module and just iterate its decls. 
+
+struct AnnotationHandler = { Arg: T, Target: T, Ret: T, f: fn(Arg, Target) Ret };
+
+var annotation_handlers: {}(Symbol, []AnnotationHandler) = find_compiler_global({}(Symbol, []AnnotationHandler));
+
+@annotation 
+fn annotation(args: (), target: &FnDeclAst) Expr = {
+    const F: FnType = unwrap(expr_type(target));
+    const T: Tuple(Type, 2) = F.Arg;
+    set_flag(target, Annotation, true);
+    let handler = { Arg: first(T), Target: second(T), Ret: F.Ret, f: compile_expr(F, target) };
+    let prev = insert(annotation_handlers, name(target), handler);
+    target
+}
 
 @annotation @intrinsic
 fn module(args: Expr, target: ()) Expr;
@@ -70,3 +85,25 @@ fn addr(args: Expr, target: ()) Expr;
 fn assert_compile_error(args: (), target: Block) Block;
 
 // TODO: @return @break @continue
+
+// TODO: not this if target is rust or zig
+// Note: this implementation can't call methods that use match? or maybe its fine since someone else would have compiled them. 
+@annotation @auto
+fn match(args: &Expr, target: []FnDeclAst) Expr = {
+    const E: EnumType = unwrap(expr_type(args));
+    var handlers: Map((Tag(E), Type), FnDeclAst) = foreach(target, fn(f: &FnDeclAst)={
+        let F = expr_type(f);
+        if(eq(name(f), nil()), fn={
+            @todo
+        }, fn = {
+            @todo
+        })
+       
+        @todo
+    });
+    
+    assert_eq(len(body), len(cases(E)));
+}
+
+fn expr_type(ast: Expr) Type;
+fn compile_expr(T: Type, ast: Expr) Result(T, _);
