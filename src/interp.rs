@@ -163,7 +163,9 @@ struct FnBody<'p> {
     stack_slots: usize,
     vars: HashMap<Var, StackOffset>, // TODO: use a vec
     arg_names: Vec<Option<Ident<'p>>>,
-    comptime_cache: bool,
+    for_comptime: bool,
+    slot_types: Vec<TypeId>,
+    func: FuncId,
 }
 
 //
@@ -183,6 +185,18 @@ pub struct Interp<'a, 'p> {
     ready: Vec<Option<FnBody<'p>>>,
     builtins: Vec<Ident<'p>>,
     log_depth: usize,
+    // TODO: really need to have unique ids on expressions so im not just recursively hashing it and hoping for the best
+    comptime_cache: HashMap<Expr<'p>, Value>,
+    // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
+    debug_trace: Vec<DebugState<'p>>,
+}
+
+#[derive(Clone, Debug)]
+enum DebugState<'p> {
+    OuterCall(FuncId, Value),
+    JitToBc(FuncId, bool),
+    RunInstLoop(FuncId),
+    ComputeCached(Expr<'p>),
 }
 
 // TODO: rn these eat any calls. no overload checking.
@@ -220,7 +234,51 @@ impl<'a, 'p> Interp<'a, 'p> {
             ready: vec![],
             builtins: BUILTINS.iter().map(|name| pool.intern(name)).collect(),
             log_depth: 0,
+            comptime_cache: Default::default(),
+            debug_trace: vec![],
         }
+    }
+
+    fn push_state(&mut self, s: DebugState<'p>) {
+        self.debug_trace.push(s);
+        self.log_trace();
+    }
+
+    // TODO: would be nice if you passed it in so could make sure that you're popping the expected one
+    //       but just check that its empty at the end and its fine.
+    fn pop_state(&mut self) {
+        self.debug_trace.pop().expect("state stack");
+    }
+
+    fn log_trace(&self) {
+        println!("=== TRACE ===");
+        let show_f = |func: FuncId| {
+            format!(
+                "f{}:{}",
+                func.0,
+                self.pool.get(self.program.funcs[func.0].name)
+            )
+        };
+
+        for (i, s) in self.debug_trace.iter().enumerate() {
+            print!("{i}");
+            match s {
+                DebugState::OuterCall(f, arg) => {
+                    print!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
+                }
+                DebugState::JitToBc(f, comptime) => {
+                    print!(
+                        "| Jit Bytecode| {} for {}",
+                        show_f(*f),
+                        if *comptime { "comptime" } else { "runtime" }
+                    )
+                }
+                DebugState::RunInstLoop(f) => print!("| Loop Insts  | {}", show_f(*f)),
+                DebugState::ComputeCached(e) => print!("| Cache Eval  | {}", e.log(self.pool)),
+            }
+            println!(";")
+        }
+        println!("=============");
     }
 
     pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) {
@@ -245,6 +303,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     pub fn run(&mut self, f: FuncId, arg: Value) -> Value {
+        self.push_state(DebugState::OuterCall(f, arg.clone()));
         let init_heights = (self.call_stack.len(), self.value_stack.len());
 
         // A fake callframe representing the calling rust program.
@@ -279,11 +338,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         assert_eq!(final_callframe, marker_callframe);
         let end_heights = (self.call_stack.len(), self.value_stack.len());
         assert_eq!(init_heights, end_heights, "bad stack size");
-
+        self.pop_state();
         result
     }
 
     fn run_inst_loop(&mut self) {
+        let func = self.call_stack.last().unwrap().current_func;
+        self.push_state(DebugState::RunInstLoop(func));
         loop {
             let i = self.next_inst();
             self.log_stack();
@@ -391,6 +452,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
         }
+        self.pop_state();
     }
 
     fn runtime_builtin(&mut self, name: &str, arg: Value) -> Value {
@@ -514,7 +576,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
 
             Value::Tuple {
-                container_type: TypeId(0), // TODO
+                container_type: TypeId::any(), // TODO
                 values,
             }
         }
@@ -530,10 +592,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         StackAbsolute(frame.stack_base.0 + slot.0)
     }
 
-    fn ensure_compiled(&mut self, FuncId(index): FuncId, comptime_cache: bool) {
+    fn ensure_compiled(&mut self, FuncId(index): FuncId, for_comptime: bool) {
         if let Some(Some(_)) = self.ready.get(index) {
             return;
         }
+        self.push_state(DebugState::JitToBc(FuncId(index), for_comptime));
         while self.ready.len() <= index {
             self.ready.push(None);
         }
@@ -553,7 +616,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             stack_slots: func.arg_names.len(),
             vars: Default::default(),
             arg_names: func.arg_names.clone(),
-            comptime_cache,
+            for_comptime,
+            slot_types: vec![],
+            func: FuncId(index),
         };
         let return_value = self.compile_expr(&mut result, func.body.as_ref().unwrap());
 
@@ -574,6 +639,15 @@ impl<'a, 'p> Interp<'a, 'p> {
             self.pool.get(func.name)
         );
         self.log_depth -= 1;
+        self.pop_state();
+    }
+
+    pub fn write_jitted(&self) -> Vec<String> {
+        self.ready
+            .iter()
+            .enumerate()
+            .filter_map(|(i, result)| result.as_ref().map(|result| format!("{:?}", result)))
+            .collect()
     }
 
     fn compile_stmt(&mut self, expr: Stmt) {
@@ -581,7 +655,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn return_stack_slots(&mut self, f: FuncId) -> usize {
-        self.infer_types(f);
+        // You must self.infer_types(f); before calling this
         let func = &self.program.funcs[f.0];
         let (_, ret) = func.ty.unwrap();
         self.program.slot_count(ret)
@@ -591,19 +665,21 @@ impl<'a, 'p> Interp<'a, 'p> {
     //       and just use the slow linear types for debugging.
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &Expr<'p>) -> StackRange {
         match expr {
-            Expr::Num(_) => todo!(),
             Expr::Call(f, arg) => {
                 let arg = self.compile_expr(result, arg);
 
                 if let Expr::GetNamed(i) = f.as_ref() {
                     if let Some(f) = self.lookup_unique_func(*i) {
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
-                        let ret = result.reserve_slots(self.return_stack_slots(f));
+                        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
+                        self.infer_types(f);
+                        let (arg_ty, _) = self.program.funcs[f.0].ty.unwrap();
+                        let ret = result.reserve_slots(self.return_stack_slots(f), arg_ty);
                         result.insts.push(Bc::CallDirect { f, ret, arg });
                         return ret;
                     } else if self.builtins.contains(i) {
                         // TODO: not all builtins have 1 return value
-                        let ret = result.reserve_slots(1);
+                        let ret = result.reserve_slots(1, TypeId::any());
                         result.insts.push(Bc::CallBuiltin { name: *i, ret, arg });
                         return ret;
                     }
@@ -614,7 +690,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let f = self.compile_expr(result, f);
                 assert_eq!(f.count, 1);
                 // TODO: not all function ptrs have 1 return value
-                let ret = result.reserve_slots(1);
+                let ret = result.reserve_slots(1, TypeId::any());
                 result.insts.push(Bc::CallDynamic {
                     f: f.first,
                     ret,
@@ -631,7 +707,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .map(|v| self.compile_expr(result, v))
                     .collect();
                 let required_slots: usize = values.iter().map(|range| range.count).sum();
-                let ret = result.reserve_slots(required_slots);
+                let ret = result.reserve_slots(required_slots, TypeId::any());
                 // TODO: they might already be consecutive
                 let base = ret.first.0;
                 let mut count = 0;
@@ -664,19 +740,19 @@ impl<'a, 'p> Interp<'a, 'p> {
                     //       but it makes interp easier to debug if you always move when consuming
                     // Function arguments are at the beginning of our stack.
                     // They might be read more than once, so need to copy the value (interp uses linear types).
-                    let to = result.reserve_slots(1);
+                    let to = result.reserve_slots(1, TypeId::any());
                     result.insts.push(Bc::Clone {
                         from: StackOffset(index),
                         to: to.first,
                     });
                     to
-                } else if let Some(value) = self.builtin_constant(self.pool.get(*i)) {
-                    let to = result.reserve_slots(1);
-                    result.insts.push(Bc::LoadConstant {
-                        slot: to.first,
-                        value,
-                    });
-                    to
+                } else if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
+                    result.load_constant(value, ty)
+                } else if let Some(func) = self.program.declarations.get(i) {
+                    assert_eq!(func.len(), 1, "ambigous function reference");
+                    let func = func[0];
+                    self.ensure_compiled(func, true);
+                    result.load_constant(Value::GetFn(func), TypeId::any())
                 } else {
                     panic!("undeclared variable {}", self.pool.get(*i))
                 }
@@ -684,7 +760,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::EnumLiteral(_) => todo!(),
             Expr::StructLiteral(_) => todo!(),
             Expr::Value(value) => {
-                let to = result.reserve_slots(1);
+                let to = result.reserve_slots(1, TypeId::any());
                 result.insts.push(Bc::LoadConstant {
                     slot: to.first,
                     value: value.clone(),
@@ -694,14 +770,15 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn builtin_constant(&mut self, name: &str) -> Option<Value> {
+    fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
         if let Some(ty) = builtin_type(name) {
             let ty = self.program.intern_type(ty);
-            return Some(Value::Type(ty));
+            let tyty = self.program.intern_type(TypeInfo::Type);
+            return Some((Value::Type(ty), tyty));
         }
 
         Some(match name {
-            "unit" => Value::Unit,
+            "unit" => (Value::Unit, self.program.intern_type(TypeInfo::Unit)),
             _ => return None,
         })
     }
@@ -732,12 +809,14 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn infer_types(&mut self, func: FuncId) {
         match self.program.funcs[func.0].ty.clone() {
             LazyFnType::Pending { arg, ret } => {
+                println!("RESOLVE: Ret of {func:?}");
                 let ret = match ret {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(e) => self.cached_eval_expr(e.clone()).unwrap_type(),
                     LazyType::Finished(id) => id, // easy
                 };
                 // TODO: copy-n-paste
+                println!("RESOLVE: Arg of {func:?}");
                 let arg = match arg {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(e) => self.cached_eval_expr(e.clone()).unwrap_type(),
@@ -758,15 +837,24 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     // TODO: fast path for builtin type identifiers
     fn cached_eval_expr(&mut self, e: Expr<'p>) -> Value {
+        if let Some(old_result) = self.comptime_cache.get(&e) {
+            println!("CACHED: {} -> {:?}", e.log(self.pool), old_result);
+            return old_result.clone();
+        }
+        self.push_state(DebugState::ComputeCached(e.clone()));
         let fake_func: Func<'p> = Func {
             name: self.pool.intern("@cached_eval_expr@"),
             ty: self.unit_to_type(),
-            body: Some(e),
+            body: Some(e.clone()),
             arg_names: vec![None],
         };
         let func_id = self.program.add_func(fake_func);
         self.ensure_compiled(func_id, true);
-        self.run(func_id, Value::Unit)
+        let result = self.run(func_id, Value::Unit);
+        println!("COMPUTED: {} -> {:?}", e.log(self.pool), result);
+        self.comptime_cache.insert(e, result.clone());
+        self.pop_state();
+        result
     }
 }
 
@@ -811,7 +899,17 @@ impl Debug for StackRange {
 
 impl Debug for FnBody<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "=== Func BC ===")?;
+        writeln!(
+            f,
+            "=== Bytecode for {:?} at {} ===",
+            self.func,
+            if self.for_comptime {
+                "comptime"
+            } else {
+                "runtime"
+            }
+        )?;
+        writeln!(f, "TYPES: {:?}", &self.slot_types);
         for (i, bc) in self.insts.iter().enumerate() {
             writeln!(f, "{i}. {bc:?}");
         }
@@ -877,13 +975,34 @@ fn runtime_builtin(name: &str, arg: Value) -> Option<Value> {
 }
 
 impl FnBody<'_> {
-    fn reserve_slots(&mut self, count: usize) -> StackRange {
+    fn reserve_slots(&mut self, count: usize, ty: TypeId) -> StackRange {
+        if ty.is_any() {
+            for _ in 0..count {
+                self.slot_types.push(TypeId::any());
+            }
+        } else if count == 1 {
+            self.slot_types.push(ty);
+        } else {
+            // TODO: expand from tuple
+            for _ in 0..count {
+                self.slot_types.push(TypeId::any());
+            }
+        }
         let range = StackRange {
             first: StackOffset(self.stack_slots),
             count,
         };
         self.stack_slots += count;
         range
+    }
+
+    fn load_constant(&mut self, value: Value, ty: TypeId) -> StackRange {
+        let to = self.reserve_slots(1, ty);
+        self.insts.push(Bc::LoadConstant {
+            slot: to.first,
+            value,
+        });
+        to
     }
 }
 

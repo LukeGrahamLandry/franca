@@ -56,6 +56,22 @@ fn main() {
     //     // fn call(fn(Int));
     //     // call(fn = { $0 });
     // "#;
+    run_main(
+        r#"
+                        fn main(n: i64) i64 = { add(add(two(unit)), n) }
+                        fn two(u: Unit) Tuple(i64, i64) = { tuple(1, 2) }
+                        "#,
+        Value::I64(3),
+        Value::I64(6),
+    );
+    run_main(
+        r#"
+                fn main(n: int(unit)) int(unit) = { add(add(n, n), n) }
+                @comptime fn int(u: Unit) Type = { i64 }
+                "#,
+        Value::I64(5),
+        Value::I64(15),
+    );
 }
 
 // TODO: since operators are traits, i probably dont need to use a macro for this
@@ -95,7 +111,7 @@ fn return_tuple() {
                         "#,
         Value::I64(3),
         Value::Tuple {
-            container_type: ast::TypeId(0), // TODO
+            container_type: ast::TypeId::any(), // TODO
             values: vec![Value::I64(3), Value::I64(4)],
         },
     );
@@ -117,9 +133,8 @@ fn passing_tuple_to_multiargs() {
 fn call_in_type_annotation() {
     run_main(
         r#"
-                fn main(n: memo(int, unit)) memo(int, unit) = { add(add(n, n), n) }
+                fn main(n: int(unit)) int(unit) = { add(add(n, n), n) }
                 @comptime fn int(u: Unit) Type = { i64 }
-                
                 "#,
         Value::I64(5),
         Value::I64(15),
@@ -138,5 +153,6 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     let result = interp.run(f, arg.clone());
     println!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
+    interp.write_jitted().iter().for_each(|f| println!("{}", f));
     program.log_cached_types();
 }

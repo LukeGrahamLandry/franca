@@ -7,18 +7,40 @@ use std::{
     fmt::{format, Debug},
     hash::Hash,
     marker::PhantomData,
+    ops::Deref,
     rc::Rc,
     sync::RwLock,
 };
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
-pub struct TypeId(pub usize);
+#[derive(Copy, Clone, PartialEq, Hash, Eq)]
+pub struct TypeId(usize);
 
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub param: TypeId,
     pub returns: TypeId,
+}
+
+impl Debug for TypeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_any() {
+            write!(f, "TyAny")
+        } else {
+            write!(f, "Ty{}", self.0)
+        }
+    }
+}
+
+impl TypeId {
+    pub fn is_any(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Placeholder to use while working on typechecking.
+    pub fn any() -> TypeId {
+        TypeId(0)
+    }
 }
 
 pub struct FuncFlags {
@@ -34,6 +56,7 @@ pub struct FuncFlags {
 
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub enum TypeInfo {
+    Any,
     Never,
     F64,
     I64,
@@ -51,10 +74,9 @@ pub enum TypeInfo {
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Var(usize, usize);
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum Expr<'p> {
     Value(Value),
-    Num(f64),
     Call(Box<Self>, Box<Self>),
     Block(Vec<Stmt<'p>>, Box<Self>),
     IfElse(Box<Self>, Box<Self>, Box<Self>),
@@ -70,7 +92,7 @@ pub enum Expr<'p> {
     GetNamed(Ident<'p>),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum Stmt<'p> {
     Eval(Expr<'p>),
 
@@ -91,7 +113,7 @@ pub enum Stmt<'p> {
     },
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub struct Func<'p> {
     pub name: Ident<'p>,
     pub ty: LazyFnType<'p>,     // We might not have typechecked yet.
@@ -99,7 +121,7 @@ pub struct Func<'p> {
     pub arg_names: Vec<Option<Ident<'p>>>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum LazyFnType<'p> {
     Finished(TypeId, TypeId),
     Pending {
@@ -108,7 +130,7 @@ pub enum LazyFnType<'p> {
     },
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum LazyType<'p> {
     Infer,
     PendingEval(Expr<'p>),
@@ -118,7 +140,7 @@ pub enum LazyType<'p> {
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub struct FuncId(pub usize);
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Program<'p> {
     pub types: Vec<TypeInfo>,
     // At the call site, you know the name but not the type.
@@ -205,7 +227,6 @@ impl<'p> LazyType<'p> {
 impl<'p> Expr<'p> {
     pub fn log(&self, pool: &StringPool) -> String {
         match self {
-            Expr::Num(n) => n.to_string(),
             Expr::Call(func, arg) => {
                 format!("{}({})", func.log(pool), arg.log(pool))
             }
@@ -238,9 +259,31 @@ impl<'p> Expr<'p> {
     }
 }
 
+impl<'p> Default for Program<'p> {
+    fn default() -> Self {
+        Self {
+            // Any needs to be first becuase I use TypeId(0) as a place holder.
+            // The rest are just common ones that i want to find faster if i end up iterating the array.
+            types: vec![
+                TypeInfo::Any,
+                TypeInfo::Unit,
+                TypeInfo::I64,
+                TypeInfo::Bool,
+                TypeInfo::Type,
+                TypeInfo::F64,
+            ],
+            declarations: Default::default(),
+            func_lookup: Default::default(),
+            funcs: Default::default(),
+            generics_memo: Default::default(),
+        }
+    }
+}
+
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
         match &self.types[t.0] {
+            TypeInfo::Any => "Any".to_owned(),
             TypeInfo::Never => "Never".to_owned(),
             TypeInfo::F64 => "f64".to_owned(),
             TypeInfo::I64 => "i64".to_owned(),
@@ -310,5 +353,38 @@ impl<'p> Program<'p> {
         let (_, ret) = func.ty.unwrap();
         let ty = &self.types[ret.0];
         ty == &TypeInfo::Type
+    }
+
+    pub fn type_of(&mut self, v: &Value) -> TypeId {
+        match v {
+            Value::F64(_) => todo!(),
+            Value::I64(_) => self.intern_type(TypeInfo::I64),
+            Value::Bool(_) => self.intern_type(TypeInfo::Bool),
+            Value::Enum {
+                container_type,
+                tag,
+                value,
+            } => *container_type,
+            Value::Tuple {
+                container_type,
+                values,
+            }
+            | Value::Array {
+                container_type,
+                values,
+            } => *container_type,
+            Value::Ptr {
+                container_type,
+                value,
+            } => *container_type,
+            Value::Fn(_, _) => todo!(),
+            Value::Type(_) => self.intern_type(TypeInfo::Type),
+            Value::GetFn(_) => todo!(),
+            Value::Unit => todo!(),
+            Value::Poison => panic!("Tried to typecheck Value::Poison"),
+            Value::Slice(_) => todo!(),
+            Value::Map(_, _) => todo!(),
+            Value::Symbol(_) => todo!(),
+        }
     }
 }
