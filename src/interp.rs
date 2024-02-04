@@ -57,7 +57,7 @@ pub enum Value {
 #[derive(Copy, Clone)]
 struct StackOffset(usize);
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 struct StackAbsolute(usize);
 
 #[derive(Copy, Clone)]
@@ -110,7 +110,7 @@ enum Bc<'p> {
     },
     Drop(StackRange),
 }
-
+#[derive(Debug, PartialEq, Clone, Copy)]
 struct CallFrame {
     stack_base: StackAbsolute,
     current_func: FuncId,
@@ -220,29 +220,58 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     pub fn run(&mut self, f: FuncId, arg: Value) -> Value {
-        self.ensure_compiled(f);
-        // TODO: typecheck
-        self.value_stack.push(Value::Poison); // For the return value.
-        self.value_stack.push(arg);
-        self.call_stack.push(CallFrame {
-            stack_base: StackAbsolute(1), // Our stack includes the argument but not the return slot.
-            current_func: f,
+        let init_heights = (self.call_stack.len(), self.value_stack.len());
+        // A fake callframe representing the calling rust program.
+        let marker_callframe = CallFrame {
+            stack_base: StackAbsolute(0),
+            current_func: FuncId(0), // TODO: actually reserve 0 cause i do this a lot
             current_ip: 0,
             return_slot: StackAbsolute(0),
-            return_count: 1,
-        });
+            return_count: 0,
+        };
+        self.call_stack.push(marker_callframe);
+        // TODO: typecheck
+        self.value_stack.push(Value::Poison); // For the return value.
+        self.push_callframe(
+            f,
+            StackRange {
+                first: StackOffset(0),
+                count: 1,
+            },
+            arg,
+        );
+        self.run_inst_loop();
+        // Give the return value to the caller.
+        // Can't call take_slot because there isn't a stack frame.
+        // This will change when comptime execution calls run recursively.
+        assert_eq!(self.value_stack.len(), 1);
+        let fake_callframe = self.call_stack.pop().unwrap();
+        assert_eq!(fake_callframe, marker_callframe);
+        assert!(
+            self.call_stack.is_empty(),
+            "called recursively. this is fine. just dont want to do it accidently before im ready"
+        );
+        let result = self.value_stack.pop().unwrap();
+        assert_ne!(result, Value::Poison);
+        let end_heights = (self.call_stack.len(), self.value_stack.len());
+        assert_eq!(init_heights, end_heights, "bad stack size");
+        result
+    }
 
-        let empty = self.current_fn_body().stack_slots;
-        for _ in 0..empty {
-            self.value_stack.push(Value::Poison);
-        }
-
+    fn run_inst_loop(&mut self) {
         while self.value_stack.len() > 1 {
             let i = self.next_inst();
+            self.log_stack();
             println!("I: {:?}", i);
             match i {
                 &Bc::CallDirect { f, ret, arg } => {
-                    todo!()
+                    // preincrement our ip because ret doesn't do it.
+                    // this would be different if i was trying to do tail calls?
+                    self.bump_ip();
+                    let arg = self.take_slots(arg);
+                    self.push_callframe(f, ret, arg);
+
+                    // don't bump ip here, we're in a new call frame.
                 }
                 Bc::LoadConstant { slot, value } => {
                     let slot = *slot;
@@ -266,7 +295,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                 }
                 &Bc::CallBuiltin { name, ret, arg } => {
-                    println!("{:?}", self.value_stack);
                     let name = self.pool.get(name);
                     // Calling Convention: arguments passed to a function are moved out of your stack.
                     let arg = self.take_slots(arg);
@@ -276,7 +304,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                         panic!("Known builtin {:?} is not implemented.", name);
                     };
                     *self.get_slot_mut(ret.first) = value;
-                    println!("{:?}", self.value_stack);
                     self.bump_ip();
                 }
                 &Bc::Ret(slot) => {
@@ -317,14 +344,37 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
         }
-        // Give the return value to the caller.
-        // Can't call take_slot because there isn't a stack frame.
-        // This will change when comptime execution calls run recursively.
-        assert_eq!(self.value_stack.len(), 1);
-        assert!(self.call_stack.is_empty());
-        let result = self.value_stack.pop().unwrap();
-        assert_ne!(result, Value::Poison);
-        result
+    }
+
+    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Value) {
+        self.ensure_compiled(f);
+        // Calling Convention: arguments passed to a function are moved out of your stack.
+        assert_eq!(ret.count, 1);
+        let return_slot = self.slot_to_index(ret.first);
+        self.value_stack.push(arg); // TODO: what if its a tuples
+        self.call_stack.push(CallFrame {
+            stack_base: StackAbsolute(self.value_stack.len() - 1), // Our stack includes the argument but not the return slot.
+            current_func: f,
+            current_ip: 0,
+            return_slot,
+            return_count: ret.count,
+        });
+        let empty = self.current_fn_body().stack_slots;
+        for _ in 0..empty {
+            self.value_stack.push(Value::Poison);
+        }
+    }
+
+    fn log_stack(&self) {
+        print!("|");
+        let frame = self.call_stack.last().unwrap();
+        for i in 0..frame.stack_base.0 {
+            print!("({:?}), ", self.value_stack[i]);
+        }
+        for i in frame.stack_base.0..self.value_stack.len() {
+            print!("[{:?}], ", self.value_stack[i]);
+        }
+        println!("|");
     }
 
     fn bump_ip(&mut self) {
@@ -528,7 +578,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let body = self
             .ready
             .get(frame.current_func.0)
-            .unwrap()
+            .expect("Forgot to jit current function?")
             .as_ref()
             .unwrap();
         body
