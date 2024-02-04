@@ -44,12 +44,14 @@ pub enum TypeInfo {
     Array(TypeId),
     Struct(TypeId),
     Enum(Vec<TypeId>),
+    Type,
+    Unit, // TODO: same as empty tuple but easier to type
 }
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Var(usize, usize);
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Expr<'p> {
     Num(f64),
     Call(Box<Self>, Box<Self>),
@@ -67,7 +69,7 @@ pub enum Expr<'p> {
     GetNamed(Ident<'p>),
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Stmt<'p> {
     Eval(Expr<'p>),
 
@@ -78,12 +80,7 @@ pub enum Stmt<'p> {
     // Frontend only
     DeclVar(Ident<'p>),
     SetNamed(Ident<'p>, Expr<'p>),
-    DeclFunc {
-        name: Ident<'p>,
-        return_type: Option<Expr<'p>>,
-        body: Option<Expr<'p>>,
-        arg_names: Vec<Option<Ident<'p>>>,
-    },
+    DeclFunc(Func<'p>),
 
     /// for <free> with <cond> { <definitions> }
     Generic {
@@ -93,13 +90,28 @@ pub enum Stmt<'p> {
     },
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Func<'p> {
     pub name: Ident<'p>,
-    pub ty: TypeId,
-    pub body: Expr<'p>,
+    pub ty: LazyFnType<'p>,     // We might not have typechecked yet.
+    pub body: Option<Expr<'p>>, // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
-    pub return_value_count: usize,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum LazyFnType<'p> {
+    Finished(TypeId, TypeId),
+    Pending {
+        arg: LazyType<'p>,
+        ret: LazyType<'p>,
+    },
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum LazyType<'p> {
+    Infer,
+    PendingEval(Expr<'p>),
+    Finished(TypeId),
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -129,18 +141,62 @@ impl<'p> Stmt<'p> {
                 cond,
                 definitions,
             } => todo!(),
-            Stmt::DeclFunc {
-                name,
-                return_type,
-                body,
-                ..
-            } => format!(
+            Stmt::DeclFunc(func) => format!(
                 "fn {} {:?} = {:?}",
-                pool.get(*name),
-                return_type.as_ref().map(|e| e.log(pool)),
-                body.as_ref().map(|e| e.log(pool))
+                pool.get(func.name),
+                func.ty.log(pool),
+                func.body.as_ref().map(|e| e.log(pool))
             ),
             _ => todo!(),
+        }
+    }
+}
+
+impl<'p> LazyFnType<'p> {
+    pub fn log(&self, pool: &StringPool) -> String {
+        match self {
+            LazyFnType::Finished(arg, ret) => format!("(fn({:?}) {:?})", arg, ret),
+            LazyFnType::Pending { arg, ret } => {
+                format!("(fn({}) {})", arg.log(pool), ret.log(pool))
+            }
+        }
+    }
+
+    pub fn of(arg_type: Option<Expr<'p>>, return_type: Option<Expr<'p>>) -> LazyFnType<'p> {
+        let arg = match &return_type {
+            Some(arg) => LazyType::PendingEval(arg.clone()),
+            None => LazyType::Infer,
+        };
+
+        let ret = match &return_type {
+            Some(ret) => LazyType::PendingEval(ret.clone()),
+            None => LazyType::Infer,
+        };
+        LazyFnType::Pending { arg, ret }
+    }
+
+    pub fn unwrap(&self) -> (TypeId, TypeId) {
+        match self {
+            LazyFnType::Finished(arg, ret) => (*arg, *ret),
+            LazyFnType::Pending { arg, ret } => panic!("Not ready {:?} {:?}", arg, ret),
+        }
+    }
+}
+
+// TODO: print actual type info
+impl<'p> LazyType<'p> {
+    pub fn log(&self, pool: &StringPool) -> String {
+        match self {
+            LazyType::Infer => "Infer".into(),
+            LazyType::PendingEval(e) => e.log(pool),
+            LazyType::Finished(ty) => format!("{:?}", ty),
+        }
+    }
+
+    pub fn unwrap(&self) -> TypeId {
+        match self {
+            LazyType::Finished(ty) => *ty,
+            _ => panic!("Type not ready: {:?}", self),
         }
     }
 }
@@ -197,6 +253,34 @@ impl<'p> Program<'p> {
             ),
             TypeInfo::Tuple(_) => "Tuple(TODO)".to_owned(),
             TypeInfo::Enum(_) => "Enum(TODO)".to_owned(),
+            TypeInfo::Type => "Type".to_owned(),
+            TypeInfo::Unit => "Unit".to_owned(),
         }
+    }
+
+    pub fn slot_count(&self, ty: TypeId) -> usize {
+        match &self.types[ty.0] {
+            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
+            TypeInfo::Struct(_) => todo!(),
+            _ => 1,
+        }
+    }
+
+    pub fn intern_type(&mut self, ty: TypeInfo) -> TypeId {
+        let id = self.types.len();
+        self.types.push(ty);
+        TypeId(id)
+    }
+
+    pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
+        let id = FuncId(self.funcs.len());
+        let name = func.name;
+        self.funcs.push(func);
+        // TODO: add to func_lookup
+
+        // TODODODODO: wrong! need comptiem intern. need resolve. just testing.
+        // assert!(self.declarations.get(&name).is_none(), "TODO");
+        self.declarations.insert(name, vec![id]);
+        id
     }
 }

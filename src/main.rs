@@ -37,9 +37,8 @@ macro_rules! check_cmp {
 fn main() {
     run_main(
         r#"
-            fn main(n: i64) = { add(other(n), n) }
-            fn other(n: i64) = { add(n, n)}
-            
+            fn main(n: int()) int() = { add(add(n, n), n) }
+            @comptime fn int() Type = { i64 }
             "#,
         Value::I64(5),
         Value::I64(15),
@@ -72,6 +71,32 @@ fn interp_math() {
     check_cmp!("lt", <);
     check_cmp!("le", <=);
     check_cmp!("ge", >=);
+}
+
+// TODO: when i add inference, need to check for recursion. err: Recursive functions must specify return type.
+
+#[test]
+fn call_user_fn() {
+    run_main(
+        r#"
+            fn main(n: i64) i64 = { add(other(n), n) }
+            fn other(n: i64) i64 = { add(n, n) }
+            "#,
+        Value::I64(5),
+        Value::I64(15),
+    );
+}
+
+#[test]
+fn call_in_type_annotation() {
+    run_main(
+        r#"
+                fn main(n: int()) int() = { add(add(n, n), n) }
+                @comptime fn int() Type = { i64 }
+                "#,
+        Value::I64(5),
+        Value::I64(15),
+    );
 }
 
 fn run_main(src: &str, arg: Value, expect: Value) {

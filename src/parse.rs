@@ -3,7 +3,7 @@ use std::rc::Rc;
 use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 
 use crate::{
-    ast::{Expr, Stmt},
+    ast::{Expr, Func, LazyFnType, LazyType, Stmt},
     pool::{Ident, StringPool},
 };
 
@@ -52,6 +52,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
 
             let mut cursor = proto.walk();
 
+            // TODO: its actially down in the tree somehwere
             let mut entries = proto.children_by_field_name("return_type", &mut cursor);
             let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
             assert!(entries.next().is_none());
@@ -89,12 +90,20 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             };
             assert!(entries.next().is_none());
 
-            Stmt::DeclFunc {
+            let mut cursor = node.walk();
+            let mut entries = node.children_by_field_name("annotation", &mut cursor);
+            let annotation: Option<Ident<'p>> = if let Some(annotation) = entries.next() {
+                println!("TODO annotation {:?}", annotation.to_sexp());
+                None
+            } else {
+                None
+            };
+            Stmt::DeclFunc(Func {
                 name,
-                return_type,
+                ty: LazyFnType::of(None, return_type),
                 body,
                 arg_names,
-            }
+            })
         } else if node.kind() == "call_expr" {
             let f = node.child(0).unwrap();
             let f = Box::new(self.parse_expr(f.walk()));

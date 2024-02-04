@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    ast::{Expr, Func, FuncId, Program, Stmt, TypeId, Var},
+    ast::{Expr, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     pool::{Ident, StringPool},
 };
 
@@ -52,6 +52,15 @@ pub enum Value {
     Slice(TypeId),       // for `[]T`
     Map(TypeId, TypeId), // for `{}(K, V)`
     Symbol(usize),       // TODO: this is an Ident<'p> but i really dont want the lifetime
+}
+impl Value {
+    fn unwrap_type(&self) -> TypeId {
+        if let &Value::Type(id) = self {
+            id
+        } else {
+            panic!("Expected Type found {:?}", self)
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -117,6 +126,7 @@ struct CallFrame {
     current_ip: usize,
     return_slot: StackAbsolute,
     return_count: usize,
+    is_rust_marker: bool,
 }
 
 struct FnBody<'p> {
@@ -186,23 +196,8 @@ impl<'a, 'p> Interp<'a, 'p> {
     pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) {
         for stmt in ast {
             match stmt {
-                Stmt::DeclFunc {
-                    name,
-                    return_type,
-                    body,
-                    arg_names,
-                } => {
-                    let id = FuncId(self.program.funcs.len());
-                    self.program.funcs.push(Func {
-                        name,
-                        ty: TypeId(0), // TODO
-                        body: body.unwrap(),
-                        arg_names,
-                        return_value_count: 1, // TODO
-                    });
-                    // TODO: add to func_lookup
-                    assert!(self.program.declarations.get(&name).is_none(), "TODO");
-                    self.program.declarations.insert(name, vec![id]);
+                Stmt::DeclFunc(func) => {
+                    self.program.add_func(func);
                 }
                 _ => panic!(
                     "Stmt {} is not supported at top level.",
@@ -221,6 +216,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     pub fn run(&mut self, f: FuncId, arg: Value) -> Value {
         let init_heights = (self.call_stack.len(), self.value_stack.len());
+
         // A fake callframe representing the calling rust program.
         let marker_callframe = CallFrame {
             stack_base: StackAbsolute(0),
@@ -228,38 +224,36 @@ impl<'a, 'p> Interp<'a, 'p> {
             current_ip: 0,
             return_slot: StackAbsolute(0),
             return_count: 0,
+            is_rust_marker: true, // used for exiting the run loop. this is the only place we set it true.
         };
         self.call_stack.push(marker_callframe);
         // TODO: typecheck
         self.value_stack.push(Value::Poison); // For the return value.
-        self.push_callframe(
-            f,
-            StackRange {
-                first: StackOffset(0),
-                count: 1,
-            },
-            arg,
-        );
+        let ret = StackRange {
+            first: StackOffset(0),
+            count: 1,
+        };
+
+        // Call the function
+        self.push_callframe(f, ret, arg);
         self.run_inst_loop();
+
         // Give the return value to the caller.
-        // Can't call take_slot because there isn't a stack frame.
-        // This will change when comptime execution calls run recursively.
-        assert_eq!(self.value_stack.len(), 1);
-        let fake_callframe = self.call_stack.pop().unwrap();
-        assert_eq!(fake_callframe, marker_callframe);
-        assert!(
-            self.call_stack.is_empty(),
-            "called recursively. this is fine. just dont want to do it accidently before im ready"
-        );
-        let result = self.value_stack.pop().unwrap();
+        let result = self.take_slots(ret);
+
+        // Sanity checks that we didn't mess anything up for the next guy.
         assert_ne!(result, Value::Poison);
+        assert_eq!(self.value_stack.pop(), Some(Value::Poison));
+        let final_callframe = self.call_stack.pop().unwrap();
+        assert_eq!(final_callframe, marker_callframe);
         let end_heights = (self.call_stack.len(), self.value_stack.len());
         assert_eq!(init_heights, end_heights, "bad stack size");
+
         result
     }
 
     fn run_inst_loop(&mut self) {
-        while self.value_stack.len() > 1 {
+        loop {
             let i = self.next_inst();
             self.log_stack();
             println!("I: {:?}", i);
@@ -316,9 +310,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let value = self.value_stack.pop().unwrap();
                         debug_assert_eq!(value, Value::Poison)
                     }
-                    // We can't increment the caller's ip because the callstack might be empty now
-                    // (if they were the original rust code that called run).
-                    // In that case, the loop will break.
+                    // We don't increment the caller's ip, they did it on call.
+
+                    if self.call_stack.last().unwrap().is_rust_marker {
+                        break;
+                    }
                 }
                 Bc::CallDynamic { .. } => todo!(), // Dont for get to inc ip first since ret doesn't
                 &Bc::CreateTuple { values, target } => {
@@ -358,6 +354,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             current_ip: 0,
             return_slot,
             return_count: ret.count,
+            is_rust_marker: false,
         });
         let empty = self.current_fn_body().stack_slots;
         for _ in 0..empty {
@@ -432,20 +429,23 @@ impl<'a, 'p> Interp<'a, 'p> {
             self.ready.push(None);
         }
 
-        let func = self.program.funcs[index].clone();
+        let mut func = self.program.funcs[index].clone();
         self.log_depth += 1;
         println!(
             "{} Start JIT: {}",
             "=".repeat(self.log_depth),
             self.pool.get(func.name)
         );
+        println!("AST:");
+        println!("{:?}", func.body.as_ref().map(|b| b.log(self.pool)));
+        self.infer_types(FuncId(index));
         let mut result = FnBody {
             insts: vec![],
             stack_slots: func.arg_names.len(),
             vars: Default::default(),
             arg_names: func.arg_names.clone(),
         };
-        let return_value = self.compile_expr(&mut result, &func.body);
+        let return_value = self.compile_expr(&mut result, func.body.as_ref().unwrap());
 
         // We're done with our arguments, get rid of them.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
@@ -470,8 +470,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         todo!()
     }
 
-    fn return_stack_slots(&self, f: FuncId) -> usize {
-        self.program.funcs[f.0].return_value_count
+    fn return_stack_slots(&mut self, f: FuncId) -> usize {
+        self.infer_types(f);
+        let func = &self.program.funcs[f.0];
+        let (_, ret) = func.ty.unwrap();
+        self.program.slot_count(ret)
     }
 
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &Expr<'p>) -> StackRange {
@@ -553,6 +556,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                         to: to.first,
                     });
                     to
+                } else if let Some(ty) = builtin_type(self.pool.get(*i)) {
+                    let to = result.reserve_slots(1);
+                    let ty = self.program.intern_type(ty);
+                    result.insts.push(Bc::LoadConstant {
+                        slot: to.first,
+                        value: Value::Type(ty),
+                    });
+                    to
                 } else {
                     panic!("undeclared variable {}", self.pool.get(*i))
                 }
@@ -582,6 +593,47 @@ impl<'a, 'p> Interp<'a, 'p> {
             .as_ref()
             .unwrap();
         body
+    }
+
+    // Resolve the lazy types for Arg and Ret
+    fn infer_types(&mut self, func: FuncId) {
+        match self.program.funcs[func.0].ty.clone() {
+            LazyFnType::Pending { arg, ret } => {
+                let ret = match ret {
+                    LazyType::Infer => todo!(),
+                    LazyType::PendingEval(e) => self.eval_expr(e.clone()).unwrap_type(),
+                    LazyType::Finished(id) => id, // easy
+                };
+                // TODO: copy-n-paste
+                let arg = match arg {
+                    LazyType::Infer => todo!(),
+                    LazyType::PendingEval(e) => self.eval_expr(e.clone()).unwrap_type(),
+                    LazyType::Finished(id) => id, // easy
+                };
+                self.program.funcs[func.0].ty = LazyFnType::Finished(arg, ret);
+            }
+            LazyFnType::Finished(_, _) => {} // easy
+        }
+    }
+
+    fn unit_to_type(&mut self) -> LazyFnType<'p> {
+        LazyFnType::Finished(
+            self.program.intern_type(TypeInfo::Unit),
+            self.program.intern_type(TypeInfo::Type),
+        )
+    }
+
+    // TODO: fast path for builtin type identifiers
+    fn eval_expr(&mut self, e: Expr<'p>) -> Value {
+        let fake_func: Func<'p> = Func {
+            name: self.pool.intern("@interp@eval_expr@"),
+            ty: self.unit_to_type(),
+            body: Some(e),
+            arg_names: vec![None],
+        };
+        let func_id = self.program.add_func(fake_func);
+        self.ensure_compiled(func_id);
+        self.run(func_id, Value::Unit)
     }
 }
 
@@ -688,4 +740,16 @@ impl FnBody<'_> {
         self.stack_slots += count;
         range
     }
+}
+
+fn builtin_type(name: &str) -> Option<TypeInfo> {
+    use TypeInfo::*;
+    Some(match name {
+        "Unit" => Unit,
+        "i64" => I64,
+        "f64" => F64,
+        "Type" => Type,
+        "bool" => Bool,
+        _ => return None,
+    })
 }

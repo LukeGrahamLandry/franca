@@ -20,12 +20,14 @@ module.exports = grammar({
       prec(
         5,
         seq(
+          field("annotation", optional($.annotation)),
           "fn",
           field("name", $.identifier),
           field("proto", $.func_proto),
           choice(";", seq("=", field("body", $._expr))),
         ),
       ),
+    annotation: ($) => seq("@", $.identifier),
     func_proto: ($) =>
       prec.left(
         seq(
