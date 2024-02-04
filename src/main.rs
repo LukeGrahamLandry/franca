@@ -35,14 +35,14 @@ macro_rules! check_cmp {
 }
 
 fn main() {
-    run_main(
-        r#"
-            fn main(n: int()) int() = { add(add(n, n), n) }
-            @comptime fn int() Type = { i64 }
-            "#,
-        Value::I64(5),
-        Value::I64(15),
-    );
+    // run_main(
+    //     r#"
+    //         fn main(n: int()) int() = { add(add(n, n), n) }
+    //         @comptime fn int() Type = { i64 }
+    //         "#,
+    //     Value::I64(5),
+    //     Value::I64(15),
+    // );
 
     // let src = include_str!("lib/builtins.txt");
     // let src = r#"
@@ -88,11 +88,38 @@ fn call_user_fn() {
 }
 
 #[test]
+fn return_tuple() {
+    run_main(
+        r#"
+                        fn main(n: i64) Tuple(i64, i64) = { tuple(n, add(n, 1)) }
+                        "#,
+        Value::I64(3),
+        Value::Tuple {
+            container_type: ast::TypeId(0), // TODO
+            values: vec![Value::I64(3), Value::I64(4)],
+        },
+    );
+}
+
+#[test]
+fn passing_tuple_to_multiargs() {
+    run_main(
+        r#"
+                    fn main(n: i64) i64 = { add(add(two(unit)), n) }
+                    fn two(u: Unit) Tuple(i64, i64) = { tuple(1, 2) }
+                    "#,
+        Value::I64(3),
+        Value::I64(6),
+    );
+}
+
+#[test]
 fn call_in_type_annotation() {
     run_main(
         r#"
-                fn main(n: int()) int() = { add(add(n, n), n) }
-                @comptime fn int() Type = { i64 }
+                fn main(n: memo(int, unit)) memo(int, unit) = { add(add(n, n), n) }
+                @comptime fn int(u: Unit) Type = { i64 }
+                
                 "#,
         Value::I64(5),
         Value::I64(15),
@@ -111,4 +138,5 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     let result = interp.run(f, arg.clone());
     println!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
+    program.log_cached_types();
 }

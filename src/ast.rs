@@ -14,7 +14,7 @@ use std::{
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct TypeId(pub usize);
 
-#[derive(Clone, PartialEq, Hash, Eq)]
+#[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub param: TypeId,
@@ -32,7 +32,7 @@ pub struct FuncFlags {
     pub intrinsic: bool,
 }
 
-#[derive(Clone, PartialEq, Hash, Eq)]
+#[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub enum TypeInfo {
     Never,
     F64,
@@ -53,6 +53,7 @@ pub struct Var(usize, usize);
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Expr<'p> {
+    Value(Value),
     Num(f64),
     Call(Box<Self>, Box<Self>),
     Block(Vec<Stmt<'p>>, Box<Self>),
@@ -114,7 +115,7 @@ pub enum LazyType<'p> {
     Finished(TypeId),
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub struct FuncId(pub usize);
 
 #[derive(Clone, Default)]
@@ -231,6 +232,7 @@ impl<'p> Expr<'p> {
                 format!("tuple({})", args)
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
+            Expr::Value(v) => format!("{:?}", v),
             _ => todo!(),
         }
     }
@@ -251,11 +253,22 @@ impl<'p> Program<'p> {
                 self.log_type(f.param),
                 self.log_type(f.returns)
             ),
-            TypeInfo::Tuple(_) => "Tuple(TODO)".to_owned(),
+            TypeInfo::Tuple(v) => {
+                let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
+                format!("Tuple({})", v.join(", "))
+            }
             TypeInfo::Enum(_) => "Enum(TODO)".to_owned(),
             TypeInfo::Type => "Type".to_owned(),
             TypeInfo::Unit => "Unit".to_owned(),
         }
+    }
+
+    pub fn log_cached_types(&self) {
+        println!("=== CACHED TYPES ===");
+        for (i, ty) in self.types.iter().enumerate() {
+            println!("- id({i}) = {} = {:?}", self.log_type(TypeId(i)), ty);
+        }
+        println!("====================");
     }
 
     pub fn slot_count(&self, ty: TypeId) -> usize {
@@ -266,9 +279,17 @@ impl<'p> Program<'p> {
         }
     }
 
+    // TODO: this is O(n), at the very least make sure the common types are at the beginning.
     pub fn intern_type(&mut self, ty: TypeInfo) -> TypeId {
-        let id = self.types.len();
-        self.types.push(ty);
+        let id = self
+            .types
+            .iter()
+            .position(|check| check == &ty)
+            .unwrap_or_else(|| {
+                let id = self.types.len();
+                self.types.push(ty);
+                id
+            });
         TypeId(id)
     }
 
@@ -282,5 +303,12 @@ impl<'p> Program<'p> {
         // assert!(self.declarations.get(&name).is_none(), "TODO");
         self.declarations.insert(name, vec![id]);
         id
+    }
+
+    pub fn returns_type(&self, f: FuncId) -> bool {
+        let func = &self.funcs[f.0];
+        let (_, ret) = func.ty.unwrap();
+        let ty = &self.types[ret.0];
+        ty == &TypeInfo::Type
     }
 }

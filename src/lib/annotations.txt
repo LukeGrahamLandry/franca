@@ -23,18 +23,50 @@
 // 
 
 @module(ast, impl=core, vis=Public) {
+    // TODO: how to give each ast a uid? 
+    // TODO: how to express that these are linear types? no copy, no alias. 
+    
     // You don't need to declare enum payloads as seperate types like this (they can be inline). 
     // Sometimes its useful because it lets you write functions that take a specific case as a parameter.
-    enum Expr = Block | Call | Ident(Str) | TupleLiteral | FnDeclAst; 
-    struct Block = { body: Array(Stmt), value: ?Box(Expr) };
-    struct Call = { name: Str, arg: Box(Expr) };
-    struct TupleLiteral = (Array(Expr));
-    struct FnDeclAst = @todo;
+    enum ExprAst = Block | Call | VarAst | TupleLiteral | FnDeclAst | WithFreeVariables | CAny;
+    struct Block = { 
+        // These are run for side effects but thier results are discarded. 
+        body: []ExprAst, 
+        // TODO: nil is the same as unit so why bother? maybe you'd like to know for better error messages? 
+        /// This is returned when the block is evalutated. It's the thing at the end without a semicolon. 
+        value: ?&ExprAst,
+    };
+    struct Call = { name: &ExprAst, arg: &ExprAst };
+    struct TupleLiteral = ([]ExprAst);
+    struct FnDeclAst = { Arg: LazyType, Ret: LazyType, body: &WithFreeVariables };
     
-    // TODO: can i make everything be an expression. just some are useless like a let returns unit (NOT flow through!). 
-    enum Stmt = Expr | FnDecl;
+    /// Same as interp::Value. 
+    enum CAny = BigNum | []CAny | {}(CAny, CAny) | Str | Type;
     
-    enum AnnotationOutput = Expr;
+    /// - function body: vars=parameters
+    /// - generic impl body: vars=generic parameters
+    /// - trait definition body: vars=Self and associated types
+    struct WithFreeVariables = (&ExprAst, []VarAst);
+    
+    /// Bake comptime known values into an ast. 
+    /// This allows specialization for generics. 
+    fn bind_variables(replacements: Map(VarAst, CAny), ast: WithFreeVariables) ExprAst;
+    
+    /// Since types can be comptime expressions, places on the ast that we know must have a type might not be ready yet. 
+    /// This gives you a way to precive the difference and not just auto evaluate anything you try to look at since it might fail. 
+    enum LazyType = Finished(Type) | Pending(&ExprAst) | Infer();
+    
+    fn try_cast(LazyType) ?Type;
+    fn unwrap(LazyType) Type;
+    
+    enum VarKind = Let | Var | Const | FuncParam | GenericParam;
+    struct VarAst = { name: Symbol, uid: i64, decl: VarKind, ty: LazyType };
+    
+    /// Nil: the compiler cannot infer the type. 
+    fn expr_type(ast: &ExprAst) ?Type;
+    fn eval_expr(ast: ExprAst) CAny = eval_expr(CAny, ast);
+    /// Calling this one is better because it lets you give a type hint. 
+    fn eval_expr(T: Type, ast: ExprAst) Result(T, _);
 
     struct CommentAst = (Str);
     fn get_comments(ast: ExprAst) ?CommentAst;
@@ -42,12 +74,18 @@
     // TODO: might not want to provide this because then i need to keep parent ptrs all the time. 
     fn get_parent(ast: ExprAst) ?ExprAst;
     
+    // TODO: figure out if this is the right name. https://stackoverflow.com/questions/134887/when-to-use-or-quote-in-lisp
+    //       maybe dont bother trying to feel clever and just call it parse. 
     /// Manually invoke the parser on a computed string. Useful for code generation when the ast api is too verbose. 
-    @comptime fn quote(Str) AstExpr;
+    /// The result may have free variables that you can fill in later. 
+    @example(fn = )
+    @comptime 
+    fn quote(Str) AstExpr;
 }
 
 struct AnnotationHandler = { Arg: T, Target: T, Ret: T, f: fn(Arg, Target) Ret };
 struct OverloadHandler = fn(Arg: ?Type, Ret: ?Type) ?FnDecl;
+struct GenericHandler = { arg_count: i64, cond: fn([] Type) bool, f: fn([] Type) AstExpr };
 
 @module(compiler, all=Public) {
     //! You don't want fancy comptime execution to mean everything is a black box to the compiler. 
@@ -56,7 +94,6 @@ struct OverloadHandler = fn(Arg: ?Type, Ret: ?Type) ?FnDecl;
     fn annotation_handlers() {}(Symbol, []AnnotationHandler);
     fn overload_handlers() {}(Symbol, []OverloadHandler);;
 }
-
 
 // TODO: require `;` after if target is Unit? But then you can't use it as an expression. 
 @in(@module(syntax, impl=core, vis=Public));
@@ -83,8 +120,35 @@ fn boot(args: Builtin | Interp, target: FnDecl) FnDecl = match(args, [
 ])
 // TODO: allow @boot on a whole module and just iterate its decls. 
 
+
+// TODO: allow leading `|` on enums so you can have them all off the end and look consistant. 
+// TODO: some way to tag the default case. give annotations a way to express that they want to access the parent and generate code in that scope. 
+//       so it could generate an `fn default() E`.
+/// What to do with the return value of the handler. 
+enum AnnotationAction = 
+    // Put the resulting Ast back at the annotation call site. 
+    | Replace
+    // Store the result parallel to the ast so it can be retrived later. 
+    // Examples: @example, @invarient. 
+    // TODO: really you dont want ^ in either case. you just want a list
+    | Save(Symbol)
+    // Build up a list of all the results (and thier callsites) and pass it to a function after all calls to your annotation have finished. 
+    // TODO: doc: this syntax for an unbounded generic 
+    //            this is a function accepting a list of pairs where the first is inferred (return type of the annotation in this case) and the second is Loc. 
+    // TODO: maybe this is always better than Save(_) since you could have a collector that does that. 
+    // TODO: what if you want to access the target but not consume it? i guess at some point just put your list in a global
+    | Collect(fn([](_, Loc)) Unit)
+    // Same as above but grouped and calls the handler multiple times.
+    // Examples: @switch
+    | CollectMap({ K: Type, V: Type, f: fn(K, [](V, Loc))})
+;
+
+// TODO: doc: If the args are references, you don't consume them and they continue on to the rest of compilation. TODO: dont allow escaping. 
+//       how do you decide if you want Collect or a global? i guess if you want it all at the end or as you go.
+//       have a better way of expressing this than just allowing escaping references to the ast. 
 @annotation 
-fn annotation(args: (), target: &FnDeclAst) Expr = {
+fn annotation(args: AnnotationArg = Replace, target: FnDeclAst) Expr = {
+    todo_assert(eq(args, Replace));
     // i was thinking for generics where it might happen multiple times but maybe its fine cause you eat it. 
     // its really the overload handler that needs to use it multiple times and not mutate. 
     // assert(not(mutates_args(target)), "Annotation must not mutate Ast node. Make a copy and return it instead.");
@@ -96,6 +160,8 @@ fn annotation(args: (), target: &FnDeclAst) Expr = {
     target
 }
 
+fn todo_assert(cond: bool) = assert(cond, "Not yet implemented.");
+
 @annotation @intrinsic
 fn module(args: Expr, target: ()) !Expr;
 
@@ -105,6 +171,7 @@ fn ffi(args: Target, target: ()) !Expr;
 @annotation @intrinsic
 fn type_of(args: Expr, target: ()) !Expr;
 
+/// puts you in place expression mode
 @annotation @intrinsic
 fn addr(args: Expr, target: ()) !Expr;
 
@@ -116,7 +183,7 @@ fn assert_compile_error(args: (), target: Block) Expr;
 // TODO: not use this if target is rust or zig
 // Note: this implementation can't call methods that use match? or maybe its fine since someone else would have compiled them. 
 @annotation @auto
-fn match(args: &Expr, target: []FnDeclAst) Expr = {
+fn match(args: ExprAst, target: []FnDeclAst) ExprAst = {
     const E: EnumType = unwrap(expr_type(args));
     
     // Each branch function must return the same type. 
@@ -147,7 +214,7 @@ fn match(args: &Expr, target: []FnDeclAst) Expr = {
     fold(handlers, quote("comptime_unreachable()"), join_branches)
 }
 
-// TODO: handle matching over Any.
+// TODO: handle type matching over Any.
 
 /// This makes more sense as a function because you don't want to eagerly evaluate. 
 @annotation @auto
@@ -178,13 +245,10 @@ for (T, I(_)) with is_trait(Iter, I){
     }
 }
 
-fn expr_type(ast: Expr) Type;
-fn compile_expr(T: Type, ast: Expr) Result(T, _);
-
 // TODO: replace the `for` syntax with this. not sure if i actually want to change the name. 
 // `@impl((T, U), and(allow_type(T), allow_other(U))) { ... }`
 @annotation
-fn impl((names, cond): ([] Ident, Fn), target: &BlockAst) = {
+fn impl((names, cond): ([] Ident, Fn), target: BlockAst) = {
     make_fn()
     let args = struct_type(map(names, fn(name: Symbol)=()))
 }
@@ -206,9 +270,25 @@ fn trait(((name, placeholder, cond): (Symbol, Symbol, BlockAst), target: [](VarD
     todo()
 }
 
-@annotation
-fn switch() = {
-}
+// for pattern matching across function definitions 
+@annotation(CollectMap({ K: FnSig, V: FnDeclAst, f: build_switch_body }))
+fn switch(args: Unit, target: FnDeclAst);
+
+/// Declares an outer function that matches over its argument and dispatches to one of the `cases`.
+@private fn build_switch_body(sig: FnSig, cases: [](FnDeclAst, Loc)) AstExpr;
+
+/// Useful for documenting behaviour of a function. And getting an automatic reminder when your docs get out of date. 
+/// The expression is not evaluated, it just hangs out on the Ast. It should not contain free variables. 
+/// The default test runner will compile and run them all, failing if they panic. 
+/// Use `assert` and friends to expect certain values.
+/// Equivilent to https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html
+/// (but already part of your code instead of needing an extra tool to parse it out of comments).
+// Note: we don't force type checking if not building for test currently. 
+@annotation(Collect(maybe_run_examples))
+fn example(args: FnDeclAst, target: Unit) FnDeclAst = args;
+
+// Run if testing
+@private fn maybe_run_examples(examples: []FnDeclAst);
 
 // TODO: specilizations for specific targets that return a string in the host language. 
 

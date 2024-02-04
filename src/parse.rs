@@ -4,6 +4,7 @@ use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 
 use crate::{
     ast::{Expr, Func, LazyFnType, LazyType, Stmt},
+    interp::Value,
     pool::{Ident, StringPool},
 };
 
@@ -179,6 +180,13 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                     .collect();
                 assert_eq!(names.len(), 1);
                 names[0].clone()
+            }
+            "number" => {
+                let text = node.utf8_text(self.src).unwrap();
+                match text.parse::<i64>() {
+                    Ok(i) => Expr::Value(Value::I64(i)),
+                    Err(e) => todo!("{:?}", e),
+                }
             }
             _ => todo!("parse expr for {}: {:?}", node.kind(), node.to_sexp()),
         }
