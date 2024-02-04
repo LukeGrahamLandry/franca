@@ -4,7 +4,11 @@ use ast::Program;
 use interp::Value;
 use tree_sitter::Parser;
 
-use crate::{interp::Interp, parse::WalkParser, pool::StringPool};
+use crate::{
+    interp::{ExecTime, Interp},
+    parse::WalkParser,
+    pool::StringPool,
+};
 
 mod ast;
 mod interp;
@@ -150,7 +154,7 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     let mut interp = Interp::new(&pool, &mut program);
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
-    let result = interp.run(f, arg.clone());
+    let result = interp.run(f, arg.clone(), ExecTime::Runtime).unwrap();
     println!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
     interp.write_jitted().iter().for_each(|f| println!("{}", f));

@@ -387,4 +387,8 @@ impl<'p> Program<'p> {
             Value::Symbol(_) => todo!(),
         }
     }
+
+    pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
+        self.types[ty.0] == expect
+    }
 }

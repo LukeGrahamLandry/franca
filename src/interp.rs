@@ -53,6 +53,9 @@ pub enum Value {
     Map(TypeId, TypeId), // for `{}(K, V)`
     Symbol(usize),       // TODO: this is an Ident<'p> but i really dont want the lifetime
 }
+
+pub type Res<'p, T> = Result<T, CompileError<'p>>;
+
 impl Value {
     fn unwrap_type(&self) -> TypeId {
         if let &Value::Type(id) = self {
@@ -156,6 +159,7 @@ struct CallFrame<'p> {
     return_count: usize,
     is_rust_marker: bool,
     debug_name: Ident<'p>,
+    when: ExecTime,
 }
 
 struct FnBody<'p> {
@@ -163,7 +167,7 @@ struct FnBody<'p> {
     stack_slots: usize,
     vars: HashMap<Var, StackOffset>, // TODO: use a vec
     arg_names: Vec<Option<Ident<'p>>>,
-    for_comptime: bool,
+    when: ExecTime,
     slot_types: Vec<TypeId>,
     func: FuncId,
 }
@@ -192,11 +196,27 @@ pub struct Interp<'a, 'p> {
 }
 
 #[derive(Clone, Debug)]
-enum DebugState<'p> {
+pub enum DebugState<'p> {
     OuterCall(FuncId, Value),
-    JitToBc(FuncId, bool),
+    JitToBc(FuncId, ExecTime),
     RunInstLoop(FuncId),
     ComputeCached(Expr<'p>),
+}
+
+#[derive(Clone, Debug)]
+pub struct CompileError<'p> {
+    reason: CErr<'p>,
+    trace: Vec<DebugState<'p>>,
+    value_stack: Vec<Value>,
+    call_stack: Vec<CallFrame<'p>>,
+}
+
+#[derive(Clone, Debug)]
+enum CErr<'p> {
+    UndeclaredIdent(Ident<'p>),
+    ComptimeCallAtRuntime,
+    Ice(&'static str),
+    LeakedValue,
 }
 
 // TODO: rn these eat any calls. no overload checking.
@@ -250,6 +270,22 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.debug_trace.pop().expect("state stack");
     }
 
+    fn compile_error(&self, reason: CErr<'p>) -> Res<'p, ()> {
+        Err(CompileError {
+            reason,
+            trace: self.debug_trace.clone(),
+            value_stack: self.value_stack.clone(),
+            call_stack: self.call_stack.clone(),
+        })
+    }
+
+    fn assert(&self, cond: bool, on_err: impl FnOnce() -> CErr<'p>) -> Res<'p, ()> {
+        if !cond {
+            self.compile_error(on_err())?
+        }
+        Ok(())
+    }
+
     fn log_trace(&self) {
         println!("=== TRACE ===");
         let show_f = |func: FuncId| {
@@ -266,12 +302,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 DebugState::OuterCall(f, arg) => {
                     print!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
                 }
-                DebugState::JitToBc(f, comptime) => {
-                    print!(
-                        "| Jit Bytecode| {} for {}",
-                        show_f(*f),
-                        if *comptime { "comptime" } else { "runtime" }
-                    )
+                DebugState::JitToBc(f, when) => {
+                    print!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
                 }
                 DebugState::RunInstLoop(f) => print!("| Loop Insts  | {}", show_f(*f)),
                 DebugState::ComputeCached(e) => print!("| Cache Eval  | {}", e.log(self.pool)),
@@ -281,7 +313,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         println!("=============");
     }
 
-    pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) {
+    pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) -> Res<'p, ()> {
         for stmt in ast {
             match stmt {
                 Stmt::DeclFunc(func) => {
@@ -293,6 +325,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ),
             }
         }
+        Ok(())
     }
 
     pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
@@ -302,7 +335,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         })
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Value) -> Value {
+    pub fn run(&mut self, f: FuncId, arg: Value, when: ExecTime) -> Res<'p, Value> {
         self.push_state(DebugState::OuterCall(f, arg.clone()));
         let init_heights = (self.call_stack.len(), self.value_stack.len());
 
@@ -315,6 +348,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             return_count: 0,
             is_rust_marker: true, // used for exiting the run loop. this is the only place we set it true.
             debug_name: self.pool.intern("@interp::run@"),
+            when,
         };
         self.call_stack.push(marker_callframe);
         // TODO: typecheck
@@ -325,7 +359,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
 
         // Call the function
-        self.push_callframe(f, ret, arg);
+        self.push_callframe(f, ret, arg, when);
         self.run_inst_loop();
 
         // Give the return value to the caller.
@@ -335,11 +369,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         assert_ne!(result, Value::Poison);
         assert_eq!(self.value_stack.pop(), Some(Value::Poison));
         let final_callframe = self.call_stack.pop().unwrap();
-        assert_eq!(final_callframe, marker_callframe);
+        self.assert_eq(final_callframe, marker_callframe, || CErr::Ice("bad frame"));
         let end_heights = (self.call_stack.len(), self.value_stack.len());
-        assert_eq!(init_heights, end_heights, "bad stack size");
+        self.assert(init_heights == end_heights, || CErr::Ice("bad stack size"));
         self.pop_state();
-        result
+        Ok(result)
     }
 
     fn run_inst_loop(&mut self) {
@@ -355,7 +389,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // this would be different if i was trying to do tail calls?
                     self.bump_ip();
                     let arg = self.take_slots(arg);
-                    self.push_callframe(f, ret, arg);
+                    let when = self.call_stack.last().unwrap().when;
+                    self.push_callframe(f, ret, arg, when); // TODO
                     self.log_callstack();
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -409,7 +444,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                             assert_eq!(values.len(), frame.return_count);
                             let base = frame.return_slot.0;
                             for (i, v) in values.into_iter().enumerate() {
-                                debug_assert_eq!(self.value_stack[base + i], Value::Poison);
+                                // TODO: this needs to be a macro cause the cloning is a problem
+                                self.assert_eq(
+                                    self.value_stack[base + i].clone(),
+                                    Value::Poison,
+                                    || CErr::LeakedValue,
+                                );
                                 self.value_stack[base + i] = v;
                             }
                         }
@@ -484,8 +524,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         //         .insert((f.unwrap_func(), arg), ret.unwrap_type());
     }
 
-    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Value) {
-        self.ensure_compiled(f, false);
+    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Value, when: ExecTime) {
+        self.ensure_compiled(f, when);
         // Calling Convention: arguments passed to a function are moved out of your stack.
         let return_slot = self.slot_to_index(ret.first); // TODO: what about tuple returns?
         let stack_base = self.value_stack.len(); // Our stack includes the argument but not the return slot.
@@ -499,6 +539,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             return_count: ret.count,
             is_rust_marker: false,
             debug_name,
+            when,
         });
         let empty = self.current_fn_body().stack_slots; // TODO: does this count tuple args right?
         for _ in 0..empty {
@@ -592,11 +633,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         StackAbsolute(frame.stack_base.0 + slot.0)
     }
 
-    fn ensure_compiled(&mut self, FuncId(index): FuncId, for_comptime: bool) {
+    fn ensure_compiled(&mut self, FuncId(index): FuncId, when: ExecTime) {
         if let Some(Some(_)) = self.ready.get(index) {
             return;
         }
-        self.push_state(DebugState::JitToBc(FuncId(index), for_comptime));
+        self.push_state(DebugState::JitToBc(FuncId(index), when));
         while self.ready.len() <= index {
             self.ready.push(None);
         }
@@ -616,8 +657,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             stack_slots: func.arg_names.len(),
             vars: Default::default(),
             arg_names: func.arg_names.clone(),
-            for_comptime,
-            slot_types: vec![],
+            when,
+            slot_types: vec![TypeId::any(); func.arg_names.len()],
             func: FuncId(index),
         };
         let return_value = self.compile_expr(&mut result, func.body.as_ref().unwrap());
@@ -673,7 +714,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
                         self.infer_types(f);
-                        let (arg_ty, _) = self.program.funcs[f.0].ty.unwrap();
+                        let (arg_ty, ret_ty) = self.program.funcs[f.0].ty.unwrap();
+                        if self.program.is_type(ret_ty, TypeInfo::Type) {
+                            assert_eq!(
+                                result.when,
+                                ExecTime::Comptime,
+                                "Cannot call function returning type at runtime."
+                            );
+                        }
                         let ret = result.reserve_slots(self.return_stack_slots(f), arg_ty);
                         result.insts.push(Bc::CallDirect { f, ret, arg });
                         return ret;
@@ -751,7 +799,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 } else if let Some(func) = self.program.declarations.get(i) {
                     assert_eq!(func.len(), 1, "ambigous function reference");
                     let func = func[0];
-                    self.ensure_compiled(func, true);
+                    self.ensure_compiled(func, ExecTime::Comptime);
                     result.load_constant(Value::GetFn(func), TypeId::any())
                 } else {
                     panic!("undeclared variable {}", self.pool.get(*i))
@@ -806,26 +854,27 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // Resolve the lazy types for Arg and Ret
-    fn infer_types(&mut self, func: FuncId) {
+    fn infer_types(&mut self, func: FuncId) -> Res<'p, ()> {
         match self.program.funcs[func.0].ty.clone() {
             LazyFnType::Pending { arg, ret } => {
                 println!("RESOLVE: Ret of {func:?}");
                 let ret = match ret {
                     LazyType::Infer => todo!(),
-                    LazyType::PendingEval(e) => self.cached_eval_expr(e.clone()).unwrap_type(),
+                    LazyType::PendingEval(e) => self.cached_eval_expr(e.clone())?.unwrap_type(),
                     LazyType::Finished(id) => id, // easy
                 };
                 // TODO: copy-n-paste
                 println!("RESOLVE: Arg of {func:?}");
                 let arg = match arg {
                     LazyType::Infer => todo!(),
-                    LazyType::PendingEval(e) => self.cached_eval_expr(e.clone()).unwrap_type(),
+                    LazyType::PendingEval(e) => self.cached_eval_expr(e.clone())?.unwrap_type(),
                     LazyType::Finished(id) => id, // easy
                 };
                 self.program.funcs[func.0].ty = LazyFnType::Finished(arg, ret);
             }
             LazyFnType::Finished(_, _) => {} // easy
         }
+        Ok(())
     }
 
     fn unit_to_type(&mut self) -> LazyFnType<'p> {
@@ -836,10 +885,10 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // TODO: fast path for builtin type identifiers
-    fn cached_eval_expr(&mut self, e: Expr<'p>) -> Value {
+    fn cached_eval_expr(&mut self, e: Expr<'p>) -> Res<'p, Value> {
         if let Some(old_result) = self.comptime_cache.get(&e) {
             println!("CACHED: {} -> {:?}", e.log(self.pool), old_result);
-            return old_result.clone();
+            return Ok(old_result.clone());
         }
         self.push_state(DebugState::ComputeCached(e.clone()));
         let fake_func: Func<'p> = Func {
@@ -849,12 +898,16 @@ impl<'a, 'p> Interp<'a, 'p> {
             arg_names: vec![None],
         };
         let func_id = self.program.add_func(fake_func);
-        self.ensure_compiled(func_id, true);
-        let result = self.run(func_id, Value::Unit);
+        let result = self.run(func_id, Value::Unit, ExecTime::Comptime)?;
         println!("COMPUTED: {} -> {:?}", e.log(self.pool), result);
         self.comptime_cache.insert(e, result.clone());
         self.pop_state();
-        result
+        Ok(result)
+    }
+
+    // TODO: make sure im `?` not dropping everywhere
+    fn assert_eq<T: PartialEq>(&self, a: T, b: T, on_err: impl Fn() -> CErr<'p>) -> Res<'p, ()> {
+        self.assert(a == b, on_err)
     }
 }
 
@@ -897,18 +950,15 @@ impl Debug for StackRange {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExecTime {
+    Comptime,
+    Runtime,
+}
+
 impl Debug for FnBody<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "=== Bytecode for {:?} at {} ===",
-            self.func,
-            if self.for_comptime {
-                "comptime"
-            } else {
-                "runtime"
-            }
-        )?;
+        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when)?;
         writeln!(f, "TYPES: {:?}", &self.slot_types);
         for (i, bc) in self.insts.iter().enumerate() {
             writeln!(f, "{i}. {bc:?}");
