@@ -60,7 +60,6 @@ pub enum Expr<'p> {
     RefType(Box<Self>),
     EnumLiteral(Vec<(Ident<'p>, Self)>),
     StructLiteral(Vec<(Ident<'p>, Self)>),
-
     // Backend only
     GetVar(Var),
 

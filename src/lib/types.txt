@@ -12,6 +12,11 @@
 
 enum Type = TagType | EnumType | StructType | UnionType | FnType;
 
+// TODO: use this instead of @comptime T? 
+fn Const(Type) Type;
+
+struct ConstAny = { T: Type, value: &T };
+
 fn type_name(Type) Str;
 
 // A struct M is a MetaType if some types can be cast to M. 
@@ -80,8 +85,13 @@ for T with ne(stride(T), nil()) {
     fn get(T: Type, name: @comptime Str) &T;
 }
 
-// true when T is a value type, no references, 
+// true when T is a value type, no references. 
+// common auto methods are a no-op: field access, 
 fn is_bits(T: Type) bool;
+
+// You can mutate through the pointer but you can't change what address it it points to. 
+// Java final variables have this property. 
+fn Final(T: PtrType) Type;
 
 //////////////
 /// Traits ///
@@ -178,7 +188,6 @@ struct FnFlags = FlagSet(
     // TODO: this is a bad name. it sounds like the compiler doesn't check but it means behaviour depends on build mode. 
     | OnlySafetyPanic  // TODO: one for "behaviour differs if checked"
     | InnerUnsafe
-    | NeedsAllocator
 );
 
 // A value of this type cannot be produced. 
@@ -202,6 +211,10 @@ const Symbol = @comptime Str;
 const TagType = []Symbol;  
 // A tagged union. Each branch has a unique tag and some payload. A type may appear as a payload multiple types. 
 const EnumType = { Tag: TagType, cases: OrderedMap(Tag, Type) };
+
+fn has_case(E: EnumType, name: ?Symbol, T: Type) bool {
+    let name = or_else(name, fn = )
+}
 
 fn unit_payload(name: Symbol) (Symbol, Type) = (name, Unit);
 
@@ -380,6 +393,18 @@ const PtrFlags = FlagSet(
     | CloneOnWrite
     // This pointer may or may not be present but you can safely check. 
     | OptionalDeref
+    // Values of this type contain a runtime pointer to some allocator. 
+    | HasAllocatorPtr
+    // Deallocating or resizing this type requires the caller to pass in an allocator pointer. 
+    // It must be the same one used to allocate this value originally. 
+    | SpecificExternalAllocator
+    // This is not actually a pointer. The indirection exists to set different PtrFlags on part of a struct. 
+    // Types with this flag might not have a comptime known size and are often stored behind another indirection. 
+    // Rust uses these often: UnsafeCell, Cell, RefCell, Mutex, RwLock. 
+    | StoredInline
+    // This value might be stored on the call stack. 
+    // It is safe to use until the caller returns.  
+    | MaybeStack
 );
 
 let PtrPrefix = FlagSet(Amp | Star | Arrow);
@@ -401,7 +426,11 @@ trait Ptr for Ref(_) when {
         fn deref(&Ref(V)) &V;
     }
     
+    // TODO: some annotation for functions like this that are really pattern matching across definitions so they need to syntezise an outer thing to do that. 
     for T with is_trait(T, Ptr){
+        for V {
+            fn rebox(&V, T) T(V);
+        }
         fn Flags(Ptr(V)) PtrFlags;
         fn Inner(Ptr(_)) Type;
         fn PtrTo(V) Ty(Ptr);
@@ -453,3 +482,13 @@ const BestNumber;
 enum NumRepr = SignedInt | UnsignedInt | Float | ArbitraryPreciesion;
 enum Overflow = Undefined | Wrap | SafetyChecked | Allowed;
 struct NumType = { NumRepr, Overflow, max: BestNumber, min: BestNumber, bits: i64, indirection: ?PtrFlags };
+
+// TODO: think about what things need to be comptime.
+//       like the types of your own program are comptime.
+//       but manipulating the TypeInfo enum at runtime is fine, you just cant do anything with it.
+//       but that's kinda what the compiler needs to do. 
+//       unless you think of it as the compiler never having a runtime.
+//       which i guess is true. theres a rust program that calls the user's comptime functions, 
+//       the fact that they choose to call comptime functions that i also wrote is a coincidence.
+//       there's no program written in this language that *is* "the compiler".  
+//

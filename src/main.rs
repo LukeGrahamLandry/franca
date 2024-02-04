@@ -36,10 +36,15 @@ macro_rules! check_cmp {
 
 fn main() {
     run_main(
-        "fn main(n: i64) = { add(add(n, n), n)}",
+        r#"
+            fn main(n: i64) = { add(other(n), n) }
+            fn other(n: i64) = { add(n, n)}
+            
+            "#,
         Value::I64(5),
         Value::I64(15),
     );
+
     // let src = include_str!("lib/builtins.txt");
     // let src = r#"
     //     fn get(arr: &Array(T), i: i64) &T;

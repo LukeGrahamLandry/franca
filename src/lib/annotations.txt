@@ -21,7 +21,45 @@
 //       where the interpreter calls into precompiled code if avaiable. 
 //       The compiler's runtime is always someone else's comptime. 
 // 
-@in(@module(ast, impl=core, vis=Public))
+
+@module(ast, impl=core, vis=Public) {
+    // You don't need to declare enum payloads as seperate types like this (they can be inline). 
+    // Sometimes its useful because it lets you write functions that take a specific case as a parameter.
+    enum Expr = Block | Call | Ident(Str) | TupleLiteral | FnDeclAst; 
+    struct Block = { body: Array(Stmt), value: ?Box(Expr) };
+    struct Call = { name: Str, arg: Box(Expr) };
+    struct TupleLiteral = (Array(Expr));
+    struct FnDeclAst = @todo;
+    
+    // TODO: can i make everything be an expression. just some are useless like a let returns unit (NOT flow through!). 
+    enum Stmt = Expr | FnDecl;
+    
+    enum AnnotationOutput = Expr;
+
+    struct CommentAst = (Str);
+    fn get_comments(ast: ExprAst) ?CommentAst;
+    
+    // TODO: might not want to provide this because then i need to keep parent ptrs all the time. 
+    fn get_parent(ast: ExprAst) ?ExprAst;
+    
+    /// Manually invoke the parser on a computed string. Useful for code generation when the ast api is too verbose. 
+    @comptime fn quote(Str) AstExpr;
+}
+
+struct AnnotationHandler = { Arg: T, Target: T, Ret: T, f: fn(Arg, Target) Ret };
+struct OverloadHandler = fn(Arg: ?Type, Ret: ?Type) ?FnDecl;
+
+@module(compiler, all=Public) {
+    //! You don't want fancy comptime execution to mean everything is a black box to the compiler. 
+    
+    // TODO: these are local to a module. 
+    fn annotation_handlers() {}(Symbol, []AnnotationHandler);
+    fn overload_handlers() {}(Symbol, []OverloadHandler);;
+}
+
+
+// TODO: require `;` after if target is Unit? But then you can't use it as an expression. 
+@in(@module(syntax, impl=core, vis=Public));
 
 //
 // Builtin Function Annotations: 
@@ -32,16 +70,6 @@
 // TODO: doc: set default visibility of items in module because its painful to put @pub everywhere. 
 // TODO: doc: `enum A = Thing` (bame = "Thing", payload = type Thing) is not the same as `enum A = Thing()` (name = "Thing", paylaod = type Unit).
 // TODO: doc: @in(...) at the top of a file for avoiding an extra indent
-
-// You don't need to declare enum payloads as seperate types like this (they can be inline). 
-// Sometimes its useful because it lets you write functions that take a specific case as a parameter.
-enum Expr = Block | Call | Ident(Str) | TupleLiteral | FnDeclAst; 
-struct Block = { body: Array(Stmt), value: ?Box(Expr) };
-struct Call = { name: Str, arg: Box(Expr) };
-struct TupleLiteral = (Array(Expr));
-struct FnDeclAst = @todo;
-
-enum Stmt = Expr | FnDecl;
 
 // The target function is needed to compile the compiler. 
 // While bootstrapping the compiler, 
@@ -55,55 +83,202 @@ fn boot(args: Builtin | Interp, target: FnDecl) FnDecl = match(args, [
 ])
 // TODO: allow @boot on a whole module and just iterate its decls. 
 
-struct AnnotationHandler = { Arg: T, Target: T, Ret: T, f: fn(Arg, Target) Ret };
-
-var annotation_handlers: {}(Symbol, []AnnotationHandler) = find_compiler_global({}(Symbol, []AnnotationHandler));
-
 @annotation 
 fn annotation(args: (), target: &FnDeclAst) Expr = {
+    // i was thinking for generics where it might happen multiple times but maybe its fine cause you eat it. 
+    // its really the overload handler that needs to use it multiple times and not mutate. 
+    // assert(not(mutates_args(target)), "Annotation must not mutate Ast node. Make a copy and return it instead.");
     const F: FnType = unwrap(expr_type(target));
     const T: Tuple(Type, 2) = F.Arg;
-    set_flag(target, Annotation, true);
+    set_flags(target, all(get_flags(target), Annotation | Comptime), true);
     let handler = { Arg: first(T), Target: second(T), Ret: F.Ret, f: compile_expr(F, target) };
     let prev = insert(annotation_handlers, name(target), handler);
     target
 }
 
 @annotation @intrinsic
-fn module(args: Expr, target: ()) Expr;
+fn module(args: Expr, target: ()) !Expr;
 
 @annotation @intrinsic
-fn ffi(args: Target, target: ()) Expr;
+fn ffi(args: Target, target: ()) !Expr;
 
 @annotation @intrinsic
-fn type_of(args: Expr, target: ()) Expr;
+fn type_of(args: Expr, target: ()) !Expr;
 
 @annotation @intrinsic
-fn addr(args: Expr, target: ()) Expr;
+fn addr(args: Expr, target: ()) !Expr;
 
 @annotation @intrinsic
-fn assert_compile_error(args: (), target: Block) Block;
+fn assert_compile_error(args: (), target: Block) Expr;
 
 // TODO: @return @break @continue
 
-// TODO: not this if target is rust or zig
+// TODO: not use this if target is rust or zig
 // Note: this implementation can't call methods that use match? or maybe its fine since someone else would have compiled them. 
 @annotation @auto
 fn match(args: &Expr, target: []FnDeclAst) Expr = {
     const E: EnumType = unwrap(expr_type(args));
-    var handlers: Map((Tag(E), Type), FnDeclAst) = foreach(target, fn(f: &FnDeclAst)={
-        let F = expr_type(f);
-        if(eq(name(f), nil()), fn={
-            @todo
+    
+    // Each branch function must return the same type. 
+    let Out = unwrap(resolve_fold_types(map(target, fn(T: FnDeclAst) Type = Ret(T))));
+    
+    let handlers: Iter(Tag(E), FnDeclAst) = foreach(target, fn(f: &FnDeclAst)={
+        let F: FnType = expr_type(f);
+        let cases = if(eq(name(f), nil()), fn={
+            // If they didn't specify a name, just look for the argument type. 
+            filter(cases(E), fn(name: Symbol, Payload: Type) = eq(Payload, F.Arg))
         }, fn = {
-            @todo
-        })
-       
-        @todo
+            filter(cases(E), fn(name: Symbol, Payload: Type) = and(eq(name, F.name), eq(Payload, F.Arg)));
+        });
+        
+        @assert(eq(len(cases), 1), "ambigous or missing match branch");
+        let action = eval_expr(f);
+        ((get(cases, 0)), fn(payload) Out = cast(action(payload)))
     });
     
-    assert_eq(len(body), len(cases(E)));
+    assert_eq(len(handlers), len(cases(E)));
+    
+    let join_branches = fn(prev: AstExpr, tag: Tag(E), handler: FnDeclAst) AstExpr = {
+        let tag_expr = CallAst("tag_of", args, Tag(E));
+        let cond_expr = CallAst("eq", (tag_expr, tag), bool);
+        @if(cond_expr, handler, prev)
+    };
+    
+    fold(handlers, quote("comptime_unreachable()"), join_branches)
+}
+
+// TODO: handle matching over Any.
+
+/// This makes more sense as a function because you don't want to eagerly evaluate. 
+@annotation @auto
+fn if((cond, if_true, if_false): (ExprAst, FnDecl, FnDecl), target: Unit) AstExpr {
+    panic("@if(bool, fn() T, fn() T) T) not implemented on the current backend. No default available.")
+}
+
+// Find a type that all `types` can `cast` to. 
+// Used for typechecking branching execution paths that rejoin eventually. 
+fn resolve_fold_types(types: []Type) Result(Type, _);
+
+// TODO: move this to iter.txt
+for (T, I(_)) with is_trait(Iter, I){
+    // Call `f` on pairs from the iterator until exauhsted. 
+    fn reduce(self: I(T), f: fn(T, T) T) ?I = {
+        var rolling = @try(next(self));
+        @todo
+    }
+    
+    for U {
+        // TODO: figure out if this is left or right. 
+        fn fold(self: I(T), initial: U, f: fn(U, T) U) = {
+            var rolling = initial;
+            while(fn() T = @try(next(self)), fn(e: T) {
+                rolling = f(rolling, e);
+            })
+        }
+    }
 }
 
 fn expr_type(ast: Expr) Type;
 fn compile_expr(T: Type, ast: Expr) Result(T, _);
+
+// TODO: replace the `for` syntax with this. not sure if i actually want to change the name. 
+// `@impl((T, U), and(allow_type(T), allow_other(U))) { ... }`
+@annotation
+fn impl((names, cond): ([] Ident, Fn), target: &BlockAst) = {
+    make_fn()
+    let args = struct_type(map(names, fn(name: Symbol)=()))
+}
+
+// TODO: support destructuring in args 
+
+struct FnArg = { name: ?Symbol, T: ?ExprAst, default_value: ?ExprAst };
+struct FnArgsAst = []FnArg;
+
+@invarient(fn(f: FnArgsAst) bool = nand(is_nil(name), is_nil(T)));
+
+@annotation
+fn trait(((name, placeholder, cond): (Symbol, Symbol, BlockAst), target: [](VarDeclAst | FnDeclAst)) = {
+    // TODO: a meta type for traits 
+    // name is used for the type
+    // placeholder is used as generic in later exprs
+    // cond is extra requirements on types to implement
+    // target is associated types/values or fn declarations or fn implementations in terms of other declarations
+    todo()
+}
+
+@annotation
+fn switch() = {
+}
+
+// TODO: specilizations for specific targets that return a string in the host language. 
+
+// TODO: is this really better than Result(T, _) which isnt a special case? 
+// Produce a result type with the error type infered based on the function body. 
+// fn whatever(foo: Bar) @result(Baz) = { ... }
+// TODO: i want the = so its consistant. maybe since that never has an ast node its fine and you just ignore. 
+// TODO: really you want to pattern match and say "whenever you see this annotation as the return type in a function declaration"
+@annotation
+fn result(args: Type, target: BlockAst) BlockAst;
+
+// Provide a function that will always return true. 
+// The allows declaring some constraint on values of a certain type. 
+// Any time the compiler notices values of the argument type, it may choose to call `assertion`, and panic if it returns false. 
+// In optimising builds, `assertion` will never be called. 
+// `assertion` is no longer a normal function and cannot be called manually
+@annotation
+fn invarient(assertion: FnDecl, target: Unit);
+
+// Same as @invarient but allow the compiler to optimise assuming you didn't lie. 
+// It is safety checked illegal behaviour to violate this assertion. 
+// The fact that `assertion` returns true is treated as a staticlly known constant regardless of the arguments. 
+// Like if you try to check the asserted condition in normal code else where the compiler might decide its redundant and remove it. 
+@annotation
+fn unsafe_invarient(assertion: FnDecl, target: Unit) = {
+    invarient(assertion, target);
+}
+
+// TODO: Result(T, E) -> (T, E)
+enum TypeStructure = Tuple(TupleType) | Struct(StructType) | Unit(Symbol);
+fn Destructure(@type T) StructuralPattern;
+fn destructure(T) StructuralPattern; 
+
+// Evaluate a fallible expression and return an error to the parent if not successful. 
+// This can't be a normal function because it has to be able to early return. 
+@annotation
+fn try(args: ExprAst, target: ()) ExprAst = {
+    let Maybe = expr_type(args);
+    // TODO: support actual destructuring 
+    @match(Maybe) {
+        fn(Result(T, E): Type)
+    }
+    // assert that it has a success assosiated tpye
+    
+    todo()
+}
+
+// Exit the current function and indicate an error. 
+// How this is expressed depends on the return type of the function. 
+// - Option(T): ignore arg and return nil.
+// - Result(T, E): coerce arg to E and return Err(arg). 
+// - T: panic. use `debug(arg)` as the message. 
+@annotation
+fn error(args: ExprAst, target: ()) ExprAst; 
+
+// Like `fn assert` but using @error on failure instead of `fn panic`
+@annotation
+fn assert(args: ExprAst, target: ()) ExprAst; 
+
+fn todo() Never = panic("Not yet implemented");
+
+// TODO: not sure if i want to provide this cause its probably slow to walk an extra time but maybe that's a you problem 
+@annotation
+fn preprocess_ast(args: (), target: fn(ExprAst));
+
+// TODO: comptime panic should take you to a repl where you can inspect variable values. 
+
+// maybe use rust macro syntax to resolve ambiguity when its an expression with no postfix target. 
+
+
+// TODO: can do a really nice thing for closure interop with rust, 
+//       since i know the captures, allow expressing that as extra reference arguments
+//       so you pass in the borrow every time you call and it gives it back. 

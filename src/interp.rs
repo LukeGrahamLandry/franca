@@ -47,6 +47,11 @@ pub enum Value {
     // This is unsed to represent a function's empty stack space.
     // Crash if you try to read one.
     Poison,
+
+    // These are needed because they're using for bootstrapping the comptime types.
+    Slice(TypeId),       // for `[]T`
+    Map(TypeId, TypeId), // for `{}(K, V)`
+    Symbol(usize),       // TODO: this is an Ident<'p> but i really dont want the lifetime
 }
 
 #[derive(Copy, Clone)]
@@ -236,7 +241,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             let i = self.next_inst();
             println!("I: {:?}", i);
             match i {
-                &Bc::CallDirect { .. } => todo!(),
+                &Bc::CallDirect { f, ret, arg } => {
+                    todo!()
+                }
                 Bc::LoadConstant { slot, value } => {
                     let slot = *slot;
                     let value = value.clone();
@@ -574,7 +581,9 @@ impl Debug for FnBody<'_> {
             write!(f, "{i}. ");
             match bc {
                 Bc::CallDynamic { .. } => todo!(),
-                Bc::CallDirect { .. } => todo!(),
+                Bc::CallDirect { f: func, ret, arg } => {
+                    writeln!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)?
+                }
                 Bc::CallBuiltin { name, ret, arg } => {
                     writeln!(f, "{ret:?} = builtin(i({}), {arg:?});", name.0)?
                 }
