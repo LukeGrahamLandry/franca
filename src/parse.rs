@@ -38,73 +38,8 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let mut cursor = node.walk();
         println!("Parse Stmt {}", node.to_sexp());
         if node.kind() == "func_def" {
-            let mut entries = node.children_by_field_name("name", &mut cursor);
-            let result = entries.next().unwrap();
-            assert!(entries.next().is_none());
-            let name = result.utf8_text(self.src).unwrap();
-            let name = self.pool.intern(name);
-            drop(entries);
-
-            println!("Parse func_def {}", node.to_sexp());
-
-            let mut entries = node.children_by_field_name("proto", &mut cursor);
-            let proto = entries.next().unwrap();
-            assert!(entries.next().is_none());
-
-            let mut cursor = proto.walk();
-
-            // TODO: its actially down in the tree somehwere
-            let mut entries = proto.children_by_field_name("return_type", &mut cursor);
-            let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
-            assert!(entries.next().is_none());
-            drop(entries);
-
-            let mut arg_names: Vec<Option<Ident>> = vec![];
-            let mut args = proto.children_by_field_name("params", &mut cursor);
-            for arg in args {
-                println!("Arg: {}", arg.to_sexp());
-                let (names, ty) = self.parse_binding(arg);
-                arg_names.push(names);
-            }
-
-            let mut cursor = node.walk();
-
-            let mut entries = node.children_by_field_name("body", &mut cursor);
-            let body = if let Some(body) = entries.next() {
-                println!("body {:?}", body.to_sexp());
-                let mut cursor = body.walk();
-                let mut stmts = body.children_by_field_name("body", &mut cursor);
-                assert!(stmts.next().is_none()); // TODO.
-                drop(stmts);
-
-                let mut entries = body.children_by_field_name("result", &mut cursor);
-                let body = if let Some(result) = entries.next() {
-                    println!("Return {:?}", result.to_sexp());
-                    Some(self.parse_expr(result.walk()))
-                } else {
-                    None
-                };
-                assert!(entries.next().is_none());
-                body
-            } else {
-                None
-            };
-            assert!(entries.next().is_none());
-
-            let mut cursor = node.walk();
-            let mut entries = node.children_by_field_name("annotation", &mut cursor);
-            let annotation: Option<Ident<'p>> = if let Some(annotation) = entries.next() {
-                println!("TODO annotation {:?}", annotation.to_sexp());
-                None
-            } else {
-                None
-            };
-            Stmt::DeclFunc(Func {
-                name,
-                ty: LazyFnType::of(None, return_type),
-                body,
-                arg_names,
-            })
+            let func = self.parse_func(node);
+            Stmt::DeclFunc(func)
         } else if node.kind() == "call_expr" {
             let f = node.child(0).unwrap();
             let f = Box::new(self.parse_expr(f.walk()));
@@ -147,23 +82,9 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 Expr::Tuple(args.collect())
             }
             "closure_expr" => {
-                let mut entries = node.children_by_field_name("proto", &mut cursor);
-                let node = entries.next().unwrap();
-                assert!(entries.next().is_none());
-
-                let mut cursor = node.walk();
-
-                let mut entries = node.children_by_field_name("return_type", &mut cursor);
-                let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
-                assert!(entries.next().is_none());
-
-                // Stmt::DeclFunc {
-                //     name,
-                //     return_type,
-                //     body: None,
-                // }
-                // Expr::Func()
-                todo!()
+                let func = self.parse_func(node);
+                assert!(func.body.is_some());
+                Expr::Closure(Box::new(func))
             }
             "call_expr" => {
                 let f = node.child(0).unwrap();
@@ -206,6 +127,79 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             (Some(name), ty)
         } else {
             panic!("expected argument name found {}", name.log(self.pool));
+        }
+    }
+
+    fn parse_func(&mut self, node: Node) -> Func<'p> {
+        let mut cursor = node.walk();
+        let mut entries = node.children_by_field_name("name", &mut cursor);
+        let name = entries.next().map(|result| {
+            let name = result.utf8_text(self.src).unwrap();
+            let name = self.pool.intern(name);
+            name
+        });
+        assert!(entries.next().is_none());
+        drop(entries);
+
+        println!("Parse func_def {}", node.to_sexp());
+
+        let mut entries = node.children_by_field_name("proto", &mut cursor);
+        let proto = entries.next().unwrap();
+        assert!(entries.next().is_none());
+
+        let mut cursor = proto.walk();
+
+        // TODO: its actially down in the tree somehwere
+        let mut entries = proto.children_by_field_name("return_type", &mut cursor);
+        let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
+        assert!(entries.next().is_none());
+        drop(entries);
+
+        let mut arg_names: Vec<Option<Ident>> = vec![];
+        let mut args = proto.children_by_field_name("params", &mut cursor);
+        for arg in args {
+            println!("Arg: {}", arg.to_sexp());
+            let (names, ty) = self.parse_binding(arg);
+            arg_names.push(names);
+        }
+
+        let mut cursor = node.walk();
+
+        let mut entries = node.children_by_field_name("body", &mut cursor);
+        let body = if let Some(body) = entries.next() {
+            println!("body {:?}", body.to_sexp());
+            let mut cursor = body.walk();
+            let mut stmts = body.children_by_field_name("body", &mut cursor);
+            assert!(stmts.next().is_none()); // TODO.
+            drop(stmts);
+
+            let mut entries = body.children_by_field_name("result", &mut cursor);
+            let body = if let Some(result) = entries.next() {
+                println!("Return {:?}", result.to_sexp());
+                Some(self.parse_expr(result.walk()))
+            } else {
+                None
+            };
+            assert!(entries.next().is_none());
+            body
+        } else {
+            None
+        };
+        assert!(entries.next().is_none());
+
+        let mut cursor = node.walk();
+        let mut entries = node.children_by_field_name("annotation", &mut cursor);
+        let annotation: Option<Ident<'p>> = if let Some(annotation) = entries.next() {
+            println!("TODO annotation {:?}", annotation.to_sexp());
+            None
+        } else {
+            None
+        };
+        Func {
+            name,
+            ty: LazyFnType::of(None, return_type),
+            body,
+            arg_names,
         }
     }
 

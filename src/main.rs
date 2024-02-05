@@ -60,22 +60,6 @@ fn main() {
     //     // fn call(fn(Int));
     //     // call(fn = { $0 });
     // "#;
-    run_main(
-        r#"
-                        fn main(n: i64) i64 = { add(add(two(unit)), n) }
-                        fn two(u: Unit) Tuple(i64, i64) = { tuple(1, 2) }
-                        "#,
-        Value::I64(3),
-        Value::I64(6),
-    );
-    run_main(
-        r#"
-                fn main(n: int(unit)) int(unit) = { add(add(n, n), n) }
-                @comptime fn int(u: Unit) Type = { i64 }
-                "#,
-        Value::I64(5),
-        Value::I64(15),
-    );
 }
 
 // TODO: since operators are traits, i probably dont need to use a macro for this
@@ -142,6 +126,15 @@ fn call_in_type_annotation() {
                 "#,
         Value::I64(5),
         Value::I64(15),
+    );
+}
+
+#[test]
+fn simple_if() {
+    run_main(
+        r#"  fn main(n: i64) i64 = { if(eq(n, 1), fn(a: i64) i64 = { 5 }, fn(a: i64) i64 = { 10) }) }  "#,
+        Value::I64(1),
+        Value::I64(5),
     );
 }
 

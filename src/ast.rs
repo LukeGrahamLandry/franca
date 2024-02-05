@@ -85,6 +85,7 @@ pub enum Expr<'p> {
     RefType(Box<Self>),
     EnumLiteral(Vec<(Ident<'p>, Self)>),
     StructLiteral(Vec<(Ident<'p>, Self)>),
+    Closure(Box<Func<'p>>),
     // Backend only
     GetVar(Var),
 
@@ -115,10 +116,20 @@ pub enum Stmt<'p> {
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub struct Func<'p> {
-    pub name: Ident<'p>,
-    pub ty: LazyFnType<'p>,     // We might not have typechecked yet.
-    pub body: Option<Expr<'p>>, // It might be a forward declaration / ffi.
+    pub name: Option<Ident<'p>>, // it might be an annonomus closure
+    pub ty: LazyFnType<'p>,      // We might not have typechecked yet.
+    pub body: Option<Expr<'p>>,  // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
+}
+
+impl<'p> Func<'p> {
+    pub fn synth_name(&self, pool: &StringPool<'p>) -> &'p str {
+        pool.get(self.get_name(pool))
+    }
+
+    pub fn get_name(&self, pool: &StringPool<'p>) -> Ident<'p> {
+        self.name.unwrap_or_else(|| pool.intern("@anon@"))
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
@@ -154,7 +165,7 @@ pub struct Program<'p> {
 }
 
 impl<'p> Stmt<'p> {
-    pub fn log(&self, pool: &StringPool) -> String {
+    pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
             &Stmt::DeclVar(i) => format!("let {};", pool.get(i)),
             Stmt::Eval(e) => e.log(pool),
@@ -166,7 +177,7 @@ impl<'p> Stmt<'p> {
             } => todo!(),
             Stmt::DeclFunc(func) => format!(
                 "fn {} {:?} = {:?}",
-                pool.get(func.name),
+                func.synth_name(pool),
                 func.ty.log(pool),
                 func.body.as_ref().map(|e| e.log(pool))
             ),
@@ -176,7 +187,7 @@ impl<'p> Stmt<'p> {
 }
 
 impl<'p> LazyFnType<'p> {
-    pub fn log(&self, pool: &StringPool) -> String {
+    pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
             LazyFnType::Finished(arg, ret) => format!("(fn({:?}) {:?})", arg, ret),
             LazyFnType::Pending { arg, ret } => {
@@ -208,7 +219,7 @@ impl<'p> LazyFnType<'p> {
 
 // TODO: print actual type info
 impl<'p> LazyType<'p> {
-    pub fn log(&self, pool: &StringPool) -> String {
+    pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
             LazyType::Infer => "Infer".into(),
             LazyType::PendingEval(e) => e.log(pool),
@@ -225,7 +236,7 @@ impl<'p> LazyType<'p> {
 }
 
 impl<'p> Expr<'p> {
-    pub fn log(&self, pool: &StringPool) -> String {
+    pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
             Expr::Call(func, arg) => {
                 format!("{}({})", func.log(pool), arg.log(pool))
@@ -254,7 +265,7 @@ impl<'p> Expr<'p> {
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
             Expr::Value(v) => format!("{:?}", v),
-            _ => todo!(),
+            _ => format!("{:?}", self),
         }
     }
 }
@@ -344,7 +355,9 @@ impl<'p> Program<'p> {
 
         // TODODODODO: wrong! need comptiem intern. need resolve. just testing.
         // assert!(self.declarations.get(&name).is_none(), "TODO");
-        self.declarations.insert(name, vec![id]);
+        if let Some(name) = name {
+            self.declarations.insert(name, vec![id]);
+        }
         id
     }
 
