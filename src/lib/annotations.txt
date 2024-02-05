@@ -14,6 +14,9 @@
 // - It is an error for both to be unit. 
 // - You can never recieve annother annotation invocation as an arument. They're just applied in sequence. 
 //
+// It's very good if your annotation is @pure, then the compiler (or IDE plugin) can cache it. 
+// TODO: thats an advantage to structured side effects like AnnotationAction::Collect. 
+//
 // TODO: there's really two types of Type. 
 //       1) A local type in your own program that needs to be comptime only.
 //       2) The compiler working on asts but you don't want it to be running in the interpreter. 
@@ -21,6 +24,7 @@
 //       where the interpreter calls into precompiled code if avaiable. 
 //       The compiler's runtime is always someone else's comptime. 
 // 
+// TODO: maybe split this into ast.txt and syntax.txt
 
 @module(ast, impl=core, vis=Public) {
     // TODO: how to give each ast a uid? 
@@ -46,7 +50,14 @@
     /// - function body: vars=parameters
     /// - generic impl body: vars=generic parameters
     /// - trait definition body: vars=Self and associated types
-    struct WithFreeVariables = (&ExprAst, []VarAst);
+    struct WithFreeVariables = (Pattern, &ExprAst);
+    
+    // TODO: holy shit, why can't the parser generator take this as input??? 
+    // Name and optional type annotations that can bind values. 
+    // - `let <Pattern> = <ExprAst>;`
+    // - `fn <?Symbol>(<Pattern>) <?ExprAst> = <ExprAst>;`
+    enum Pattern = []Pattern | Binding; 
+    struct Binding = { name: ?VarAst, type: ?ExprAst };
     
     /// Bake comptime known values into an ast. 
     /// This allows specialization for generics. 
@@ -80,6 +91,15 @@
     /// The result may have free variables that you can fill in later. 
     @comptime 
     fn quote(Str) AstExpr;
+    
+    
+    @pub fn same_ast(a: Str, b: Str) = assert_eq(parse_ast(a), parse_ast(b));
+    
+    // Produce a constant literal. 
+    fn cast(Type) AstExpr;
+    
+    // TODO: consistant naming
+    @pub fn function_decl(name: ?Symbol, args: Pattern, ret_type: ?AstExpr, body: ?AstExpr) FnDeclAst;
 }
 
 // TODO: maybe postfix syntax with `!` on an expression. so you could have, whatever()!await, whatever()!try, whatever()!addr, 
@@ -166,6 +186,8 @@ fn annotation(args: AnnotationArg = Replace, target: FnDeclAst) Expr = {
     target
 }
 
+fn CRes(T: Type) Type = Result(T, CompileError);
+
 fn todo_assert(cond: bool) = assert(cond, "Not yet implemented.");
 
 @annotation @intrinsic
@@ -174,21 +196,23 @@ fn module(args: Expr, target: ()) !Expr;
 @annotation @intrinsic
 fn ffi(args: Target, target: ()) !Expr;
 
-@annotation @intrinsic
+@annotation @intrinsic @pure
 fn type_of(args: Expr, target: ()) !Expr;
 
 /// puts you in place expression mode
-@annotation @intrinsic
+@annotation @intrinsic @pure
 fn addr(args: Expr, target: ()) !Expr;
 
-@annotation @intrinsic
-fn assert_compile_error(args: (), target: Block) Expr;
+// Try to compile the target but require a specific error. Useful for testing safety checks. 
+@annotation @intrinsic @pure
+fn assert_compile_error(args: ?CompileError, target: Block) CRes(());
 
 // TODO: @return @break @continue
 
 // TODO: not use this if target is rust or zig
 // Note: this implementation can't call methods that use match? or maybe its fine since someone else would have compiled them. 
-@annotation @auto
+// TODO: rewrite to take advantage of function params being a Pattern
+@annotation @auto @pure
 fn match(args: ExprAst, target: []FnDeclAst) ExprAst = {
     const E: EnumType = unwrap(expr_type(args));
     
@@ -220,10 +244,39 @@ fn match(args: ExprAst, target: []FnDeclAst) ExprAst = {
     fold(handlers, quote("comptime_unreachable()"), join_branches)
 }
 
+// Loop over an iterator. 
+// This is a trivial wrapper around the `for` function that gives it a more familiar syntax. 
+@example(same_ast("@for(i, range(0, 10)) { print(i); }", "for(range(0, 10), fn(i) = { print(i); })"))
+@annotation @auto @pure
+fn for((names, iter): (Pattern, AstExpr), target: WithFreeVariables) AstExpr {
+    let f = function_decl(nil(), names, Unit, target);
+    call_expr(for, iter, f);
+}
+
+// TODO: move this to iter.txt
+@impl((I, T), fn next(I) ?T) {
+    fn for(iter: I, sink: fn(T)) {
+        var value: T = next(iter);
+        while(fn = ne(value, nil()), fn = {
+            sink(value);
+            value = next(iter);
+        })
+    }
+}
+
+// TODO: replace the `for` syntax with this. not sure if i actually want to change the name. 
+// `@impl((T, U), and(allow_type(T), allow_other(U))) { ... }`
+@annotation
+fn impl((names, cond): ([] Ident, Fn), target: BlockAst) = {
+    make_fn()
+    let args = struct_type(map(names, fn(name: Symbol)=()))
+}
+
+
 // TODO: handle type matching over Any.
 
 /// This makes more sense as a function because you don't want to eagerly evaluate. 
-@annotation @auto
+@annotation @auto @pure
 fn if((cond, if_true, if_false): (ExprAst, FnDecl, FnDecl), target: Unit) AstExpr {
     panic("@if(bool, fn() T, fn() T) T) not implemented on the current backend. No default available.")
 }
@@ -249,14 +302,6 @@ for (T, I(_)) with is_trait(Iter, I){
             })
         }
     }
-}
-
-// TODO: replace the `for` syntax with this. not sure if i actually want to change the name. 
-// `@impl((T, U), and(allow_type(T), allow_other(U))) { ... }`
-@annotation
-fn impl((names, cond): ([] Ident, Fn), target: BlockAst) = {
-    make_fn()
-    let args = struct_type(map(names, fn(name: Symbol)=()))
 }
 
 // TODO: support destructuring in args 
@@ -303,7 +348,7 @@ fn example(args: FnDeclAst, target: Unit) FnDeclAst = args;
 // fn whatever(foo: Bar) @result(Baz) = { ... }
 // TODO: i want the = so its consistant. maybe since that never has an ast node its fine and you just ignore. 
 // TODO: really you want to pattern match and say "whenever you see this annotation as the return type in a function declaration"
-@annotation
+@annotation @pure
 fn result(args: Type, target: BlockAst) BlockAst;
 
 // Provide a function that will always return true. 
@@ -330,7 +375,7 @@ fn destructure(T) StructuralPattern;
 
 // Evaluate a fallible expression and return an error to the parent if not successful. 
 // This can't be a normal function because it has to be able to early return. 
-@annotation
+@annotation @pure
 fn try(args: ExprAst, target: ()) ExprAst = {
     let Maybe = expr_type(args);
     // TODO: support actual destructuring 
@@ -347,11 +392,11 @@ fn try(args: ExprAst, target: ()) ExprAst = {
 // - Option(T): ignore arg and return nil.
 // - Result(T, E): coerce arg to E and return Err(arg). 
 // - T: panic. use `debug(arg)` as the message. 
-@annotation
+@annotation @pure
 fn error(args: ExprAst, target: ()) ExprAst; 
 
 // Like `fn assert` but using @error on failure instead of `fn panic`
-@annotation
+@annotation @pure
 fn assert(args: ExprAst, target: ()) ExprAst; 
 
 fn todo() Never = panic("Not yet implemented");

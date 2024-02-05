@@ -1,0 +1,189 @@
+// TODO: I want a general annotation that can take two pieces of code that are writen as building up and tearing down an enum tree,
+//       and inline them together so you consume it as you use it and dont actually allocate the structure. 
+//       i bet thats really hard to do in general. 
+//       things like rust iterators and serde 
+//       maybe im actually describing generators where you basically have a coroutine that can yield. 
+//       should read about how other languages do generators. 
+//       feels similar: https://mailund.dk/posts/c-generators/
+//       There was some article i liked about it being easy to write as the caller but not the callee because then it's inside out. 
+//       but i cant find it. was in c, they had the example of a lexer, you want to just call `yeild(c)` and they want to just call `c = get()`.
+// TODO: what's the difference between iterators, closures, generators, futures?
+//       they're all a function whose locals need to be packaged into a struct so you can suspend and come back later. 
+//       a function that yields is the same as a function that takes a closure as an argument. 
+//       And really exceptions and return values are the same but you know you don't need to come back. 
+//       maybe ive reinvented effects? should try to read about that but i find it hard when they start bragging about category theory. like bro just write the function. 
+//       https://en.wikipedia.org/wiki/Effect_system
+//       https://koka-lang.github.io/koka/doc/index.html
+//       - funny that they have the same while loop thing as me
+
+
+// this has examples more complicated than 1-10 which i should try in all these varients. 
+// https://news.ycombinator.com/item?id=5286406
+
+//
+/// note:inline_closures
+//
+// Having closures where you just write `fn() = { ... }` and access locals,
+// appears like the compiler needs to figure out how to store your locals in a struct with a FnPtr,
+// and maybe heap allocate that so they have a consistant size. 
+// But, if they're statically known, you can just inline any function that takes a closure as an argument. 
+// hate: if the bodies are big so you end up compiling many copies of the same thing. 
+// like: you can optimise across them since its just normal code.  
+// This is how I'm currently imagining closures working in this language. 
+// Since you pretty much need to be able to inline functions anyway, its trivial to implement this. 
+//
+
+// ideally these aren't language features, they're just annotations. 
+////////////////////////////////////////////////////////////////////////////////////////
+// Print numbers 1-10.
+// This is too easy since there's no control flow. 
+// Closure stuff would need state machine when it gets more interesting. 
+
+//// With generator ////
+// like: both sides look like normal functions.
+// hate: need to trust compiler magic.
+// sugar: for calls generator 
+
+fn count() gen(i) = {
+    var i = 0;
+    while i < 10 {
+        yeild i;
+        i += 1;
+    }
+}
+
+@for(i, count()) {
+    print("N:", i);
+}
+
+//// With closure callback ////
+// this is what my current code looks like. 
+// like: high control of the code. @link(note:inline_closures)
+// hate: the user is an ugly inside out function. 
+// sugar: anonymous functions
+
+fn count(callback: fn(int)) = {
+    var i = 0;
+    while i < 10 {
+        callback(i);
+        i += 1;
+    }
+}
+
+count(fn(i: int) = print("N:", i));
+
+//// With iterator ////
+// this is what rust does
+// like: total control of the code. easy to compile. 
+// hate: the iter is an ugly inside out function. 
+// sugar: for loop calls next()
+
+struct Count = { i: int };
+fn next(self: &Count) = ?int {
+    if self.i < 10 {
+        self.i += 1;
+        self.i - 1
+    } else {
+        nil()
+    }
+}
+
+@for(i, count()) {
+    print("N:", i);
+}
+
+//// With closure iter ////
+// this is the same as the above but with the compiler closing over your locals
+// like: high control of the code. @link(note:inline_closures)
+// hate: the iter is an ugly inside out function. 
+// sugar: for loop calls function
+
+fn count() fn() ?int {
+    var i = 0;
+    fn() ?int = {
+        if i < 10 {
+            i += 1;
+            i - 1
+        } else {
+            nil()
+        }
+    }
+}
+
+@for(i, count()) {
+    print("N:", i);
+}
+
+//// With allocation ////
+// no iterator support, just eagerly evaluate and allocate each intermidate computation
+// like: obvious what the code does
+// hate: waste of memory
+// sugar: for loop over array
+
+fn count() []int = {
+    var arr = array();
+    var i = 0;
+    while i < 10 {
+        push(arr, i);
+        i += 1;
+    }
+    arr
+}
+
+@for(i, count()) {
+    print("N:", i);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////
+
+// you might want to send info both ways
+
+fn count(is_good: fn(int) bool) = {
+    for i in 0..10 {
+        if is_good(i) {
+            print("round", i);
+        }
+    }
+}
+
+count(fn(i: int) bool = is_even(i));
+
+////////////////////////////////////////////////////////////////////////////////////////
+
+// I think postfix syntax is important 
+
+// annotation idea:
+@iter(
+    range(1, 10);
+    fn filter(i) = is_even(i);
+    fn sink(i) = print("round", i);
+)
+
+// current: (closure callback)
+range(1, 10, fn(i) = {
+    filter(fn(i) = is_even(i), fn(i) = {
+        print("round", i);
+    })
+})
+
+// swift:
+range(1, 10) { i in
+    filter({ i in is_even(i) }) { i in
+        print("round", i);
+    })
+}
+
+// rust: 
+range(1, 10)
+    .filter(|i| is_even(i))
+    .sink(|i| print("round", i))
+
+// mine, dot calls:
+range(1, 10)
+    .filter(fn(i) = is_even(i))
+    .sink(fn(i) = print("round", i))
+
+// this is the prefix syntax i was afraid of: 
+sink(filter(range(1, 10), fn(i) = is_even(i)), fn(i) = print("round", i))
+
+////////////////////////////////////////////////////////////////////////////////////////

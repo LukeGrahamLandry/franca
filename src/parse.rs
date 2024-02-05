@@ -2,6 +2,11 @@ use std::rc::Rc;
 
 use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 
+// TODO: this sucks ass. very possible im just using the api wrong because i didn't read the docs, i just looked at the functions i could call.
+//       or maybe the anti-parser-generator people were right.
+//       one thing i dont understand: they always say you need a manually written one for good error reporting,
+//       but are syntax errors really the thing you care about?maybe im just brainwashed by rust being super agressive about other stuff.
+
 use crate::{
     ast::{Expr, Func, LazyFnType, LazyType, Stmt},
     interp::Value,
