@@ -184,6 +184,7 @@ pub struct Interp<'a, 'p> {
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     debug_trace: Vec<DebugState<'p>>,
     anon_fn_counter: usize,
+    pub assertion_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -209,13 +210,27 @@ enum CErr<'p> {
     ComptimeCallAtRuntime,
     Ice(&'static str),
     LeakedValue,
+    StackDepthLimit,
 }
 
 // TODO: rn these eat any calls. no overload checking.
 // TODO: always put these at start of pool so can use indexes without hashmap lookup
 //       IMPORTANT: interp should probably made the pool if i do that.
 const BUILTINS: &[&str] = &[
-    "add", "sub", "mul", "div", "eq", "ne", "lt", "gt", "ge", "le", "Tuple", "tuple",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "eq",
+    "ne",
+    "lt",
+    "gt",
+    "ge",
+    "le",
+    "Tuple",
+    "tuple",
+    "assert_eq",
+    "is_comptime",
 ];
 
 // TODO: use this for op call builtin to avoid a runtime hashmap lookup.
@@ -249,6 +264,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             comptime_cache: Default::default(),
             debug_trace: vec![],
             anon_fn_counter: 0,
+            assertion_count: 0,
         }
     }
 
@@ -367,8 +383,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
 
         // Call the function
-        self.push_callframe(f, ret, arg, when);
-        self.run_inst_loop();
+        self.push_callframe(f, ret, arg, when)?;
+        self.run_inst_loop()?;
 
         // Give the return value to the caller.
         let result = self.take_slots(ret);
@@ -401,7 +417,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                     let arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
-                    self.push_callframe(f, ret, arg, when); // TODO
+                    self.push_callframe(f, ret, arg, when)?;
                     self.log_callstack();
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -488,7 +504,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let f = self.take_slot(f);
                     let arg = self.take_slots(arg);
                     let f = self.to_func(f);
-                    self.push_callframe(f, ret, arg, when);
+                    self.push_callframe(f, ret, arg, when)?;
                     self.log_callstack();
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -531,6 +547,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ty = self.program.intern_type(ty);
                 Value::Type(ty)
             }
+            "assert_eq" => {
+                let (a, b) = self.to_pair(arg)?;
+                assert_eq!(a, b, "runtime_builtin:assert_eq");
+                self.assertion_count += 1; // sanity check for making sure tests actually ran
+                Value::Unit
+            }
+            "is_comptime" => {
+                assert_eq!(arg, Value::Unit);
+                let when = self.call_stack.last().unwrap().when;
+                Value::Bool(when == ExecTime::Comptime)
+            }
             _ => {
                 if let Some(value) = runtime_builtin(name, arg.clone()) {
                     value
@@ -544,8 +571,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(value)
     }
 
-    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Value, when: ExecTime) {
-        self.ensure_compiled(f, when).unwrap();
+    fn push_callframe(
+        &mut self,
+        f: FuncId,
+        ret: StackRange,
+        arg: Value,
+        when: ExecTime,
+    ) -> Res<'p, ()> {
+        self.ensure_compiled(f, when)?;
         assert!(
             self.ready[f.0].as_ref().is_some(),
             "ICE: ensure_compiled didn't work on {f:?}"
@@ -569,6 +602,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         for _ in 0..empty {
             self.value_stack.push(Value::Poison);
         }
+        // TODO: only comptime.
+        if self.call_stack.len() > 1000 {
+            return Err(self.error(CErr::StackDepthLimit));
+        }
+        Ok(())
     }
 
     fn push_expanded(&mut self, arg: Value) {
@@ -694,10 +732,12 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         // We're done with our arguments, get rid of them.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        result.insts.push(Bc::Drop(StackRange {
-            first: StackOffset(0),
-            count: result.arg_names.len(),
-        }));
+        if !result.arg_names.is_empty() {
+            result.insts.push(Bc::Drop(StackRange {
+                first: StackOffset(0),
+                count: result.arg_names.len(),
+            }));
+        }
 
         for slot in result.vars.values() {
             result.insts.push(Bc::Drop(*slot));
@@ -753,7 +793,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Stmt::SetNamed(_, _) => todo!(),
-            _ => todo!(),
+            Stmt::Noop => {}
+            Stmt::DeclFunc(func) => {
+                self.program.add_func(func.clone());
+            }
+            s => todo!("Compile Stmt {:?}", s),
         }
         Ok(())
     }
@@ -948,6 +992,8 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         Some(match name {
             "unit" => (Value::Unit, self.program.intern_type(TypeInfo::Unit)),
+            "true" => (Value::Bool(true), self.program.intern_type(TypeInfo::Bool)),
+            "false" => (Value::Bool(false), self.program.intern_type(TypeInfo::Bool)),
             _ => return None,
         })
     }
@@ -1025,6 +1071,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             ty: self.unit_to_type(),
             body: Some(e.clone()),
             arg_names: vec![None],
+            annotations: vec![],
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
@@ -1079,6 +1126,12 @@ impl<'a, 'p> Interp<'a, 'p> {
         } else {
             panic!("Expected Func found {:?}", value)
         }
+    }
+
+    fn to_pair(&self, value: Value) -> Res<'static, (Value, Value)> {
+        let values = self.to_seq(value)?;
+        assert_eq!(values.len(), 2);
+        Ok((values[0].clone(), values[1].clone()))
     }
 }
 

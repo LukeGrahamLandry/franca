@@ -71,6 +71,12 @@ pub enum TypeInfo {
     Unit, // TODO: same as empty tuple but easier to type
 }
 
+#[derive(Clone, PartialEq, Hash, Eq, Debug)]
+pub struct Annotation<'p> {
+    pub name: Ident<'p>,
+    pub args: Option<Expr<'p>>,
+}
+
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Var<'p>(pub Ident<'p>, pub usize);
 
@@ -95,6 +101,7 @@ pub enum Expr<'p> {
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum Stmt<'p> {
+    Noop,
     Eval(Expr<'p>),
 
     // Backend Only
@@ -116,6 +123,7 @@ pub enum Stmt<'p> {
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub struct Func<'p> {
+    pub annotations: Vec<Annotation<'p>>,
     pub name: Option<Ident<'p>>, // it might be an annonomus closure
     pub ty: LazyFnType<'p>,      // We might not have typechecked yet.
     pub body: Option<Expr<'p>>,  // It might be a forward declaration / ffi.
@@ -181,6 +189,7 @@ impl<'p> Stmt<'p> {
                 func.ty.log(pool),
                 func.body.as_ref().map(|e| e.log(pool))
             ),
+            Stmt::Noop => "".to_owned(),
             _ => todo!(),
         }
     }

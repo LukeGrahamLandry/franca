@@ -8,7 +8,7 @@ use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 //       but are syntax errors really the thing you care about?maybe im just brainwashed by rust being super agressive about other stuff.
 
 use crate::{
-    ast::{Expr, Func, LazyFnType, LazyType, Stmt},
+    ast::{Annotation, Expr, Func, LazyFnType, LazyType, Stmt},
     interp::Value,
     pool::{Ident, StringPool},
 };
@@ -20,6 +20,7 @@ pub struct WalkParser<'a, 'p> {
 
 impl<'a, 'p> WalkParser<'a, 'p> {
     pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<Stmt<'p>> {
+        println!("SRC:\n{src}");
         let tree = p.parse(src, None).unwrap();
         let mut p = WalkParser {
             pool,
@@ -42,7 +43,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let node = cursor.node();
         let mut cursor = node.walk();
         println!("Parse Stmt {}", node.to_sexp());
-        match node.kind() {
+        let stmt = match node.kind() {
             "func_def" => {
                 let func = self.parse_func(node);
                 Stmt::DeclFunc(func)
@@ -80,8 +81,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 };
                 Stmt::SetNamed(name, value)
             }
+            ";" => Stmt::Noop,
             s => todo!("Wanted Stmt found {s}: {:?}", node),
-        }
+        };
+        println!("STMT: {stmt:?}");
+        stmt
     }
 
     fn assert_literal(&self, node: Node, expected: &str) {
@@ -120,7 +124,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             }
             "closure_expr" => {
                 let func = self.parse_func(node);
-                assert!(func.body.is_some());
+                assert!(func.body.is_some(), "CLOSURE MISSING BODY: \n{:?}", func);
                 Expr::Closure(Box::new(func))
             }
             "call_expr" => {
@@ -234,17 +238,21 @@ impl<'a, 'p> WalkParser<'a, 'p> {
 
         let mut cursor = node.walk();
         let mut entries = node.children_by_field_name("annotation", &mut cursor);
-        let annotation: Option<Ident<'p>> = if let Some(annotation) = entries.next() {
+
+        let mut annotations = vec![];
+
+        for annotation in entries {
             println!("TODO annotation {:?}", annotation.to_sexp());
-            None
-        } else {
-            None
-        };
+            let name = annotation.child(0).unwrap();
+            let name = self.pool.intern(name.utf8_text(self.src).unwrap());
+            annotations.push(Annotation { name, args: None })
+        }
         Func {
             name,
             ty: LazyFnType::of(None, return_type),
             body,
             arg_names,
+            annotations,
         }
     }
 

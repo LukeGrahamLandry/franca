@@ -39,6 +39,7 @@ macro_rules! check_cmp {
 }
 
 fn main() {
+    run_tests_txt();
     // let src = include_str!("lib/builtins.txt");
     // let src = r#"
     //     fn get(arr: &Array(T), i: i64) &T;
@@ -54,51 +55,20 @@ fn main() {
 }
 
 #[test]
-fn simple_variables() {
-    run_main(
-        r#"
-            fn main(n: i64) i64 = { 
-                let x = 10;
-                n
-            }
-            "#,
-        Value::I64(5),
-        Value::I64(5),
-    );
-
-    run_main(
-        r#"
-                fn main(n: i64) i64 = { 
-                    let x = 10;
-                    x
-                }
-                "#,
-        Value::I64(5),
-        Value::I64(10),
-    );
-    run_main(
-        r#"
-                fn main(n: i64) i64 = { 
-                    let x = n;
-                    x
-                }
-                "#,
-        Value::I64(5),
-        Value::I64(5),
-    );
-    run_main(
-        r#"
-                fn main(n: i64) i64 = { 
-                    let x = n;
-                    x = 50;
-                    x
-                }
-                "#,
-        Value::I64(5),
-        Value::I64(50),
-    );
+fn tests_txt() {
+    run_tests_txt();
 }
 
+fn run_tests_txt() {
+    run_main(
+        &format!(
+            "fn main(_unused: i64) i64 = {{\n {} \n _unused\n}}",
+            include_str!("tests.txt")
+        ),
+        Value::I64(0),
+        Value::I64(0),
+    );
+}
 // TODO: since operators are traits, i probably dont need to use a macro for this
 #[test]
 fn interp_math() {
@@ -154,27 +124,6 @@ fn passing_tuple_to_multiargs() {
     );
 }
 
-#[test]
-fn call_in_type_annotation() {
-    run_main(
-        r#"
-                fn main(n: int(unit)) int(unit) = { add(add(n, n), n) }
-                @comptime fn int(u: Unit) Type = { i64 }
-                "#,
-        Value::I64(5),
-        Value::I64(15),
-    );
-}
-
-#[test]
-fn simple_if() {
-    run_main(
-        r#"  fn main(n: i64) i64 = { if(eq(n, 1), fn(a: i64) i64 = { 5 }, fn(a: i64) i64 = { 10) }) }  "#,
-        Value::I64(1),
-        Value::I64(5),
-    );
-}
-
 fn run_main(src: &str, arg: Value, expect: Value) {
     let mut p = Parser::new();
     p.set_language(tree_sitter_inferd::language());
@@ -188,5 +137,9 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     println!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
     interp.write_jitted().iter().for_each(|f| println!("{}", f));
+    // TODO: change this when i add assert(bool)
+    let assertion_count = src.split("assert_eq(").count() - 1;
+    assert_eq!(interp.assertion_count, assertion_count);
     program.log_cached_types();
+    println!("{assertion_count} assertions passed");
 }
