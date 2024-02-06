@@ -136,7 +136,11 @@ pub enum Stmt<'p> {
     Scope(Vec<Var<'p>>, Box<Self>),
 
     // Frontend only
-    DeclVar(Ident<'p>, Option<FatExpr<'p>>),
+    DeclVar {
+        name: Ident<'p>,
+        ty: Option<FatExpr<'p>>,
+        value: Option<FatExpr<'p>>,
+    },
     SetNamed(Ident<'p>, FatExpr<'p>),
     DeclFunc(Func<'p>),
 
@@ -202,10 +206,11 @@ pub struct Program<'p> {
 impl<'p> Stmt<'p> {
     pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            Stmt::DeclVar(i, v) => format!(
-                "let {} = {:?};",
-                pool.get(*i),
-                v.as_ref().map(|v| v.log(pool))
+            Stmt::DeclVar { name, ty, value } => format!(
+                "let {}: {:?} = {:?};",
+                pool.get(*name),
+                ty,
+                value.as_ref().map(|v| v.log(pool))
             ),
             Stmt::Eval(e) => e.log(pool),
             Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),

@@ -143,9 +143,17 @@ enum Bc<'p> {
         from: StackOffset,
         to: StackOffset,
     },
+    CloneRange {
+        from: StackRange,
+        to: StackRange,
+    },
     Move {
         from: StackOffset,
         to: StackOffset,
+    },
+    ExpandTuple {
+        from: StackOffset,
+        to: StackRange,
     },
     Drop(StackRange),
     AbsoluteStackAddr {
@@ -492,7 +500,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // Calling Convention: arguments passed to a function are moved out of your stack.
                     let arg = self.take_slots(arg);
                     let value = self.runtime_builtin(name, arg.clone())?;
-                    *self.get_slot_mut(ret.first) = value;
+                    let abs = self.range_to_index(ret);
+                    self.expand_maybe_tuple(value, abs.first, abs.count);
                     self.bump_ip();
                 }
                 &Bc::Ret(slot) => {
@@ -507,28 +516,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         frame.return_count
                     );
 
-                    match frame.return_count.cmp(&1) {
-                        std::cmp::Ordering::Equal => {
-                            self.value_stack[frame.return_slot.0] = value;
-                        }
-                        std::cmp::Ordering::Less => {
-                            todo!("zero argument return. probably just works but untested.")
-                        }
-                        std::cmp::Ordering::Greater => {
-                            let values = self.to_seq(value)?;
-                            assert_eq!(values.len(), frame.return_count);
-                            let base = frame.return_slot.0;
-                            for (i, v) in values.into_iter().enumerate() {
-                                // TODO: this needs to be a macro cause the cloning is a problem
-                                self.assert_eq(
-                                    &self.value_stack[base + i].clone(),
-                                    &Value::Poison,
-                                    || CErr::LeakedValue,
-                                );
-                                self.value_stack[base + i] = v;
-                            }
-                        }
-                    }
+                    self.expand_maybe_tuple(value, frame.return_slot, frame.return_count);
 
                     // Release our stack space.
                     let size = self.value_stack.len() - frame.stack_base.0;
@@ -571,6 +559,20 @@ impl<'a, 'p> Interp<'a, 'p> {
                     *self.get_slot_mut(to) = v;
                     self.bump_ip();
                 }
+                &Bc::CloneRange { from, to } => {
+                    debug_assert_eq!(from.count, to.count);
+                    for i in 0..from.count {
+                        let v = self.clone_slot(from.index(i));
+                        *self.get_slot_mut(to.index(i)) = v;
+                    }
+                    self.bump_ip();
+                }
+                &Bc::ExpandTuple { from, to } => {
+                    let tuple = self.take_slot(from);
+                    let slot = self.slot_to_index(to.first);
+                    self.expand_maybe_tuple(tuple, slot, to.count);
+                    self.bump_ip();
+                }
                 &Bc::Drop(slot) => {
                     assert_ne!(slot.count, 0);
                     for i in 0..slot.count {
@@ -589,6 +591,35 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
+    fn expand_maybe_tuple(
+        &mut self,
+        value: Value,
+        first: StackAbsolute,
+        expected_count: usize,
+    ) -> Res<'static, ()> {
+        match expected_count.cmp(&1) {
+            std::cmp::Ordering::Equal => {
+                self.value_stack[first.0] = value;
+            }
+            std::cmp::Ordering::Less => {
+                todo!("zero argument return. probably just works but untested.")
+            }
+            std::cmp::Ordering::Greater => {
+                let values = self.to_seq(value)?;
+                assert_eq!(values.len(), expected_count);
+                let base = first.0;
+                for (i, v) in values.into_iter().enumerate() {
+                    // TODO: this needs to be a macro cause the cloning is a problem
+                    self.assert_eq(&self.value_stack[base + i].clone(), &Value::Poison, || {
+                        CErr::LeakedValue
+                    });
+                    self.value_stack[base + i] = v;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
@@ -601,7 +632,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Type(ty)
             }
             "assert_eq" => {
-                let (a, b) = self.to_pair(arg)?;
+                let (a, b) = self.split_to_pair(arg)?;
                 assert_eq!(a, b, "runtime_builtin:assert_eq");
                 self.assertion_count += 1; // sanity check for making sure tests actually ran
                 Value::Unit
@@ -903,18 +934,38 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let value = self.compile_expr(result, expr)?;
                 result.push(Bc::Drop(value));
             }
-            Stmt::DeclVar(name, expr) => {
+            Stmt::DeclVar { name, ty, value } => {
                 // TODO: scope.
                 let value = invert(
-                    expr.as_ref()
+                    value
+                        .as_ref()
                         .map(|expr| self.compile_expr(result, expr.deref())),
                 )?;
-                let value = match value {
-                    Some(value) => {
-                        assert_eq!(value.count, 1, "TODO: tuple variables");
-                        value
+                let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
+                let ty_slots = if let Some(ty) = ty {
+                    Some(self.program.slot_count(self.to_type(ty)?))
+                } else {
+                    None
+                };
+
+                let value = match (value, ty_slots) {
+                    (None, Some(slots)) => result.reserve_slots(slots, TypeId::any()),
+                    (Some(value), None) => value,
+                    (Some(value), Some(slots)) => {
+                        if slots == value.count {
+                            value
+                        } else {
+                            assert_eq!(value.count, 1);
+                            let expanded = result.reserve_slots(slots, TypeId::any());
+                            result.push(Bc::ExpandTuple {
+                                from: value.first,
+                                to: expanded,
+                            });
+                            expanded
+                        }
                     }
-                    None => result.reserve_slots(1, TypeId::any()),
+                    // TODO: make this an error. dont guess.
+                    (None, None) => result.reserve_slots(1, TypeId::any()),
                 };
                 let prev = result.vars.insert(Var(*name, 0), value);
                 assert!(prev.is_none(), "TODO: redeclare and drop");
@@ -982,8 +1033,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts.push(Bc::CallDirect { f, ret, arg });
                         return Ok(ret);
                     } else if self.builtins.contains(i) {
-                        // TODO: not all builtins have 1 return value
-                        let ret = result.reserve_slots(1, TypeId::any());
+                        // TODO: this is ugly... other builtins might return tuples
+                        let slots = if "tuple" == self.pool.get(*i) {
+                            arg.count
+                        } else {
+                            1
+                        };
+                        let ret = result.reserve_slots(slots, TypeId::any());
                         result.insts.push(Bc::CallBuiltin { name: *i, ret, arg });
                         return Ok(ret);
                     } else if "if" == self.pool.get(*i) {
@@ -1099,12 +1155,15 @@ impl<'a, 'p> Interp<'a, 'p> {
                     result.load_constant(Value::GetFn(func), TypeId::any())
                 } else if let Some(index) = result.vars.get(&Var(*i, 0)) {
                     let from = *index;
-                    assert_eq!(index.count, 1);
-                    let to = result.reserve_slots(1, TypeId::any());
-                    result.insts.push(Bc::Clone {
-                        from: from.first,
-                        to: to.first,
-                    });
+                    let to = result.reserve_slots(from.count, TypeId::any());
+                    if from.count == 1 {
+                        result.insts.push(Bc::Clone {
+                            from: from.first,
+                            to: to.first,
+                        });
+                    } else {
+                        result.insts.push(Bc::CloneRange { from, to });
+                    }
                     to
                 } else {
                     logln!("UNDECLARED IDENT: {} (in GetNamed)", self.pool.get(*i));
@@ -1326,6 +1385,30 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok((values[0].clone(), values[1].clone()))
     }
 
+    fn split_to_pair(&self, value: Value) -> Res<'static, (Value, Value)> {
+        let values = to_flat_seq(value);
+
+        // TODO: sad cloning
+        if values.len() == 2 {
+            return Ok((values[0].clone(), values[1].clone()));
+        }
+
+        assert_eq!(values.len() % 2, 0);
+        let first = (values[0..values.len() / 2]).to_vec();
+        let second = (values[values.len() / 2..]).to_vec();
+
+        Ok((
+            Value::Tuple {
+                container_type: TypeId::any(),
+                values: first,
+            },
+            Value::Tuple {
+                container_type: TypeId::any(),
+                values: second,
+            },
+        ))
+    }
+
     fn to_stack_addr(&self, value: Value) -> Res<'static, StackAbsoluteRange> {
         if let Value::InterpAbsStackAddr(r) = value {
             Ok(r)
@@ -1426,11 +1509,13 @@ impl Debug for Bc<'_> {
             )?,
             Bc::Goto { ip } => write!(f, "goto {ip};",)?,
             Bc::CreateTuple { values, target } => {
-                write!(f, "{target:?} = tuple{values:?};")?;
+                write!(f, "{target:?} = move{values:?};")?;
             }
             Bc::Ret(i) => write!(f, "return {i:?};")?,
             Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
+            Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
             Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
+            Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
             Bc::Drop(i) => write!(f, "drop({:?});", i)?,
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of)?,
         }
@@ -1509,4 +1594,18 @@ fn builtin_type(name: &str) -> Option<TypeInfo> {
 /// https://users.rust-lang.org/t/convenience-method-for-flipping-option-result-to-result-option/13695
 fn invert<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
     x.map_or(Ok(None), |v| v.map(Some))
+}
+
+fn to_flat_seq(value: Value) -> Vec<Value> {
+    match value {
+        Value::Tuple {
+            container_type,
+            values,
+        }
+        | Value::Array {
+            container_type,
+            values,
+        } => values.into_iter().flat_map(to_flat_seq).collect(),
+        e => vec![e],
+    }
 }

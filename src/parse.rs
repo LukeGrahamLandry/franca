@@ -94,17 +94,18 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "expr" => Stmt::Eval(self.parse_expr(cursor)),
             "declare" => {
                 self.assert_literal(node.child(0).unwrap(), "let");
-                let names = self.parse_expr(node.child(1).unwrap().walk());
-                let name = match names.deref() {
-                    Expr::GetNamed(i) => i,
-                    _ => todo!("assign to {names:?}"),
-                };
+                let binding = self.parse_binding(node.child(1).unwrap());
 
-                let initial_value = node.child(2).map(|eq_sign| {
+                let value = node.child(2).map(|eq_sign| {
                     self.assert_literal(node.child(2).unwrap(), "=");
                     self.parse_expr(node.child(3).unwrap().walk())
                 });
-                Stmt::DeclVar(*name, initial_value)
+
+                Stmt::DeclVar {
+                    name: binding.0.expect("binding name"),
+                    ty: binding.1,
+                    value,
+                }
             }
             "assign" => {
                 let names = self.parse_expr(node.child(0).unwrap().walk());
@@ -194,21 +195,13 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                     let inner = node.child(1).unwrap();
                     let e = Expr::RefType(Box::new(self.parse_expr(inner.walk())));
                     self.expr(e, node.start_position())
+                } else if kind == "tuple" {
+                    self.parse_tuple(node) // TODO: this shouldnt be a type_expr branch
                 } else {
                     todo!("Unknown typeexpr kind {kind}");
                 }
             }
-            "tuple" => {
-                let mut cursor = node.walk();
-                let args = node
-                    .children(&mut cursor)
-                    .filter(|child| {
-                        child.kind() != "(" && child.kind() != ")" && child.kind() != ","
-                    }) // TODO: wtf
-                    .map(|child| self.parse_expr(child.walk()));
-                let e = Expr::Tuple(args.collect());
-                self.expr(e, node.start_position())
-            }
+            "tuple" => self.parse_tuple(node),
             "closure_expr" => {
                 let func = self.parse_func(node);
                 assert!(func.body.is_some(), "CLOSURE MISSING BODY: \n{:?}", func);
@@ -381,6 +374,16 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             loc,
             id: self.expr_id,
         }
+    }
+
+    fn parse_tuple(&mut self, node: Node<'_>) -> FatExpr<'p> {
+        let mut cursor = node.walk();
+        let args = node
+            .children(&mut cursor)
+            .filter(|child| child.kind() != "(" && child.kind() != ")" && child.kind() != ",") // TODO: wtf
+            .map(|child| self.parse_expr(child.walk()));
+        let e = Expr::Tuple(args.collect());
+        self.expr(e, node.start_position())
     }
 
     // fn find_one(&mut self, cursor: &mut TreeCursor, field_name: &str) {
