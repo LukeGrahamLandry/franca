@@ -147,7 +147,7 @@ struct CallFrame<'p> {
 struct FnBody<'p> {
     insts: Vec<Bc<'p>>,
     stack_slots: usize,
-    vars: HashMap<Var, StackOffset>, // TODO: use a vec
+    vars: HashMap<Var<'p>, StackRange>, // TODO: use a vec
     arg_names: Vec<Option<Ident<'p>>>,
     when: ExecTime,
     slot_types: Vec<TypeId>,
@@ -183,9 +183,10 @@ pub struct Interp<'a, 'p> {
     comptime_cache: HashMap<Expr<'p>, Value>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     debug_trace: Vec<DebugState<'p>>,
+    anon_fn_counter: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DebugState<'p> {
     OuterCall(FuncId, Value),
     JitToBc(FuncId, ExecTime),
@@ -247,18 +248,21 @@ impl<'a, 'p> Interp<'a, 'p> {
             log_depth: 0,
             comptime_cache: Default::default(),
             debug_trace: vec![],
+            anon_fn_counter: 0,
         }
     }
 
-    fn push_state(&mut self, s: DebugState<'p>) {
-        self.debug_trace.push(s);
+    #[track_caller]
+    fn push_state(&mut self, s: &DebugState<'p>) {
+        self.debug_trace.push(s.clone());
         self.log_trace();
     }
 
     // TODO: would be nice if you passed it in so could make sure that you're popping the expected one
     //       but just check that its empty at the end and its fine.
-    fn pop_state(&mut self) {
-        self.debug_trace.pop().expect("state stack");
+    fn pop_state(&mut self, s: DebugState<'p>) {
+        let found = self.debug_trace.pop().expect("state stack");
+        assert_eq!(found, s);
     }
 
     #[track_caller]
@@ -286,12 +290,15 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.assert(a == b, on_err)
     }
 
+    #[track_caller]
     fn log_trace(&self) {
         println!("=== TRACE ===");
+        println!("{}", Location::caller());
         let show_f = |func: FuncId| {
             format!(
-                "f{}:{}",
+                "f{}:{:?}:{}",
                 func.0,
+                self.program.funcs[func.0].get_name(self.pool),
                 self.program.funcs[func.0].synth_name(self.pool)
             )
         };
@@ -336,7 +343,8 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     pub fn run(&mut self, f: FuncId, arg: Value, when: ExecTime) -> Res<'p, Value> {
-        self.push_state(DebugState::OuterCall(f, arg.clone()));
+        let state = DebugState::OuterCall(f, arg.clone());
+        self.push_state(&state);
         let init_heights = (self.call_stack.len(), self.value_stack.len());
 
         // A fake callframe representing the calling rust program.
@@ -374,13 +382,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         });
         let end_heights = (self.call_stack.len(), self.value_stack.len());
         self.assert(init_heights == end_heights, || CErr::Ice("bad stack size"));
-        self.pop_state();
+        self.pop_state(state);
         Ok(result)
     }
 
     fn run_inst_loop(&mut self) -> Res<'p, ()> {
         let func = self.call_stack.last().unwrap().current_func;
-        self.push_state(DebugState::RunInstLoop(func));
+        let state = DebugState::RunInstLoop(func);
+        self.push_state(&state);
         loop {
             let i = self.next_inst();
             self.log_stack();
@@ -507,7 +516,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
         }
-        self.pop_state();
+        self.pop_state(state);
         Ok(())
     }
 
@@ -536,7 +545,11 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Value, when: ExecTime) {
-        self.ensure_compiled(f, when);
+        self.ensure_compiled(f, when).unwrap();
+        assert!(
+            self.ready[f.0].as_ref().is_some(),
+            "ICE: ensure_compiled didn't work on {f:?}"
+        );
         // Calling Convention: arguments passed to a function are moved out of your stack.
         let return_slot = self.slot_to_index(ret.first); // TODO: what about tuple returns?
         let stack_base = self.value_stack.len(); // Our stack includes the argument but not the return slot.
@@ -644,11 +657,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         StackAbsolute(frame.stack_base.0 + slot.0)
     }
 
+    // why the fuck does result must use not warn me
     fn ensure_compiled(&mut self, FuncId(index): FuncId, when: ExecTime) -> Res<'p, ()> {
         if let Some(Some(_)) = self.ready.get(index) {
             return Ok(());
         }
-        self.push_state(DebugState::JitToBc(FuncId(index), when));
+        let state = DebugState::JitToBc(FuncId(index), when);
+        self.push_state(&state);
         while self.ready.len() <= index {
             self.ready.push(None);
         }
@@ -656,8 +671,9 @@ impl<'a, 'p> Interp<'a, 'p> {
         let mut func = self.program.funcs[index].clone();
         self.log_depth += 1;
         println!(
-            "{} Start JIT: {}",
+            "{} Start JIT: {:?} {}",
             "=".repeat(self.log_depth),
+            FuncId(index),
             func.synth_name(self.pool)
         );
         println!("AST:");
@@ -683,17 +699,22 @@ impl<'a, 'p> Interp<'a, 'p> {
             count: result.arg_names.len(),
         }));
 
+        for slot in result.vars.values() {
+            result.insts.push(Bc::Drop(*slot));
+        }
+
         result.insts.push(Bc::Ret(return_value));
 
         println!("{:?}", result);
         self.ready[index] = Some(result);
         println!(
-            "{} Done JIT: {}",
+            "{} Done JIT: {:?} {}",
             "=".repeat(self.log_depth),
+            FuncId(index),
             func.synth_name(self.pool)
         );
         self.log_depth -= 1;
-        self.pop_state();
+        self.pop_state(state);
         Ok(())
     }
 
@@ -705,8 +726,36 @@ impl<'a, 'p> Interp<'a, 'p> {
             .collect()
     }
 
-    fn compile_stmt(&mut self, expr: Stmt) {
-        todo!()
+    fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &Stmt<'p>) -> Res<'p, ()> {
+        match stmt {
+            Stmt::Eval(expr) => {
+                let value = self.compile_expr(result, expr)?;
+                result.push(Bc::Drop(value));
+            }
+            Stmt::DeclVar(name, expr) => {
+                // TODO: scope.
+                let value = self.compile_expr(result, expr)?;
+                assert_eq!(value.count, 1, "TODO: tuple variables");
+                let prev = result.vars.insert(Var(*name, 0), value);
+                assert!(prev.is_none(), "TODO: redeclare and drop");
+            }
+            Stmt::SetNamed(name, expr) => {
+                let value = self.compile_expr(result, expr)?;
+                let slot = result.vars.get(&Var(*name, 0));
+                let slot = *slot.expect("SetNamed: var must be declared");
+                result.push(Bc::Drop(slot));
+                assert_eq!(value.count, slot.count);
+                for i in 0..value.count {
+                    result.push(Bc::Move {
+                        from: value.index(i),
+                        to: slot.index(i),
+                    });
+                }
+            }
+            Stmt::SetNamed(_, _) => todo!(),
+            _ => todo!(),
+        }
+        Ok(())
     }
 
     fn return_stack_slots(&mut self, f: FuncId) -> usize {
@@ -722,7 +771,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(match expr {
             Expr::Closure(func) => {
                 let id = self.program.add_func(*func.clone());
-                self.ensure_compiled(id, result.when);
+                self.ensure_compiled(id, result.when)?;
                 let ty = self.program.intern_type(TypeInfo::Fn(FnType {
                     param: TypeId::any(),
                     returns: TypeId::any(),
@@ -800,7 +849,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                 });
                 ret
             }
-            Expr::Block(_, _) => todo!(),
+            Expr::Block(prelude, value) => {
+                for stmt in prelude {
+                    self.compile_stmt(result, stmt)?;
+                }
+                self.compile_expr(result, value)?
+            }
             Expr::IfElse(_, _, _) => todo!(),
             Expr::Array(_) => todo!(),
             Expr::Tuple(values) => {
@@ -827,11 +881,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ret
             }
             Expr::RefType(_) => todo!(),
-            Expr::GetVar(v) => StackRange {
-                // TODO clone
-                first: *result.vars.get(v).unwrap(),
-                count: 1,
-            },
+            Expr::GetVar(v) => {
+                let ret = result.reserve_slots(1, TypeId::any());
+                result.push(Bc::Clone {
+                    from: result.vars.get(v).unwrap().first,
+                    to: ret.first,
+                });
+                ret
+            }
             Expr::GetNamed(i) => {
                 if let Some(index) = result
                     .arg_names
@@ -854,8 +911,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 } else if let Some(func) = self.program.declarations.get(i) {
                     assert_eq!(func.len(), 1, "ambigous function reference");
                     let func = func[0];
-                    self.ensure_compiled(func, ExecTime::Comptime);
+                    self.ensure_compiled(func, ExecTime::Comptime)?;
                     result.load_constant(Value::GetFn(func), TypeId::any())
+                } else if let Some(index) = result.vars.get(&Var(*i, 0)) {
+                    let from = *index;
+                    assert_eq!(index.count, 1);
+                    let to = result.reserve_slots(1, TypeId::any());
+                    result.insts.push(Bc::Clone {
+                        from: from.first,
+                        to: to.first,
+                    });
+                    to
                 } else {
                     return Err(self.error(CErr::UndeclaredIdent(*i)));
                 }
@@ -899,13 +965,13 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     fn current_fn_body(&self) -> &FnBody {
         let frame = self.call_stack.last().unwrap();
-        let body = self
-            .ready
-            .get(frame.current_func.0)
-            .expect("Forgot to jit current function?") // index off the end
-            .as_ref()
-            .expect("Forgot to jit current function?"); // something past it so was filled in None
-        body
+        let body = self.ready.get(frame.current_func.0).unwrap();
+        body.as_ref().unwrap_or_else(|| {
+            self.write_jitted().iter().for_each(|f| println!("{}", f));
+            self.log_trace();
+            self.log_callstack();
+            panic!("Forgot to jit current function? Forgot a return instruction?")
+        })
     }
 
     // Resolve the lazy types for Arg and Ret
@@ -951,18 +1017,22 @@ impl<'a, 'p> Interp<'a, 'p> {
             println!("CACHED: {} -> {:?}", e.log(self.pool), old_result);
             return Ok(old_result.clone());
         }
-        self.push_state(DebugState::ComputeCached(e.clone()));
+        let state = DebugState::ComputeCached(e.clone());
+        self.push_state(&state);
+        let name = format!("@eval_{}@", self.anon_fn_counter);
         let fake_func: Func<'p> = Func {
-            name: Some(self.pool.intern("@cached_eval_expr@")),
+            name: Some(self.pool.intern(&name)),
             ty: self.unit_to_type(),
             body: Some(e.clone()),
             arg_names: vec![None],
         };
+        self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
+        println!("Made anon: {func_id:?} = {name}");
         let result = self.run(func_id, Value::Unit, ExecTime::Comptime)?;
         println!("COMPUTED: {} -> {:?}", e.log(self.pool), result);
         self.comptime_cache.insert(e, result.clone());
-        self.pop_state();
+        self.pop_state(state);
         Ok(result)
     }
 

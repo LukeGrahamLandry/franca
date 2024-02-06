@@ -1,7 +1,15 @@
-use std::{borrow::Cow, collections::HashMap, hash::Hash, marker::PhantomData, sync::RwLock};
+use std::{
+    borrow::Cow, collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock,
+};
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
+
+impl Debug for Ident<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "S{}", self.0)
+    }
+}
 
 /// A raw pointer that uses the reference's Hash/PartialEq implementations.
 struct Ptr<T: ?Sized>(*mut T);

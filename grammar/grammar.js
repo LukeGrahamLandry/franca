@@ -5,9 +5,11 @@ module.exports = grammar({
   rules: {
     source_file: ($) => repeat($._statement),
 
-    _statement: ($) => choice($.func_def, seq($._expr, ";"), $.assign),
-    assign: ($) =>
+    _statement: ($) =>
+      choice($.func_def, seq($._expr, ";"), $.declare, $.assign),
+    declare: ($) =>
       seq("let", $.names, optional(seq(":", $._expr)), "=", $._expr, ";"),
+    assign: ($) => seq($.names, "=", $._expr, ";"),
     block: ($) =>
       seq(
         "{",

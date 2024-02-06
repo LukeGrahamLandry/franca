@@ -42,19 +42,51 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let node = cursor.node();
         let mut cursor = node.walk();
         println!("Parse Stmt {}", node.to_sexp());
-        if node.kind() == "func_def" {
-            let func = self.parse_func(node);
-            Stmt::DeclFunc(func)
-        } else if node.kind() == "call_expr" {
-            let f = node.child(0).unwrap();
-            let f = Box::new(self.parse_expr(f.walk()));
-            let arg = node.child(1).unwrap();
-            let arg = Box::new(self.parse_expr(arg.walk()));
+        match node.kind() {
+            "func_def" => {
+                let func = self.parse_func(node);
+                Stmt::DeclFunc(func)
+            }
+            "call_expr" => {
+                let f = node.child(0).unwrap();
+                let f = Box::new(self.parse_expr(f.walk()));
+                let arg = node.child(1).unwrap();
+                let arg = Box::new(self.parse_expr(arg.walk()));
 
-            Stmt::Eval(Expr::Call(f, arg))
-        } else {
-            todo!("Wanted Stmt found {:?}", node)
+                Stmt::Eval(Expr::Call(f, arg))
+            }
+            "declare" => {
+                self.assert_literal(node.child(0).unwrap(), "let");
+                let names = self.parse_expr(node.child(1).unwrap().walk());
+                println!("{:?}", names);
+                self.assert_literal(node.child(2).unwrap(), "=");
+                let value = self.parse_expr(node.child(3).unwrap().walk());
+                println!("{:?}", value);
+                self.assert_literal(node.child(4).unwrap(), ";");
+                let name = match names {
+                    Expr::GetNamed(i) => i,
+                    _ => todo!("assign to {names:?}"),
+                };
+                Stmt::DeclVar(name, Box::new(value))
+            }
+            "assign" => {
+                let names = self.parse_expr(node.child(0).unwrap().walk());
+                self.assert_literal(node.child(1).unwrap(), "=");
+                let value = self.parse_expr(node.child(2).unwrap().walk());
+                self.assert_literal(node.child(3).unwrap(), ";");
+                let name = match names {
+                    Expr::GetNamed(i) => i,
+                    _ => todo!("assign to {names:?}"),
+                };
+                Stmt::SetNamed(name, value)
+            }
+            s => todo!("Wanted Stmt found {s}: {:?}", node),
         }
+    }
+
+    fn assert_literal(&self, node: Node, expected: &str) {
+        let name = node.utf8_text(self.src).unwrap();
+        assert_eq!(name, expected)
     }
 
     fn parse_expr(&mut self, mut cursor: TreeCursor) -> Expr<'p> {
@@ -175,18 +207,26 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             println!("body {:?}", body.to_sexp());
             let mut cursor = body.walk();
             let mut stmts = body.children_by_field_name("body", &mut cursor);
-            assert!(stmts.next().is_none()); // TODO.
-            drop(stmts);
+
+            let body_stmts: Vec<_> = stmts
+                .map(|stmt| self.parse_stmt(&mut stmt.walk()))
+                .collect();
 
             let mut entries = body.children_by_field_name("result", &mut cursor);
-            let body = if let Some(result) = entries.next() {
+            let result = if let Some(result) = entries.next() {
                 println!("Return {:?}", result.to_sexp());
                 Some(self.parse_expr(result.walk()))
             } else {
                 None
             };
             assert!(entries.next().is_none());
-            body
+
+            if body_stmts.is_empty() {
+                result
+            } else {
+                let result = result.unwrap_or_else(|| Expr::Value(Value::Unit));
+                Some(Expr::Block(body_stmts, Box::new(result)))
+            }
         } else {
             None
         };

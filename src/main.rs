@@ -39,15 +39,6 @@ macro_rules! check_cmp {
 }
 
 fn main() {
-    // run_main(
-    //     r#"
-    //         fn main(n: int()) int() = { add(add(n, n), n) }
-    //         @comptime fn int() Type = { i64 }
-    //         "#,
-    //     Value::I64(5),
-    //     Value::I64(15),
-    // );
-
     // let src = include_str!("lib/builtins.txt");
     // let src = r#"
     //     fn get(arr: &Array(T), i: i64) &T;
@@ -60,6 +51,52 @@ fn main() {
     //     // fn call(fn(Int));
     //     // call(fn = { $0 });
     // "#;
+}
+
+#[test]
+fn simple_variables() {
+    run_main(
+        r#"
+            fn main(n: i64) i64 = { 
+                let x = 10;
+                n
+            }
+            "#,
+        Value::I64(5),
+        Value::I64(5),
+    );
+
+    run_main(
+        r#"
+                fn main(n: i64) i64 = { 
+                    let x = 10;
+                    x
+                }
+                "#,
+        Value::I64(5),
+        Value::I64(10),
+    );
+    run_main(
+        r#"
+                fn main(n: i64) i64 = { 
+                    let x = n;
+                    x
+                }
+                "#,
+        Value::I64(5),
+        Value::I64(5),
+    );
+    run_main(
+        r#"
+                fn main(n: i64) i64 = { 
+                    let x = n;
+                    x = 50;
+                    x
+                }
+                "#,
+        Value::I64(5),
+        Value::I64(50),
+    );
 }
 
 // TODO: since operators are traits, i probably dont need to use a macro for this

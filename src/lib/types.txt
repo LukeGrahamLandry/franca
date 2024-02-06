@@ -11,6 +11,7 @@
 @in(@module(reflect, dep("declare_meta_types")))
 
 enum Type = TagType | EnumType | StructType | UnionType | FnType;
+// TODO: distinguish TypeInfo (this enum) and TypeId (index into a pool)
 
 // TODO: use this instead of @comptime T? 
 fn Const(Type) Type;
@@ -97,8 +98,27 @@ fn Final(T: PtrType) Type;
 /// Traits ///
 //////////////
 
-@comptime let Trait = fn(Type) bool;
-fn and(a: Trait, b: Trait) Trait;
+// A trait is (mostly) just a (named) predicate over types. 
+const Trait = { cond: fn(Type) bool, statics: []FnDecl };
+
+fn is(Check: Type, A: Trait) bool = A.cond(Check);
+
+// TODO: doc example: function whose body is a struct init expression. 
+fn and(A: Trait, B: Trait) Trait = {
+    cond: fn(T: Type) = and(A.cond(T), B.cond(T)),
+    statics: todo("merge statics"),
+};
+
+fn or(A: Trait, B: Trait) Trait = {
+    cond: fn(T: Type) = or(A.cond(T), B.cond(T)),
+    statics: todo("merge statics"),
+};
+
+fn not(A: Trait) Trait = { 
+    cond: fn(T: Type) = not(A(T).cond), 
+    statics: empty(),
+};
+
 fn same_functions(Type) Trait;
 
 /////////////////
@@ -291,15 +311,17 @@ fn Sealed(cases: []Type) EnumType;
 // Like an enum in C or Java.
 fn ValueEnum(Backing: Type, cases: [](Symbol, Backing)) Type;
 
+
+// Like an enum with a comptime known tag. 
+// Lets you write overloads for each input type seperatly 
+// but call it like there's one function of the output type. 
+fn OneOf([] Type) Type;
+
 ///////////////
 /// Structs ///
 ///////////////
 
-enum StructLayout = C | Rust | Zig | Packed | 
-
-// 
-| MagicJit
-;
+enum StructLayout = C | Rust | Zig | Packed | MagicJit;
 
 @type StructType = { FieldName: TagType, fields: OrderedMap(FieldName, Type), layout: StructLayout };
 
@@ -324,7 +346,6 @@ fn field_type(S: StructType, name: Str) ?Type = then(field_index(S, name), fn(i)
 // TODO: make sure its easy to express copy on write swift structs. 
 //       you need a way to say that mutating a field can make the parent point somewhere else? 
 
-
 // TODO: have a way to express memory on the stack with runtime known size. 
 //       they're probably evil but its weird to keep the idea a secret. 
 //       just dont allow them when targetting a language that doesnt expose that capability. 
@@ -333,48 +354,58 @@ fn field_type(S: StructType, name: Str) ?Type = then(field_index(S, name), fn(i)
 // TODO: backends should always generate an ast for the target language (not just a string),
 //       so you can easily run target specific safety checks, etc. 
 
-
 // These are used for two things:  (TODO: maybe break appart)
 //  - normal functions resolved with overloading. 
 //  - marker traits used for optional safety checking.
 // However, since they're called automatically by the compiler, its really useful to quickly check if that's needed.
 // This is just explicit caching of which have no-op or missing implementations. 
-enum AutoTrait = 
-    // `fn drop(&T)`
-    | Drop
-    // `fn copy(T) T`
-    | Copy
-    // `fn clone(&T) T`
-    | Clone
-    
+enum AutoTrait = @trait_enum {
+    // What happens when a value of this type goes out of scope? 
+    @flag_trait(Drop, fn drop(&T));
+    @flag_trait(Copy, fn copy(T) T);
+    @flag_trait(Clone, fn clone(&T) T);
+    // This type "has no self", its just a bag of bytes. 
+    // Owns no memory, has no pointers, has no-op impls of all other auto-traits. 
+    @flag_trait(Bits);
     // This type has a known constant size. It can be stored on the stack or as an array element. 
-    // `and(fn size_of() i64, fn stride_of() i64)`
-    | Sized
-    | Sync
-    | Send
-    | Move
-    | Leak
-    | Serialize
-    | Default
-    | ZeroInit
-;
+    @flag_trait(Sized, and(fn size_of() i64, fn stride_of() i64));
+    // A reference to this type can be shared between threads.
+    @flag_trait(Sync);
+    // This type can be moved to another thread (the original will not access again).
+    @flag_trait(Send);
+    // This type can be moved to another location in memory (its not self referential).
+    // This is like rust's UnPin.
+    @flag_trait(Move, fn move(T) T);
+    // If this type is leaked without calling its destructor, the only problem is that memory is not reclaimed. 
+    @flag_trait(Leak);
+    @flag_trait(Serialize);
+    // You can always create a value of this type out of thin air. 
+    @flag_trait(Default, fn default() T);
+    // A correctly sized sequence of zero bytes is a valid value of this type.
+    @flag_trait(ZeroInit, fn zero_init() T);
+    // The whole thing might be shared. Useful for deeply copy-on-write types. 
+    // Need some callback before giving out a mutable pointer to a field
+    @flag_trait(MutationCallback, fn will_mutate(&T));
+    // This type can be used in pattern matching. 
+    @flag_trait(Structured, Structured);
+};
+
+@private @tag(flag_trait, (Symbol, ?Trait));
+
+// TODO: generate the trait and an enum 
+@private @annotation
+fn trait_enum() ExprAst;
 
 enum AutoHandler = 
     // The compiler can 
     | Noop 
+    // The type does not implement the trait. 
     | Deny
     | Custom
 ;
 
 const AutoTraits = FlagSet(AutoTrait);
 
-const StructFlags = FlagSet(
-    | Bits
-    // The whole thing might be shared. 
-    // Need some callback before giving out a mutable pointer to a field
-    | CopyOnWrite
-    
-)
 
 trait StaticDotSyntax for S when {
     // Do not put methods here, those are function overloads. 
@@ -484,6 +515,9 @@ trait Ptr for Ref(_) when {
     for V with Sized(V) {
         // This is the same as cast but may be unsafe to call depending on the Flags(Ptr).
         fn deref(&Ref(V)) &V;
+        
+        // This distiction allows for copy-on-write types.
+        @auto fn deref_mut(self: &Ref(V)) &V = deref(self);
     }
     
     // TODO: some annotation for functions like this that are really pattern matching across definitions so they need to syntezise an outer thing to do that. 

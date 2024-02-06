@@ -1,3 +1,4 @@
+@in(@module(syntax, impl=core, vis=Public));
 // 
 // Annotations are macros. 
 // Writing `@name(args) target` calls `name(args, target)` at comptime. 
@@ -24,83 +25,6 @@
 //       where the interpreter calls into precompiled code if avaiable. 
 //       The compiler's runtime is always someone else's comptime. 
 // 
-// TODO: maybe split this into ast.txt and syntax.txt
-
-@module(ast, impl=core, vis=Public) {
-    // TODO: how to give each ast a uid? 
-    // TODO: how to express that these are linear types? no copy, no alias. 
-    
-    // You don't need to declare enum payloads as seperate types like this (they can be inline). 
-    // Sometimes its useful because it lets you write functions that take a specific case as a parameter.
-    enum ExprAst = Block | Call | VarAst | TupleLiteral | FnDeclAst | WithFreeVariables | CAny;
-    struct Block = { 
-        // These are run for side effects but thier results are discarded. 
-        body: []ExprAst, 
-        // TODO: nil is the same as unit so why bother? maybe you'd like to know for better error messages? 
-        /// This is returned when the block is evalutated. It's the thing at the end without a semicolon. 
-        value: ?&ExprAst,
-    };
-    struct Call = { name: &ExprAst, arg: &ExprAst };
-    struct TupleLiteral = ([]ExprAst);
-    struct FnDeclAst = { Arg: LazyType, Ret: LazyType, body: &WithFreeVariables };
-    
-    /// Same as interp::Value. 
-    enum CAny = BigNum | []CAny | {}(CAny, CAny) | Str | Type;
-    
-    /// - function body: vars=parameters
-    /// - generic impl body: vars=generic parameters
-    /// - trait definition body: vars=Self and associated types
-    struct WithFreeVariables = (Pattern, &ExprAst);
-    
-    // TODO: holy shit, why can't the parser generator take this as input??? 
-    // Name and optional type annotations that can bind values. 
-    // - `let <Pattern> = <ExprAst>;`
-    // - `fn <?Symbol>(<Pattern>) <?ExprAst> = <ExprAst>;`
-    enum Pattern = []Pattern | Binding; 
-    struct Binding = { name: ?VarAst, type: ?ExprAst };
-    
-    /// Bake comptime known values into an ast. 
-    /// This allows specialization for generics. 
-    fn bind_variables(replacements: Map(VarAst, CAny), ast: WithFreeVariables) ExprAst;
-    
-    /// Since types can be comptime expressions, places on the ast that we know must have a type might not be ready yet. 
-    /// This gives you a way to precive the difference and not just auto evaluate anything you try to look at since it might fail. 
-    enum LazyType = Finished(Type) | Pending(&ExprAst) | Infer();
-    
-    fn try_cast(LazyType) ?Type;
-    fn unwrap(LazyType) Type;
-    
-    enum VarKind = Let | Var | Const | FuncParam | GenericParam;
-    struct VarAst = { name: Symbol, uid: i64, decl: VarKind, ty: LazyType };
-    
-    /// Nil: the compiler cannot infer the type. 
-    fn expr_type(ast: &ExprAst) ?Type;
-    fn eval_expr(ast: ExprAst) CAny = eval_expr(CAny, ast);
-    /// Calling this one is better because it lets you give a type hint. 
-    fn eval_expr(T: Type, ast: ExprAst) Result(T, _);
-
-    struct CommentAst = (Str);
-    fn get_comments(ast: ExprAst) ?CommentAst;
-    
-    // TODO: might not want to provide this because then i need to keep parent ptrs all the time. 
-    fn get_parent(ast: ExprAst) ?ExprAst;
-    
-    // TODO: figure out if this is the right name. https://stackoverflow.com/questions/134887/when-to-use-or-quote-in-lisp
-    //       maybe dont bother trying to feel clever and just call it parse. 
-    /// Manually invoke the parser on a computed string. Useful for code generation when the ast api is too verbose. 
-    /// The result may have free variables that you can fill in later. 
-    @comptime 
-    fn quote(Str) AstExpr;
-    
-    
-    @pub fn same_ast(a: Str, b: Str) = assert_eq(parse_ast(a), parse_ast(b));
-    
-    // Produce a constant literal. 
-    fn cast(Type) AstExpr;
-    
-    // TODO: consistant naming
-    @pub fn function_decl(name: ?Symbol, args: Pattern, ret_type: ?AstExpr, body: ?AstExpr) FnDeclAst;
-}
 
 // TODO: maybe postfix syntax with `!` on an expression. so you could have, whatever()!await, whatever()!try, whatever()!addr, 
 //       nullish coallesing: falible!if.method()!if.other() === falible.map(fn(v) = v.method().map(fn(v) = v.other()))
@@ -108,21 +32,9 @@
 //       whatever()!unwrap, fallable!or(default) but that could be a method, i could just give in and have dot syntax.
 //       becomes obvious if i use that for fields and let you have getters so you could just return functions anyway. should just make it the default. 
 //       should it just be sugar? @a(b) === b!a
-
-struct AnnotationHandler = { Arg: T, Target: T, Ret: T, f: fn(Arg, Target) Ret };
-struct OverloadHandler = fn(Arg: ?Type, Ret: ?Type) ?FnDecl;
-struct GenericHandler = { arg_count: i64, cond: fn([] Type) bool, f: fn([] Type) AstExpr };
-
-@module(compiler, all=Public) {
-    //! You don't want fancy comptime execution to mean everything is a black box to the compiler. 
-    
-    // TODO: these are local to a module. 
-    fn annotation_handlers() {}(Symbol, []AnnotationHandler);
-    fn overload_handlers() {}(Symbol, []OverloadHandler);;
-}
+//       `something()!unsafe` instead of rust's `unsafe { something() }`
 
 // TODO: require `;` after if target is Unit? But then you can't use it as an expression. 
-@in(@module(syntax, impl=core, vis=Public));
 
 //
 // Builtin Function Annotations: 
@@ -134,6 +46,7 @@ struct GenericHandler = { arg_count: i64, cond: fn([] Type) bool, f: fn([] Type)
 // TODO: doc: `enum A = Thing` (bame = "Thing", payload = type Thing) is not the same as `enum A = Thing()` (name = "Thing", paylaod = type Unit).
 // TODO: doc: @in(...) at the top of a file for avoiding an extra indent
 
+// TODO: get rid of this. i dont like it anymore. interp should just intercept everything it needs to when bootstrapping. 
 // The target function is needed to compile the compiler. 
 // While bootstrapping the compiler, 
 // - Builtin: There is a version written in rust
@@ -145,7 +58,6 @@ fn boot(args: Builtin | Interp, target: FnDecl) FnDecl = match(args, [
     (Interp, add_flag(target, BootInterp)),
 ])
 // TODO: allow @boot on a whole module and just iterate its decls. 
-
 
 // TODO: allow leading `|` on enums so you can have them all off the end and look consistant. 
 // TODO: some way to tag the default case. give annotations a way to express that they want to access the parent and generate code in that scope. 
@@ -186,9 +98,11 @@ fn annotation(args: AnnotationArg = Replace, target: FnDeclAst) Expr = {
     target
 }
 
-fn CRes(T: Type) Type = Result(T, CompileError);
-
-fn todo_assert(cond: bool) = assert(cond, "Not yet implemented.");
+// Defines an annotation that does not generate code, it just leaves some data in the ast for other annotations. 
+// Annotations can retrive data in the form of `struct Name = Payload;`.
+// Like Rust's `#[ident(args)]` but I spell it `@ident(args)`
+@annotation @pure
+fn tag((name, payload): (Symbol, Type), target: Unit) TypeDecl;
 
 @annotation @intrinsic
 fn module(args: Expr, target: ()) !Expr;
@@ -209,6 +123,7 @@ fn assert_compile_error(args: ?CompileError, target: Block) CRes(());
 
 // TODO: @return @break @continue
 
+// TODO: handle type matching over Any.
 // TODO: not use this if target is rust or zig
 // Note: this implementation can't call methods that use match? or maybe its fine since someone else would have compiled them. 
 // TODO: rewrite to take advantage of function params being a Pattern
@@ -244,71 +159,64 @@ fn match(args: ExprAst, target: []FnDeclAst) ExprAst = {
     fold(handlers, quote("comptime_unreachable()"), join_branches)
 }
 
+// TODO: the other killer feature of this is that if you think macros are evil,
+//       maybe you can configure your ide to always show the expanded form when you click into libraries (only works for pure ones). 
+//       try to do impure annotations as a pure one that outputs a @comptime block.
+//       allow configurable `fn render(Ast) Ast;`. could format how you like too. 
+
+// TODO: support the value being an array. do enumerate if there's an extra i64 in the pattern. 
 // Loop over an iterator. 
 // This is a trivial wrapper around the `for` function that gives it a more familiar syntax. 
-@example(same_ast("@for(i, range(0, 10)) { print(i); }", "for(range(0, 10), fn(i) = { print(i); })"))
+@example(same_ast("@for(i, range(0, 10)) { print(i); }", "for(range(0, 10), fn(i) = { print(i); })"));
+@example(same_ast("@for((i, v), vec!(1, 2, 3)) { print(i, ".", v); }", "enumerate(vec!(1, 2, 3), fn(i, v) = { print(i, ".", v); })"));
 @annotation @auto @pure
 fn for((names, iter): (Pattern, AstExpr), target: WithFreeVariables) AstExpr {
+    assert(completly_matches(names, target));
     let f = function_decl(nil(), names, Unit, target);
-    call_expr(for, iter, f);
+    call_expr(for, (iter, f))
 }
 
-// TODO: move this to iter.txt
-@impl((I, T), fn next(I) ?T) {
-    fn for(iter: I, sink: fn(T)) {
-        var value: T = next(iter);
-        while(fn = ne(value, nil()), fn = {
-            sink(value);
-            value = next(iter);
-        })
-    }
-}
+// @unroll to force generating each branch of a loop?
 
-// TODO: replace the `for` syntax with this. not sure if i actually want to change the name. 
+// TODO: replace the old `for` syntax with this. not sure if i actually want to change the name. 
 // `@impl((T, U), and(allow_type(T), allow_other(U))) { ... }`
 @annotation
-fn impl((names, cond): ([] Ident, Fn), target: BlockAst) = {
-    make_fn()
-    let args = struct_type(map(names, fn(name: Symbol)=()))
+fn impl((names, cond): (Pattern, FnDeclAst), target: BlockAst) = {
+    foreach(@addr(names), fn(n)={
+        // TODO: this wont typecheck. deal with the enum.
+        assert_eq(n.type, nil(), "Generic parameters must not have type hint."); 
+        n.type = Type;
+    }); 
+    assert(can_call(names, cond));
+    todo();
 }
 
+// Conditional compilation. This can't just be normal code because toplevel doesn't run. 
+@annotation @pure
+fn when(arg: bool, target: AstExpr) AstExpr;
 
-// TODO: handle type matching over Any.
+@when(any(get_target(), Java | Cplusplus | Swift | Python | JavaScript))
+@annotation @pure
+fn throw(arg: AstExpr, target: Unit) AstExpr;
 
-/// This makes more sense as a function because you don't want to eagerly evaluate. 
+// TODO: as i do more and more of these its starting to feel like i really just want trailing closure syntax like swift/kotlin. 
+@example_ast("@if(x > 10) { print(x) }", "if(x > 10, fn = print(x))");
+@example_ast("let x: ?i64; @if(let y = x) { print(y) }", "let x: ?i64; @match(x, { fn none() = (); fn some(y) = print(y); });"));
 @annotation @auto @pure
-fn if((cond, if_true, if_false): (ExprAst, FnDecl, FnDecl), target: Unit) AstExpr {
-    panic("@if(bool, fn() T, fn() T) T) not implemented on the current backend. No default available.")
-}
+fn if(cond: ExprAst, target: BlockAst) AstExpr;
 
-// Find a type that all `types` can `cast` to. 
-// Used for typechecking branching execution paths that rejoin eventually. 
-fn resolve_fold_types(types: []Type) Result(Type, _);
+// Same as rust
+@annotation @pure
+fn vec(values: TupleAst, target: Unit) ExprAst;
 
-// TODO: move this to iter.txt
-for (T, I(_)) with is_trait(Iter, I){
-    // Call `f` on pairs from the iterator until exauhsted. 
-    fn reduce(self: I(T), f: fn(T, T) T) ?I = {
-        var rolling = @try(next(self));
-        @todo
-    }
-    
-    for U {
-        // TODO: figure out if this is left or right. 
-        fn fold(self: I(T), initial: U, f: fn(U, T) U) = {
-            var rolling = initial;
-            while(fn() T = @try(next(self)), fn(e: T) {
-                rolling = f(rolling, e);
-            })
-        }
-    }
-}
+@annotation
+fn example_ast(code: (Str, Str), target: Unit) AstExpr = todo("example <- same_ast(code)");
 
 // TODO: support destructuring in args 
 
+// TODO: replace this with Pattern
 struct FnArg = { name: ?Symbol, T: ?ExprAst, default_value: ?ExprAst };
 struct FnArgsAst = []FnArg;
-
 @invarient(fn(f: FnArgsAst) bool = nand(is_nil(name), is_nil(T)));
 
 @annotation
@@ -336,7 +244,15 @@ fn switch(args: Unit, target: FnDeclAst);
 /// (but already part of your code instead of needing an extra tool to parse it out of comments).
 // Note: we don't force type checking if not building for test currently. 
 @annotation(Collect(maybe_run_examples))
-fn example(args: FnDeclAst, target: Unit) FnDeclAst = args;
+fn example(args: ExprAst, target: Unit) FnDeclAst = {
+    @match(args) {
+        fn(args: FnDeclAst) = {
+            todo("assert arg=ret=union")
+            args
+        }
+        fn(args) = todo("wrap in fn");
+    }
+}
 
 // Run if testing
 @private fn maybe_run_examples(examples: []FnDeclAst);
@@ -356,6 +272,7 @@ fn result(args: Type, target: BlockAst) BlockAst;
 // Any time the compiler notices values of the argument type, it may choose to call `assertion`, and panic if it returns false. 
 // In optimising builds, `assertion` will never be called. 
 // `assertion` is no longer a normal function and cannot be called manually
+// TODO: footgun: need @comptime when args are types? or it would be allowed to bake those constants in and crash at runtime. 
 @annotation
 fn invarient(assertion: FnDecl, target: Unit);
 
@@ -367,11 +284,6 @@ fn invarient(assertion: FnDecl, target: Unit);
 fn unsafe_invarient(assertion: FnDecl, target: Unit) = {
     invarient(assertion, target);
 }
-
-// TODO: Result(T, E) -> (T, E)
-enum TypeStructure = Tuple(TupleType) | Struct(StructType) | Unit(Symbol);
-fn Destructure(@type T) StructuralPattern;
-fn destructure(T) StructuralPattern; 
 
 // Evaluate a fallible expression and return an error to the parent if not successful. 
 // This can't be a normal function because it has to be able to early return. 
@@ -386,6 +298,16 @@ fn try(args: ExprAst, target: ()) ExprAst = {
     
     todo()
 }
+
+@trait(Fallible, F) {
+    @static const HappyPath: Type;
+    @static const SadPath: Type;
+    
+    fn as_fallible(F) (HappyPath | SadPath);
+}
+// TODO: be careful of recursion when creating types in an invarient 
+@invarient(@comptime fn(T: Type) bool = is(?T, Fallible(HappyPath=T, SadPath=Unit)));
+@invarient(@comptime fn(T: Type, E: Type) bool = is(Result(T, E), Fallible(HappyPath=T, SadPath=E)));
 
 // Exit the current function and indicate an error. 
 // How this is expressed depends on the return type of the function. 

@@ -72,7 +72,7 @@ pub enum TypeInfo {
 }
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
-pub struct Var(usize, usize);
+pub struct Var<'p>(pub Ident<'p>, pub usize);
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum Expr<'p> {
@@ -87,7 +87,7 @@ pub enum Expr<'p> {
     StructLiteral(Vec<(Ident<'p>, Self)>),
     Closure(Box<Func<'p>>),
     // Backend only
-    GetVar(Var),
+    GetVar(Var<'p>),
 
     // Frontend only
     GetNamed(Ident<'p>),
@@ -98,11 +98,11 @@ pub enum Stmt<'p> {
     Eval(Expr<'p>),
 
     // Backend Only
-    SetVar(Var, Expr<'p>),
-    Scope(Vec<Var>, Box<Self>),
+    SetVar(Var<'p>, Expr<'p>),
+    Scope(Vec<Var<'p>>, Box<Self>),
 
     // Frontend only
-    DeclVar(Ident<'p>),
+    DeclVar(Ident<'p>, Box<Expr<'p>>),
     SetNamed(Ident<'p>, Expr<'p>),
     DeclFunc(Func<'p>),
 
@@ -167,7 +167,7 @@ pub struct Program<'p> {
 impl<'p> Stmt<'p> {
     pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            &Stmt::DeclVar(i) => format!("let {};", pool.get(i)),
+            Stmt::DeclVar(i, v) => format!("let {} = {};", pool.get(*i), v.log(pool)),
             Stmt::Eval(e) => e.log(pool),
             Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
             Stmt::Generic {
