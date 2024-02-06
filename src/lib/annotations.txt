@@ -87,6 +87,7 @@ enum AnnotationAction =
 @annotation 
 fn annotation(args: AnnotationArg = Replace, target: FnDeclAst) Expr = {
     todo_assert(eq(args, Replace));
+    // TODO: require that args are either by value or const. if you want to mutate a node, pass it in and return it. 
     // i was thinking for generics where it might happen multiple times but maybe its fine cause you eat it. 
     // its really the overload handler that needs to use it multiple times and not mutate. 
     // assert(not(mutates_args(target)), "Annotation must not mutate Ast node. Make a copy and return it instead.");
@@ -172,7 +173,7 @@ fn match(args: ExprAst, target: []FnDeclAst) ExprAst = {
 @annotation @auto @pure
 fn for((names, iter): (Pattern, AstExpr), target: WithFreeVariables) AstExpr {
     assert(completly_matches(names, target));
-    let f = function_decl(nil(), names, Unit, target);
+    let f = fn_decl(nil(), names, Unit, target);
     call_expr(for, (iter, f))
 }
 
@@ -204,6 +205,8 @@ fn throw(arg: AstExpr, target: Unit) AstExpr;
 @example_ast("let x: ?i64; @if(let y = x) { print(y) }", "let x: ?i64; @match(x, { fn none() = (); fn some(y) = print(y); });"));
 @annotation @auto @pure
 fn if(cond: ExprAst, target: BlockAst) AstExpr;
+
+@tag(intrinsic, { name: Symbol, args: Pattern, ret: Type });
 
 // Same as rust
 @annotation @pure
@@ -242,12 +245,12 @@ fn switch(args: Unit, target: FnDeclAst);
 /// Use `assert` and friends to expect certain values.
 /// Equivilent to https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html
 /// (but already part of your code instead of needing an extra tool to parse it out of comments).
-// Note: we don't force type checking if not building for test currently. 
+// TODO: don't force type checking if not building for test currently. 
 @annotation(Collect(maybe_run_examples))
 fn example(args: ExprAst, target: Unit) FnDeclAst = {
     @match(args) {
         fn(args: FnDeclAst) = {
-            todo("assert arg=ret=union")
+            todo("assert arg=ret=unit")
             args
         }
         fn(args) = todo("wrap in fn");
@@ -331,7 +334,72 @@ fn preprocess_ast(args: (), target: fn(ExprAst));
 
 // maybe use rust macro syntax to resolve ambiguity when its an expression with no postfix target. 
 
-
 // TODO: can do a really nice thing for closure interop with rust, 
 //       since i know the captures, allow expressing that as extra reference arguments
 //       so you pass in the borrow every time you call and it gives it back. 
+
+/////////////////
+/// Operators ///
+/////////////////
+
+// TODO: its a bit odd that this implies the set varient returns whatever the set function does but normal assignment is a statement.  
+//       extra important that normal doesnt flow the value through like c. 
+//       but would be more consistant if normal was an expression that returned unit. 
+//       problem with that is then chain assignment syntax is the same as c but wildly different, 
+//       but since its unit, the type checker would trivially warn you if you made that mistake. 
+/// Sugar for calling get/set means you can use it for pointer dereference!
+@example_ast("let e = arr[i];", "let e = get(arr, i);");
+@example_ast("arr[i] = e;", "set(arr, i, e);");
+@example_ast("let v = ptr[];", "let v = get(ptr);");
+@example_ast("ptr[] = v;", "set(ptr, v);");
+@operator((get, set))
+fn operator_subscript((arr, i, e): (ExprAst, ?ExprAst, ?ExprAst)) ExprAst = @match(i) {
+    fn some(i) = @match(e) {
+        fn some(e) = call_expr("set", (arr, i, e));
+        fn none() = call_expr("get", (arr, i));
+    }
+    fn none() = @match(e) {
+        fn some(e) = call_expr("set", (arr, e));
+        fn none() = call_expr("get", (arr));
+    }
+}
+
+/// Assert that blessed functions behave as thier syntax sugar would suggest. 
+@annotation(Collect(maybe_run_examples)) @pure
+fn sane_overload(arg: ExprAst, target: ()) = {
+    // TODO: kinda want named arguments for things like this where there's lots cause its logically a constructor.
+    //       maybe that means it should just be a struct and it has to wait for iterp to support that anyway.
+    fn_decl(args=unit, ret=Unit, body=call_expr("prove_sane", eval_expr(arg)))
+}
+
+// TODO: make sure rust hash maps fit because get is owned but set is reference. 
+//       i want to be able to express that without writing the trait twice. 
+//       maybe allow the methods different types but they must cast to eachother? 
+@impl((A, I, E, R), (and(fn get(&A, I) &E, fn set(&A, I, E) R))) {
+    struct SubscriptProof(A, I, E) = {
+        init: fn() A,
+        // this must be valid indicies in the initial collection (so arrays should be pre-sized). 
+        i: []I,
+        // these must be able to go in the collection but not what starts in it. 
+        e: []E,
+    }
+    
+    fn prove_sane(proof: SubscriptProof) = {
+        assert(and(eq(len(self.i), len(self.e)), gt(len(self.i), 0)));
+        let arr = proof.init();
+        // Can we put stuff in?
+        @for((i, e), (proof.i, proof.e)) {
+            assert_ne(arr[i], e);
+            arr[i] = e;
+            assert_eq(arr[i], e);
+        }
+        // Did anything get lost?
+        @for((i, e), (proof.i, proof.e)) {
+            assert_eq(arr[i], e);
+        }
+    }
+}
+
+// TODO: put these elsewhere 
+@sane_overload({ init=fn=@vec(1, 2, 3), i=@vec(0, 1, 2), e=@vec(4, 5, 6) });
+@sane_overload({ init=fn=box(1), i=@vec(unit), e=@vec(2) });

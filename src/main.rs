@@ -1,5 +1,7 @@
 #![allow(unused)]
 
+use std::time::Instant;
+
 use ast::Program;
 use interp::Value;
 use tree_sitter::Parser;
@@ -9,6 +11,25 @@ use crate::{
     parse::WalkParser,
     pool::StringPool,
 };
+
+macro_rules! log {
+    // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
+    ($($arg:tt)*) => {{
+        if cfg!(feature = "logging") {
+            print!($($arg)*);
+        }
+    }};
+}
+macro_rules! logln {
+    // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
+    ($($arg:tt)*) => {{
+        if cfg!(feature = "logging") {
+            println!($($arg)*);
+        }
+    }};
+}
+pub(crate) use log;
+pub(crate) use logln;
 
 mod ast;
 mod interp;
@@ -118,6 +139,7 @@ fn passing_tuple_to_multiargs() {
 }
 
 fn run_main(src: &str, arg: Value, expect: Value) {
+    let start = Instant::now();
     let mut p = Parser::new();
     p.set_language(tree_sitter_inferd::language());
     let pool = StringPool::default();
@@ -127,12 +149,22 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
     let result = interp.run(f, arg.clone(), ExecTime::Runtime).unwrap();
-    println!("{arg:?} -> {result:?}");
+    logln!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
-    interp.write_jitted().iter().for_each(|f| println!("{}", f));
+    interp.write_jitted().iter().for_each(|f| logln!("{}", f));
     // TODO: change this when i add assert(bool)
     let assertion_count = src.split("assert_eq(").count() - 1;
     assert_eq!(interp.assertion_count, assertion_count);
     program.log_cached_types();
-    println!("{assertion_count} assertions passed");
+    println!("{assertion_count} assertions passed.");
+    let end = Instant::now();
+    let seconds = (end - start).as_secs_f32();
+    let lines = src
+        .split('\n')
+        .filter(|s| !s.split("//").next().unwrap().is_empty())
+        .count();
+    println!(
+        "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+        lines as f32 / seconds
+    );
 }

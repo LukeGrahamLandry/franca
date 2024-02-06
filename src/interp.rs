@@ -3,11 +3,15 @@ use std::{
     collections::HashMap,
     fmt::{format, Debug},
     mem::replace,
+    ops::Deref,
     panic::Location,
 };
 
 use crate::{
-    ast::{Expr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
+    ast::{
+        Expr, FatExpr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo,
+        Var,
+    },
     pool::{Ident, StringPool},
 };
 
@@ -16,6 +20,12 @@ macro_rules! bin_int {
         let (a, b) = load_int_pair($arg);
         $res(a $op b)
     }};
+}
+
+pub enum LogTag {
+    Parsing,
+    InstLoop,
+    Jitting,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
@@ -49,6 +59,7 @@ pub enum Value {
     // This is unsed to represent a function's empty stack space.
     // Crash if you try to read one.
     Poison,
+    InterpAbsStackAddr(StackAbsoluteRange),
 
     // These are needed because they're using for bootstrapping the comptime types.
     Slice(TypeId),       // for `[]T`
@@ -70,8 +81,14 @@ impl StackOffset {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
 struct StackAbsolute(usize);
+
+#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
+pub struct StackAbsoluteRange {
+    first: StackAbsolute,
+    count: usize,
+}
 
 #[derive(Copy, Clone)]
 struct StackRange {
@@ -131,6 +148,10 @@ enum Bc<'p> {
         to: StackOffset,
     },
     Drop(StackRange),
+    AbsoluteStackAddr {
+        of: StackRange,
+        to: StackOffset,
+    },
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
 struct CallFrame<'p> {
@@ -180,7 +201,7 @@ pub struct Interp<'a, 'p> {
     builtins: Vec<Ident<'p>>,
     log_depth: usize,
     // TODO: really need to have unique ids on expressions so im not just recursively hashing it and hoping for the best
-    comptime_cache: HashMap<Expr<'p>, Value>,
+    comptime_cache: HashMap<FatExpr<'p>, Value>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     debug_trace: Vec<DebugState<'p>>,
     anon_fn_counter: usize,
@@ -192,7 +213,8 @@ pub enum DebugState<'p> {
     OuterCall(FuncId, Value),
     JitToBc(FuncId, ExecTime),
     RunInstLoop(FuncId),
-    ComputeCached(Expr<'p>),
+    ComputeCached(FatExpr<'p>),
+    ResolveFnType(FuncId, LazyType<'p>, LazyType<'p>),
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +233,14 @@ enum CErr<'p> {
     Ice(&'static str),
     LeakedValue,
     StackDepthLimit,
+    AddrRvalue(FatExpr<'p>),
+}
+
+// Just in case im stupid and forget to unwrap one somewhere.
+impl<'p> Drop for CompileError<'p> {
+    fn drop(&mut self) {
+        logln!("COMPILE ERROR: {:?} (Internal: {})", self.reason, self.loc);
+    }
 }
 
 // TODO: rn these eat any calls. no overload checking.
@@ -231,6 +261,7 @@ const BUILTINS: &[&str] = &[
     "tuple",
     "assert_eq",
     "is_comptime",
+    "get",
 ];
 
 // TODO: use this for op call builtin to avoid a runtime hashmap lookup.
@@ -308,8 +339,8 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     #[track_caller]
     fn log_trace(&self) {
-        println!("=== TRACE ===");
-        println!("{}", Location::caller());
+        logln!("=== TRACE ===");
+        logln!("{}", Location::caller());
         let show_f = |func: FuncId| {
             format!(
                 "f{}:{:?}:{}",
@@ -320,20 +351,28 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
 
         for (i, s) in self.debug_trace.iter().enumerate() {
-            print!("{i}");
+            log!("{i}");
             match s {
                 DebugState::OuterCall(f, arg) => {
-                    print!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
+                    log!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
                 }
                 DebugState::JitToBc(f, when) => {
-                    print!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
+                    log!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
                 }
-                DebugState::RunInstLoop(f) => print!("| Loop Insts  | {}", show_f(*f)),
-                DebugState::ComputeCached(e) => print!("| Cache Eval  | {}", e.log(self.pool)),
+                DebugState::RunInstLoop(f) => log!("| Loop Insts  | {}", show_f(*f)),
+                DebugState::ComputeCached(e) => log!("| Cache Eval  | {}", e.log(self.pool)),
+                DebugState::ResolveFnType(f, arg, ret) => {
+                    log!(
+                        "| Resolve Type| {} is fn({}) {}",
+                        show_f(*f),
+                        arg.log(self.pool),
+                        ret.log(self.pool)
+                    )
+                }
             }
-            println!(";")
+            logln!(";")
         }
-        println!("=============");
+        logln!("=============");
     }
 
     pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) -> Res<'p, ()> {
@@ -409,7 +448,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         loop {
             let i = self.next_inst();
             self.log_stack();
-            println!("I: {:?}", i);
+            logln!("I: {:?}", i);
             match i {
                 &Bc::CallDirect { f, ret, arg } => {
                     // preincrement our ip because ret doesn't do it.
@@ -454,9 +493,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.log_callstack();
                     let value = self.take_slots(slot);
                     let frame = self.call_stack.pop().unwrap();
-                    println!(
+                    logln!(
                         "return from {:?} --- {:?} --- to {:?} count:{}",
-                        slot, value, frame.return_slot, frame.return_count
+                        slot,
+                        value,
+                        frame.return_slot,
+                        frame.return_count
                     );
 
                     match frame.return_count.cmp(&1) {
@@ -530,6 +572,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     self.bump_ip();
                 }
+                &Bc::AbsoluteStackAddr { of, to } => {
+                    let ptr = self.range_to_index(of);
+                    *self.get_slot_mut(to) = Value::InterpAbsStackAddr(ptr);
+                    self.bump_ip();
+                }
             }
         }
         self.pop_state(state);
@@ -537,7 +584,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
-        println!("runtime_builtin: {name} {arg:?}");
+        logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             // Construct a tuple type from the arguments
             "Tuple" => {
@@ -557,6 +604,20 @@ impl<'a, 'p> Interp<'a, 'p> {
                 assert_eq!(arg, Value::Unit);
                 let when = self.call_stack.last().unwrap().when;
                 Value::Bool(when == ExecTime::Comptime)
+            }
+            "get" => {
+                let addr = self.to_stack_addr(arg);
+                if addr.count == 1 {
+                    let value = self.value_stack[addr.first.0].clone();
+                    assert_ne!(value, Value::Poison);
+                    value
+                } else {
+                    let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
+                    Value::Tuple {
+                        container_type: TypeId::any(),
+                        values: values.to_vec(),
+                    }
+                }
             }
             _ => {
                 if let Some(value) = runtime_builtin(name, arg.clone()) {
@@ -624,28 +685,28 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn log_stack(&self) {
-        print!("STACK ");
+        log!("STACK ");
         let frame = self.call_stack.last().unwrap();
         for i in 0..frame.stack_base.0 {
             if self.value_stack[i] != Value::Poison {
-                print!("({i}|{:?}), ", self.value_stack[i]);
+                log!("({i}|{:?}), ", self.value_stack[i]);
             }
         }
         for i in frame.stack_base.0..self.value_stack.len() {
             if self.value_stack[i] != Value::Poison {
                 let slot = i - frame.stack_base.0;
-                print!("[{i}|${slot}|{:?}], ", self.value_stack[i]);
+                log!("[{i}|${slot}|{:?}], ", self.value_stack[i]);
             }
         }
-        println!("END");
+        logln!("END");
     }
 
     fn log_callstack(&self) {
-        print!("CALLS ");
+        log!("CALLS ");
         for frame in &self.call_stack {
-            print!("[{}], ", self.pool.get(frame.debug_name));
+            log!("[{}], ", self.pool.get(frame.debug_name));
         }
-        println!("END");
+        logln!("END");
     }
 
     fn bump_ip(&mut self) {
@@ -695,6 +756,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         StackAbsolute(frame.stack_base.0 + slot.0)
     }
 
+    fn range_to_index(&mut self, slot: StackRange) -> StackAbsoluteRange {
+        StackAbsoluteRange {
+            first: self.slot_to_index(slot.first),
+            count: slot.count,
+        }
+    }
+
     // why the fuck does result must use not warn me
     fn ensure_compiled(&mut self, FuncId(index): FuncId, when: ExecTime) -> Res<'p, ()> {
         if let Some(Some(_)) = self.ready.get(index) {
@@ -708,14 +776,14 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         let mut func = self.program.funcs[index].clone();
         self.log_depth += 1;
-        println!(
+        logln!(
             "{} Start JIT: {:?} {}",
             "=".repeat(self.log_depth),
             FuncId(index),
             func.synth_name(self.pool)
         );
-        println!("AST:");
-        println!("{:?}", func.body.as_ref().map(|b| b.log(self.pool)));
+        logln!("AST:");
+        logln!("{:?}", func.body.as_ref().map(|b| b.log(self.pool)));
         self.infer_types(FuncId(index));
         let mut result = FnBody {
             insts: vec![],
@@ -726,7 +794,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             slot_types: vec![TypeId::any(); func.arg_names.len()],
             func: FuncId(index),
         };
-        println!("{:?}", func);
+        logln!("{:?}", func);
         let body = func.body.as_ref().expect("fn body");
         let return_value = self.compile_expr(&mut result, body)?;
 
@@ -745,9 +813,9 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         result.insts.push(Bc::Ret(return_value));
 
-        println!("{:?}", result);
+        logln!("{:?}", result);
         self.ready[index] = Some(result);
-        println!(
+        logln!(
             "{} Done JIT: {:?} {}",
             "=".repeat(self.log_depth),
             FuncId(index),
@@ -825,7 +893,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::Call(f, arg) => {
                 let arg = self.compile_expr(result, arg)?;
 
-                if let Expr::GetNamed(i) = f.as_ref() {
+                if let Expr::GetNamed(i) = f.as_ref().deref() {
                     if let Some(f) = self.lookup_unique_func(*i) {
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
@@ -881,7 +949,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // else: fallthrough
                 }
 
-                println!("dynamic {}", f.log(self.pool));
+                logln!("dynamic {}", f.log(self.pool));
                 let f = self.compile_expr(result, f)?;
                 assert_eq!(f.count, 1);
                 // TODO: not all function ptrs have 1 return value
@@ -967,7 +1035,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     });
                     to
                 } else {
-                    println!("UNDECLARED IDENT: {}", self.pool.get(*i));
+                    logln!("UNDECLARED IDENT: {}", self.pool.get(*i));
                     return Err(self.error(CErr::UndeclaredIdent(*i)));
                 }
             }
@@ -980,6 +1048,33 @@ impl<'a, 'p> Interp<'a, 'p> {
                     value: value.clone(),
                 });
                 to
+            }
+            Expr::SuffixMacro(macro_name, arg) => {
+                let name = self.pool.get(*macro_name);
+                match name {
+                    "addr" => {
+                        match arg.deref().deref() {
+                            // TODO: copy-n-paste
+                            Expr::GetNamed(i) => {
+                                let stack_slot = if let Some(index) = result.vars.get(&Var(*i, 0)) {
+                                    *index
+                                } else {
+                                    logln!("UNDECLARED IDENT: {}", self.pool.get(*i));
+                                    return Err(self.error(CErr::UndeclaredIdent(*i)));
+                                };
+
+                                let addr_slot = result.reserve_slots(1, TypeId::any());
+                                result.push(Bc::AbsoluteStackAddr {
+                                    of: stack_slot,
+                                    to: addr_slot.first,
+                                });
+                                addr_slot
+                            }
+                            _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
+                        }
+                    }
+                    _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
+                }
             }
         })
     }
@@ -1014,7 +1109,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let frame = self.call_stack.last().unwrap();
         let body = self.ready.get(frame.current_func.0).unwrap();
         body.as_ref().unwrap_or_else(|| {
-            self.write_jitted().iter().for_each(|f| println!("{}", f));
+            self.write_jitted().iter().for_each(|f| logln!("{}", f));
             self.log_trace();
             self.log_callstack();
             panic!("Forgot to jit current function? Forgot a return instruction?")
@@ -1025,7 +1120,9 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn infer_types(&mut self, func: FuncId) -> Res<'p, ()> {
         match self.program.funcs[func.0].ty.clone() {
             LazyFnType::Pending { arg, ret } => {
-                println!("RESOLVE: Ret of {func:?}");
+                let state = DebugState::ResolveFnType(func, arg.clone(), ret.clone());
+                self.push_state(&state);
+                logln!("RESOLVE: Ret of {func:?}");
                 let ret = match ret {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(e) => {
@@ -1035,7 +1132,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     LazyType::Finished(id) => id, // easy
                 };
                 // TODO: copy-n-paste
-                println!("RESOLVE: Arg of {func:?}");
+                logln!("RESOLVE: Arg of {func:?}");
                 let arg = match arg {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(e) => {
@@ -1045,6 +1142,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     LazyType::Finished(id) => id, // easy
                 };
                 self.program.funcs[func.0].ty = LazyFnType::Finished(arg, ret);
+                self.pop_state(state);
             }
             LazyFnType::Finished(_, _) => {} // easy
         }
@@ -1059,9 +1157,9 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // TODO: fast path for builtin type identifiers
-    fn cached_eval_expr(&mut self, e: Expr<'p>) -> Res<'p, Value> {
+    fn cached_eval_expr(&mut self, e: FatExpr<'p>) -> Res<'p, Value> {
         if let Some(old_result) = self.comptime_cache.get(&e) {
-            println!("CACHED: {} -> {:?}", e.log(self.pool), old_result);
+            logln!("CACHED: {} -> {:?}", e.log(self.pool), old_result);
             return Ok(old_result.clone());
         }
         let state = DebugState::ComputeCached(e.clone());
@@ -1076,9 +1174,9 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
-        println!("Made anon: {func_id:?} = {name}");
+        logln!("Made anon: {func_id:?} = {name}");
         let result = self.run(func_id, Value::Unit, ExecTime::Comptime)?;
-        println!("COMPUTED: {} -> {:?}", e.log(self.pool), result);
+        logln!("COMPUTED: {} -> {:?}", e.log(self.pool), result);
         self.comptime_cache.insert(e, result.clone());
         self.pop_state(state);
         Ok(result)
@@ -1133,6 +1231,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         let values = self.to_seq(value)?;
         assert_eq!(values.len(), 2);
         Ok((values[0].clone(), values[1].clone()))
+    }
+
+    fn to_stack_addr(&self, value: Value) -> StackAbsoluteRange {
+        if let Value::InterpAbsStackAddr(r) = value {
+            r
+        } else {
+            panic!("Expected InterpAbsStackAddr found {:?}", value)
+        }
     }
 }
 
@@ -1225,6 +1331,7 @@ impl Debug for Bc<'_> {
             Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
             Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
             Bc::Drop(i) => write!(f, "drop({:?});", i)?,
+            Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of)?,
         }
         Ok(())
     }

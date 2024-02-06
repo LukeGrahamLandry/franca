@@ -1,3 +1,5 @@
+use tree_sitter::Point;
+
 use crate::{
     interp::Value,
     pool::{Ident, StringPool},
@@ -7,7 +9,7 @@ use std::{
     fmt::{format, Debug},
     hash::Hash,
     marker::PhantomData,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     rc::Rc,
     sync::RwLock,
 };
@@ -83,15 +85,16 @@ pub struct Var<'p>(pub Ident<'p>, pub usize);
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum Expr<'p> {
     Value(Value),
-    Call(Box<Self>, Box<Self>),
-    Block(Vec<Stmt<'p>>, Box<Self>),
-    IfElse(Box<Self>, Box<Self>, Box<Self>),
-    Array(Vec<Self>),
-    Tuple(Vec<Self>),
-    RefType(Box<Self>),
-    EnumLiteral(Vec<(Ident<'p>, Self)>),
-    StructLiteral(Vec<(Ident<'p>, Self)>),
+    Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
+    Block(Vec<Stmt<'p>>, Box<FatExpr<'p>>),
+    IfElse(Box<Self>, Box<FatExpr<'p>>, Box<FatExpr<'p>>),
+    Array(Vec<FatExpr<'p>>),
+    Tuple(Vec<FatExpr<'p>>),
+    RefType(Box<FatExpr<'p>>),
+    EnumLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
+    StructLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
     Closure(Box<Func<'p>>),
+    SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     // Backend only
     GetVar(Var<'p>),
 
@@ -99,24 +102,43 @@ pub enum Expr<'p> {
     GetNamed(Ident<'p>),
 }
 
+#[derive(Clone, Debug, Eq)]
+pub struct FatExpr<'p> {
+    pub expr: Expr<'p>,
+    pub loc: Point,
+    pub id: usize,
+}
+
+impl PartialEq for FatExpr<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Hash for FatExpr<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(self.id)
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum Stmt<'p> {
     Noop,
-    Eval(Expr<'p>),
+    Eval(FatExpr<'p>),
 
     // Backend Only
-    SetVar(Var<'p>, Expr<'p>),
+    SetVar(Var<'p>, FatExpr<'p>),
     Scope(Vec<Var<'p>>, Box<Self>),
 
     // Frontend only
-    DeclVar(Ident<'p>, Box<Expr<'p>>),
-    SetNamed(Ident<'p>, Expr<'p>),
+    DeclVar(Ident<'p>, Box<FatExpr<'p>>),
+    SetNamed(Ident<'p>, FatExpr<'p>),
     DeclFunc(Func<'p>),
 
     /// for <free> with <cond> { <definitions> }
     Generic {
         free: Ident<'p>,
-        cond: Expr<'p>,
+        cond: FatExpr<'p>,
         definitions: Box<Self>,
     },
 }
@@ -124,9 +146,9 @@ pub enum Stmt<'p> {
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
-    pub name: Option<Ident<'p>>, // it might be an annonomus closure
-    pub ty: LazyFnType<'p>,      // We might not have typechecked yet.
-    pub body: Option<Expr<'p>>,  // It might be a forward declaration / ffi.
+    pub name: Option<Ident<'p>>,   // it might be an annonomus closure
+    pub ty: LazyFnType<'p>,        // We might not have typechecked yet.
+    pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
 }
 
@@ -152,7 +174,7 @@ pub enum LazyFnType<'p> {
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
 pub enum LazyType<'p> {
     Infer,
-    PendingEval(Expr<'p>),
+    PendingEval(FatExpr<'p>),
     Finished(TypeId),
 }
 
@@ -205,7 +227,7 @@ impl<'p> LazyFnType<'p> {
         }
     }
 
-    pub fn of(arg_type: Option<Expr<'p>>, return_type: Option<Expr<'p>>) -> LazyFnType<'p> {
+    pub fn of(arg_type: Option<FatExpr<'p>>, return_type: Option<FatExpr<'p>>) -> LazyFnType<'p> {
         let arg = match &return_type {
             Some(arg) => LazyType::PendingEval(arg.clone()),
             None => LazyType::Infer,
@@ -327,11 +349,11 @@ impl<'p> Program<'p> {
     }
 
     pub fn log_cached_types(&self) {
-        println!("=== CACHED TYPES ===");
+        logln!("=== CACHED TYPES ===");
         for (i, ty) in self.types.iter().enumerate() {
-            println!("- id({i}) = {} = {:?}", self.log_type(TypeId(i)), ty);
+            logln!("- id({i}) = {} = {:?}", self.log_type(TypeId(i)), ty);
         }
-        println!("====================");
+        logln!("====================");
     }
 
     pub fn slot_count(&self, ty: TypeId) -> usize {
@@ -407,10 +429,25 @@ impl<'p> Program<'p> {
             Value::Slice(_) => todo!(),
             Value::Map(_, _) => todo!(),
             Value::Symbol(_) => todo!(),
+            Value::InterpAbsStackAddr(_) => TypeId::any(),
         }
     }
 
     pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
         self.types[ty.0] == expect
+    }
+}
+
+impl<'p> Deref for FatExpr<'p> {
+    type Target = Expr<'p>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.expr
+    }
+}
+
+impl<'p> DerefMut for FatExpr<'p> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.expr
     }
 }

@@ -1,6 +1,6 @@
-use std::rc::Rc;
+use std::{ops::Deref, rc::Rc};
 
-use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
+use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
 
 // TODO: this sucks ass. very possible im just using the api wrong because i didn't read the docs, i just looked at the functions i could call.
 //       or maybe the anti-parser-generator people were right.
@@ -9,7 +9,7 @@ use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 // I FUCKING TAKE IT BACK I HATE TREE SITTER SO MUCH
 
 use crate::{
-    ast::{Annotation, Expr, Func, LazyFnType, LazyType, Stmt},
+    ast::{Annotation, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt},
     interp::Value,
     pool::{Ident, StringPool},
 };
@@ -17,37 +17,48 @@ use crate::{
 pub struct WalkParser<'a, 'p> {
     pool: &'a StringPool<'p>,
     src: &'a [u8],
+    expr_id: usize,
 }
 
-fn print_but_not_fucking_stupid(src: &[u8], depth: usize, node: Node) {
-    print!("{} {}", "=".repeat(depth), node.kind());
-    if node.kind() == "identifier" {
-        print!(" {}", node.utf8_text(src).unwrap());
+fn print_but_not_fucking_stupid(
+    child_id: usize,
+    src: &[u8],
+    depth: usize,
+    node: Node,
+    limit: usize,
+) {
+    log!("{}({child_id}): {}", "=".repeat(depth * 2), node.kind());
+    if node.kind() == "identifier" || node.kind() == "names" {
+        log!(" |{}|", node.utf8_text(src).unwrap());
     }
     if node.start_position().row != node.end_position().row {
-        println!(
+        logln!(
             "   [Lines {} to {}]",
-            node.start_position().row,
-            node.end_position().row
+            node.start_position().row + 1,
+            node.end_position().row + 1
         );
     } else {
-        println!("   [Line {}]", node.start_position().row);
+        logln!("   [Line {}]", node.start_position().row + 1);
     }
 
-    for child in node.children(&mut node.walk()) {
-        print_but_not_fucking_stupid(src, depth + 1, child);
+    if limit == 0 {
+        return;
+    }
+    for (i, child) in node.children(&mut node.walk()).enumerate() {
+        print_but_not_fucking_stupid(i, src, depth + 1, child, limit - 1);
     }
 }
 
 impl<'a, 'p> WalkParser<'a, 'p> {
     pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<Stmt<'p>> {
-        println!("SRC:\n{src}");
+        logln!("SRC:\n{src}");
         let tree = p.parse(src, None).unwrap();
-        println!("PARSE:\n{}", tree.root_node().to_sexp());
-        print_but_not_fucking_stupid(src.as_bytes(), 1, tree.root_node());
+        logln!("PARSE:\n{}", tree.root_node().to_sexp());
+        print_but_not_fucking_stupid(0, src.as_bytes(), 1, tree.root_node(), 9999);
         let mut p = WalkParser {
             pool,
             src: src.as_bytes(),
+            expr_id: 0,
         };
         let mut tree = tree.walk();
         tree.goto_first_child();
@@ -57,63 +68,64 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             stmts.push(p.parse_stmt(&mut tree));
         }
         for s in &stmts {
-            println!("finished stmt: {}", s.log(p.pool))
+            logln!("finished stmt: {}", s.log(p.pool))
         }
         stmts
     }
 
     fn parse_stmt(&mut self, cursor: &mut TreeCursor) -> Stmt<'p> {
         let node = cursor.node();
+        if node.is_error() || node.is_missing() {
+            panic!(
+                "PARSE ERROR: {} to {}",
+                node.start_position(),
+                node.end_position()
+            );
+        }
         let mut cursor = node.walk();
-        println!("Parse Stmt {}", node.to_sexp());
+        // logln!("Parse Stmt {}", node.to_sexp());
+        logln!("PARSE STMT:");
+        print_but_not_fucking_stupid(0, self.src, 0, node, 2);
         let stmt = match node.kind() {
             "func_def" => {
                 let func = self.parse_func(node);
                 Stmt::DeclFunc(func)
             }
-            "call_expr" => {
-                let f = node.child(0).unwrap();
-                let f = Box::new(self.parse_expr(f.walk()));
-                let arg = node.child(1).unwrap();
-                let arg = Box::new(self.parse_expr(arg.walk()));
-
-                Stmt::Eval(Expr::Call(f, arg))
-            }
+            "expr" => Stmt::Eval(self.parse_expr(cursor)),
             "declare" => {
                 self.assert_literal(node.child(0).unwrap(), "let");
                 let names = self.parse_expr(node.child(1).unwrap().walk());
-                println!("{:?}", names);
                 self.assert_literal(node.child(2).unwrap(), "=");
                 let value = self.parse_expr(node.child(3).unwrap().walk());
-                println!("{:?}", value);
-                let name = match names {
+                let name = match names.deref() {
                     Expr::GetNamed(i) => i,
                     _ => todo!("assign to {names:?}"),
                 };
-                Stmt::DeclVar(name, Box::new(value))
+                Stmt::DeclVar(*name, Box::new(value))
             }
             "assign" => {
                 let names = self.parse_expr(node.child(0).unwrap().walk());
                 self.assert_literal(node.child(1).unwrap(), "=");
                 let value = self.parse_expr(node.child(2).unwrap().walk());
-                let name = match names {
+                let name = match names.deref() {
                     Expr::GetNamed(i) => i,
                     _ => todo!("assign to {names:?}"),
                 };
-                Stmt::SetNamed(name, value)
+                Stmt::SetNamed(*name, value)
             }
             ";" => Stmt::Noop,
             s => {
                 if let Some(parent) = node.parent() {
-                    println!("ERROR PARENT:");
-                    println!("{}", parent.utf8_text(self.src).unwrap());
-                    println!("ERROR TEXT:");
-                    println!("{}", node.utf8_text(self.src).unwrap());
+                    logln!("ERROR PARENT:");
+                    logln!("{}", parent.utf8_text(self.src).unwrap());
+                    logln!("ERROR TEXT:");
+                    logln!("{}", node.utf8_text(self.src).unwrap());
                 }
                 todo!("Wanted Stmt found {s}: {:?}\n {}", node, node.to_sexp())
             }
         };
-        println!("STMT: {stmt:?}");
+        logln!("GOT STMT: {stmt:?}");
+        logln!("================");
         stmt
     }
 
@@ -122,21 +134,63 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         assert_eq!(name, expected)
     }
 
-    fn parse_expr(&mut self, mut cursor: TreeCursor) -> Expr<'p> {
+    fn parse_expr(&mut self, mut cursor: TreeCursor) -> FatExpr<'p> {
         let node = cursor.node();
-        println!("Parse Expr: {:?}", cursor.node().to_sexp());
+        logln!("PARSE EXPR");
+        print_but_not_fucking_stupid(0, self.src, 0, node, 3);
+        logln!("=============");
+        if node.is_error() || node.is_missing() {
+            panic!("PARSE ERROR: {}", node.start_position());
+        }
+        let expr = if node.kind() == "expr" {
+            let expr = self.parse_expr_inner(node.child(0).unwrap().walk());
+
+            let mut bang = node
+                .children(&mut cursor)
+                .filter(|n| n.kind() == "suffix_macro");
+            let macro_node = bang.next();
+            logln!("suffix macro is {:?}", macro_node);
+            let macro_name = macro_node.map(|result| {
+                self.assert_literal(result.child(0).unwrap(), "!");
+                self.parse_expr(result.child(1).unwrap().walk())
+            });
+            assert!(bang.next().is_none());
+
+            match macro_name {
+                Some(name_expr) => {
+                    if let &Expr::GetNamed(i) = name_expr.deref() {
+                        self.expr(Expr::SuffixMacro(i, Box::new(expr)), name_expr.loc)
+                    } else {
+                        panic!("Suffix macro must be an identifier not {name_expr:?}")
+                    }
+                }
+                None => expr,
+            }
+        } else {
+            // TODO: try to never get here because it probably means there's somewhere you cant do `expr!thing`.
+            self.parse_expr_inner(cursor)
+        };
+        logln!("FOUND EXPR: {:?}", expr.log(self.pool));
+        logln!("=============");
+        expr
+    }
+
+    fn parse_expr_inner(&mut self, mut cursor: TreeCursor) -> FatExpr<'p> {
+        let node = cursor.node();
+        logln!("Parse Expr: {:?}", cursor.node().to_sexp());
         match node.kind() {
             "identifier" => {
                 let name = node.utf8_text(self.src).unwrap();
                 let name = self.pool.intern(name);
-                Expr::GetNamed(name)
+                self.expr(Expr::GetNamed(name), node.start_position())
             }
             "type_expr" => {
                 let child = node.child(0).unwrap();
                 let kind = child.kind();
                 if kind == "&" {
                     let inner = node.child(1).unwrap();
-                    Expr::RefType(Box::new(self.parse_expr(inner.walk())))
+                    let e = Expr::RefType(Box::new(self.parse_expr(inner.walk())));
+                    self.expr(e, node.start_position())
                 } else {
                     todo!("Unknown typeexpr kind {kind}");
                 }
@@ -149,19 +203,23 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                         child.kind() != "(" && child.kind() != ")" && child.kind() != ","
                     }) // TODO: wtf
                     .map(|child| self.parse_expr(child.walk()));
-                Expr::Tuple(args.collect())
+                let e = Expr::Tuple(args.collect());
+                self.expr(e, node.start_position())
             }
             "closure_expr" => {
                 let func = self.parse_func(node);
                 assert!(func.body.is_some(), "CLOSURE MISSING BODY: \n{:?}", func);
-                Expr::Closure(Box::new(func))
+                self.expr(Expr::Closure(Box::new(func)), node.start_position())
             }
             "call_expr" => {
                 let f = node.child(0).unwrap();
                 let args = node.child(1).unwrap();
                 let f = self.parse_expr(f.walk());
                 let args = self.parse_expr(args.walk());
-                Expr::Call(Box::new(f), Box::new(args))
+                self.expr(
+                    Expr::Call(Box::new(f), Box::new(args)),
+                    node.start_position(),
+                )
             }
             "names" => {
                 let mut cursor = node.walk();
@@ -175,15 +233,45 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "number" => {
                 let text = node.utf8_text(self.src).unwrap();
                 match text.parse::<i64>() {
-                    Ok(i) => Expr::Value(Value::I64(i)),
+                    Ok(i) => self.expr(Expr::Value(Value::I64(i)), node.start_position()),
                     Err(e) => todo!("{:?}", e),
                 }
             }
-            _ => todo!("parse expr for {}: {:?}", node.kind(), node.to_sexp()),
+            "block" => {
+                let mut cursor = node.walk();
+                let mut stmts = node.children_by_field_name("body", &mut cursor);
+
+                let body_stmts: Vec<_> = stmts
+                    .map(|stmt| self.parse_stmt(&mut stmt.walk()))
+                    .collect();
+
+                let mut entries = node.children_by_field_name("result", &mut cursor);
+                let result = if let Some(result) = entries.next() {
+                    logln!("Return {:?}", result.to_sexp());
+                    Some(self.parse_expr(result.walk()))
+                } else {
+                    None
+                };
+                assert!(entries.next().is_none());
+
+                if body_stmts.is_empty() {
+                    result
+                        .unwrap_or_else(|| self.expr(Expr::Value(Value::Unit), node.end_position()))
+                } else {
+                    let result = result.unwrap_or_else(|| {
+                        self.expr(Expr::Value(Value::Unit), node.end_position())
+                    });
+                    self.expr(
+                        Expr::Block(body_stmts, Box::new(result)),
+                        node.start_position(),
+                    )
+                }
+            }
+            _ => todo!("parse expr for {}", node.kind()),
         }
     }
 
-    fn parse_binding(&mut self, arg: Node<'_>) -> (Option<Ident<'p>>, Option<Expr<'p>>) {
+    fn parse_binding(&mut self, arg: Node<'_>) -> (Option<Ident<'p>>, Option<FatExpr<'p>>) {
         assert_eq!(arg.kind(), "binding_type");
         let mut cursor = arg.walk();
 
@@ -193,8 +281,8 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         }
 
         let ty = arg.child(2).map(|result| self.parse_expr(result.walk()));
-        if let Expr::GetNamed(name) = name {
-            (Some(name), ty)
+        if let Expr::GetNamed(name) = name.deref() {
+            (Some(*name), ty)
         } else {
             panic!("expected argument name found {}", name.log(self.pool));
         }
@@ -211,8 +299,6 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         assert!(entries.next().is_none());
         drop(entries);
 
-        println!("Parse func_def {}", node.to_sexp());
-
         let mut entries = node.children_by_field_name("proto", &mut cursor);
         let proto = entries.next().unwrap();
         assert!(entries.next().is_none());
@@ -228,7 +314,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let mut arg_names: Vec<Option<Ident>> = vec![];
         let mut args = proto.children_by_field_name("params", &mut cursor);
         for arg in args {
-            println!("Arg: {}", arg.to_sexp());
+            logln!("Arg: {}", arg.to_sexp());
             let (names, ty) = self.parse_binding(arg);
             arg_names.push(names);
         }
@@ -237,29 +323,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
 
         let mut entries = node.children_by_field_name("body", &mut cursor);
         let body = if let Some(body) = entries.next() {
-            println!("body {:?}", body.to_sexp());
-            let mut cursor = body.walk();
-            let mut stmts = body.children_by_field_name("body", &mut cursor);
+            logln!("FUNCTION BODY");
+            print_but_not_fucking_stupid(0, self.src, 0, body, 3);
+            logln!("=============");
 
-            let body_stmts: Vec<_> = stmts
-                .map(|stmt| self.parse_stmt(&mut stmt.walk()))
-                .collect();
-
-            let mut entries = body.children_by_field_name("result", &mut cursor);
-            let result = if let Some(result) = entries.next() {
-                println!("Return {:?}", result.to_sexp());
-                Some(self.parse_expr(result.walk()))
-            } else {
-                None
-            };
-            assert!(entries.next().is_none());
-
-            if body_stmts.is_empty() {
-                result
-            } else {
-                let result = result.unwrap_or_else(|| Expr::Value(Value::Unit));
-                Some(Expr::Block(body_stmts, Box::new(result)))
-            }
+            Some(self.parse_expr(body.walk()))
         } else {
             None
         };
@@ -271,7 +339,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let mut annotations = vec![];
 
         for annotation in entries {
-            println!("TODO annotation {:?}", annotation.to_sexp());
+            logln!("TODO annotation {:?}", annotation.to_sexp());
             let name = annotation.child(0).unwrap();
             let name = self.pool.intern(name.utf8_text(self.src).unwrap());
             annotations.push(Annotation { name, args: None })
@@ -282,6 +350,15 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             body,
             arg_names,
             annotations,
+        }
+    }
+
+    fn expr(&mut self, expr: Expr<'p>, loc: Point) -> FatExpr<'p> {
+        self.expr_id += 1;
+        FatExpr {
+            expr,
+            loc,
+            id: self.expr_id,
         }
     }
 
