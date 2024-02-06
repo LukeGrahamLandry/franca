@@ -148,10 +148,11 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     let mut interp = Interp::new(&pool, &mut program);
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
-    let result = interp.run(f, arg.clone(), ExecTime::Runtime).unwrap();
+    let result = interp.run(f, arg.clone(), ExecTime::Runtime);
+    logln!("{}", interp.write_jitted());
+    let result = result.unwrap();
     logln!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
-    interp.write_jitted().iter().for_each(|f| logln!("{}", f));
     // TODO: change this when i add assert(bool)
     let assertion_count = src.split("assert_eq(").count() - 1;
     assert_eq!(interp.assertion_count, assertion_count);

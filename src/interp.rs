@@ -242,12 +242,18 @@ enum CErr<'p> {
     LeakedValue,
     StackDepthLimit,
     AddrRvalue(FatExpr<'p>),
+    TypeError(&'static str, Value),
 }
 
 // Just in case im stupid and forget to unwrap one somewhere.
+// TODO: why am i not getting must use warnings from the result?
+// TODO: i need better formating for errors because rn it prints the entire stack of poisons
+//       the benifit of this drop even when no bugs is it puts the actual problem under my giant log message
 impl<'p> Drop for CompileError<'p> {
     fn drop(&mut self) {
-        logln!("COMPILE ERROR: {:?} (Internal: {})", self.reason, self.loc);
+        println!("=============");
+        println!("COMPILE ERROR: {:?} (Internal: {})", self.reason, self.loc);
+        println!("=============");
     }
 }
 
@@ -276,6 +282,9 @@ const BUILTINS: &[&str] = &[
     "Ptr",
     "is_oob_stack",
     "slice",
+    "alloc",
+    "free",
+    "print",
 ];
 
 // TODO: use this for op call builtin to avoid a runtime hashmap lookup.
@@ -432,7 +441,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.value_stack.push(Value::Poison); // For the return value.
         let ret = StackRange {
             first: StackOffset(0),
-            count: 1,
+            count: 1, // TODO
         };
 
         // Call the function
@@ -501,7 +510,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.take_slots(arg);
                     let value = self.runtime_builtin(name, arg.clone())?;
                     let abs = self.range_to_index(ret);
-                    self.expand_maybe_tuple(value, abs.first, abs.count);
+                    self.expand_maybe_tuple(value, abs.first, abs.count)?;
                     self.bump_ip();
                 }
                 &Bc::Ret(slot) => {
@@ -516,7 +525,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         frame.return_count
                     );
 
-                    self.expand_maybe_tuple(value, frame.return_slot, frame.return_count);
+                    self.expand_maybe_tuple(value, frame.return_slot, frame.return_count)?;
 
                     // Release our stack space.
                     let size = self.value_stack.len() - frame.stack_base.0;
@@ -539,7 +548,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                     let f = self.take_slot(f);
                     let arg = self.take_slots(arg);
-                    let f = self.to_func(f);
+                    let f = self.to_func(f)?;
                     self.push_callframe(f, ret, arg, when)?;
                     self.log_callstack();
                     // don't bump ip here, we're in a new call frame.
@@ -570,7 +579,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 &Bc::ExpandTuple { from, to } => {
                     let tuple = self.take_slot(from);
                     let slot = self.slot_to_index(to.first);
-                    self.expand_maybe_tuple(tuple, slot, to.count);
+                    self.expand_maybe_tuple(tuple, slot, to.count)?;
                     self.bump_ip();
                 }
                 &Bc::Drop(slot) => {
@@ -596,7 +605,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         value: Value,
         first: StackAbsolute,
         expected_count: usize,
-    ) -> Res<'static, ()> {
+    ) -> Res<'p, ()> {
+        logln!("Expand {:?} TO {} slots", value, expected_count);
         match expected_count.cmp(&1) {
             std::cmp::Ordering::Equal => {
                 self.value_stack[first.0] = value;
@@ -697,6 +707,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Bool(addr.first.0 >= self.value_stack.len())
             }
             "slice" => {
+                // last is not included
                 let (addr, first, last) = self.to_triple(arg)?;
                 let (addr, first, last) = (
                     self.to_stack_addr(addr)?,
@@ -707,13 +718,27 @@ impl<'a, 'p> Interp<'a, 'p> {
                     first >= 0
                         && last >= 0
                         && (first as usize) < addr.count
-                        && (last as usize) < addr.count
+                        && (last as usize) <= addr.count
                         && first < last
                 );
                 Value::InterpAbsStackAddr(StackAbsoluteRange {
                     first: StackAbsolute(addr.first.0 + first as usize),
                     count: (last - first) as usize,
                 })
+            }
+            "alloc" => {
+                let (ty, count) = self.to_pair(arg)?;
+                let (ty, count) = (self.to_type(ty)?, self.to_int(count)?);
+                todo!()
+            }
+            "free" => {
+                let (ty, count, ptr) = self.to_triple(arg)?;
+                let (ty, count) = (self.to_type(ty)?, self.to_int(count)?);
+                todo!()
+            }
+            "print" => {
+                println!("{:?}", arg);
+                Value::Unit
             }
             _ => {
                 if let Some(value) = runtime_builtin(name, arg.clone()) {
@@ -869,40 +894,67 @@ impl<'a, 'p> Interp<'a, 'p> {
         while self.ready.len() <= index {
             self.ready.push(None);
         }
-
-        let mut func = self.program.funcs[index].clone();
         self.log_depth += 1;
         logln!(
             "{} Start JIT: {:?} \n{}",
             "=".repeat(self.log_depth),
             FuncId(index),
-            func.log(self.pool)
+            self.program.funcs[index].log(self.pool)
         );
         self.infer_types(FuncId(index));
+        let mut func = self.program.funcs[index].clone();
+        let (arg, ret) = func.ty.unwrap();
+        let arg_slots = self.program.slot_count(arg);
+        println!("{:?} has arg {} slots", FuncId(index), arg_slots);
+        assert_ne!(arg_slots, 0);
         let mut result = FnBody {
             insts: vec![],
-            stack_slots: func.arg_names.len(),
+            stack_slots: arg_slots,
             vars: Default::default(),
             arg_names: func.arg_names.clone(),
             when,
-            slot_types: vec![TypeId::any(); func.arg_names.len()],
+            slot_types: vec![TypeId::any(); arg_slots],
             func: FuncId(index),
         };
-        logln!("{:?}", func);
+        let arg_range = StackRange {
+            first: StackOffset(0),
+            count: arg_slots,
+        };
+        let mut to_drop = vec![];
+        if func.arg_names.len() == 1 {
+            // if there's one name, it refers to the whole tuple.
+            if let Some(name) = func.arg_names[0] {
+                result.vars.insert(Var(name, 0), arg_range);
+            } else {
+                to_drop.push(arg_range);
+            }
+        } else if func.arg_names.len() == arg_slots {
+            // if they match, each element has its own name.
+            for (i, name) in func.arg_names.iter().enumerate() {
+                let range = StackRange {
+                    first: StackOffset(i),
+                    count: 1,
+                };
+                if let Some(name) = func.arg_names[0] {
+                    result.vars.insert(Var(name, 0), range);
+                } else {
+                    to_drop.push(range);
+                }
+            }
+        } else {
+            // TODO: pattern match destructuring but for now you just cant refer to the arg.
+            to_drop.push(arg_range);
+        }
         let body = func.body.as_ref().expect("fn body");
         let return_value = self.compile_expr(&mut result, body)?;
 
-        // We're done with our arguments, get rid of them.
+        // We're done with our arguments, get rid of them. Same for other vars.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        if !result.arg_names.is_empty() {
-            result.insts.push(Bc::Drop(StackRange {
-                first: StackOffset(0),
-                count: result.arg_names.len(),
-            }));
-        }
-
         for slot in result.vars.values() {
             result.insts.push(Bc::Drop(*slot));
+        }
+        for slot in to_drop {
+            result.insts.push(Bc::Drop(slot));
         }
 
         result.insts.push(Bc::Ret(return_value));
@@ -920,11 +972,16 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    pub fn write_jitted(&self) -> Vec<String> {
+    pub fn write_jitted(&self) -> String {
         self.ready
             .iter()
+            .zip(self.program.funcs.iter())
             .enumerate()
-            .filter_map(|(i, result)| result.as_ref().map(|result| format!("{:?}", result)))
+            .filter_map(|(i, (result, func))| {
+                result
+                    .as_ref()
+                    .map(|result| format!("{}\n {:?}", func.log(self.pool), result))
+            })
             .collect()
     }
 
@@ -1121,32 +1178,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ret
             }
             Expr::RefType(_) => todo!(),
-            Expr::GetVar(v) => {
-                let ret = result.reserve_slots(1, TypeId::any());
-                result.push(Bc::Clone {
-                    from: result.vars.get(v).unwrap().first,
-                    to: ret.first,
-                });
-                ret
-            }
+            Expr::GetVar(v) => todo!(),
             Expr::GetNamed(i) => {
-                if let Some(index) = result
-                    .arg_names
-                    .iter()
-                    .flatten()
-                    .position(|check| check == i)
-                {
-                    // TODO: call the right copy function. dont have redundant instructions for coyping
-                    //       but it makes interp easier to debug if you always move when consuming
-                    // Function arguments are at the beginning of our stack.
-                    // They might be read more than once, so need to copy the value (interp uses linear types).
-                    let to = result.reserve_slots(1, TypeId::any());
-                    result.insts.push(Bc::Clone {
-                        from: StackOffset(index),
-                        to: to.first,
-                    });
-                    to
-                } else if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
+                if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
                     result.load_constant(value, ty)
                 } else if let Some(func) = self.program.declarations.get(i) {
                     assert_eq!(func.len(), 1, "ambigous function reference");
@@ -1189,16 +1223,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                             Expr::GetNamed(i) => {
                                 let stack_slot = if let Some(index) = result.vars.get(&Var(*i, 0)) {
                                     *index
-                                } else if let Some(index) = result
-                                    .arg_names
-                                    .iter()
-                                    .flatten()
-                                    .position(|check| check == i)
-                                {
-                                    StackRange {
-                                        first: StackOffset(index),
-                                        count: 1,
-                                    }
                                 } else {
                                     logln!(
                                         "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
@@ -1252,12 +1276,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn current_fn_body(&self) -> &FnBody {
         let frame = self.call_stack.last().unwrap();
         let body = self.ready.get(frame.current_func.0).unwrap();
-        body.as_ref().unwrap_or_else(|| {
-            self.write_jitted().iter().for_each(|f| logln!("{}", f));
-            self.log_trace();
-            self.log_callstack();
-            panic!("Forgot to jit current function? Forgot a return instruction?")
-        })
+        body.as_ref().expect("jit current function")
     }
 
     // Resolve the lazy types for Arg and Ret
@@ -1334,23 +1353,26 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(result)
     }
 
-    fn to_type(&self, value: Value) -> Res<'static, TypeId> {
+    #[track_caller]
+    fn to_type(&self, value: Value) -> Res<'p, TypeId> {
         if let Value::Type(id) = value {
             Ok(id)
         } else {
-            panic!("Expected Type found {:?}", value)
+            Err(self.error(CErr::TypeError("Type", value)))
         }
     }
 
-    fn to_bool(&self, value: Value) -> Res<'static, bool> {
+    #[track_caller]
+    fn to_bool(&self, value: Value) -> Res<'p, bool> {
         if let Value::Bool(v) = value {
             Ok(v)
         } else {
-            panic!("Expected Bool found {:?}", value)
+            Err(self.error(CErr::TypeError("bool", value)))
         }
     }
 
-    fn to_seq(&self, value: Value) -> Res<'static, Vec<Value>> {
+    #[track_caller]
+    fn to_seq(&self, value: Value) -> Res<'p, Vec<Value>> {
         match value {
             Value::Tuple {
                 container_type,
@@ -1361,31 +1383,35 @@ impl<'a, 'p> Interp<'a, 'p> {
                 values,
             } => Ok(values),
             Value::Slice(values) => todo!(),
-            _ => panic!("Expected Type found {:?}", value),
+            _ => Err(self.error(CErr::TypeError("AnyTuple | AnyArray", value))),
         }
     }
 
-    fn to_triple(&self, value: Value) -> Res<'static, (Value, Value, Value)> {
+    #[track_caller]
+    fn to_triple(&self, value: Value) -> Res<'p, (Value, Value, Value)> {
         let values = self.to_seq(value)?;
         assert_eq!(values.len(), 3);
         Ok((values[0].clone(), values[1].clone(), values[2].clone()))
     }
 
-    fn to_func(&self, value: Value) -> FuncId {
+    #[track_caller]
+    fn to_func(&self, value: Value) -> Res<'p, FuncId> {
         if let Value::GetFn(id) = value {
-            id
+            Ok(id)
         } else {
-            panic!("Expected Func found {:?}", value)
+            Err(self.error(CErr::TypeError("AnyFunc", value)))
         }
     }
 
-    fn to_pair(&self, value: Value) -> Res<'static, (Value, Value)> {
+    #[track_caller]
+    fn to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
         assert_eq!(values.len(), 2);
         Ok((values[0].clone(), values[1].clone()))
     }
 
-    fn split_to_pair(&self, value: Value) -> Res<'static, (Value, Value)> {
+    #[track_caller]
+    fn split_to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
         let values = to_flat_seq(value);
 
         // TODO: sad cloning
@@ -1409,19 +1435,21 @@ impl<'a, 'p> Interp<'a, 'p> {
         ))
     }
 
-    fn to_stack_addr(&self, value: Value) -> Res<'static, StackAbsoluteRange> {
+    #[track_caller]
+    fn to_stack_addr(&self, value: Value) -> Res<'p, StackAbsoluteRange> {
         if let Value::InterpAbsStackAddr(r) = value {
             Ok(r)
         } else {
-            panic!("Expected InterpAbsStackAddr found {:?}", value)
+            Err(self.error(CErr::TypeError("StackAddr", value)))
         }
     }
 
-    fn to_int(&self, value: Value) -> Res<'static, i64> {
+    #[track_caller]
+    fn to_int(&self, value: Value) -> Res<'p, i64> {
         if let Value::I64(r) = value {
             Ok(r)
         } else {
-            panic!("Expected i64 found {:?}", value)
+            Err(self.error(CErr::TypeError("i64", value)))
         }
     }
 }
