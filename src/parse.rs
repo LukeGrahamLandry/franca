@@ -9,7 +9,7 @@ use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
 // I FUCKING TAKE IT BACK I HATE TREE SITTER SO MUCH
 
 use crate::{
-    ast::{Annotation, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt},
+    ast::{Annotation, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId},
     interp::Value,
     pool::{Ident, StringPool},
 };
@@ -95,13 +95,16 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "declare" => {
                 self.assert_literal(node.child(0).unwrap(), "let");
                 let names = self.parse_expr(node.child(1).unwrap().walk());
-                self.assert_literal(node.child(2).unwrap(), "=");
-                let value = self.parse_expr(node.child(3).unwrap().walk());
                 let name = match names.deref() {
                     Expr::GetNamed(i) => i,
                     _ => todo!("assign to {names:?}"),
                 };
-                Stmt::DeclVar(*name, Box::new(value))
+
+                let initial_value = node.child(2).map(|eq_sign| {
+                    self.assert_literal(node.child(2).unwrap(), "=");
+                    self.parse_expr(node.child(3).unwrap().walk())
+                });
+                Stmt::DeclVar(*name, initial_value)
             }
             "assign" => {
                 let names = self.parse_expr(node.child(0).unwrap().walk());
@@ -273,6 +276,8 @@ impl<'a, 'p> WalkParser<'a, 'p> {
 
     fn parse_binding(&mut self, arg: Node<'_>) -> (Option<Ident<'p>>, Option<FatExpr<'p>>) {
         assert_eq!(arg.kind(), "binding_type");
+        logln!("do_parse_binding");
+        print_but_not_fucking_stupid(0, self.src, 0, arg, 2);
         let mut cursor = arg.walk();
 
         let name = self.parse_expr(arg.child(0).unwrap().walk());
@@ -281,6 +286,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         }
 
         let ty = arg.child(2).map(|result| self.parse_expr(result.walk()));
+        logln!("ty: {ty:?}");
         if let Expr::GetNamed(name) = name.deref() {
             (Some(*name), ty)
         } else {
@@ -312,11 +318,13 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         drop(entries);
 
         let mut arg_names: Vec<Option<Ident>> = vec![];
+        let mut arg_types: Vec<Option<FatExpr>> = vec![];
         let mut args = proto.children_by_field_name("params", &mut cursor);
         for arg in args {
             logln!("Arg: {}", arg.to_sexp());
             let (names, ty) = self.parse_binding(arg);
             arg_names.push(names);
+            arg_types.push(ty);
         }
 
         let mut cursor = node.walk();
@@ -344,13 +352,26 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             let name = self.pool.intern(name.utf8_text(self.src).unwrap());
             annotations.push(Annotation { name, args: None })
         }
-        Func {
+
+        let arg = match arg_types.len() {
+            // Note: this is the *type* `Unit`, NOT the *value* `unit`
+            0 => Some(self.expr(
+                Expr::Value(Value::Type(TypeId::unit())),
+                node.start_position(),
+            )),
+            1 => arg_types.into_iter().next().unwrap(),
+            _ => todo!("multi argument type"),
+        };
+
+        let func = Func {
             name,
-            ty: LazyFnType::of(None, return_type),
+            ty: LazyFnType::of(arg, return_type),
             body,
             arg_names,
             annotations,
-        }
+        };
+        logln!("GOT FUNC: {}", func.log(self.pool));
+        func
     }
 
     fn expr(&mut self, expr: Expr<'p>, loc: Point) -> FatExpr<'p> {

@@ -262,6 +262,12 @@ const BUILTINS: &[&str] = &[
     "assert_eq",
     "is_comptime",
     "get",
+    "set",
+    "is_uninit",
+    "len",
+    "Ptr",
+    "is_oob_stack",
+    "slice",
 ];
 
 // TODO: use this for op call builtin to avoid a runtime hashmap lookup.
@@ -606,7 +612,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Bool(when == ExecTime::Comptime)
             }
             "get" => {
-                let addr = self.to_stack_addr(arg);
+                let addr = self.to_stack_addr(arg)?;
                 if addr.count == 1 {
                     let value = self.value_stack[addr.first.0].clone();
                     assert_ne!(value, Value::Poison);
@@ -618,6 +624,65 @@ impl<'a, 'p> Interp<'a, 'p> {
                         values: values.to_vec(),
                     }
                 }
+            }
+            "set" => {
+                let (addr, value) = self.to_pair(arg)?;
+                let addr = self.to_stack_addr(addr)?;
+                // TODO: call drop if not poison
+                // Note: the slots you're setting to are allowed to contain poison
+                if addr.count == 1 {
+                    self.value_stack[addr.first.0] = value;
+                } else {
+                    let values = self.to_seq(value)?;
+                    assert_eq!(values.len(), addr.count);
+                    for (i, entry) in values.into_iter().enumerate() {
+                        self.value_stack[addr.first.0 + i] = entry;
+                    }
+                }
+                Value::Unit
+            }
+            "is_uninit" => {
+                let addr = self.to_stack_addr(arg)?;
+                let result = if addr.count == 1 {
+                    self.value_stack[addr.first.0] == Value::Poison
+                } else {
+                    // TODO: not sure if its more useful if this is all or any or crash
+                    self.value_stack[addr.first.0..addr.first.0 + addr.count]
+                        .iter()
+                        .all(|v| v == &Value::Poison)
+                };
+                Value::Bool(result)
+            }
+            "len" => {
+                if let Value::Tuple { .. } = arg {
+                    panic!("Bad argument to builtin len: {arg:?}. consider passing a pointer to the value instead.");
+                }
+                let addr = self.to_stack_addr(arg)?;
+                Value::I64(addr.count as i64)
+            }
+            "Ptr" => Value::Type(self.program.intern_type(TypeInfo::Ptr(self.to_type(arg)?))),
+            "is_oob_stack" => {
+                let addr = self.to_stack_addr(arg)?;
+                Value::Bool(addr.first.0 >= self.value_stack.len())
+            }
+            "slice" => {
+                let (addr, first, last) = self.to_triple(arg)?;
+                let (addr, first, last) = (
+                    self.to_stack_addr(addr)?,
+                    self.to_int(first)?,
+                    self.to_int(last)?,
+                );
+                assert!(
+                    first >= 0
+                        && last >= 0
+                        && (first as usize) < addr.count
+                        && (last as usize) < addr.count
+                        && first < last
+                );
+                Value::InterpAbsStackAddr(StackAbsoluteRange {
+                    first: StackAbsolute(addr.first.0 + first as usize),
+                    count: (last - first) as usize,
+                })
             }
             _ => {
                 if let Some(value) = runtime_builtin(name, arg.clone()) {
@@ -777,13 +842,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         let mut func = self.program.funcs[index].clone();
         self.log_depth += 1;
         logln!(
-            "{} Start JIT: {:?} {}",
+            "{} Start JIT: {:?} \n{}",
             "=".repeat(self.log_depth),
             FuncId(index),
-            func.synth_name(self.pool)
+            func.log(self.pool)
         );
-        logln!("AST:");
-        logln!("{:?}", func.body.as_ref().map(|b| b.log(self.pool)));
         self.infer_types(FuncId(index));
         let mut result = FnBody {
             insts: vec![],
@@ -842,8 +905,17 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             Stmt::DeclVar(name, expr) => {
                 // TODO: scope.
-                let value = self.compile_expr(result, expr)?;
-                assert_eq!(value.count, 1, "TODO: tuple variables");
+                let value = invert(
+                    expr.as_ref()
+                        .map(|expr| self.compile_expr(result, expr.deref())),
+                )?;
+                let value = match value {
+                    Some(value) => {
+                        assert_eq!(value.count, 1, "TODO: tuple variables");
+                        value
+                    }
+                    None => result.reserve_slots(1, TypeId::any()),
+                };
                 let prev = result.vars.insert(Var(*name, 0), value);
                 assert!(prev.is_none(), "TODO: redeclare and drop");
             }
@@ -1035,7 +1107,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     });
                     to
                 } else {
-                    logln!("UNDECLARED IDENT: {}", self.pool.get(*i));
+                    logln!("UNDECLARED IDENT: {} (in GetNamed)", self.pool.get(*i));
                     return Err(self.error(CErr::UndeclaredIdent(*i)));
                 }
             }
@@ -1058,8 +1130,21 @@ impl<'a, 'p> Interp<'a, 'p> {
                             Expr::GetNamed(i) => {
                                 let stack_slot = if let Some(index) = result.vars.get(&Var(*i, 0)) {
                                     *index
+                                } else if let Some(index) = result
+                                    .arg_names
+                                    .iter()
+                                    .flatten()
+                                    .position(|check| check == i)
+                                {
+                                    StackRange {
+                                        first: StackOffset(index),
+                                        count: 1,
+                                    }
                                 } else {
-                                    logln!("UNDECLARED IDENT: {}", self.pool.get(*i));
+                                    logln!(
+                                        "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
+                                        self.pool.get(*i)
+                                    );
                                     return Err(self.error(CErr::UndeclaredIdent(*i)));
                                 };
 
@@ -1087,7 +1172,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
 
         Some(match name {
-            "unit" => (Value::Unit, self.program.intern_type(TypeInfo::Unit)),
+            "unit" => (Value::Unit, TypeId::unit()),
             "true" => (Value::Bool(true), self.program.intern_type(TypeInfo::Bool)),
             "false" => (Value::Bool(false), self.program.intern_type(TypeInfo::Bool)),
             _ => return None,
@@ -1174,9 +1259,17 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
-        logln!("Made anon: {func_id:?} = {name}");
+        logln!(
+            "Made anon: {func_id:?} = {}",
+            self.program.funcs[func_id.0].log(self.pool)
+        );
         let result = self.run(func_id, Value::Unit, ExecTime::Comptime)?;
-        logln!("COMPUTED: {} -> {:?}", e.log(self.pool), result);
+        logln!(
+            "COMPUTED: {} -> {:?} under {}",
+            e.log(self.pool),
+            result,
+            self.program.funcs[func_id.0].log(self.pool)
+        );
         self.comptime_cache.insert(e, result.clone());
         self.pop_state(state);
         Ok(result)
@@ -1233,11 +1326,19 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok((values[0].clone(), values[1].clone()))
     }
 
-    fn to_stack_addr(&self, value: Value) -> StackAbsoluteRange {
+    fn to_stack_addr(&self, value: Value) -> Res<'static, StackAbsoluteRange> {
         if let Value::InterpAbsStackAddr(r) = value {
-            r
+            Ok(r)
         } else {
             panic!("Expected InterpAbsStackAddr found {:?}", value)
+        }
+    }
+
+    fn to_int(&self, value: Value) -> Res<'static, i64> {
+        if let Value::I64(r) = value {
+            Ok(r)
+        } else {
+            panic!("Expected i64 found {:?}", value)
         }
     }
 }
@@ -1403,4 +1504,9 @@ fn builtin_type(name: &str) -> Option<TypeInfo> {
         "bool" => Bool,
         _ => return None,
     })
+}
+
+/// https://users.rust-lang.org/t/convenience-method-for-flipping-option-result-to-result-option/13695
+fn invert<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
+    x.map_or(Ok(None), |v| v.map(Some))
 }

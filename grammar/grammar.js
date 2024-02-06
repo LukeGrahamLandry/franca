@@ -1,14 +1,24 @@
 module.exports = grammar({
   name: "inferd",
 
-  extras: ($) => [/\s/, token(seq("//", /.*/, "\n"))],
+  extras: ($) => [
+    /\s/,
+    token(seq("//", /.*/, "\n")),
+    // TODO
+    // token(seq("/*", /.*/, "*/")),
+  ],
   rules: {
     source_file: ($) => repeat($._statement),
 
     _statement: ($) =>
       choice($.func_def, seq(choice($.expr, $.declare, $.assign), ";")),
     declare: ($) =>
-      seq("let", $.names, optional(seq(":", $.expr)), "=", $.expr),
+      seq(
+        "let",
+        $.names,
+        optional(seq(":", $.expr)),
+        optional(seq("=", $.expr)),
+      ),
     assign: ($) => seq($.names, "=", $.expr),
     block: ($) =>
       seq(

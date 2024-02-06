@@ -43,6 +43,11 @@ impl TypeId {
     pub fn any() -> TypeId {
         TypeId(0)
     }
+
+    // Be careful that this is in the pool correctly!
+    pub fn unit() -> TypeId {
+        TypeId(1)
+    }
 }
 
 pub struct FuncFlags {
@@ -131,7 +136,7 @@ pub enum Stmt<'p> {
     Scope(Vec<Var<'p>>, Box<Self>),
 
     // Frontend only
-    DeclVar(Ident<'p>, Box<FatExpr<'p>>),
+    DeclVar(Ident<'p>, Option<FatExpr<'p>>),
     SetNamed(Ident<'p>, FatExpr<'p>),
     DeclFunc(Func<'p>),
 
@@ -197,7 +202,11 @@ pub struct Program<'p> {
 impl<'p> Stmt<'p> {
     pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            Stmt::DeclVar(i, v) => format!("let {} = {};", pool.get(*i), v.log(pool)),
+            Stmt::DeclVar(i, v) => format!(
+                "let {} = {:?};",
+                pool.get(*i),
+                v.as_ref().map(|v| v.log(pool))
+            ),
             Stmt::Eval(e) => e.log(pool),
             Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
             Stmt::Generic {
@@ -205,12 +214,7 @@ impl<'p> Stmt<'p> {
                 cond,
                 definitions,
             } => todo!(),
-            Stmt::DeclFunc(func) => format!(
-                "fn {} {:?} = {:?}",
-                func.synth_name(pool),
-                func.ty.log(pool),
-                func.body.as_ref().map(|e| e.log(pool))
-            ),
+            Stmt::DeclFunc(func) => format!("Declare:{}", func.log(pool)),
             Stmt::Noop => "".to_owned(),
             _ => todo!(),
         }
@@ -228,7 +232,7 @@ impl<'p> LazyFnType<'p> {
     }
 
     pub fn of(arg_type: Option<FatExpr<'p>>, return_type: Option<FatExpr<'p>>) -> LazyFnType<'p> {
-        let arg = match &return_type {
+        let arg = match &arg_type {
             Some(arg) => LazyType::PendingEval(arg.clone()),
             None => LazyType::Infer,
         };
@@ -295,6 +299,7 @@ impl<'p> Expr<'p> {
                 format!("tuple({})", args)
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
+            Expr::Value(Value::Unit) => "unit".to_string(),
             Expr::Value(v) => format!("{:?}", v),
             _ => format!("{:?}", self),
         }
@@ -330,9 +335,9 @@ impl<'p> Program<'p> {
             TypeInfo::F64 => "f64".to_owned(),
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
-            TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(t)),
-            TypeInfo::Array(e) => format!("Array({})", self.log_type(t)),
-            TypeInfo::Struct(e) => format!("Struct({}, {})", t.0, self.log_type(t)),
+            TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
+            TypeInfo::Array(e) => format!("Array({})", self.log_type(*e)),
+            TypeInfo::Struct(e) => format!("Struct({}, {})", t.0, self.log_type(*e)),
             TypeInfo::Fn(f) => format!(
                 "fn({}) {}",
                 self.log_type(f.param),
@@ -348,8 +353,9 @@ impl<'p> Program<'p> {
         }
     }
 
+    // Note: be careful this can't get into a recursive loop trying to pretty print stuff.
     pub fn log_cached_types(&self) {
-        logln!("=== CACHED TYPES ===");
+        logln!("=== {} CACHED TYPES ===", self.types.len());
         for (i, ty) in self.types.iter().enumerate() {
             logln!("- id({i}) = {} = {:?}", self.log_type(TypeId(i)), ty);
         }
@@ -449,5 +455,20 @@ impl<'p> Deref for FatExpr<'p> {
 impl<'p> DerefMut for FatExpr<'p> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.expr
+    }
+}
+
+impl<'p> Func<'p> {
+    pub fn log(&self, pool: &StringPool<'p>) -> String {
+        format!(
+            "[fn {:?} {} = {}; A:{:?}]",
+            self.synth_name(pool),
+            self.ty.log(pool),
+            self.body
+                .as_ref()
+                .map(|e| e.log(pool))
+                .unwrap_or_else(|| "@forward_decl()".to_owned()),
+            self.annotations
+        )
     }
 }
