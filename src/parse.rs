@@ -6,6 +6,7 @@ use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 //       or maybe the anti-parser-generator people were right.
 //       one thing i dont understand: they always say you need a manually written one for good error reporting,
 //       but are syntax errors really the thing you care about?maybe im just brainwashed by rust being super agressive about other stuff.
+// I FUCKING TAKE IT BACK I HATE TREE SITTER SO MUCH
 
 use crate::{
     ast::{Annotation, Expr, Func, LazyFnType, LazyType, Stmt},
@@ -18,10 +19,32 @@ pub struct WalkParser<'a, 'p> {
     src: &'a [u8],
 }
 
+fn print_but_not_fucking_stupid(src: &[u8], depth: usize, node: Node) {
+    print!("{} {}", "=".repeat(depth), node.kind());
+    if node.kind() == "identifier" {
+        print!(" {}", node.utf8_text(src).unwrap());
+    }
+    if node.start_position().row != node.end_position().row {
+        println!(
+            "   [Lines {} to {}]",
+            node.start_position().row,
+            node.end_position().row
+        );
+    } else {
+        println!("   [Line {}]", node.start_position().row);
+    }
+
+    for child in node.children(&mut node.walk()) {
+        print_but_not_fucking_stupid(src, depth + 1, child);
+    }
+}
+
 impl<'a, 'p> WalkParser<'a, 'p> {
     pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<Stmt<'p>> {
         println!("SRC:\n{src}");
         let tree = p.parse(src, None).unwrap();
+        println!("PARSE:\n{}", tree.root_node().to_sexp());
+        print_but_not_fucking_stupid(src.as_bytes(), 1, tree.root_node());
         let mut p = WalkParser {
             pool,
             src: src.as_bytes(),
@@ -63,7 +86,6 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 self.assert_literal(node.child(2).unwrap(), "=");
                 let value = self.parse_expr(node.child(3).unwrap().walk());
                 println!("{:?}", value);
-                self.assert_literal(node.child(4).unwrap(), ";");
                 let name = match names {
                     Expr::GetNamed(i) => i,
                     _ => todo!("assign to {names:?}"),
@@ -74,7 +96,6 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 let names = self.parse_expr(node.child(0).unwrap().walk());
                 self.assert_literal(node.child(1).unwrap(), "=");
                 let value = self.parse_expr(node.child(2).unwrap().walk());
-                self.assert_literal(node.child(3).unwrap(), ";");
                 let name = match names {
                     Expr::GetNamed(i) => i,
                     _ => todo!("assign to {names:?}"),
@@ -82,7 +103,15 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 Stmt::SetNamed(name, value)
             }
             ";" => Stmt::Noop,
-            s => todo!("Wanted Stmt found {s}: {:?}", node),
+            s => {
+                if let Some(parent) = node.parent() {
+                    println!("ERROR PARENT:");
+                    println!("{}", parent.utf8_text(self.src).unwrap());
+                    println!("ERROR TEXT:");
+                    println!("{}", node.utf8_text(self.src).unwrap());
+                }
+                todo!("Wanted Stmt found {s}: {:?}\n {}", node, node.to_sexp())
+            }
         };
         println!("STMT: {stmt:?}");
         stmt

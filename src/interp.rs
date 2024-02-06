@@ -967,6 +967,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     });
                     to
                 } else {
+                    println!("UNDECLARED IDENT: {}", self.pool.get(*i));
                     return Err(self.error(CErr::UndeclaredIdent(*i)));
                 }
             }

@@ -60,14 +60,7 @@ fn tests_txt() {
 }
 
 fn run_tests_txt() {
-    run_main(
-        &format!(
-            "fn main(_unused: i64) i64 = {{\n {} \n _unused\n}}",
-            include_str!("tests.txt")
-        ),
-        Value::I64(0),
-        Value::I64(0),
-    );
+    run_main(include_str!("tests.txt"), Value::I64(0), Value::I64(0));
 }
 // TODO: since operators are traits, i probably dont need to use a macro for this
 #[test]

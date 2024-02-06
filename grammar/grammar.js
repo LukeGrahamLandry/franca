@@ -1,15 +1,15 @@
 module.exports = grammar({
   name: "inferd",
 
-  extras: ($) => [/\s/, token(seq("//", /.*/, "\n"))],
+  extras: ($) => [/\s/, seq("//", /[^\n]*\n?/)],
   rules: {
     source_file: ($) => repeat($._statement),
 
     _statement: ($) =>
-      choice($.func_def, seq($._expr, ";"), $.declare, $.assign, ";"),
+      choice($.func_def, seq(choice($._expr, $.declare, $.assign), ";")),
     declare: ($) =>
-      seq("let", $.names, optional(seq(":", $._expr)), "=", $._expr, ";"),
-    assign: ($) => seq($.names, "=", $._expr, ";"),
+      seq("let", $.names, optional(seq(":", $._expr)), "=", $._expr),
+    assign: ($) => seq($.names, "=", $._expr),
     block: ($) =>
       seq(
         "{",
@@ -29,7 +29,7 @@ module.exports = grammar({
           choice(";", seq("=", field("body", $._expr))),
         ),
       ),
-    annotation: ($) => seq("@", $.identifier, optional($.tuple)),
+    annotation: ($) => seq("@", $.identifier),
     func_proto: ($) =>
       prec.left(
         seq(
@@ -70,7 +70,7 @@ module.exports = grammar({
     closure_expr: ($) =>
       prec(
         // high prec so if there's a body it counts as this not a type then a random equals sign i guess?
-        10,
+        3,
         choice(
           seq("fn", field("proto", $.func_proto), "=", field("body", $._expr)),
           seq("fn", "=", field("body", $._expr)),
