@@ -91,15 +91,19 @@ pub struct Var<'p>(pub Ident<'p>, pub usize);
 pub enum Expr<'p> {
     Value(Value),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
-    Block(Vec<Stmt<'p>>, Box<FatExpr<'p>>),
-    IfElse(Box<Self>, Box<FatExpr<'p>>, Box<FatExpr<'p>>),
-    Array(Vec<FatExpr<'p>>),
+    Block {
+        body: Vec<Stmt<'p>>,
+        result: Box<FatExpr<'p>>,
+        locals: Option<Vec<Var<'p>>>, // useful information for calling drop
+    },
+    ArrayLiteral(Vec<FatExpr<'p>>),
     Tuple(Vec<FatExpr<'p>>),
     RefType(Box<FatExpr<'p>>),
     EnumLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
     StructLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
     Closure(Box<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
+
     // Backend only
     GetVar(Var<'p>),
 
@@ -107,11 +111,36 @@ pub enum Expr<'p> {
     GetNamed(Ident<'p>),
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConstKnown {
+    Yes,
+    No,
+    Maybe,
+}
+
 #[derive(Clone, Debug, Eq)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Point,
     pub id: usize,
+    pub ty: Option<TypeId>,
+    pub known: ConstKnown,
+}
+
+impl<'p> FatExpr<'p> {
+    // used for moving out of ast
+    pub fn null() -> Self {
+        FatExpr {
+            expr: Expr::Value(Value::Poison),
+            loc: Point {
+                row: 0,
+                column: 123456789,
+            },
+            id: 123456789,
+            ty: None,
+            known: ConstKnown::No,
+        }
+    }
 }
 
 impl PartialEq for FatExpr<'_> {
@@ -130,26 +159,25 @@ impl Hash for FatExpr<'_> {
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
+    DeclFunc(Func<'p>),
 
     // Backend Only
     SetVar(Var<'p>, FatExpr<'p>),
-    Scope(Vec<Var<'p>>, Box<Self>),
+    DeclVar {
+        name: Var<'p>,
+        ty: Option<FatExpr<'p>>,
+        value: Option<FatExpr<'p>>,
+        dropping: Option<Var<'p>>, // if this is a redeclaration, immediatly call the drop handler on the old one
+    },
+    EndScope(Vec<Var<'p>>),
 
     // Frontend only
-    DeclVar {
+    DeclNamed {
         name: Ident<'p>,
         ty: Option<FatExpr<'p>>,
         value: Option<FatExpr<'p>>,
     },
     SetNamed(Ident<'p>, FatExpr<'p>),
-    DeclFunc(Func<'p>),
-
-    /// for <free> with <cond> { <definitions> }
-    Generic {
-        free: Ident<'p>,
-        cond: FatExpr<'p>,
-        definitions: Box<Self>,
-    },
 }
 
 #[derive(Clone, PartialEq, Debug, Hash, Eq)]
@@ -159,6 +187,7 @@ pub struct Func<'p> {
     pub ty: LazyFnType<'p>,        // We might not have typechecked yet.
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
+    pub arg_vars: Option<Vec<Var<'p>>>,
 }
 
 impl<'p> Func<'p> {
@@ -206,7 +235,7 @@ pub struct Program<'p> {
 impl<'p> Stmt<'p> {
     pub fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            Stmt::DeclVar { name, ty, value } => format!(
+            Stmt::DeclNamed { name, ty, value } => format!(
                 "let {}: {:?} = {:?};",
                 pool.get(*name),
                 ty,
@@ -214,15 +243,15 @@ impl<'p> Stmt<'p> {
             ),
             Stmt::Eval(e) => e.log(pool),
             Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
-            Stmt::Generic {
-                free,
-                cond,
-                definitions,
-            } => todo!(),
             Stmt::DeclFunc(func) => format!("Declare:{}", func.log(pool)),
             Stmt::Noop => "".to_owned(),
-            _ => todo!(),
+            _ => format!("{:?}", self),
         }
+    }
+
+    // used for moving out of ast
+    pub fn null() -> Stmt<'p> {
+        Stmt::Eval(FatExpr::null())
     }
 }
 
@@ -282,18 +311,16 @@ impl<'p> Expr<'p> {
                 format!("{}({})", func.log(pool), arg.log(pool))
             }
             &Expr::GetNamed(i) => pool.get(i).to_string(),
-            Expr::Block(es, val) => {
-                let es: Vec<_> = es.iter().map(|e| e.log(pool)).collect();
+            Expr::Block {
+                body,
+                result,
+                locals,
+            } => {
+                let es: Vec<_> = body.iter().map(|e| e.log(pool)).collect();
                 let es = es.join("; ");
-                format!("{{ {}; {} }}", es, val.log(pool))
+                format!("{{ {}; {} }}", es, result.log(pool))
             }
-            Expr::IfElse(cond, yes, no) => format!(
-                "if {} {{ {} }} else {{ {} }}",
-                cond.log(pool),
-                yes.log(pool),
-                no.log(pool)
-            ),
-            Expr::Array(args) => {
+            Expr::ArrayLiteral(args) => {
                 let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
                 let args: String = args.join(", ");
                 format!("array({})", args)

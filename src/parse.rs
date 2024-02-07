@@ -9,9 +9,10 @@ use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
 // I FUCKING TAKE IT BACK I HATE TREE SITTER SO MUCH
 
 use crate::{
-    ast::{Annotation, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId},
+    ast::{Annotation, ConstKnown, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId},
     interp::Value,
     pool::{Ident, StringPool},
+    scope::ResolveScope,
 };
 
 pub struct WalkParser<'a, 'p> {
@@ -67,6 +68,8 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         while tree.goto_next_sibling() {
             stmts.push(p.parse_stmt(&mut tree));
         }
+
+        ResolveScope::of(&mut stmts);
         for s in &stmts {
             logln!("finished stmt: {}", s.log(p.pool))
         }
@@ -102,7 +105,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                     self.parse_expr(node.child(3).unwrap().walk())
                 });
 
-                Stmt::DeclVar {
+                Stmt::DeclNamed {
                     name: binding.0.expect("binding name"),
                     ty: binding.1,
                     value,
@@ -164,7 +167,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             match macro_name {
                 Some(name_expr) => {
                     if let &Expr::GetNamed(i) = name_expr.deref() {
-                        self.expr(Expr::SuffixMacro(i, Box::new(expr)), name_expr.loc)
+                        self.expr(
+                            Expr::SuffixMacro(i, Box::new(expr)),
+                            name_expr.loc,
+                            ConstKnown::Maybe,
+                        )
                     } else {
                         panic!("Suffix macro must be an identifier not {name_expr:?}")
                     }
@@ -187,7 +194,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "identifier" => {
                 let name = node.utf8_text(self.src).unwrap();
                 let name = self.pool.intern(name);
-                self.expr(Expr::GetNamed(name), node.start_position())
+                self.expr(
+                    Expr::GetNamed(name),
+                    node.start_position(),
+                    ConstKnown::Maybe,
+                )
             }
             "type_expr" => {
                 let child = node.child(0).unwrap();
@@ -195,7 +206,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 if kind == "&" {
                     let inner = node.child(1).unwrap();
                     let e = Expr::RefType(Box::new(self.parse_expr(inner.walk())));
-                    self.expr(e, node.start_position())
+                    self.expr(e, node.start_position(), ConstKnown::Yes)
                 } else if kind == "tuple" {
                     self.parse_tuple(node) // TODO: this shouldnt be a type_expr branch
                 } else {
@@ -206,7 +217,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "closure_expr" => {
                 let func = self.parse_func(node);
                 assert!(func.body.is_some(), "CLOSURE MISSING BODY: \n{:?}", func);
-                self.expr(Expr::Closure(Box::new(func)), node.start_position())
+                self.expr(
+                    Expr::Closure(Box::new(func)),
+                    node.start_position(),
+                    ConstKnown::Yes,
+                )
             }
             "call_expr" => {
                 let f = node.child(0).unwrap();
@@ -216,6 +231,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 self.expr(
                     Expr::Call(Box::new(f), Box::new(args)),
                     node.start_position(),
+                    ConstKnown::Maybe,
                 )
             }
             "names" => {
@@ -230,7 +246,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             "number" => {
                 let text = node.utf8_text(self.src).unwrap();
                 match text.parse::<i64>() {
-                    Ok(i) => self.expr(Expr::Value(Value::I64(i)), node.start_position()),
+                    Ok(i) => self.expr(
+                        Expr::Value(Value::I64(i)),
+                        node.start_position(),
+                        ConstKnown::Yes,
+                    ),
                     Err(e) => todo!("{:?}", e),
                 }
             }
@@ -252,15 +272,29 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                 assert!(entries.next().is_none());
 
                 if body_stmts.is_empty() {
-                    result
-                        .unwrap_or_else(|| self.expr(Expr::Value(Value::Unit), node.end_position()))
+                    result.unwrap_or_else(|| {
+                        self.expr(
+                            Expr::Value(Value::Unit),
+                            node.end_position(),
+                            ConstKnown::Yes,
+                        )
+                    })
                 } else {
                     let result = result.unwrap_or_else(|| {
-                        self.expr(Expr::Value(Value::Unit), node.end_position())
+                        self.expr(
+                            Expr::Value(Value::Unit),
+                            node.end_position(),
+                            ConstKnown::Yes,
+                        )
                     });
                     self.expr(
-                        Expr::Block(body_stmts, Box::new(result)),
+                        Expr::Block {
+                            body: body_stmts,
+                            result: Box::new(result),
+                            locals: None,
+                        },
                         node.start_position(),
+                        ConstKnown::Maybe,
                     )
                 }
             }
@@ -352,6 +386,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             0 => Some(self.expr(
                 Expr::Value(Value::Type(TypeId::unit())),
                 node.start_position(),
+                ConstKnown::Yes,
             )),
             1 => arg_types.into_iter().next().unwrap(),
             _ => todo!("multi argument type"),
@@ -363,17 +398,20 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             body,
             arg_names,
             annotations,
+            arg_vars: None,
         };
         logln!("GOT FUNC: {}", func.log(self.pool));
         func
     }
 
-    fn expr(&mut self, expr: Expr<'p>, loc: Point) -> FatExpr<'p> {
+    fn expr(&mut self, expr: Expr<'p>, loc: Point, known: ConstKnown) -> FatExpr<'p> {
         self.expr_id += 1;
         FatExpr {
             expr,
             loc,
             id: self.expr_id,
+            ty: None,
+            known,
         }
     }
 
@@ -384,7 +422,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             .filter(|child| child.kind() != "(" && child.kind() != ")" && child.kind() != ",") // TODO: wtf
             .map(|child| self.parse_expr(child.walk()));
         let e = Expr::Tuple(args.collect());
-        self.expr(e, node.start_position())
+        self.expr(e, node.start_position(), ConstKnown::Maybe)
     }
 
     // fn find_one(&mut self, cursor: &mut TreeCursor, field_name: &str) {

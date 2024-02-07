@@ -16,10 +16,80 @@ use crate::{
     pool::{Ident, StringPool},
 };
 
+// TODO: move all this junk to logging.rs
+
 macro_rules! bin_int {
-    ($op:tt, $arg:expr, $res:expr) => {{
-        let (a, b) = load_int_pair($arg);
+    ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
+        let (a, b) = $self.load_int_pair($arg)?;
         $res(a $op b)
+    }};
+}
+
+macro_rules! err {
+    ($self:expr, $payload:expr) => {{
+        return Err($self.error($payload));
+    }};
+    ($self:expr, $($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        return err!($self, CErr::Msg(msg))
+    }};
+}
+
+macro_rules! assert {
+    ($self:expr, $cond:expr, $($arg:tt)+) => {{
+        if !($cond) {
+            let msg = format!("Assertion Failed: {}\n{}", stringify!($cond), format!($($arg)*));
+            return err!($self, CErr::Msg(msg))
+        }
+    }};
+    ($self:expr, $cond:expr $(,)?) => {{
+        assert!($self, $cond, "")
+    }};
+}
+
+// looks weird cause i stole it from the rust one. apparently its faster or whatever
+macro_rules! assert_eq {
+    ($self:expr, $left:expr, $right:expr, $($arg:tt)+) => {
+        match (&$left, &$right) {
+            (left_val, right_val) => {
+                if !(*left_val == *right_val) {
+                    let msg = format!($($arg)*);
+                    err!(
+                        $self,
+                        "Expected {} == {}\nBut {:?} != {:?}\n{}",
+                        stringify!($left_val),
+                        stringify!($right_val),
+                        left_val,
+                        right_val,
+                        msg
+                    )
+                }
+            }
+        }
+    };
+    ($self:expr, $left:expr, $right:expr) => {
+        assert_eq!($self, $left, $right, "");
+    };
+}
+
+macro_rules! check {
+    ($self:expr, $cond:expr, $($arg:tt)+) => {{
+        if !($cond) {
+            let msg = format!("Builtin Safety Check Failed: {}\n{}", stringify!($cond), format!($($arg)*));
+            return err!($self, CErr::Msg(msg))
+        }
+    }};
+    ($self:expr, $cond:expr $(,)?) => {{
+        check!($self, $cond, "")
+    }};
+}
+
+// I want to be as easy to use my error system as just paniking.
+// Use this one for things that aren't supported yet or should have been caught in a previous stage of compilation.
+macro_rules! ice {
+    ($self:expr, $($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        return err!($self, CErr::IceFmt(msg))
     }};
 }
 
@@ -104,7 +174,7 @@ struct StackRange {
 
 impl StackRange {
     fn index(&self, offset: usize) -> StackOffset {
-        assert!(offset < self.count);
+        debug_assert!(offset < self.count);
         StackOffset(self.first.0 + offset)
     }
 }
@@ -250,10 +320,12 @@ enum CErr<'p> {
     UndeclaredIdent(Ident<'p>),
     ComptimeCallAtRuntime,
     Ice(&'static str),
+    IceFmt(String),
     LeakedValue,
     StackDepthLimit,
     AddrRvalue(FatExpr<'p>),
     TypeError(&'static str, Value),
+    Msg(String),
 }
 
 // Just in case im stupid and forget to unwrap one somewhere.
@@ -294,7 +366,7 @@ const BUILTINS: &[&str] = &[
     "is_oob_stack",
     "slice",
     "alloc",
-    "free",
+    "dealloc",
     "print",
 ];
 
@@ -343,7 +415,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     //       but just check that its empty at the end and its fine.
     fn pop_state(&mut self, s: DebugState<'p>) {
         let found = self.debug_trace.pop().expect("state stack");
-        assert_eq!(found, s);
+        debug_assert_eq!(found, s);
     }
 
     #[track_caller]
@@ -355,20 +427,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             value_stack: self.value_stack.clone(),
             call_stack: self.call_stack.clone(),
         }
-    }
-
-    #[track_caller]
-    fn assert(&self, cond: bool, on_err: impl FnOnce() -> CErr<'p>) -> Res<'p, ()> {
-        if !cond {
-            return Err(self.error(on_err()));
-        }
-        Ok(())
-    }
-
-    // TODO: make sure im `?` not dropping everywhere
-    #[track_caller]
-    fn assert_eq<T: PartialEq>(&self, a: &T, b: &T, on_err: impl Fn() -> CErr<'p>) -> Res<'p, ()> {
-        self.assert(a == b, on_err)
     }
 
     #[track_caller]
@@ -416,7 +474,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.program.add_func(func);
                 }
                 Stmt::Noop => {}
-                _ => panic!(
+                _ => ice!(
+                    self,
                     "Stmt {} {stmt:?} is not supported at top level.",
                     stmt.log(self.pool)
                 ),
@@ -427,7 +486,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
         self.program.declarations.get(&name).map(|decls| {
-            assert_eq!(decls.len(), 1);
+            debug_assert_eq!(decls.len(), 1);
             decls[0]
         })
     }
@@ -464,14 +523,12 @@ impl<'a, 'p> Interp<'a, 'p> {
         let result = self.take_slots(ret);
 
         // Sanity checks that we didn't mess anything up for the next guy.
-        assert_ne!(result, Value::Poison);
-        assert_eq!(self.value_stack.pop(), Some(Value::Poison));
+        assert!(self, result != Value::Poison);
+        assert!(self, self.value_stack.pop() == Some(Value::Poison));
         let final_callframe = self.call_stack.pop().unwrap();
-        self.assert_eq(&final_callframe, &marker_callframe, || {
-            CErr::Ice("bad frame")
-        });
+        assert!(self, final_callframe == marker_callframe, "bad frame");
         let end_heights = (self.call_stack.len(), self.value_stack.len());
-        self.assert(init_heights == end_heights, || CErr::Ice("bad stack size"));
+        assert!(self, init_heights == end_heights, "bad stack size");
         self.pop_state(state);
         Ok(result)
     }
@@ -628,13 +685,15 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             std::cmp::Ordering::Greater => {
                 let values = self.to_seq(value)?;
-                assert_eq!(values.len(), expected_count);
+                assert_eq!(self, values.len(), expected_count);
                 let base = first.0;
                 for (i, v) in values.into_iter().enumerate() {
                     // TODO: this needs to be a macro cause the cloning is a problem
-                    self.assert_eq(&self.value_stack[base + i].clone(), &Value::Poison, || {
-                        CErr::LeakedValue
-                    });
+                    assert!(
+                        self,
+                        self.value_stack[base + i] == Value::Poison,
+                        "leaked value",
+                    );
                     self.value_stack[base + i] = v;
                 }
             }
@@ -655,12 +714,12 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "assert_eq" => {
                 let (a, b) = self.split_to_pair(arg)?;
-                assert_eq!(a, b, "runtime_builtin:assert_eq");
+                assert_eq!(self, a, b, "runtime_builtin:assert_eq");
                 self.assertion_count += 1; // sanity check for making sure tests actually ran
                 Value::Unit
             }
             "is_comptime" => {
-                assert_eq!(arg, Value::Unit);
+                assert_eq!(self, arg, Value::Unit);
                 let when = self.call_stack.last().unwrap().when;
                 Value::Bool(when == ExecTime::Comptime)
             }
@@ -684,7 +743,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     count,
                 } => {
                     let data = unsafe { &*value };
-                    assert!(data.references > 0);
+                    assert!(self, data.references > 0);
                     if count == 1 {
                         let value = data.values[0].clone();
                         assert_ne!(value, Value::Poison);
@@ -709,7 +768,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             self.value_stack[addr.first.0] = value;
                         } else {
                             let values = self.to_seq(value)?;
-                            assert_eq!(values.len(), addr.count);
+                            assert_eq!(self, values.len(), addr.count);
                             for (i, entry) in values.into_iter().enumerate() {
                                 self.value_stack[addr.first.0 + i] = entry;
                             }
@@ -724,6 +783,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         // Slicing operations are bounds checked.
                         let ptr = unsafe { &mut *ptr_value };
                         assert!(
+                            self,
                             ptr.references > 0
                                 && first < ptr.values.len()
                                 && count < ptr.values.len()
@@ -732,7 +792,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             ptr.values[first] = value;
                         } else {
                             let values = self.to_seq(value)?;
-                            assert_eq!(values.len(), count);
+                            assert_eq!(self, values.len(), count);
                             for (i, entry) in values.into_iter().enumerate() {
                                 ptr.values[first + 1] = entry;
                             }
@@ -754,6 +814,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     } => {
                         let data = unsafe { &*value };
                         assert!(
+                            self,
                             data.references > 0
                                 && first < data.values.len()
                                 && count < data.values.len()
@@ -781,10 +842,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // last is not included
                 let (addr, new_first, new_last) = self.to_triple(arg)?;
                 let (new_first, new_last) = (self.to_int(new_first)?, self.to_int(new_last)?);
-                assert!(new_first >= 0 && new_last >= 0 && new_first < new_last);
+                assert!(
+                    self,
+                    new_first >= 0 && new_last >= 0 && new_first < new_last
+                );
                 match addr {
                     Value::InterpAbsStackAddr(addr) => {
                         assert!(
+                            self,
                             (new_first as usize) < addr.count && (new_last as usize) <= addr.count
                         );
                         Value::InterpAbsStackAddr(StackAbsoluteRange {
@@ -802,6 +867,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         // Slicing operations are bounds checked.
                         let data = unsafe { &*value };
                         assert!(
+                            self,
                             data.references > 0
                                 && abs_first < data.values.len()
                                 && abs_last <= data.values.len()
@@ -818,7 +884,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "alloc" => {
                 let (ty, count) = self.to_pair(arg)?;
                 let (ty, count) = (self.to_type(ty)?, self.to_int(count)?);
-                assert!(count >= 0);
+                assert!(self, count >= 0);
                 let count = count as usize * self.program.slot_count(ty);
                 let values = vec![Value::Poison; count];
                 let value = Box::into_raw(Box::new(InterpBox {
@@ -831,7 +897,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     count,
                 }
             }
-            "free" => {
+            "dealloc" => {
                 let (ty, count, ptr) = self.to_triple(arg)?;
                 let (ty, count, (ptr, ptr_first, ptr_count)) = (
                     self.to_type(ty)?,
@@ -839,11 +905,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.to_heap_ptr(ptr)?,
                 );
                 let slots = count as usize * self.program.slot_count(ty);
-                assert_eq!(ptr_first, 0);
-                assert_eq!(ptr_count, slots);
+                assert_eq!(self, ptr_first, 0);
+                assert_eq!(self, ptr_count, slots);
                 let ptr_val = unsafe { &*ptr };
-                assert_eq!(ptr_val.references, 1);
-                assert_eq!(ptr_val.values.len(), slots);
+                assert_eq!(self, ptr_val.references, 1);
+                assert_eq!(self, ptr_val.values.len(), slots);
                 let _ = unsafe { Box::from_raw(ptr) };
                 Value::Unit
             }
@@ -851,19 +917,26 @@ impl<'a, 'p> Interp<'a, 'p> {
                 println!("{:?}", arg);
                 Value::Unit
             }
-            _ => {
-                if let Some(value) = runtime_builtin(name, arg.clone()) {
-                    value
-                } else {
-                    return Err(self
-                        .assert(false, || CErr::Ice("Known builtin is not implemented."))
-                        .unwrap_err());
-                }
+            "add" => bin_int!(self, +, arg, Value::I64),
+            "sub" => bin_int!(self, -, arg, Value::I64),
+            "mul" => bin_int!(self, *, arg, Value::I64),
+            "div" => bin_int!(self, /, arg, Value::I64),
+            "eq" => bin_int!(self, ==, arg, Value::Bool),
+            "ne" => bin_int!(self, !=, arg, Value::Bool),
+            "gt" => bin_int!(self, >, arg, Value::Bool),
+            "lt" => bin_int!(self, <, arg, Value::Bool),
+            "ge" => bin_int!(self, >=, arg, Value::Bool),
+            "le" => bin_int!(self, <=, arg, Value::Bool),
+            "tuple" => {
+                // This will become the `(a, b, c)` syntax.
+                // It just gives you a way to express that you want to pass multiple things at once.
+                // TODO: this is really inefficient. it boxes them from the stack and then writes them all back again?
+                arg
             }
+            _ => ice!(self, "Known builtin is not implemented. {}", name),
         };
         Ok(value)
     }
-
     fn push_callframe(
         &mut self,
         f: FuncId,
@@ -873,6 +946,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     ) -> Res<'p, ()> {
         self.ensure_compiled(f, when)?;
         assert!(
+            self,
             self.ready[f.0].as_ref().is_some(),
             "ICE: ensure_compiled didn't work on {f:?}"
         );
@@ -1102,7 +1176,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let value = self.compile_expr(result, expr)?;
                 result.push(Bc::Drop(value));
             }
-            Stmt::DeclVar { name, ty, value } => {
+            Stmt::DeclNamed { name, ty, value } => {
                 // TODO: scope.
                 let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
@@ -1119,7 +1193,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         if slots == value.count {
                             value
                         } else {
-                            assert_eq!(value.count, 1);
+                            assert_eq!(self, value.count, 1);
                             let expanded = result.reserve_slots(slots, TypeId::any());
                             result.push(Bc::ExpandTuple {
                                 from: value.first,
@@ -1132,14 +1206,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     (None, None) => result.reserve_slots(1, TypeId::any()),
                 };
                 let prev = result.vars.insert(Var(*name, 0), value);
-                assert!(prev.is_none(), "TODO: redeclare and drop");
+                assert!(self, prev.is_none(), "TODO: redeclare and drop");
             }
             Stmt::SetNamed(name, expr) => {
                 let value = self.compile_expr(result, expr)?;
                 let slot = result.vars.get(&Var(*name, 0));
                 let slot = *slot.expect("SetNamed: var must be declared");
                 result.push(Bc::Drop(slot));
-                assert_eq!(value.count, slot.count);
+                assert_eq!(self, value.count, slot.count);
                 for i in 0..value.count {
                     result.push(Bc::Move {
                         from: value.index(i),
@@ -1188,7 +1262,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let (arg_ty, ret_ty) = self.program.funcs[f.0].ty.unwrap();
                         if self.program.is_type(ret_ty, TypeInfo::Type) {
                             assert_eq!(
-                                result.when,
+                                self, result.when,
                                 ExecTime::Comptime,
                                 "Cannot call function returning type at runtime."
                             );
@@ -1211,7 +1285,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             .load_constant(Value::Unit, self.program.intern_type(TypeInfo::Unit));
                         // TODO: if returning tuples
                         let ret = result.reserve_slots(1, TypeId::any());
-                        assert_eq!(arg.count, 3);
+                        assert_eq!(self, arg.count, 3);
                         let branch_ip = result.insts.len();
                         let true_ip = branch_ip + 1;
                         let false_ip = branch_ip + 4;
@@ -1234,8 +1308,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                             arg: unit,
                         });
                         result.push(Bc::Drop(arg.index(1).to_range()));
-                        assert_eq!(true_ip, real_true_ip);
-                        assert_eq!(false_ip, real_false_ip);
+                        assert_eq!(self, true_ip, real_true_ip);
+                        assert_eq!(self, false_ip, real_false_ip);
                         return Ok(ret);
                     }
                     // else: fallthrough
@@ -1243,7 +1317,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
                 logln!("dynamic {}", f.log(self.pool));
                 let f = self.compile_expr(result, f)?;
-                assert_eq!(f.count, 1);
+                assert_eq!(self, f.count, 1);
                 // TODO: not all function ptrs have 1 return value
                 let ret = result.reserve_slots(1, TypeId::any());
                 result.insts.push(Bc::CallDynamic {
@@ -1253,14 +1327,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 });
                 ret
             }
-            Expr::Block(prelude, value) => {
-                for stmt in prelude {
+            Expr::Block {
+                body,
+                result: value,
+                locals,
+            } => {
+                for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
                 self.compile_expr(result, value)?
             }
-            Expr::IfElse(_, _, _) => todo!(),
-            Expr::Array(_) => todo!(),
+            Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(values) => {
                 let values: Res<'p, Vec<_>> = values
                     .iter()
@@ -1281,7 +1358,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         count += 1;
                     }
                 }
-                assert_eq!(count, ret.count);
+                assert_eq!(self, count, ret.count);
                 ret
             }
             Expr::RefType(_) => todo!(),
@@ -1290,7 +1367,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
                     result.load_constant(value, ty)
                 } else if let Some(func) = self.program.declarations.get(i) {
-                    assert_eq!(func.len(), 1, "ambigous function reference");
+                    assert_eq!(self, func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(func, ExecTime::Comptime)?;
                     result.load_constant(Value::GetFn(func), TypeId::any())
@@ -1306,8 +1383,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts.push(Bc::CloneRange { from, to });
                     }
                     to
+                } else if self.builtins.contains(i) {
+                    todo!("make builtins first class functions");
                 } else {
-                    logln!(
+                    println!(
                         "UNDECLARED IDENT: {} (in GetNamed) at {:?}",
                         self.pool.get(*i),
                         expr.loc
@@ -1351,6 +1430,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                             }
                             _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
                         }
+                    }
+                    "type" => {
+                        let ty = arg.ty.expect("TODO: better type tracking");
+                        result.load_constant(
+                            Value::Type(ty),
+                            self.program.intern_type(TypeInfo::Type),
+                        )
                     }
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
@@ -1445,6 +1531,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             body: Some(e.clone()),
             arg_names: vec![None],
             annotations: vec![],
+            arg_vars: Some(vec![]),
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
@@ -1501,7 +1588,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_triple(&self, value: Value) -> Res<'p, (Value, Value, Value)> {
         let values = self.to_seq(value)?;
-        assert_eq!(values.len(), 3);
+        assert_eq!(self, values.len(), 3);
         Ok((values[0].clone(), values[1].clone(), values[2].clone()))
     }
 
@@ -1517,7 +1604,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
-        assert_eq!(values.len(), 2);
+        assert_eq!(self, values.len(), 2);
         Ok((values[0].clone(), values[1].clone()))
     }
 
@@ -1530,7 +1617,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             return Ok((values[0].clone(), values[1].clone()));
         }
 
-        assert_eq!(values.len() % 2, 0);
+        assert_eq!(self, values.len() % 2, 0);
         let first = (values[0..values.len() / 2]).to_vec();
         let second = (values[values.len() / 2..]).to_vec();
 
@@ -1576,28 +1663,28 @@ impl<'a, 'p> Interp<'a, 'p> {
             Err(self.error(CErr::TypeError("Heap", value)))
         }
     }
-}
 
-// TODO: macros for each builtin arg type cause this sucks.
-fn load_int_pair(v: Value) -> (i64, i64) {
-    match v {
-        Value::Tuple {
-            container_type,
-            mut values,
-        } => {
-            assert_eq!(values.len(), 2, "load_int_pair wrong arity");
-            let a = replace(&mut values[0], Value::Poison);
-            let b = replace(&mut values[1], Value::Poison);
-            (load_int(a), load_int(b))
+    // TODO: macros for each builtin arg type cause this sucks.
+    fn load_int_pair(&self, v: Value) -> Res<'p, (i64, i64)> {
+        match v {
+            Value::Tuple {
+                container_type,
+                mut values,
+            } => {
+                assert_eq!(self, values.len(), 2, "load_int_pair wrong arity");
+                let a = replace(&mut values[0], Value::Poison);
+                let b = replace(&mut values[1], Value::Poison);
+                Ok((self.load_int(a)?, self.load_int(b)?))
+            }
+            v => err!(self, "load_int_pair {:?}", v),
         }
-        v => panic!("load_int_pair {:?}", v),
     }
-}
 
-fn load_int(v: Value) -> i64 {
-    match v {
-        Value::I64(i) => i,
-        v => panic!("load_int {:?}", v),
+    fn load_int(&self, v: Value) -> Res<'p, i64> {
+        match v {
+            Value::I64(i) => Ok(i),
+            v => err!(self, "load_int {:?}", v),
+        }
     }
 }
 
@@ -1673,30 +1760,6 @@ impl Debug for Bc<'_> {
         }
         Ok(())
     }
-}
-
-// These are normal functions that don't need to do scary things to the compilation context.
-fn runtime_builtin(name: &str, arg: Value) -> Option<Value> {
-    let v = match name {
-        "add" => bin_int!(+, arg, Value::I64),
-        "sub" => bin_int!(-, arg, Value::I64),
-        "mul" => bin_int!(*, arg, Value::I64),
-        "div" => bin_int!(/, arg, Value::I64),
-        "eq" => bin_int!(==, arg, Value::Bool),
-        "ne" => bin_int!(!=, arg, Value::Bool),
-        "gt" => bin_int!(>, arg, Value::Bool),
-        "lt" => bin_int!(<, arg, Value::Bool),
-        "ge" => bin_int!(>=, arg, Value::Bool),
-        "le" => bin_int!(<=, arg, Value::Bool),
-        "tuple" => {
-            // This will become the `(a, b, c)` syntax.
-            // It just gives you a way to express that you want to pass multiple things at once.
-            // TODO: this is really inefficient. it boxes them from the stack and then writes them all back again?
-            arg
-        }
-        _ => return None,
-    };
-    Some(v)
 }
 
 impl FnBody<'_> {

@@ -28,11 +28,13 @@ macro_rules! logln {
         }
     }};
 }
+
 pub(crate) use log;
 pub(crate) use logln;
 
 mod ast;
 mod interp;
+mod logging;
 mod parse;
 mod pool;
 mod scope;
