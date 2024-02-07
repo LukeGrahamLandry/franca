@@ -114,6 +114,11 @@ pub enum Bc<'p> {
         ret: StackRange,
         arg: StackRange,
     },
+    CallDirectMaybeCached {
+        f: FuncId,
+        ret: StackRange,
+        arg: StackRange,
+    },
     CallDirect {
         f: FuncId,
         ret: StackRange,
@@ -136,12 +141,12 @@ pub enum Bc<'p> {
     Goto {
         ip: usize,
     },
-    // TODO: having memory is bad!
-    CreateTuple {
-        values: StackRange,
-        target: StackOffset,
-    },
     Ret(StackRange),
+    AbsoluteStackAddr {
+        of: StackRange,
+        to: StackOffset,
+    },
+    DebugMarker(&'static str, Ident<'p>),
     // Clone, Move, and Drop are for managing linear types.
     Clone {
         from: StackOffset,
@@ -164,11 +169,15 @@ pub enum Bc<'p> {
         to: StackRange,
     },
     Drop(StackRange),
-    AbsoluteStackAddr {
-        of: StackRange,
-        to: StackOffset,
+    // TODO: having memory is bad!
+    MoveCreateTuple {
+        values: StackRange,
+        target: StackOffset,
     },
-    DebugMarker(&'static str, Ident<'p>),
+    CloneCreateTuple {
+        values: StackRange,
+        target: StackOffset,
+    },
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct CallFrame<'p> {
@@ -478,6 +487,22 @@ impl<'a, 'p> Interp<'a, 'p> {
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
+                &Bc::CallDirectMaybeCached { f, ret, arg } => {
+                    // preincrement our ip because ret doesn't do it.
+                    // this would be different if i was trying to do tail calls?
+                    self.bump_ip();
+                    let arg = self.take_slots(arg);
+                    let key = (f, arg);
+                    if let Some(prev) = self.program.generics_memo.get(&key).cloned() {
+                        let ret_first = self.slot_to_index(ret.first);
+                        self.expand_maybe_tuple(prev.clone(), ret_first, ret.count)?;
+                    } else {
+                        let when = self.call_stack.last().unwrap().when;
+                        self.push_callframe(f, ret, key.1, when)?;
+                        logln!("{}", self.log_callstack());
+                        // don't bump ip here, we're in a new call frame.
+                    }
+                }
                 Bc::LoadConstant { slot, value } => {
                     let slot = *slot;
                     let value = value.clone();
@@ -553,9 +578,19 @@ impl<'a, 'p> Interp<'a, 'p> {
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
-                &Bc::CreateTuple { values, target } => {
+                &Bc::MoveCreateTuple { values, target } => {
                     let tuple = self.take_slots(values);
                     *self.get_slot_mut(target) = tuple;
+                    self.bump_ip();
+                }
+                &Bc::CloneCreateTuple { values, target } => {
+                    let values = (0..values.count)
+                        .map(|i| self.clone_slot(values.index(i)))
+                        .collect();
+                    *self.get_slot_mut(target) = Value::Tuple {
+                        container_type: TypeId::any(),
+                        values,
+                    };
                     self.bump_ip();
                 }
                 &Bc::Move { from, to } => {
@@ -859,6 +894,19 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "print_callstack" => {
                 println!("{}", self.log_callstack());
+                Value::Unit
+            }
+            "comptime_cache_insert" => {
+                let (f, arg, ret) = self.to_triple(arg)?;
+                let (f, arg, ret) = (
+                    self.to_func(f)?,
+                    flatten_value(self.to_seq(arg)?),
+                    flatten_value(self.to_seq(ret)?),
+                );
+
+                logln!("CACHE {f:?}({arg:?}) => {:?}", arg);
+                debug_assert_eq!(self.current_fn_body().when, ExecTime::Comptime);
+                self.program.generics_memo.insert((f, arg), ret);
                 Value::Unit
             }
             "add" => bin_int!(self, +, arg, Value::I64),
@@ -1267,18 +1315,53 @@ impl<'a, 'p> Interp<'a, 'p> {
                             "{f:?} is both @inline and @noinline"
                         );
                         let will_inline = force_inline;
-                        if self.program.is_type(ret_ty, TypeInfo::Type) {
+                        let returns_type = self.program.is_type(ret_ty, TypeInfo::Type); // TODO: even if only one val is a type
+
+                        let cache_arg = if returns_type {
                             assert_eq!(
                                 self, result.when,
                                 ExecTime::Comptime,
                                 "Cannot call function returning type at runtime."
                             );
-                        }
-                        let ret = result.reserve_slots(self.return_stack_slots(f), arg_ty);
-                        if will_inline {
+                            let cache_arg = result.reserve_slots(1, arg_ty);
+                            result.insts.push(Bc::CloneCreateTuple {
+                                values: arg,
+                                target: cache_arg.first,
+                            });
+                            Some(cache_arg)
+                        } else {
+                            None
+                        };
+                        let ret = result.reserve_slots(self.return_stack_slots(f), ret_ty);
+                        if returns_type {
+                            result.insts.push(Bc::CallDirectMaybeCached { f, ret, arg });
+                        } else if will_inline {
                             self.emit_inline_call(result, arg, ret, f);
                         } else {
                             result.insts.push(Bc::CallDirect { f, ret, arg });
+                        }
+                        if let Some(cache_arg) = cache_arg {
+                            let f_arg_ret = result.reserve_slots(3, TypeId::unit());
+                            result.push(Bc::LoadConstant {
+                                slot: f_arg_ret.index(0),
+                                value: Value::GetFn(f),
+                            });
+                            result.insts.push(Bc::Move {
+                                from: cache_arg.first,
+                                to: f_arg_ret.index(1),
+                            });
+                            result.insts.push(Bc::CloneCreateTuple {
+                                values: ret,
+                                target: f_arg_ret.index(2),
+                            });
+                            let nothing = result.reserve_slots(1, TypeId::unit());
+                            // TODO: put next to for call.
+                            result.insts.push(Bc::CallBuiltin {
+                                name: self.pool.intern("comptime_cache_insert"),
+                                ret: nothing,
+                                arg: f_arg_ret,
+                            });
+                            result.push(Bc::Drop(nothing));
                         }
                         return Ok(ret);
                     } else if self.builtins.contains(i) {
@@ -1779,7 +1862,7 @@ impl<'p> Bc<'p> {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }
-            Bc::CallDirect { f, ret, arg } => {
+            Bc::CallDirectMaybeCached { f, ret, arg } | Bc::CallDirect { f, ret, arg } => {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }
@@ -1798,7 +1881,7 @@ impl<'p> Bc<'p> {
                 *false_ip += ip_offset;
             }
             Bc::Goto { ip } => *ip += ip_offset,
-            Bc::CreateTuple { values, target } => {
+            Bc::CloneCreateTuple { values, target } | Bc::MoveCreateTuple { values, target } => {
                 target.0 += stack_offset;
             }
             Bc::Drop(arg) | Bc::Ret(arg) => {
@@ -1849,5 +1932,17 @@ impl fmt::Display for Value {
             }
             _ => write!(f, "{self:?}"),
         }
+    }
+}
+
+fn flatten_value(values: Vec<Value>) -> Value {
+    if values.len() == 1 {
+        return values.into_iter().next().unwrap();
+    }
+
+    // TODO: flatten inner tuples
+    Value::Tuple {
+        container_type: TypeId::any(),
+        values,
     }
 }

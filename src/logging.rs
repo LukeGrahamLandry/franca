@@ -346,6 +346,9 @@ impl Debug for Bc<'_> {
             Bc::CallDirect { f: func, ret, arg } => {
                 write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)?
             }
+            Bc::CallDirectMaybeCached { f: func, ret, arg } => {
+                write!(f, "{ret:?} = cached_call(f({:?}), {arg:?});", func.0)?
+            }
             Bc::CallBuiltin { name, ret, arg } => {
                 write!(f, "{ret:?} = builtin(i({}), {arg:?});", name.0)?
             }
@@ -360,8 +363,11 @@ impl Debug for Bc<'_> {
                 cond, true_ip, false_ip
             )?,
             Bc::Goto { ip } => write!(f, "goto {ip};",)?,
-            Bc::CreateTuple { values, target } => {
+            Bc::MoveCreateTuple { values, target } => {
                 write!(f, "{target:?} = move{values:?};")?;
+            }
+            Bc::CloneCreateTuple { values, target } => {
+                write!(f, "{target:?} = @clone{values:?};")?;
             }
             Bc::Ret(i) => write!(f, "return {i:?};")?,
             Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,

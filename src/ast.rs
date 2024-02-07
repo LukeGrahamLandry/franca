@@ -222,7 +222,7 @@ pub struct Program<'p> {
     pub func_lookup: HashMap<(Ident<'p>, TypeId), FuncId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
-    pub generics_memo: HashMap<(FuncId, Value), TypeId>,
+    pub generics_memo: HashMap<(FuncId, Value), Value>,
 }
 
 impl<'p> Stmt<'p> {
