@@ -1106,25 +1106,18 @@ impl<'a, 'p> Interp<'a, 'p> {
             count: arg_slots,
         };
         let mut to_drop = vec![];
-        if func.arg_names.len() == 1 {
+        let arguments = func.arg_vars.as_ref().unwrap();
+        if arguments.len() == 1 {
             // if there's one name, it refers to the whole tuple.
-            if let Some(name) = func.arg_names[0] {
-                result.vars.insert(Var(name, 0), arg_range);
-            } else {
-                to_drop.push(arg_range);
-            }
-        } else if func.arg_names.len() == arg_slots {
+            result.vars.insert(arguments[0], arg_range);
+        } else if arguments.len() == arg_slots {
             // if they match, each element has its own name.
-            for (i, name) in func.arg_names.iter().enumerate() {
+            for (i, var) in arguments.iter().enumerate() {
                 let range = StackRange {
                     first: StackOffset(i),
                     count: 1,
                 };
-                if let Some(name) = func.arg_names[0] {
-                    result.vars.insert(Var(name, 0), range);
-                } else {
-                    to_drop.push(range);
-                }
+                result.vars.insert(*var, range);
             }
         } else {
             // TODO: pattern match destructuring but for now you just cant refer to the arg.
@@ -1176,8 +1169,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let value = self.compile_expr(result, expr)?;
                 result.push(Bc::Drop(value));
             }
-            Stmt::DeclNamed { name, ty, value } => {
-                // TODO: scope.
+            Stmt::DeclVar {
+                name,
+                ty,
+                value,
+                dropping,
+            } => {
+                assert!(self, dropping.is_none(), "TODO: redeclare and drop");
                 let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
                 let ty_slots = if let Some(ty) = ty {
@@ -1205,12 +1203,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // TODO: make this an error. dont guess.
                     (None, None) => result.reserve_slots(1, TypeId::any()),
                 };
-                let prev = result.vars.insert(Var(*name, 0), value);
+                let prev = result.vars.insert(*name, value);
                 assert!(self, prev.is_none(), "TODO: redeclare and drop");
             }
-            Stmt::SetNamed(name, expr) => {
+            Stmt::SetVar(var, expr) => {
                 let value = self.compile_expr(result, expr)?;
-                let slot = result.vars.get(&Var(*name, 0));
+                let slot = result.vars.get(var);
                 let slot = *slot.expect("SetNamed: var must be declared");
                 result.push(Bc::Drop(slot));
                 assert_eq!(self, value.count, slot.count);
@@ -1221,7 +1219,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                     });
                 }
             }
-            Stmt::SetNamed(_, _) => todo!(),
+            Stmt::SetNamed(name, _) => err!(self, CErr::UndeclaredIdent(*name)),
+            Stmt::DeclNamed { .. } | Stmt::SetNamed(_, _) => {
+                ice!(self, "Scope resolution failed {}", stmt.log(self.pool))
+            }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
                 self.program.add_func(func.clone());
@@ -1362,16 +1363,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ret
             }
             Expr::RefType(_) => todo!(),
-            Expr::GetVar(v) => todo!(),
-            Expr::GetNamed(i) => {
-                if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
-                    result.load_constant(value, ty)
-                } else if let Some(func) = self.program.declarations.get(i) {
-                    assert_eq!(self, func.len(), 1, "ambigous function reference");
-                    let func = func[0];
-                    self.ensure_compiled(func, ExecTime::Comptime)?;
-                    result.load_constant(Value::GetFn(func), TypeId::any())
-                } else if let Some(index) = result.vars.get(&Var(*i, 0)) {
+            Expr::GetVar(var) => {
+                if let Some(index) = result.vars.get(var) {
                     let from = *index;
                     let to = result.reserve_slots(from.count, TypeId::any());
                     if from.count == 1 {
@@ -1383,6 +1376,25 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts.push(Bc::CloneRange { from, to });
                     }
                     to
+                } else {
+                    println!("{:?}", result.vars);
+                    ice!(
+                        self,
+                        "Missing resolved variable {:?} '{}' at line {}",
+                        var,
+                        self.pool.get(var.0),
+                        expr.loc.row + 1
+                    )
+                }
+            }
+            Expr::GetNamed(i) => {
+                if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
+                    result.load_constant(value, ty)
+                } else if let Some(func) = self.program.declarations.get(i) {
+                    assert_eq!(self, func.len(), 1, "ambigous function reference");
+                    let func = func[0];
+                    self.ensure_compiled(func, ExecTime::Comptime)?;
+                    result.load_constant(Value::GetFn(func), TypeId::any())
                 } else if self.builtins.contains(i) {
                     todo!("make builtins first class functions");
                 } else {
@@ -1407,30 +1419,25 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
-                    "addr" => {
-                        match arg.deref().deref() {
-                            // TODO: copy-n-paste
-                            Expr::GetNamed(i) => {
-                                let stack_slot = if let Some(index) = result.vars.get(&Var(*i, 0)) {
-                                    *index
-                                } else {
-                                    logln!(
-                                        "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
-                                        self.pool.get(*i)
-                                    );
-                                    return Err(self.error(CErr::UndeclaredIdent(*i)));
-                                };
-
-                                let addr_slot = result.reserve_slots(1, TypeId::any());
-                                result.push(Bc::AbsoluteStackAddr {
-                                    of: stack_slot,
-                                    to: addr_slot.first,
-                                });
-                                addr_slot
-                            }
-                            _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
+                    "addr" => match arg.deref().deref() {
+                        Expr::GetVar(var) => {
+                            let stack_slot = *result.vars.get(var).expect("Missing resolved var");
+                            let addr_slot = result.reserve_slots(1, TypeId::any());
+                            result.push(Bc::AbsoluteStackAddr {
+                                of: stack_slot,
+                                to: addr_slot.first,
+                            });
+                            addr_slot
                         }
-                    }
+                        &Expr::GetNamed(i) => {
+                            logln!(
+                                "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
+                                self.pool.get(i)
+                            );
+                            return Err(self.error(CErr::UndeclaredIdent(i)));
+                        }
+                        _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
+                    },
                     "type" => {
                         let ty = arg.ty.expect("TODO: better type tracking");
                         result.load_constant(

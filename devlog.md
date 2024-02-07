@@ -1,6 +1,8 @@
 
-## calls in type annotations
+## scope (Feb 7)
 
+- do arg vars based my new thing
+- switch the look ups on GetNamed to GetVar, etc. 
 
 
 ## Interp (Feb 1)
