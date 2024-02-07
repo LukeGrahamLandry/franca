@@ -441,6 +441,11 @@ impl<'p> Program<'p> {
             Value::Map(_, _) => todo!(),
             Value::Symbol(_) => todo!(),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
+            Value::Heap {
+                value,
+                first,
+                count,
+            } => TypeId::any(),
         }
     }
 

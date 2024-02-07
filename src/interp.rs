@@ -5,6 +5,7 @@ use std::{
     mem::replace,
     ops::Deref,
     panic::Location,
+    ptr,
 };
 
 use crate::{
@@ -60,6 +61,11 @@ pub enum Value {
     // Crash if you try to read one.
     Poison,
     InterpAbsStackAddr(StackAbsoluteRange),
+    Heap {
+        value: *mut InterpBox,
+        first: usize,
+        count: usize,
+    },
 
     // These are needed because they're using for bootstrapping the comptime types.
     Slice(TypeId),       // for `[]T`
@@ -101,6 +107,11 @@ impl StackRange {
         assert!(offset < self.count);
         StackOffset(self.first.0 + offset)
     }
+}
+
+pub struct InterpBox {
+    references: isize,
+    values: Vec<Value>,
 }
 
 // TODO: smaller index sizes so can pack these?
@@ -652,46 +663,100 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let when = self.call_stack.last().unwrap().when;
                 Value::Bool(when == ExecTime::Comptime)
             }
-            "get" => {
-                let addr = self.to_stack_addr(arg)?;
-                if addr.count == 1 {
-                    let value = self.value_stack[addr.first.0].clone();
-                    assert_ne!(value, Value::Poison);
-                    value
-                } else {
-                    let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
-                    Value::Tuple {
-                        container_type: TypeId::any(),
-                        values: values.to_vec(),
+            "get" => match arg {
+                Value::InterpAbsStackAddr(addr) => {
+                    if addr.count == 1 {
+                        let value = self.value_stack[addr.first.0].clone();
+                        assert_ne!(value, Value::Poison);
+                        value
+                    } else {
+                        let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
+                        Value::Tuple {
+                            container_type: TypeId::any(),
+                            values: values.to_vec(),
+                        }
                     }
                 }
-            }
+                Value::Heap {
+                    value,
+                    first,
+                    count,
+                } => {
+                    let data = unsafe { &*value };
+                    assert!(data.references > 0);
+                    if count == 1 {
+                        let value = data.values[0].clone();
+                        assert_ne!(value, Value::Poison);
+                        value
+                    } else {
+                        let values = &data.values[first..first + count];
+                        Value::Tuple {
+                            container_type: TypeId::any(),
+                            values: values.to_vec(),
+                        }
+                    }
+                }
+                _ => panic!("Wanted ptr found {:?}", arg),
+            },
             "set" => {
                 let (addr, value) = self.to_pair(arg)?;
-                let addr = self.to_stack_addr(addr)?;
-                // TODO: call drop if not poison
-                // Note: the slots you're setting to are allowed to contain poison
-                if addr.count == 1 {
-                    self.value_stack[addr.first.0] = value;
-                } else {
-                    let values = self.to_seq(value)?;
-                    assert_eq!(values.len(), addr.count);
-                    for (i, entry) in values.into_iter().enumerate() {
-                        self.value_stack[addr.first.0 + i] = entry;
+                match addr {
+                    Value::InterpAbsStackAddr(addr) => {
+                        // TODO: call drop if not poison
+                        // Note: the slots you're setting to are allowed to contain poison
+                        if addr.count == 1 {
+                            self.value_stack[addr.first.0] = value;
+                        } else {
+                            let values = self.to_seq(value)?;
+                            assert_eq!(values.len(), addr.count);
+                            for (i, entry) in values.into_iter().enumerate() {
+                                self.value_stack[addr.first.0 + i] = entry;
+                            }
+                        }
+                        Value::Unit
                     }
+                    Value::Heap {
+                        value: ptr_value,
+                        first,
+                        count,
+                    } => {
+                        // Slicing operations are bounds checked.
+                        let ptr = unsafe { &mut *ptr_value };
+                        if count == 1 {
+                            ptr.values[first] = value;
+                        } else {
+                            let values = self.to_seq(value)?;
+                            assert_eq!(values.len(), count);
+                            for (i, entry) in values.into_iter().enumerate() {
+                                ptr.values[first + 1] = entry;
+                            }
+                        }
+                        Value::Unit
+                    }
+                    _ => panic!("Wanted ptr found {:?}", addr),
                 }
-                Value::Unit
             }
             "is_uninit" => {
-                let addr = self.to_stack_addr(arg)?;
-                let result = if addr.count == 1 {
-                    self.value_stack[addr.first.0] == Value::Poison
-                } else {
-                    // TODO: not sure if its more useful if this is all or any or crash
-                    self.value_stack[addr.first.0..addr.first.0 + addr.count]
-                        .iter()
-                        .all(|v| v == &Value::Poison)
+                let range = match arg {
+                    Value::InterpAbsStackAddr(addr) => {
+                        &self.value_stack[addr.first.0..addr.first.0 + addr.count]
+                    }
+                    Value::Heap {
+                        value,
+                        first,
+                        count,
+                    } => {
+                        let data = unsafe { &*value };
+                        assert!(
+                            data.references > 0
+                                && first < data.values.len()
+                                && count < data.values.len()
+                        );
+                        &data.values[first..first + count]
+                    }
+                    _ => panic!("Wanted ptr found {:?}", arg),
                 };
+                let result = range.iter().all(|v| v == &Value::Poison);
                 Value::Bool(result)
             }
             "len" => {
@@ -708,33 +773,73 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "slice" => {
                 // last is not included
-                let (addr, first, last) = self.to_triple(arg)?;
-                let (addr, first, last) = (
-                    self.to_stack_addr(addr)?,
-                    self.to_int(first)?,
-                    self.to_int(last)?,
-                );
-                assert!(
-                    first >= 0
-                        && last >= 0
-                        && (first as usize) < addr.count
-                        && (last as usize) <= addr.count
-                        && first < last
-                );
-                Value::InterpAbsStackAddr(StackAbsoluteRange {
-                    first: StackAbsolute(addr.first.0 + first as usize),
-                    count: (last - first) as usize,
-                })
+                let (addr, new_first, new_last) = self.to_triple(arg)?;
+                let (new_first, new_last) = (self.to_int(new_first)?, self.to_int(new_last)?);
+                assert!(new_first >= 0 && new_last >= 0 && new_first < new_last);
+                match addr {
+                    Value::InterpAbsStackAddr(addr) => {
+                        assert!(
+                            (new_first as usize) < addr.count && (new_last as usize) <= addr.count
+                        );
+                        Value::InterpAbsStackAddr(StackAbsoluteRange {
+                            first: StackAbsolute(addr.first.0 + new_first as usize),
+                            count: (new_last - new_first) as usize,
+                        })
+                    }
+                    Value::Heap {
+                        value,
+                        first,
+                        count,
+                    } => {
+                        let abs_first = first + new_first as usize;
+                        let abs_last = first + new_last as usize;
+                        // Slicing operations are bounds checked.
+                        let data = unsafe { &*value };
+                        assert!(
+                            data.references > 0
+                                && abs_first < data.values.len()
+                                && abs_last <= data.values.len()
+                        );
+                        Value::Heap {
+                            value,
+                            first: abs_first,
+                            count: abs_last - abs_first,
+                        }
+                    }
+                    _ => panic!("Wanted ptr found {:?}", addr),
+                }
             }
             "alloc" => {
                 let (ty, count) = self.to_pair(arg)?;
                 let (ty, count) = (self.to_type(ty)?, self.to_int(count)?);
-                todo!()
+                assert!(count >= 0);
+                let count = count as usize * self.program.slot_count(ty);
+                let values = vec![Value::Poison; count];
+                let value = Box::into_raw(Box::new(InterpBox {
+                    references: 1,
+                    values,
+                }));
+                Value::Heap {
+                    value,
+                    first: 0,
+                    count,
+                }
             }
             "free" => {
                 let (ty, count, ptr) = self.to_triple(arg)?;
-                let (ty, count) = (self.to_type(ty)?, self.to_int(count)?);
-                todo!()
+                let (ty, count, (ptr, ptr_first, ptr_count)) = (
+                    self.to_type(ty)?,
+                    self.to_int(count)?,
+                    self.to_heap_ptr(ptr)?,
+                );
+                let slots = count as usize * self.program.slot_count(ty);
+                assert_eq!(ptr_first, 0);
+                assert_eq!(ptr_count, slots);
+                let ptr_val = unsafe { &*ptr };
+                assert_eq!(ptr_val.references, 1);
+                assert_eq!(ptr_val.values.len(), slots);
+                let _ = unsafe { Box::from_raw(ptr) };
+                Value::Unit
             }
             "print" => {
                 println!("{:?}", arg);
@@ -905,7 +1010,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let mut func = self.program.funcs[index].clone();
         let (arg, ret) = func.ty.unwrap();
         let arg_slots = self.program.slot_count(arg);
-        println!("{:?} has arg {} slots", FuncId(index), arg_slots);
+        logln!("{:?} has arg {} slots", FuncId(index), arg_slots);
         assert_ne!(arg_slots, 0);
         let mut result = FnBody {
             insts: vec![],
@@ -1450,6 +1555,19 @@ impl<'a, 'p> Interp<'a, 'p> {
             Ok(r)
         } else {
             Err(self.error(CErr::TypeError("i64", value)))
+        }
+    }
+
+    fn to_heap_ptr(&self, value: Value) -> Res<'p, (*mut InterpBox, usize, usize)> {
+        if let Value::Heap {
+            value,
+            first,
+            count,
+        } = value
+        {
+            Ok((value, first, count))
+        } else {
+            Err(self.error(CErr::TypeError("Heap", value)))
         }
     }
 }
