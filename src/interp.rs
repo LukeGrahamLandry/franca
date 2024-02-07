@@ -10,6 +10,7 @@ use std::{
     ptr,
 };
 
+use crate::logging::PoolLog;
 use crate::{
     ast::{
         Expr, FatExpr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo,
@@ -18,88 +19,8 @@ use crate::{
     pool::{Ident, StringPool},
 };
 
-// TODO: move all this junk to logging.rs
-
-macro_rules! bin_int {
-    ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
-        let (a, b) = $self.load_int_pair($arg)?;
-        $res(a $op b)
-    }};
-}
-
-macro_rules! err {
-    ($self:expr, $payload:expr) => {{
-        return Err($self.error($payload));
-    }};
-    ($self:expr, $($arg:tt)*) => {{
-        let msg = format!($($arg)*);
-        return err!($self, CErr::Msg(msg))
-    }};
-}
-
-macro_rules! assert {
-    ($self:expr, $cond:expr, $($arg:tt)+) => {{
-        if !($cond) {
-            let msg = format!("Assertion Failed: {}\n{}", stringify!($cond), format!($($arg)*));
-            return err!($self, CErr::Msg(msg))
-        }
-    }};
-    ($self:expr, $cond:expr $(,)?) => {{
-        assert!($self, $cond, "")
-    }};
-}
-
-// looks weird cause i stole it from the rust one. apparently its faster or whatever
-macro_rules! assert_eq {
-    ($self:expr, $left:expr, $right:expr, $($arg:tt)+) => {
-        match (&$left, &$right) {
-            (left_val, right_val) => {
-                if !(*left_val == *right_val) {
-                    let msg = format!($($arg)*);
-                    err!(
-                        $self,
-                        "Expected {} == {}\nBut {:?} != {:?}\n{}",
-                        stringify!($left_val),
-                        stringify!($right_val),
-                        left_val,
-                        right_val,
-                        msg
-                    )
-                }
-            }
-        }
-    };
-    ($self:expr, $left:expr, $right:expr) => {
-        assert_eq!($self, $left, $right, "");
-    };
-}
-
-macro_rules! check {
-    ($self:expr, $cond:expr, $($arg:tt)+) => {{
-        if !($cond) {
-            let msg = format!("Builtin Safety Check Failed: {}\n{}", stringify!($cond), format!($($arg)*));
-            return err!($self, CErr::Msg(msg))
-        }
-    }};
-    ($self:expr, $cond:expr $(,)?) => {{
-        check!($self, $cond, "")
-    }};
-}
-
-// I want to be as easy to use my error system as just paniking.
-// Use this one for things that aren't supported yet or should have been caught in a previous stage of compilation.
-macro_rules! ice {
-    ($self:expr, $($arg:tt)*) => {{
-        let msg = format!($($arg)*);
-        return err!($self, CErr::IceFmt(msg))
-    }};
-}
-
-pub enum LogTag {
-    Parsing,
-    InstLoop,
-    Jitting,
-}
+#[macro_use]
+use crate::logging::{logln, assert, assert_eq, ice, err, log, bin_int};
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum Value {
@@ -148,7 +69,7 @@ pub enum Value {
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
 #[derive(Copy, Clone)]
-struct StackOffset(usize);
+pub struct StackOffset(pub usize);
 
 impl StackOffset {
     fn to_range(&self) -> StackRange {
@@ -160,18 +81,18 @@ impl StackOffset {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
-struct StackAbsolute(usize);
+pub struct StackAbsolute(pub usize);
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
 pub struct StackAbsoluteRange {
-    first: StackAbsolute,
-    count: usize,
+    pub first: StackAbsolute,
+    pub count: usize,
 }
 
 #[derive(Copy, Clone)]
-struct StackRange {
-    first: StackOffset,
-    count: usize,
+pub struct StackRange {
+    pub first: StackOffset,
+    pub count: usize,
 }
 
 impl StackRange {
@@ -187,7 +108,7 @@ pub struct InterpBox {
 }
 
 #[derive(Clone)]
-enum Bc<'p> {
+pub enum Bc<'p> {
     CallDynamic {
         f: StackOffset,
         ret: StackRange,
@@ -250,7 +171,7 @@ enum Bc<'p> {
     DebugMarker(&'static str, Ident<'p>),
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
-struct CallFrame<'p> {
+pub struct CallFrame<'p> {
     stack_base: StackAbsolute,
     current_func: FuncId,
     current_ip: usize,
@@ -261,14 +182,14 @@ struct CallFrame<'p> {
     when: ExecTime,
 }
 
-struct FnBody<'p> {
-    insts: Vec<Bc<'p>>,
-    stack_slots: usize,
-    vars: HashMap<Var<'p>, StackRange>, // TODO: use a vec
+pub struct FnBody<'p> {
+    pub insts: Vec<Bc<'p>>,
+    pub stack_slots: usize,
+    pub vars: HashMap<Var<'p>, StackRange>, // TODO: use a vec
     arg_names: Vec<Option<Ident<'p>>>,
-    when: ExecTime,
-    slot_types: Vec<TypeId>,
-    func: FuncId,
+    pub when: ExecTime,
+    pub slot_types: Vec<TypeId>,
+    pub func: FuncId,
 }
 
 impl<'p> FnBody<'p> {
@@ -289,17 +210,15 @@ impl<'p> FnBody<'p> {
 //
 // TODO: bucket array for stack so you can take pointers into it
 pub struct Interp<'a, 'p> {
-    pool: &'a StringPool<'p>,
-    value_stack: Vec<Value>,
-    call_stack: Vec<CallFrame<'p>>,
-    program: &'a mut Program<'p>,
-    ready: Vec<Option<FnBody<'p>>>,
+    pub pool: &'a StringPool<'p>,
+    pub value_stack: Vec<Value>,
+    pub call_stack: Vec<CallFrame<'p>>,
+    pub program: &'a mut Program<'p>,
+    pub ready: Vec<Option<FnBody<'p>>>,
     builtins: Vec<Ident<'p>>,
     log_depth: usize,
-    // TODO: really need to have unique ids on expressions so im not just recursively hashing it and hoping for the best
-    comptime_cache: HashMap<FatExpr<'p>, Value>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
-    debug_trace: Vec<DebugState<'p>>,
+    pub debug_trace: Vec<DebugState<'p>>,
     anon_fn_counter: usize,
     pub assertion_count: usize,
 }
@@ -406,7 +325,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             ready: vec![],
             builtins: BUILTINS.iter().map(|name| pool.intern(name)).collect(),
             log_depth: 0,
-            comptime_cache: Default::default(),
             debug_trace: vec![],
             anon_fn_counter: 0,
             assertion_count: 0,
@@ -1374,6 +1292,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts.push(Bc::CallBuiltin { name: *i, ret, arg });
                         return Ok(ret);
                     } else if "if" == self.pool.get(*i) {
+                        // TODO: always inline
                         let unit = result
                             .load_constant(Value::Unit, self.program.intern_type(TypeInfo::Unit));
                         // TODO: if returning tuples
@@ -1617,10 +1536,6 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     // TODO: fast path for builtin type identifiers
     fn cached_eval_expr(&mut self, e: FatExpr<'p>) -> Res<'p, Value> {
-        if let Some(old_result) = self.comptime_cache.get(&e) {
-            logln!("CACHED: {} -> {:?}", e.log(self.pool), old_result);
-            return Ok(old_result.clone());
-        }
         let state = DebugState::ComputeCached(e.clone());
         self.push_state(&state);
         let name = format!("@eval_{}@", self.anon_fn_counter);
@@ -1645,7 +1560,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             result,
             self.program.funcs[func_id.0].log(self.pool)
         );
-        self.comptime_cache.insert(e, result.clone());
         self.pop_state(state);
         Ok(result)
     }
@@ -1787,80 +1701,10 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 }
 
-impl Debug for StackOffset {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "${}", self.0)
-    }
-}
-
-impl Debug for StackRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let args: Vec<_> = (self.first.0..(self.first.0 + self.count))
-            .map(|i| format!("${}", i))
-            .collect();
-        let args = args.join(", ");
-        write!(f, "({args})")
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExecTime {
     Comptime,
     Runtime,
-}
-
-impl Debug for FnBody<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when)?;
-        writeln!(f, "TYPES: {:?}", &self.slot_types);
-        for (i, bc) in self.insts.iter().enumerate() {
-            writeln!(f, "{i}. {bc:?}");
-        }
-        writeln!(f, "===============")?;
-        Ok(())
-    }
-}
-
-impl Debug for Bc<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Bc::CallDynamic {
-                f: func_slot,
-                ret,
-                arg,
-            } => write!(f, "{ret:?} = call({func_slot:?}, {arg:?});")?,
-            Bc::CallDirect { f: func, ret, arg } => {
-                write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)?
-            }
-            Bc::CallBuiltin { name, ret, arg } => {
-                write!(f, "{ret:?} = builtin(i({}), {arg:?});", name.0)?
-            }
-            Bc::LoadConstant { slot, value } => write!(f, "{:?} = {:?};", slot, value)?,
-            Bc::JumpIf {
-                cond,
-                true_ip,
-                false_ip,
-            } => write!(
-                f,
-                "if ({:?}) goto {} else goto {};",
-                cond, true_ip, false_ip
-            )?,
-            Bc::Goto { ip } => write!(f, "goto {ip};",)?,
-            Bc::CreateTuple { values, target } => {
-                write!(f, "{target:?} = move{values:?};")?;
-            }
-            Bc::Ret(i) => write!(f, "return {i:?};")?,
-            Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
-            Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
-            Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
-            Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
-            Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
-            Bc::Drop(i) => write!(f, "drop({:?});", i)?,
-            Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of)?,
-            Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?});", s, i)?,
-        }
-        Ok(())
-    }
 }
 
 impl FnBody<'_> {

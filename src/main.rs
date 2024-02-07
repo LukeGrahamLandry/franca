@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::{env, fs, io::read_to_string, time::Instant};
+use std::{env, fs, io::read_to_string, path::PathBuf, time::Instant};
 
 use ast::Program;
 use interp::Value;
@@ -8,29 +8,10 @@ use tree_sitter::Parser;
 
 use crate::{
     interp::{ExecTime, Interp},
+    logging::{logln, PoolLog},
     parse::WalkParser,
     pool::StringPool,
 };
-
-macro_rules! log {
-    // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
-    ($($arg:tt)*) => {{
-        if cfg!(feature = "logging") {
-            print!($($arg)*);
-        }
-    }};
-}
-macro_rules! logln {
-    // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
-    ($($arg:tt)*) => {{
-        if cfg!(feature = "logging") {
-            println!($($arg)*);
-        }
-    }};
-}
-
-pub(crate) use log;
-pub(crate) use logln;
 
 mod ast;
 mod interp;
@@ -44,9 +25,9 @@ macro_rules! check_op {
         let cases = [5, 10, -5];
         for n in cases {
             let src = format!("fn main(n: i64) i64 = {{ {0}(n, n) }}", $name);
-            run_main(&src, Value::I64(n), Value::I64(n $op n));
+            run_main(&src, Value::I64(n), Value::I64(n $op n), None);
             let src = format!("fn main(n: i64) bool = {{ {0}({0}(n, n), n) }}", $name);
-                run_main(&src, Value::I64(n), Value::I64((n $op n) $op n));
+                run_main(&src, Value::I64(n), Value::I64((n $op n) $op n), None);
         }
     }};
 }
@@ -56,7 +37,7 @@ macro_rules! check_cmp {
         let cases = [5, 10, -5];
         for n in cases {
             let src = format!("fn main(n: i64) bool = {{ {0}(n, n) }}", $name);
-            run_main(&src, Value::I64(n), Value::Bool(n $op n));
+            run_main(&src, Value::I64(n), Value::Bool(n $op n), None);
         }
     }};
 }
@@ -66,12 +47,18 @@ fn main() {
         &fs::read_to_string("src/tests.txt").unwrap(),
         Value::I64(0),
         Value::I64(0),
+        Some("target/latest_log/interp.txt"),
     );
 }
 
 #[test]
 fn tests_txt() {
-    run_main(include_str!("tests.txt"), Value::I64(0), Value::I64(0));
+    run_main(
+        include_str!("tests.txt"),
+        Value::I64(0),
+        Value::I64(0),
+        None,
+    );
 }
 
 // TODO: since operators are traits, i probably dont need to use a macro for this
@@ -100,6 +87,7 @@ fn call_user_fn() {
             "#,
         Value::I64(5),
         Value::I64(15),
+        None,
     );
 }
 
@@ -114,6 +102,7 @@ fn return_tuple() {
             container_type: ast::TypeId::any(), // TODO
             values: vec![Value::I64(3), Value::I64(4)],
         },
+        None,
     );
 }
 
@@ -126,10 +115,11 @@ fn passing_tuple_to_multiargs() {
                     "#,
         Value::I64(3),
         Value::I64(6),
+        None,
     );
 }
 
-fn run_main(src: &str, arg: Value, expect: Value) {
+fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
     let start = Instant::now();
     let mut p = Parser::new();
     p.set_language(tree_sitter_inferd::language());
@@ -140,14 +130,12 @@ fn run_main(src: &str, arg: Value, expect: Value) {
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
     let result = interp.run(f, arg.clone(), ExecTime::Runtime);
-    logln!("{}", interp.write_jitted());
     let result = result.unwrap();
     logln!("{arg:?} -> {result:?}");
     assert_eq!(result, expect);
     // TODO: change this when i add assert(bool)
     let assertion_count = src.split("assert_eq(").count() - 1;
     assert_eq!(interp.assertion_count, assertion_count);
-    program.log_cached_types();
     println!("{assertion_count} assertions passed.");
     let end = Instant::now();
     let seconds = (end - start).as_secs_f32();
@@ -156,7 +144,13 @@ fn run_main(src: &str, arg: Value, expect: Value) {
         .filter(|s| !s.split("//").next().unwrap().is_empty())
         .count();
     println!(
-        "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
-        lines as f32 / seconds
-    );
+            "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+            lines as f32 / seconds
+        );
+    if let Some(path) = save {
+        let path = PathBuf::from(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, interp.log(&pool)).unwrap();
+        println!("Wrote log to {:?}", path);
+    }
 }

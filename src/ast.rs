@@ -2,6 +2,7 @@ use tree_sitter::Point;
 
 use crate::{
     interp::Value,
+    logging::PoolLog,
     pool::{Ident, StringPool},
 };
 use std::{
@@ -13,25 +14,17 @@ use std::{
     rc::Rc,
     sync::RwLock,
 };
+#[macro_use]
+use crate::logging::logln;
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq)]
-pub struct TypeId(usize);
+pub struct TypeId(pub usize);
 
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub param: TypeId,
     pub returns: TypeId,
-}
-
-impl Debug for TypeId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_any() {
-            write!(f, "TyAny")
-        } else {
-            write!(f, "Ty{}", self.0)
-        }
-    }
 }
 
 impl TypeId {
@@ -233,22 +226,6 @@ pub struct Program<'p> {
 }
 
 impl<'p> Stmt<'p> {
-    pub fn log(&self, pool: &StringPool<'p>) -> String {
-        match self {
-            Stmt::DeclNamed { name, ty, value } => format!(
-                "let {}: {:?} = {:?};",
-                pool.get(*name),
-                ty,
-                value.as_ref().map(|v| v.log(pool))
-            ),
-            Stmt::Eval(e) => e.log(pool),
-            Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
-            Stmt::DeclFunc(func) => format!("Declare:{}", func.log(pool)),
-            Stmt::Noop => "".to_owned(),
-            _ => format!("{:?}", self),
-        }
-    }
-
     // used for moving out of ast
     pub fn null() -> Stmt<'p> {
         Stmt::Eval(FatExpr::null())
@@ -256,15 +233,6 @@ impl<'p> Stmt<'p> {
 }
 
 impl<'p> LazyFnType<'p> {
-    pub fn log(&self, pool: &StringPool<'p>) -> String {
-        match self {
-            LazyFnType::Finished(arg, ret) => format!("(fn({:?}) {:?})", arg, ret),
-            LazyFnType::Pending { arg, ret } => {
-                format!("(fn({}) {})", arg.log(pool), ret.log(pool))
-            }
-        }
-    }
-
     pub fn of(arg_type: Option<FatExpr<'p>>, return_type: Option<FatExpr<'p>>) -> LazyFnType<'p> {
         let arg = match &arg_type {
             Some(arg) => LazyType::PendingEval(arg.clone()),
@@ -288,52 +256,10 @@ impl<'p> LazyFnType<'p> {
 
 // TODO: print actual type info
 impl<'p> LazyType<'p> {
-    pub fn log(&self, pool: &StringPool<'p>) -> String {
-        match self {
-            LazyType::Infer => "Infer".into(),
-            LazyType::PendingEval(e) => e.log(pool),
-            LazyType::Finished(ty) => format!("{:?}", ty),
-        }
-    }
-
     pub fn unwrap(&self) -> TypeId {
         match self {
             LazyType::Finished(ty) => *ty,
             _ => panic!("Type not ready: {:?}", self),
-        }
-    }
-}
-
-impl<'p> Expr<'p> {
-    pub fn log(&self, pool: &StringPool<'p>) -> String {
-        match self {
-            Expr::Call(func, arg) => {
-                format!("{}({})", func.log(pool), arg.log(pool))
-            }
-            &Expr::GetNamed(i) => pool.get(i).to_string(),
-            Expr::Block {
-                body,
-                result,
-                locals,
-            } => {
-                let es: Vec<_> = body.iter().map(|e| e.log(pool)).collect();
-                let es = es.join("; ");
-                format!("{{ {}; {} }}", es, result.log(pool))
-            }
-            Expr::ArrayLiteral(args) => {
-                let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
-                let args: String = args.join(", ");
-                format!("array({})", args)
-            }
-            Expr::Tuple(args) => {
-                let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
-                let args: String = args.join(", ");
-                format!("tuple({})", args)
-            }
-            Expr::RefType(e) => format!("&({})", e.log(pool)),
-            Expr::Value(Value::Unit) => "unit".to_string(),
-            Expr::Value(v) => format!("{:?}", v),
-            _ => format!("{:?}", self),
         }
     }
 }
@@ -360,40 +286,6 @@ impl<'p> Default for Program<'p> {
 }
 
 impl<'p> Program<'p> {
-    pub fn log_type(&self, t: TypeId) -> String {
-        match &self.types[t.0] {
-            TypeInfo::Any => "Any".to_owned(),
-            TypeInfo::Never => "Never".to_owned(),
-            TypeInfo::F64 => "f64".to_owned(),
-            TypeInfo::I64 => "i64".to_owned(),
-            TypeInfo::Bool => "bool".to_owned(),
-            TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
-            TypeInfo::Array(e) => format!("Array({})", self.log_type(*e)),
-            TypeInfo::Struct(e) => format!("Struct({}, {})", t.0, self.log_type(*e)),
-            TypeInfo::Fn(f) => format!(
-                "fn({}) {}",
-                self.log_type(f.param),
-                self.log_type(f.returns)
-            ),
-            TypeInfo::Tuple(v) => {
-                let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
-                format!("Tuple({})", v.join(", "))
-            }
-            TypeInfo::Enum(_) => "Enum(TODO)".to_owned(),
-            TypeInfo::Type => "Type".to_owned(),
-            TypeInfo::Unit => "Unit".to_owned(),
-        }
-    }
-
-    // Note: be careful this can't get into a recursive loop trying to pretty print stuff.
-    pub fn log_cached_types(&self) {
-        logln!("=== {} CACHED TYPES ===", self.types.len());
-        for (i, ty) in self.types.iter().enumerate() {
-            logln!("- id({i}) = {} = {:?}", self.log_type(TypeId(i)), ty);
-        }
-        logln!("====================");
-    }
-
     pub fn slot_count(&self, ty: TypeId) -> usize {
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
@@ -492,20 +384,5 @@ impl<'p> Deref for FatExpr<'p> {
 impl<'p> DerefMut for FatExpr<'p> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.expr
-    }
-}
-
-impl<'p> Func<'p> {
-    pub fn log(&self, pool: &StringPool<'p>) -> String {
-        format!(
-            "[fn {:?} {} = {}; A:{:?}]",
-            self.synth_name(pool),
-            self.ty.log(pool),
-            self.body
-                .as_ref()
-                .map(|e| e.log(pool))
-                .unwrap_or_else(|| "@forward_decl()".to_owned()),
-            self.annotations
-        )
     }
 }

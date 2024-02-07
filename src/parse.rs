@@ -11,9 +11,13 @@ use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
 use crate::{
     ast::{Annotation, ConstKnown, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId},
     interp::Value,
+    logging::PoolLog,
     pool::{Ident, StringPool},
     scope::ResolveScope,
 };
+
+#[macro_use]
+use crate::logging::{logln, log};
 
 pub struct WalkParser<'a, 'p> {
     pool: &'a StringPool<'p>,
