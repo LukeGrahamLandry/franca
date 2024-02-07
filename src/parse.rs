@@ -375,10 +375,12 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         let mut annotations = vec![];
 
         for annotation in entries {
-            logln!("TODO annotation {:?}", annotation.to_sexp());
-            let name = annotation.child(0).unwrap();
-            let name = self.pool.intern(name.utf8_text(self.src).unwrap());
-            annotations.push(Annotation { name, args: None })
+            self.assert_literal(annotation.child(0).unwrap(), "@");
+            let name = annotation.child(1).unwrap();
+            let name = name.utf8_text(self.src).unwrap();
+            let name = self.pool.intern(name);
+            let args = annotation.child(2).map(|args| self.parse_expr(args.walk()));
+            annotations.push(Annotation { name, args })
         }
 
         let arg = match arg_types.len() {

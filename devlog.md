@@ -3,7 +3,9 @@
 
 - do arg vars based my new thing
 - switch the look ups on GetNamed to GetVar, etc. 
-
+- allow shadowing 
+- now that vars are numbered, how to do inlining becomes obvious. 
+ i ended up just doing it on the bytecode tho but might want to renumber the ast as well later? 
 
 ## Interp (Feb 1)
 

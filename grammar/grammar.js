@@ -26,7 +26,7 @@ module.exports = grammar({
       prec(
         5,
         seq(
-          field("annotation", optional($.annotation)),
+          optional(field("annotation", repeat($.annotation))),
           "fn",
           field("name", $.identifier),
           field("proto", $.func_proto),

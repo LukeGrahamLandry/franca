@@ -54,28 +54,6 @@ assert_eq(15, fn(n: int(unit)) int(unit) = { add(add(n, n), n) } (5));
 
 let a = rt();
 
-// TODO: constants and local scope. 
-// let int2 = fn() Type = { i64 };
-// let int3 = int2();
-// assert _eq(15, fn(n: int3) int3 = { add(add(n, n), n) } (5));
-
-// TODO: assert compile error
-// @comptime fn hello() Unit = {
-//    hello()
-// }
-// hello();
-
-//@comptime fn ct() i64 = { 
-//    assert _eq(is_comptime(), true); 
-//    1
-//}
-//@runtime fn rt() i64 = { 
-//    let c = is_comptime(); 
-//    assert _eq(is_comptime(), false); 
-//    1
-//}
-// assert _eq(ct(), rt());
-
 ////////////////
 /// Pointers ///
 ////////////////
@@ -116,6 +94,7 @@ fn mistake(i: i64) Ptr(i64) = {
     my_value!addr  // oops, call frame went away
 }
 let very_bad_ptr = mistake(1);  // it is illegal to dereference this pointer 
+// is_oob_stack: Only supported in the interp
 assert_eq(true, is_oob_stack(very_bad_ptr));
 assert_eq(false, is_oob_stack(very_bad_ptr!addr));
 
@@ -150,12 +129,7 @@ assert_eq(get(arr_ptr), tuple(1, 123, 3)); // the type annotations are unnessisa
 // you dont even have to write the function call
 assert_eq((4, 5, 6), tuple(4, 5, 6));  
 
-// TODO: i cant parse multiple args
-//fn things(a: i64, b: i64) i64 = { 
-//    add(a, b)
-//}
-//asser t_eq(5, things(2, 3));
-//asser t_eq(5, things((2, 3)));
+// TODO: i cant parse multiple args (for now you can only do as a tuple)
 
 // in fact, tuples aren't real at all. they're just the way i represent multiple arguments and return values 
 fn flip(args: Tuple(i64, i64)) Tuple(i64, i64) = { 
@@ -180,6 +154,7 @@ fn dont_leak(size: i64) Ptr(i64) = alloc(i64, size);
 
 let on_the_heap = dont_leak(10); 
 let first = slice(on_the_heap, 0, 1);
+// is_uninit: Only supported in the interp
 assert_eq(true, is_uninit(first));
 set(first, 15);
 assert_eq(false, is_uninit(first));
@@ -188,10 +163,67 @@ assert_eq(get(first), 15);
 dealloc(i64, 10, on_the_heap);
 // TODO: interpreter dealloc frees the value (if its a vec or whatever) but reference counts the allocation to catch use after free
 
-/// Getting Types
-//asser t_eq(i64, 10!type);
-//let bbb: i64 = 10;
-// asser t_eq(i64, bbb!type)
+/////////////////////
+/// Lexical Scope ///
+/////////////////////
+
+let x = 5;
+assert_eq(x, 5);
+{  // Variables declared in a block shadow old ones
+    let x = 10;
+    {
+        let x = 15;
+        assert_eq(x, 15);
+    };
+    assert_eq(x, 10);
+};  // but after the block you can see the old again. 
+assert_eq(x, 5);
+
+// Same in functions. 
+
+let aaaa = 20;
+let ttt = fn(n: i64) i64 = {
+    let aaaa = 25;
+    assert_eq(aaaa, 25);
+    
+    assert_eq(n, 35);
+    let n = 30;  // You can shadow arguments, but now you can't get it back. 
+    assert_eq(n, 30);
+};
+ttt(35);
+assert_eq(aaaa, 20);
+
+// infact, you can shadow anything
+let shadow = 40;
+assert_eq(shadow, 40);
+let shadow = 45;  // but the old one's gone forever. 
+assert_eq(shadow, 45);
+
+
+////////////////
+/// Inlining ///
+////////////////
+
+// print_callstack: Only supported in the interp
+@inline fn test_call_1(n: i64) i64 = {
+    print(1);
+    print_callstack(); 
+    let important_value = add(n, 1);
+    mul(important_value, 2)
+}
+
+@noinline fn test_call_2(n: i64) i64 = {
+    print(2);
+    print_callstack(); 
+    let important_value = add(n, 1);
+    mul(important_value, 2)
+}
+
+let important_value = 42;
+assert_eq(test_call_1(2), 6);
+assert_eq(important_value, 42);  // Inlining doesn't stomp variables
+assert_eq(test_call_2(2), 6);
+assert_eq(important_value, 42);  // Trivial
 
 unused
 }

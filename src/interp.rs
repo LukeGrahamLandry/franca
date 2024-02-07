@@ -1,4 +1,6 @@
 #![allow(clippy::wrong_self_convention)]
+use std::fmt::{self, Write};
+use std::path::Display;
 use std::{
     collections::HashMap,
     fmt::{format, Debug},
@@ -184,7 +186,7 @@ pub struct InterpBox {
     values: Vec<Value>,
 }
 
-// TODO: smaller index sizes so can pack these?
+#[derive(Clone)]
 enum Bc<'p> {
     CallDynamic {
         f: StackOffset,
@@ -232,6 +234,10 @@ enum Bc<'p> {
         from: StackOffset,
         to: StackOffset,
     },
+    MoveRange {
+        from: StackRange,
+        to: StackRange,
+    },
     ExpandTuple {
         from: StackOffset,
         to: StackRange,
@@ -241,6 +247,7 @@ enum Bc<'p> {
         of: StackRange,
         to: StackOffset,
     },
+    DebugMarker(&'static str, Ident<'p>),
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
 struct CallFrame<'p> {
@@ -368,6 +375,7 @@ const BUILTINS: &[&str] = &[
     "alloc",
     "dealloc",
     "print",
+    "print_callstack",
 ];
 
 // TODO: use this for op call builtin to avoid a runtime hashmap lookup.
@@ -549,7 +557,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
                     self.push_callframe(f, ret, arg, when)?;
-                    self.log_callstack();
+                    logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
                 Bc::LoadConstant { slot, value } => {
@@ -583,7 +591,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                 }
                 &Bc::Ret(slot) => {
-                    self.log_callstack();
+                    logln!("{}", self.log_callstack());
                     let value = self.take_slots(slot);
                     let frame = self.call_stack.pop().unwrap();
                     logln!(
@@ -598,13 +606,18 @@ impl<'a, 'p> Interp<'a, 'p> {
 
                     // Release our stack space.
                     let size = self.value_stack.len() - frame.stack_base.0;
-                    for _ in 0..size {
+                    for i in 0..size {
                         let value = self.value_stack.pop().unwrap();
-                        debug_assert_eq!(value, Value::Poison)
+                        debug_assert_eq!(
+                            value,
+                            Value::Poison,
+                            "{:?} was not empty",
+                            StackOffset(size - i - 1)
+                        )
                     }
                     // We don't increment the caller's ip, they did it on call.
 
-                    self.log_callstack();
+                    logln!("{}", self.log_callstack());
                     if self.call_stack.last().unwrap().is_rust_marker {
                         break;
                     }
@@ -619,7 +632,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.take_slots(arg);
                     let f = self.to_func(f)?;
                     self.push_callframe(f, ret, arg, when)?;
-                    self.log_callstack();
+                    logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
                 &Bc::CreateTuple { values, target } => {
@@ -645,6 +658,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     self.bump_ip();
                 }
+                &Bc::MoveRange { from, to } => {
+                    debug_assert_eq!(from.count, to.count);
+                    for i in 0..from.count {
+                        let v = self.take_slot(from.index(i));
+                        *self.get_slot_mut(to.index(i)) = v;
+                    }
+                    self.bump_ip();
+                }
                 &Bc::ExpandTuple { from, to } => {
                     let tuple = self.take_slot(from);
                     let slot = self.slot_to_index(to.first);
@@ -663,6 +684,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     *self.get_slot_mut(to) = Value::InterpAbsStackAddr(ptr);
                     self.bump_ip();
                 }
+                Bc::DebugMarker(_, _) => self.bump_ip(),
             }
         }
         self.pop_state(state);
@@ -914,7 +936,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Unit
             }
             "print" => {
-                println!("{:?}", arg);
+                println!("{}", arg);
+                Value::Unit
+            }
+            "print_callstack" => {
+                println!("{}", self.log_callstack());
                 Value::Unit
             }
             "add" => bin_int!(self, +, arg, Value::I64),
@@ -1007,12 +1033,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         logln!("END");
     }
 
-    fn log_callstack(&self) {
-        log!("CALLS ");
+    fn log_callstack(&self) -> String {
+        let mut s = String::new();
+        write!(s, "CALLS ");
         for frame in &self.call_stack {
-            log!("[{}], ", self.pool.get(frame.debug_name));
+            write!(s, "[{}], ", self.pool.get(frame.debug_name));
         }
-        logln!("END");
+        write!(s, "END");
+        s
     }
 
     fn bump_ip(&mut self) {
@@ -1052,6 +1080,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
+    #[track_caller]
     fn get_slot_mut(&mut self, slot: StackOffset) -> &mut Value {
         let frame = self.call_stack.last().unwrap();
         &mut self.value_stack[frame.stack_base.0 + slot.0]
@@ -1150,6 +1179,47 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
+    fn emit_inline_call(
+        &mut self,
+        result: &mut FnBody<'p>,
+        arg: StackRange,
+        ret: StackRange,
+        f: FuncId,
+    ) -> Res<'p, ()> {
+        let name = self.program.funcs[f.0].get_name(self.pool);
+        result.push(Bc::DebugMarker("start:inline_call", name));
+        let arg_slots = result.reserve_slots(arg.count, TypeId::any()); // These are included in the new function's stack
+        result.push(Bc::MoveRange {
+            from: arg,
+            to: arg_slots,
+        });
+        let (stack_offset, ip_offset) = (result.stack_slots - arg_slots.count, result.insts.len());
+        // TODO: pass arg
+        self.ensure_compiled(f, result.when);
+        let func = self.ready[f.0].as_ref().unwrap();
+        // TODO: check for recusion somewhere.
+        // TODO: put constants somewhere so dont have to clone them each time a function is inlined.
+        result.stack_slots += func.stack_slots;
+        result.slot_types.extend(func.slot_types.iter());
+        let mut has_returned = false; // TODO: remove
+        for mut inst in func.insts.iter().cloned() {
+            assert!(self, !has_returned);
+            inst.renumber(stack_offset, ip_offset);
+            if let Bc::Ret(return_value) = inst {
+                // TODO: what if there are multiple returns?
+                has_returned = true;
+                result.push(Bc::MoveRange {
+                    from: return_value,
+                    to: ret,
+                });
+            } else {
+                result.push(inst);
+            }
+        }
+        result.push(Bc::DebugMarker("end:inline_call", name));
+        Ok(())
+    }
+
     pub fn write_jitted(&self) -> String {
         self.ready
             .iter()
@@ -1175,7 +1245,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 value,
                 dropping,
             } => {
-                assert!(self, dropping.is_none(), "TODO: redeclare and drop");
                 let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
                 let ty_slots = if let Some(ty) = ty {
@@ -1204,7 +1273,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                     (None, None) => result.reserve_slots(1, TypeId::any()),
                 };
                 let prev = result.vars.insert(*name, value);
-                assert!(self, prev.is_none(), "TODO: redeclare and drop");
+                assert!(self, prev.is_none(), "shadow is still new var");
+                // Current thought is be like rust and dont call drop on the shadowed thing until the end of scope.
+                // Its consistant and it means you can reference its data if you do a chain of transforming something with the same name.
             }
             Stmt::SetVar(var, expr) => {
                 let value = self.compile_expr(result, expr)?;
@@ -1260,7 +1331,24 @@ impl<'a, 'p> Interp<'a, 'p> {
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
                         self.infer_types(f);
-                        let (arg_ty, ret_ty) = self.program.funcs[f.0].ty.unwrap();
+                        let func = &self.program.funcs[f.0];
+                        let (arg_ty, ret_ty) = func.ty.unwrap();
+                        // TODO: some huristic based on how many times called and how big the body is.
+                        // TODO: pre-intern all these constants so its not a hash lookup everytime
+                        let force_inline = func
+                            .annotations
+                            .iter()
+                            .any(|a| a.name == self.pool.intern("inline"));
+                        let deny_inline = func
+                            .annotations
+                            .iter()
+                            .any(|a| a.name == self.pool.intern("noinline"));
+                        assert!(
+                            self,
+                            !(force_inline && deny_inline),
+                            "{f:?} is both @inline and @noinline"
+                        );
+                        let will_inline = force_inline;
                         if self.program.is_type(ret_ty, TypeInfo::Type) {
                             assert_eq!(
                                 self, result.when,
@@ -1269,7 +1357,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                             );
                         }
                         let ret = result.reserve_slots(self.return_stack_slots(f), arg_ty);
-                        result.insts.push(Bc::CallDirect { f, ret, arg });
+                        if will_inline {
+                            self.emit_inline_call(result, arg, ret, f);
+                        } else {
+                            result.insts.push(Bc::CallDirect { f, ret, arg });
+                        }
                         return Ok(ret);
                     } else if self.builtins.contains(i) {
                         // TODO: this is ugly... other builtins might return tuples
@@ -1696,13 +1788,13 @@ impl<'a, 'p> Interp<'a, 'p> {
 }
 
 impl Debug for StackOffset {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "${}", self.0)
     }
 }
 
 impl Debug for StackRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let args: Vec<_> = (self.first.0..(self.first.0 + self.count))
             .map(|i| format!("${}", i))
             .collect();
@@ -1718,7 +1810,7 @@ pub enum ExecTime {
 }
 
 impl Debug for FnBody<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when)?;
         writeln!(f, "TYPES: {:?}", &self.slot_types);
         for (i, bc) in self.insts.iter().enumerate() {
@@ -1730,7 +1822,7 @@ impl Debug for FnBody<'_> {
 }
 
 impl Debug for Bc<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Bc::CallDynamic {
                 f: func_slot,
@@ -1762,8 +1854,10 @@ impl Debug for Bc<'_> {
             Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
             Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
             Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
+            Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
             Bc::Drop(i) => write!(f, "drop({:?});", i)?,
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of)?,
+            Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?});", s, i)?,
         }
         Ok(())
     }
@@ -1829,5 +1923,87 @@ fn to_flat_seq(value: Value) -> Vec<Value> {
             values,
         } => values.into_iter().flat_map(to_flat_seq).collect(),
         e => vec![e],
+    }
+}
+
+impl<'p> Bc<'p> {
+    // Used for inlining
+    fn renumber(&mut self, stack_offset: usize, ip_offset: usize) {
+        match self {
+            Bc::CallDynamic { f, ret, arg } => {
+                f.0 += stack_offset;
+                ret.first.0 += stack_offset;
+                arg.first.0 += stack_offset;
+            }
+            Bc::CallDirect { f, ret, arg } => {
+                ret.first.0 += stack_offset;
+                arg.first.0 += stack_offset;
+            }
+            Bc::CallBuiltin { name, ret, arg } => {
+                ret.first.0 += stack_offset;
+                arg.first.0 += stack_offset;
+            }
+            Bc::LoadConstant { slot, value } => slot.0 += stack_offset,
+            Bc::JumpIf {
+                cond,
+                true_ip,
+                false_ip,
+            } => {
+                cond.0 += stack_offset;
+                *true_ip += ip_offset;
+                *false_ip += ip_offset;
+            }
+            Bc::Goto { ip } => *ip += ip_offset,
+            Bc::CreateTuple { values, target } => {
+                target.0 += stack_offset;
+            }
+            Bc::Drop(arg) | Bc::Ret(arg) => {
+                arg.first.0 += stack_offset;
+            }
+
+            Bc::Move { from, to } | Bc::Clone { from, to } => {
+                from.0 += stack_offset;
+                to.0 += stack_offset;
+            }
+            Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
+                from.first.0 += stack_offset;
+                to.first.0 += stack_offset;
+            }
+            Bc::ExpandTuple { from, to } => {
+                from.0 += stack_offset;
+                to.first.0 += stack_offset;
+            }
+            Bc::AbsoluteStackAddr { of, to } => {
+                of.first.0 += stack_offset;
+                to.0 += stack_offset;
+            }
+            Bc::DebugMarker(_, _) => {}
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::F64(v) => write!(f, "{v}"),
+            Value::I64(v) => write!(f, "{v}"),
+            Value::Bool(v) => write!(f, "{v}"),
+            Value::Enum {
+                container_type,
+                tag,
+                value,
+            } => todo!(),
+            Value::Tuple {
+                container_type,
+                values,
+            } => {
+                write!(f, "(");
+                for v in values {
+                    write!(f, "{v}, ")?;
+                }
+                write!(f, ")")
+            }
+            _ => write!(f, "{self:?}"),
+        }
     }
 }

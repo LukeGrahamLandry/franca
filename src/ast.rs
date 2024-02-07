@@ -81,7 +81,7 @@ pub enum TypeInfo {
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
-    pub args: Option<Expr<'p>>,
+    pub args: Option<FatExpr<'p>>,
 }
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
