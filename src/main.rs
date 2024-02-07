@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::time::Instant;
+use std::{env, fs, io::read_to_string, time::Instant};
 
 use ast::Program;
 use interp::Value;
@@ -60,29 +60,18 @@ macro_rules! check_cmp {
 }
 
 fn main() {
-    run_tests_txt();
-    // let src = include_str!("lib/builtins.txt");
-    // let src = r#"
-    //     fn get(arr: &Array(T), i: i64) &T;
-    //     fn swap(ptr: &T, new: T) T = {
-    //         let old = get(ptr);
-    //         set(ptr, new);
-    //         old
-    //     }
-    //     call(fn(a: Int) = { a });
-    //     // fn call(fn(Int));
-    //     // call(fn = { $0 });
-    // "#;
+    run_main(
+        &fs::read_to_string("src/tests.txt").unwrap(),
+        Value::I64(0),
+        Value::I64(0),
+    );
 }
 
 #[test]
 fn tests_txt() {
-    run_tests_txt();
-}
-
-fn run_tests_txt() {
     run_main(include_str!("tests.txt"), Value::I64(0), Value::I64(0));
 }
+
 // TODO: since operators are traits, i probably dont need to use a macro for this
 #[test]
 fn interp_math() {

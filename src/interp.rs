@@ -415,8 +415,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Stmt::DeclFunc(func) => {
                     self.program.add_func(func);
                 }
+                Stmt::Noop => {}
                 _ => panic!(
-                    "Stmt {} is not supported at top level.",
+                    "Stmt {} {stmt:?} is not supported at top level.",
                     stmt.log(self.pool)
                 ),
             }
@@ -722,6 +723,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     } => {
                         // Slicing operations are bounds checked.
                         let ptr = unsafe { &mut *ptr_value };
+                        assert!(
+                            ptr.references > 0
+                                && first < ptr.values.len()
+                                && count < ptr.values.len()
+                        );
                         if count == 1 {
                             ptr.values[first] = value;
                         } else {
@@ -1098,11 +1104,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             Stmt::DeclVar { name, ty, value } => {
                 // TODO: scope.
-                let value = invert(
-                    value
-                        .as_ref()
-                        .map(|expr| self.compile_expr(result, expr.deref())),
-                )?;
+                let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
                 let ty_slots = if let Some(ty) = ty {
                     Some(self.program.slot_count(self.to_type(ty)?))
@@ -1164,8 +1166,8 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
-    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &Expr<'p>) -> Res<'p, StackRange> {
-        Ok(match expr {
+    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, StackRange> {
+        Ok(match expr.deref() {
             Expr::Closure(func) => {
                 let id = self.program.add_func(*func.clone());
                 self.ensure_compiled(id, result.when)?;
@@ -1305,7 +1307,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     to
                 } else {
-                    logln!("UNDECLARED IDENT: {} (in GetNamed)", self.pool.get(*i));
+                    logln!(
+                        "UNDECLARED IDENT: {} (in GetNamed) at {:?}",
+                        self.pool.get(*i),
+                        expr.loc
+                    );
                     return Err(self.error(CErr::UndeclaredIdent(*i)));
                 }
             }

@@ -70,6 +70,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         for s in &stmts {
             logln!("finished stmt: {}", s.log(p.pool))
         }
+
         stmts
     }
 

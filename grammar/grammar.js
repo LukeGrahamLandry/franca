@@ -11,7 +11,7 @@ module.exports = grammar({
     source_file: ($) => repeat($._statement),
 
     _statement: ($) =>
-      choice($.func_def, seq(choice($.expr, $.declare, $.assign), ";")),
+      choice($.func_def, seq(choice($.expr, $.declare, $.assign), ";"), ";"),
     declare: ($) => seq("let", $.binding_type, optional(seq("=", $.expr))),
     assign: ($) => seq($.names, "=", $.expr),
     block: ($) =>
@@ -30,7 +30,11 @@ module.exports = grammar({
           "fn",
           field("name", $.identifier),
           field("proto", $.func_proto),
-          choice(";", seq("=", field("body", $.expr))),
+          choice(
+            ";",
+            seq("=", field("body", $.expr), ";"),
+            seq("=", field("body", $.block)),
+          ),
         ),
       ),
     annotation: ($) => seq("@", $.identifier, optional($.tuple)),
