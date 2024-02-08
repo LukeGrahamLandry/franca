@@ -21,6 +21,7 @@ module.exports = grammar({
     assign: ($) => seq($.names, "=", $.expr),
     block: ($) =>
       seq(
+        optional(field("annotation", repeat($.annotation))),
         "{",
         field("body", repeat($._statement)),
         field("result", optional($.expr)),
@@ -69,9 +70,14 @@ module.exports = grammar({
             $.closure_expr,
             $.number,
             $.anon_arg,
+            $.index_expr,
           ),
           optional($.suffix_macro),
         ),
+      ),
+    index_expr: ($) =>
+      prec.left(
+        seq($.expr, "[", optional($.expr), "]", optional(seq("=", $.expr))),
       ),
     suffix_macro: ($) => seq("!", $.identifier),
     anon_arg: ($) => prec(5, seq("$", $.number)),

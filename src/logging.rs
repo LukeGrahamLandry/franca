@@ -333,11 +333,11 @@ impl<'p> PoolLog<'p> for Func<'p> {
 impl Debug for FnBody<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when)?;
-        writeln!(f, "TYPES: {:?}", &self.slot_types);
+        writeln!(f, "TYPES: {:?}", &self.slot_types)?;
         for (i, bc) in self.insts.iter().enumerate() {
-            writeln!(f, "{i}. {bc:?}");
+            writeln!(f, "{i}. {bc:?}")?;
         }
-        writeln!(f, "===============")?;
+        writeln!(f, "{}", self.why)?;
         Ok(())
     }
 }

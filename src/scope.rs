@@ -38,6 +38,10 @@ impl<'p> ResolveScope<'p> {
         self.push_scope();
         for name in func.arg_names.iter().flatten() {
             self.decl_var(name);
+            self.info.push(VarInfo {
+                ty: TypeId::any(),
+                kind: VarType::Var,
+            });
         }
         match &mut func.ty {
             LazyFnType::Finished(_, _) => {}

@@ -10,7 +10,7 @@ use std::{
     ptr,
 };
 
-use crate::ast::VarType;
+use crate::ast::{Annotation, VarType};
 use crate::logging::PoolLog;
 use crate::{
     ast::{
@@ -195,7 +195,7 @@ pub struct CallFrame<'p> {
 pub struct FnBody<'p> {
     pub insts: Vec<Bc<'p>>,
     pub stack_slots: usize,
-    pub vars: HashMap<Var<'p>, StackRange>, // TODO: use a vec
+    pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
     arg_names: Vec<Option<Ident<'p>>>,
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
@@ -232,7 +232,7 @@ pub struct Interp<'a, 'p> {
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
     pub assertion_count: usize,
-    pub constants: HashMap<Var<'p>, Value>,
+    pub constants: HashMap<Var<'p>, (Value, TypeId)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -388,7 +388,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                                 .0
                         }
                     };
-                    self.constants.insert(name, value);
+                    let found_ty = self.program.type_of(&value);
+                    self.constants.insert(name, (value, found_ty));
                 }
                 _ => ice!(
                     self,
@@ -1123,7 +1124,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let arguments = func.arg_vars.as_ref().unwrap();
         if arguments.len() == 1 {
             // if there's one name, it refers to the whole tuple.
-            result.vars.insert(arguments[0], arg_range);
+            result.vars.insert(arguments[0], (arg_range, arg));
         } else if arguments.len() == arg_slots {
             // if they match, each element has its own name.
             for (i, var) in arguments.iter().enumerate() {
@@ -1131,7 +1132,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     first: StackOffset(i),
                     count: 1,
                 };
-                result.vars.insert(*var, range);
+                result.vars.insert(*var, (range, TypeId::any()));
             }
         } else {
             // TODO: pattern match destructuring but for now you just cant refer to the arg.
@@ -1139,10 +1140,10 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
         let return_value = match func.body.as_ref() {
             Some(body) => {
-                let ret = self.compile_expr(&mut result, body)?;
+                let (ret, found_ret_ty) = self.compile_expr(&mut result, body)?;
                 // We're done with our arguments, get rid of them. Same for other vars.
                 // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-                for slot in result.vars.values() {
+                for (slot, _) in result.vars.values() {
                     result.insts.push(Bc::Drop(*slot));
                 }
                 for slot in to_drop {
@@ -1151,6 +1152,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ret
             }
             None => {
+                // TODO
+                // self.program.funcs[index].annotations.push(Annotation {
+                //     name: self.pool.intern("inline"),
+                //     args: None,
+                // });
                 let ret = result.reserve_slots(self.program.slot_count(ret), ret);
                 result.push(Bc::CallBuiltin {
                     name: func.name.expect("fn no body needs name"),
@@ -1233,7 +1239,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &Stmt<'p>) -> Res<'p, ()> {
         match stmt {
             Stmt::Eval(expr) => {
-                let value = self.compile_expr(result, expr)?;
+                let (value, _) = self.compile_expr(result, expr)?;
                 result.push(Bc::Drop(value));
             }
             Stmt::DeclVar {
@@ -1241,10 +1247,20 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ty,
                 value,
                 dropping,
-                ..
+                kind,
             } => {
-                let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
+                if *kind == VarType::Const {
+                    let value = value.clone().expect("uninit (non-blessed) const");
+                    let value = self.cached_eval_expr(value)?;
+                    let ty = ty
+                        .map(|ty| self.to_type(ty).unwrap())
+                        .unwrap_or_else(|| self.program.type_of(&value));
+                    self.constants.insert(*name, (value, ty));
+                    return Ok(());
+                }
+
+                let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty_slots = if let Some(ty) = ty {
                     let ty = self.to_type(ty)?;
                     Some(self.program.slot_count(ty))
@@ -1253,11 +1269,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 };
 
                 let value = match (value, ty_slots) {
-                    (None, Some(slots)) => result.reserve_slots(slots, TypeId::any()),
+                    (None, Some(slots)) => {
+                        (result.reserve_slots(slots, TypeId::any()), TypeId::any())
+                    }
                     (Some(value), None) => value,
-                    (Some(value), Some(slots)) => {
+                    (Some((value, ty)), Some(slots)) => {
                         if slots == value.count {
-                            value
+                            (value, ty)
                         } else {
                             assert_eq!(self, value.count, 1);
                             let expanded = result.reserve_slots(slots, TypeId::any());
@@ -1265,11 +1283,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                                 from: value.first,
                                 to: expanded,
                             });
-                            expanded
+                            (expanded, ty)
                         }
                     }
                     // TODO: make this an error. dont guess.
-                    (None, None) => result.reserve_slots(1, TypeId::any()),
+                    (None, None) => (result.reserve_slots(1, TypeId::any()), TypeId::any()),
                 };
                 let prev = result.vars.insert(*name, value);
                 assert!(self, prev.is_none(), "shadow is still new var");
@@ -1277,10 +1295,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // Its consistant and it means you can reference its data if you do a chain of transforming something with the same name.
             }
             Stmt::SetVar(var, expr) => {
-                let value = self.compile_expr(result, expr)?;
+                let kind = self.program.vars[var.1].kind;
+                assert_eq!(
+                    self, kind,
+                    VarType::Var,
+                    "Only 'var' can be reassigned (not let/const). {:?}", stmt
+                );
+                let (value, new_ty) = self.compile_expr(result, expr)?;
                 let slot = result.vars.get(var);
-                let slot =
+                let (slot, old_ty) =
                     *slot.unwrap_or_else(|| panic!("SetVar: var must be declared: {:?}", var));
+                assert_eq!(self, new_ty, old_ty);
                 result.push(Bc::Drop(slot));
                 assert_eq!(self, value.count, slot.count);
                 for i in 0..value.count {
@@ -1312,7 +1337,11 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
-    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, StackRange> {
+    fn compile_expr(
+        &mut self,
+        result: &mut FnBody<'p>,
+        expr: &FatExpr<'p>,
+    ) -> Res<'p, (StackRange, TypeId)> {
         Ok(match expr.deref() {
             Expr::Closure(func) => {
                 let id = self.program.add_func(*func.clone());
@@ -1321,17 +1350,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                     param: TypeId::any(),
                     returns: TypeId::any(),
                 })); // TODO: infer here?
-                result.load_constant(Value::GetFn(id), ty)
+                (result.load_constant(Value::GetFn(id), ty), ty)
             }
             Expr::Call(f, arg) => {
                 if let Expr::GetNamed(i) = f.as_ref().deref() {
                     if let Some(f) = self.lookup_unique_func(*i) {
-                        let arg = self.compile_expr(result, arg)?;
+                        let (arg, arg_ty_found) = self.compile_expr(result, arg)?;
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
                         self.infer_types(f);
                         let func = &self.program.funcs[f.0];
-                        let (arg_ty, ret_ty) = func.ty.unwrap();
+                        let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
                         // TODO: some huristic based on how many times called and how big the body is.
                         // TODO: pre-intern all these constants so its not a hash lookup everytime
                         let force_inline = func
@@ -1348,7 +1377,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             "{f:?} is both @inline and @noinline"
                         );
                         let will_inline = force_inline;
-                        let returns_type = self.program.is_type(ret_ty, TypeInfo::Type); // TODO: even if only one val is a type
+                        let returns_type = self.program.is_type(ret_ty_expected, TypeInfo::Type); // TODO: even if only one val is a type
 
                         let cache_arg = if returns_type {
                             assert_eq!(
@@ -1356,7 +1385,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                                 ExecTime::Comptime,
                                 "Cannot call function returning type at runtime."
                             );
-                            let cache_arg = result.reserve_slots(1, arg_ty);
+                            let cache_arg = result.reserve_slots(1, arg_ty_expected);
                             result.insts.push(Bc::CloneCreateTuple {
                                 values: arg,
                                 target: cache_arg.first,
@@ -1365,7 +1394,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         } else {
                             None
                         };
-                        let ret = result.reserve_slots(self.return_stack_slots(f), ret_ty);
+                        let ret = result.reserve_slots(self.return_stack_slots(f), ret_ty_expected);
                         if returns_type {
                             result.insts.push(Bc::CallDirectMaybeCached { f, ret, arg });
                         } else if will_inline {
@@ -1396,22 +1425,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                             });
                             result.push(Bc::Drop(nothing));
                         }
-                        return Ok(ret);
-                    } else if self.builtins.contains(i) {
-                        let arg = self.compile_expr(result, arg)?;
-                        // TODO: this is ugly... other builtins might return tuples
-                        let slots = if "tuple" == self.pool.get(*i) {
-                            arg.count
-                        } else if "comptime_cache_get" == self.pool.get(*i) {
-                            2
-                        } else {
-                            1
-                        };
-                        let ret = result.reserve_slots(slots, TypeId::any());
-                        result.insts.push(Bc::CallBuiltin { name: *i, ret, arg });
-                        return Ok(ret);
+                        return Ok((ret, ret_ty_expected));
                     } else if "if" == self.pool.get(*i) {
-                        let (cond, if_true, if_false) =
+                        let ((cond, cond_ty), if_true, if_false) =
                             if let Expr::Tuple(parts) = arg.deref().deref() {
                                 let cond = self.compile_expr(result, &parts[0])?;
                                 let if_true = if let Expr::Closure(func) = parts[1].deref() {
@@ -1433,7 +1449,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let ret = result.reserve_slots(1, TypeId::any());
                         let branch_ip = result.push(Bc::DebugMarker("patch", *i));
                         let true_ip = result.insts.len();
-                        let true_result =
+                        let (true_result, true_result_ty) =
                             self.compile_expr(result, if_true.body.as_ref().unwrap())?;
                         result.push(Bc::MoveRange {
                             from: true_result,
@@ -1441,7 +1457,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         });
                         let jump_over_false = result.push(Bc::DebugMarker("patch", *i));
                         let false_ip = result.insts.len();
-                        let false_result =
+                        let (false_result, false_result_ty) =
                             self.compile_expr(result, if_false.body.as_ref().unwrap())?;
                         result.push(Bc::MoveRange {
                             from: false_result,
@@ -1457,14 +1473,21 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts[jump_over_false] = Bc::Goto {
                             ip: result.insts.len(),
                         };
-                        return Ok(ret);
+                        // TODO: check branches are same ty[e]
+                        return Ok((ret, true_result_ty));
                     }
                     // else: fallthrough
                 }
 
-                let arg = self.compile_expr(result, arg)?;
+                let (arg, arg_ty_expected) = self.compile_expr(result, arg)?;
                 logln!("dynamic {}", f.log(self.pool));
-                let f = self.compile_expr(result, f)?;
+                let (f, func_ty) = self.compile_expr(result, f)?;
+                let ret_ty = if let TypeInfo::Fn(ty) = &self.program.types[func_ty.0] {
+                    ty.returns
+                } else {
+                    // TODO
+                    TypeId::any()
+                };
                 assert_eq!(self, f.count, 1);
                 // TODO: not all function ptrs have 1 return value
                 let ret = result.reserve_slots(1, TypeId::any());
@@ -1473,7 +1496,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     ret,
                     arg,
                 });
-                ret
+                (ret, ret_ty)
             }
             Expr::Block {
                 body,
@@ -1486,8 +1509,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ret = self.compile_expr(result, value)?;
 
                 for local in locals.as_ref().expect("resolve failed") {
-                    let slot = result.vars.remove(local).expect("missing local");
-                    result.insts.push(Bc::Drop(slot));
+                    if let Some((slot, ty)) = result.vars.remove(local) {
+                        result.insts.push(Bc::Drop(slot));
+                    } else if VarType::Const == self.program.vars[local.1].kind {
+                        // That's fine, constants dont need to be dropped.
+                    } else {
+                        ice!(self, "Missing local {local:?}")
+                    }
                 }
 
                 ret
@@ -1499,12 +1527,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .map(|v| self.compile_expr(result, v))
                     .collect();
                 let values = values?;
-                let required_slots: usize = values.iter().map(|range| range.count).sum();
+                let required_slots: usize = values.iter().map(|(range, _)| range.count).sum();
                 let ret = result.reserve_slots(required_slots, TypeId::any());
                 // TODO: they might already be consecutive
                 let base = ret.first.0;
                 let mut count = 0;
-                for v in values {
+                let mut types = vec![];
+                for (v, ty) in values {
+                    types.push(ty);
                     for i in 0..v.count {
                         result.insts.push(Bc::Move {
                             from: StackOffset(v.first.0 + i),
@@ -1514,12 +1544,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                 }
                 assert_eq!(self, count, ret.count);
-                ret
+                (ret, self.program.intern_type(TypeInfo::Tuple(types)))
             }
             Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
-                if let Some(index) = result.vars.get(var) {
-                    let from = *index;
+                if let Some((from, ty)) = result.vars.get(var).cloned() {
                     let to = result.reserve_slots(from.count, TypeId::any());
                     if from.count == 1 {
                         result.insts.push(Bc::Clone {
@@ -1529,15 +1558,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     } else {
                         result.insts.push(Bc::CloneRange { from, to });
                     }
-                    to
-                } else if let Some(value) = self.constants.get(var) {
-                    // TODO: constant tuples
+                    (to, ty)
+                } else if let Some((value, ty)) = self.constants.get(var) {
                     let slot = result.reserve_slots(1, TypeId::any());
                     result.insts.push(Bc::LoadConstant {
                         slot: slot.first,
                         value: value.clone(),
                     });
-                    slot
+                    (slot, *ty)
                 } else {
                     println!("VARS: {:?}", result.vars);
                     println!("GLOBALS: {:?}", self.constants);
@@ -1555,7 +1583,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(self, func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(func, ExecTime::Comptime)?;
-                    result.load_constant(Value::GetFn(func), TypeId::any())
+                    let (param, returns) = self.program.funcs[func.0].ty.unwrap();
+                    let ty = self
+                        .program
+                        .intern_type(TypeInfo::Fn(FnType { param, returns }));
+                    (result.load_constant(Value::GetFn(func), ty), ty)
                 } else {
                     ice!(self, "Scope resolution failed {}", expr.log(self.pool));
                 }
@@ -1568,20 +1600,25 @@ impl<'a, 'p> Interp<'a, 'p> {
                     slot: to.first,
                     value: value.clone(),
                 });
-                to
+                (to, self.program.type_of(value))
             }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
+                    // TODO: make `let` deeply immutable so only const addr
                     "addr" => match arg.deref().deref() {
                         Expr::GetVar(var) => {
-                            let stack_slot = *result.vars.get(var).expect("Missing resolved var");
+                            let (stack_slot, value_ty) = *result
+                                .vars
+                                .get(var)
+                                .expect("Missing resolved var. (TODO: addr of const?)");
                             let addr_slot = result.reserve_slots(1, TypeId::any());
                             result.push(Bc::AbsoluteStackAddr {
                                 of: stack_slot,
                                 to: addr_slot.first,
                             });
-                            addr_slot
+                            let ptr_ty = self.program.intern_type(TypeInfo::Ptr(value_ty));
+                            (addr_slot, ptr_ty)
                         }
                         &Expr::GetNamed(i) => {
                             logln!(
@@ -1593,15 +1630,83 @@ impl<'a, 'p> Interp<'a, 'p> {
                         _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
                     },
                     "type" => {
-                        let ty = arg.ty.expect("TODO: better type tracking");
-                        result.load_constant(
-                            Value::Type(ty),
-                            self.program.intern_type(TypeInfo::Type),
-                        )
+                        // Note: this does not evaluate the expression.
+                        // TODO: warning if it has side effects.
+                        let ty = self.type_of(result, arg)?;
+                        let tyty = self.program.intern_type(TypeInfo::Type);
+                        (result.load_constant(Value::Type(ty), tyty), tyty)
                     }
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
             }
+        })
+    }
+
+    fn resolve_function(&self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Option<FuncId> {
+        match expr.deref() {
+            Expr::GetNamed(i) => self.lookup_unique_func(*i),
+            _ => None,
+        }
+    }
+
+    fn type_of(&mut self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, TypeId> {
+        if let Some(ty) = expr.ty {
+            return Ok(ty);
+        }
+        Ok(match expr.deref() {
+            Expr::Value(v) => self.program.type_of(v),
+            Expr::Call(f, arg) => {
+                let fid = if let Some(f) = self.resolve_function(result, f) {
+                    f
+                } else {
+                    ice!(self, "typecheck failed to resolve function expr {f:?}")
+                };
+                self.ensure_compiled(fid, ExecTime::Comptime);
+                let (_, ret) = self.program.funcs[fid.0].ty.unwrap();
+                ret
+            }
+            Expr::Block { result: e, .. } => self.type_of(result, e)?,
+            Expr::ArrayLiteral(_) => todo!(),
+            Expr::Tuple(_) => todo!(),
+            Expr::RefType(_) => todo!(),
+            Expr::EnumLiteral(_) => todo!(),
+            Expr::StructLiteral(_) => todo!(),
+            Expr::Closure(_) => todo!(),
+            Expr::SuffixMacro(macro_name, arg) => {
+                let name = self.pool.get(*macro_name);
+                match name {
+                    // TODO: make `let` deeply immutable so only const addr
+                    "addr" => match arg.deref().deref() {
+                        Expr::GetVar(var) => {
+                            let (_, value_ty) = *result
+                                .vars
+                                .get(var)
+                                .expect("Missing resolved var (TODO: addr of const?)");
+                            self.program.intern_type(TypeInfo::Ptr(value_ty))
+                        }
+                        &Expr::GetNamed(i) => {
+                            logln!(
+                                "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
+                                self.pool.get(i)
+                            );
+                            return Err(self.error(CErr::UndeclaredIdent(i)));
+                        }
+                        _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
+                    },
+                    "type" => self.program.intern_type(TypeInfo::Type),
+                    _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
+                }
+            }
+            Expr::GetVar(var) => {
+                if let Some((_, ty)) = result.vars.get(var).cloned() {
+                    ty
+                } else if let Some((_, ty)) = self.constants.get(var) {
+                    *ty
+                } else {
+                    ice!(self, "type check missing var {var:?}")
+                }
+            }
+            Expr::GetNamed(_) => todo!(),
         })
     }
 
@@ -1693,7 +1798,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::Value(value) => return Ok(value.clone()),
             Expr::GetVar(var) => {
                 // fast path for builtin type identifiers
-                if let Some(value) = self.constants.get(var) {
+                if let Some((value, _)) = self.constants.get(var) {
                     debug_assert_ne!(value, &Value::Poison);
                     return Ok(value.clone());
                 }

@@ -369,8 +369,12 @@ impl<'p> Program<'p> {
             } => *container_type,
             Value::Fn(_, _) => todo!(),
             Value::Type(_) => self.intern_type(TypeInfo::Type),
-            Value::GetFn(_) => todo!(),
-            Value::Unit => todo!(),
+            Value::GetFn(f) => {
+                // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
+                let (param, returns) = self.funcs[f.0].ty.unwrap();
+                self.intern_type(TypeInfo::Fn(FnType { param, returns }))
+            }
+            Value::Unit => self.intern_type(TypeInfo::Unit),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Slice(_) => todo!(),
             Value::Map(_, _) => todo!(),

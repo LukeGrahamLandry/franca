@@ -6,9 +6,7 @@ fn get_i(tuple: Slice(Any), i: Any) Any = {
 
 // TODO: move to prelude
 @comptime fn call_comptime_cached(func_arg_addr: Slice((Fn(Any, Any), Any))) Any = {
-    print(get(func_arg_addr));
     let prev = comptime_cache_get(get(func_arg_addr));
-    print(prev);
     let found = get_i(prev!addr, 0);
     let value = get_i(prev!addr, 1);
     if(found, fn() Any = { value }, fn() Any = {
@@ -47,8 +45,8 @@ assert_eq(unit, fn() Unit = { let x = 0; }());  // implicit trailing `unit`  // 
 assert_eq(5, fn(n: i64) i64 = { let x = 10; n }(5));
 assert_eq(10, fn(n: i64) i64 = { let x = 10; x }(5));
 assert_eq(5, fn(n: i64) i64 = { let x = n; x }(5));
-assert_eq(50, fn(n: i64) i64 = { let x = n; x = 50; x }(5));
-assert_eq(16, fn(n: i64) i64 = { let x = n; x = add(1, add(add(x, x), n)); x }(5));
+assert_eq(50, fn(n: i64) i64 = { var x = n; x = 50; x }(5));
+assert_eq(16, fn(n: i64) i64 = { var x = n; x = add(1, add(add(x, x), n)); x }(5));
 assert_eq(10, fn(n: i64) i64 = { let x = 10; let y = x; y }(5));
 
 let one: i64 = 1;  // variables can have type annotations 
@@ -78,7 +76,7 @@ let a = rt();
 /// Pointers ///
 ////////////////
 
-let v = 10;
+var v = 10;
 let ptr = v!addr;  // Get the adddress of v's stack slot
 assert_eq(10, get(ptr));
 v = 5;
@@ -225,7 +223,6 @@ assert_eq(shadow, 40);
 let shadow = 45;  // but the old one's gone forever. 
 assert_eq(shadow, 45);
 
-
 ////////////////
 /// Inlining ///
 ////////////////
@@ -256,7 +253,7 @@ assert_eq(important_value, 42);  // Trivial
 ////////////////
 
 // Branches of a call to if can access variables from the outer scope. 
-let a = 10;
+var a = 10;
 if(true, fn() Unit = { a = 1; }, fn() Unit = { a = 2; });
 assert_eq(a, 1);
 
@@ -264,9 +261,38 @@ fn identity(arg: Any) Any = arg;
 let arg = (identity, 1);
 assert_eq(1, call_comptime_cached(arg!addr));
 
+/////////////////
+/// Constants ///
+/////////////////
+
+let x = 10;
+assert_eq(x!type, i64);
+let xa = x!addr;
+// TODO: you can't directly pass the argument because it wont relize its a constexpr
+const int_ptr = Ptr(i64);
+assert_eq(xa!type, int_ptr);
+
+// I'm not sure I like this. 
+// side effects of expressions in macros don't run. 
+// but at least it's consistant and theres a special symbol to tell you when its happening. 
+// its not as bad as `size_of(blow_up_moon()`
+// for `!addr` to be initiative it needs to put you in magic place expression mode 
+// so a chain isnt actually copying everything out of the pointers on to the stack to compute an offset. 
+// TODO: this should be a compile error. no side effects in macros that dont want them. 
+fn according(to: Ptr(i64)) bool = {
+    let the = 1234;
+    set(to, the);
+    true
+}
+let cplusplus = 5;
+assert_eq(cplusplus, 5);
+assert_eq(according(cplusplus!addr)!type, bool);
+assert_eq(cplusplus, 5);
+assert_eq(according(cplusplus!addr), true);
+assert_eq(cplusplus, 1234);
+
 unused
 }
-
 
 // TODO: support variadic functions where you pass a type and a pointer to a tuple
 //       construct a tuple from a length and a default value (or uninit)
