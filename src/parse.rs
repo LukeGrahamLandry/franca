@@ -351,7 +351,9 @@ impl<'a, 'p> WalkParser<'a, 'p> {
 
         let mut arg_names: Vec<Option<Ident>> = vec![];
         let mut arg_types: Vec<Option<FatExpr>> = vec![];
-        let mut args = proto.children_by_field_name("params", &mut cursor);
+        let mut args = proto
+            .children_by_field_name("params", &mut cursor)
+            .filter(|arg| arg.kind() != ",");
         for arg in args {
             logln!("Arg: {}", arg.to_sexp());
             let (names, ty) = self.parse_binding(arg);
@@ -387,15 +389,28 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             annotations.push(Annotation { name, args })
         }
 
+        let any_type_expr = self.expr(
+            Expr::Value(Value::Type(TypeId::any())),
+            node.start_position(),
+            ConstKnown::Yes,
+        );
+
         let arg = match arg_types.len() {
             // Note: this is the *type* `Unit`, NOT the *value* `unit`
-            0 => Some(self.expr(
-                Expr::Value(Value::Type(TypeId::unit())),
-                node.start_position(),
-                ConstKnown::Yes,
-            )),
+            0 => Some(any_type_expr),
             1 => arg_types.into_iter().next().unwrap(),
-            _ => todo!("multi argument type"),
+            _ => Some(
+                self.expr(
+                    Expr::Tuple(
+                        arg_types
+                            .into_iter()
+                            .map(|ty| ty.unwrap_or_else(|| any_type_expr.clone()))
+                            .collect(),
+                    ),
+                    node.start_position(),
+                    ConstKnown::Yes,
+                ),
+            ),
         };
 
         let func = Func {

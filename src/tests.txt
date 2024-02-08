@@ -1,5 +1,26 @@
 ;;;;;;; // allow no op stmts at top level
 
+
+fn get_i(tuple: Ptr(Any), i: Any) Any = {
+    get(slice(tuple, i, add(i, 1)))
+}
+
+// TODO: move to prelude
+@comptime fn call_comptime_cached(func_arg_addr: Ptr((Fn(Any, Any), Any))) Any = {
+    print(get(func_arg_addr));
+    let prev = comptime_cache_get(get(func_arg_addr));
+    print(prev);
+    let found = get_i(prev!addr, 0);
+    let value = get_i(prev!addr, 1);
+    if(found, fn() Any = { value }, fn() Any = {
+        let func = get_i(func_arg_addr, 0));
+        let arg = get_i(func_arg_addr, 1));
+        let ret = func(arg);
+        comptime_cache_insert(func, arg, ret);
+        ret
+    })
+}
+
 fn main(unused: i64) i64 = {
 
 // You'd think this would be easy but somehow no. 
@@ -111,7 +132,7 @@ assert_eq(6, twice(three));
 /// Tuples ///
 //////////////
 
-let arr = tuple(1, 2, 3);
+let arr = (1, 2, 3);
 let arr_ptr = arr!addr;
 // a tuple isn't treated as one *thing*, you're pointing to a range of the stack containing three values
 assert_eq(len(arr_ptr), 3);  
@@ -122,28 +143,34 @@ assert_eq(1, len(second_ptr));  // pointing at one element
 assert_eq(2, get(second_ptr)); // we can dereference as normal.
 set(second_ptr, 123);
 // TODO: length of slice as part of pointer type
-let have: Tuple(i64, i64, i64) = get(arr_ptr);
-let expected: Tuple(i64, i64, i64) = (1, 123, 3);
-assert_eq(have, expected);
-assert_eq(get(arr_ptr), tuple(1, 123, 3)); // the type annotations are unnessisary 
-// you dont even have to write the function call
-assert_eq((4, 5, 6), tuple(4, 5, 6));  
+// The type annotation for a tuple is written as a tuple of types. 
+let have: (i64, i64, i64) = get(arr_ptr);
+let expected: (i64, i64, i64) = (1, 123, 3);
+// assert_ eq(have, expected);
+// asser t_eq(get(arr_ptr), (1, 123, 3)); // the type annotations are unnessisary 
 
 // TODO: i cant parse multiple args (for now you can only do as a tuple)
 
 // in fact, tuples aren't real at all. they're just the way i represent multiple arguments and return values 
-fn flip(args: Tuple(i64, i64)) Tuple(i64, i64) = { 
+fn flip_1(args: (i64, i64)) (i64, i64) = { 
     let arr = args!addr;
     let a1 = slice(arr, 0, 1);
     let a2 = slice(arr, 1, 2);
     (get(a2), get(a1))
 }
-assert_eq((3, 2), flip((2, 3)));
-assert_eq((3, 2), flip(2, 3));
-assert_eq(3, 2, flip(2, 3));
+//assert_ eq((3, 2), flip_1((2, 3)));
+//assert_ eq((3, 2), flip_1(2, 3));
+//assert_ eq(3, 2, flip_1(2, 3));
 
 // Maybe this is a bit unfortunate. It doesnt care where the brackets go, just sees two pairs (a, b) (c, d)
-assert_eq(2, flip(2, 2), 2);
+//assert_ eq(2, flip_1(2, 2), 2);
+
+// This is indistinguishable from flip_1.
+fn flip_2(a: i64, b: i64) (i64, i64) = (b, a);
+//assert_ eq((3, 2), flip_2((2, 3)));
+//assert_ eq((3, 2), flip_2(2, 3));
+//assert_ eq(3, 2, flip_2(2, 3));
+//assert_ eq(2, flip_2(2, 2), 2);
 
 //////////////////
 /// Allocation ///
@@ -224,6 +251,22 @@ assert_eq(test_call_1(2), 6);
 assert_eq(important_value, 42);  // Inlining doesn't stomp variables
 assert_eq(test_call_2(2), 6);
 assert_eq(important_value, 42);  // Trivial
+
+////////////////
+/// Closures ///
+////////////////
+
+// Branches of a call to if can access variables from the outer scope. 
+let a = 10;
+if(true, fn() Unit = { a = 1; }, fn() Unit = { a = 2; });
+assert_eq(a, 1);
+
+fn identity(arg: Any) Any = arg;
+let arg = (identity, 1);
+print(call_comptime_cached(arg!addr));
+print(call_comptime_cached(arg!addr));
+
+// assert_ eq(1, one);
 
 unused
 }

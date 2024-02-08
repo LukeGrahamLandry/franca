@@ -121,12 +121,16 @@ fn passing_tuple_to_multiargs() {
 
 fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
     let start = Instant::now();
+    let pool = StringPool::default();
     let mut p = Parser::new();
     p.set_language(tree_sitter_inferd::language());
-    let pool = StringPool::default();
+    let builtins = WalkParser::parse(p, include_str!("interp_builtins.txt"), &pool);
+    let mut p = Parser::new();
+    p.set_language(tree_sitter_inferd::language());
     let ast = WalkParser::parse(p, src, &pool);
     let mut program = Program::default();
     let mut interp = Interp::new(&pool, &mut program);
+    interp.add_declarations(builtins);
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
     let result = interp.run(f, arg.clone(), ExecTime::Runtime);

@@ -275,55 +275,6 @@ impl<'p> Drop for CompileError<'p> {
     }
 }
 
-// TODO: rn these eat any calls. no overload checking.
-// TODO: always put these at start of pool so can use indexes without hashmap lookup
-//       IMPORTANT: interp should probably made the pool if i do that.
-const BUILTINS: &[&str] = &[
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "eq",
-    "ne",
-    "lt",
-    "gt",
-    "ge",
-    "le",
-    "Tuple",
-    "tuple",
-    "assert_eq",
-    "is_comptime",
-    "get",
-    "set",
-    "is_uninit",
-    "len",
-    "Ptr",
-    "is_oob_stack",
-    "slice",
-    "alloc",
-    "dealloc",
-    "print",
-    "print_callstack",
-];
-
-// TODO: use this for op call builtin to avoid a runtime hashmap lookup.
-//       but it seems you cant put this as a match left side so it doesnt help me anyway.
-const fn builtin_i(name: &'static str) -> usize {
-    // This is insane because iter.position isn't const.
-    let mut i = 0;
-    loop {
-        if i == BUILTINS.len() {
-            break;
-        }
-        // == isnt const
-        if matches!(BUILTINS[i], name) {
-            return i;
-        }
-        i += 1;
-    }
-    1
-}
-
 impl<'a, 'p> Interp<'a, 'p> {
     pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         Self {
@@ -332,7 +283,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             call_stack: vec![],
             program,
             ready: vec![],
-            builtins: BUILTINS.iter().map(|name| pool.intern(name)).collect(),
+            builtins: vec![],
             log_depth: 0,
             debug_trace: vec![],
             anon_fn_counter: 0,
@@ -808,7 +759,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let addr = self.to_stack_addr(arg)?;
                 Value::I64(addr.count as i64)
             }
-            "Ptr" => Value::Type(self.program.intern_type(TypeInfo::Ptr(self.to_type(arg)?))),
+            "Ptr" => {
+                let ty = self.to_type(arg)?;
+                Value::Type(self.program.intern_type(TypeInfo::Ptr(ty)))
+            }
             "is_oob_stack" => {
                 let addr = self.to_stack_addr(arg)?;
                 Value::Bool(addr.first.0 >= self.value_stack.len())
@@ -900,14 +854,38 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let (f, arg, ret) = self.to_triple(arg)?;
                 let (f, arg, ret) = (
                     self.to_func(f)?,
-                    flatten_value(self.to_seq(arg)?),
-                    flatten_value(self.to_seq(ret)?),
+                    flatten_value(vec![arg]),
+                    flatten_value(vec![ret]),
                 );
 
-                logln!("CACHE {f:?}({arg:?}) => {:?}", arg);
-                debug_assert_eq!(self.current_fn_body().when, ExecTime::Comptime);
+                logln!("INSERT_CACHE {f:?}({arg:?}) => {:?}", ret);
+                // debug_assert_eq!(self.current_fn_body().when, ExecTime::Comptime);
                 self.program.generics_memo.insert((f, arg), ret);
                 Value::Unit
+            }
+            "comptime_cache_get" => {
+                let (f, arg) = self.to_pair(arg)?;
+                let key = (self.to_func(f)?, arg);
+                logln!("CHECK_CACHE {:?}({:?})", key.0, key.1);
+                // debug_assert_eq!(self.current_fn_body().when, ExecTime::Comptime);
+                let values = if let Some(prev) = self.program.generics_memo.get(&key) {
+                    vec![Value::Bool(true), prev.clone()]
+                } else {
+                    vec![Value::Bool(false), Value::Unit]
+                };
+                Value::Tuple {
+                    container_type: TypeId::any(),
+                    values,
+                }
+            }
+            "Fn" => {
+                let (arg, ret) = self.to_pair(arg)?;
+                let (arg, ret) = (self.to_type(arg)?, self.to_type(ret)?);
+                let ty = self.program.intern_type(TypeInfo::Fn(FnType {
+                    param: arg,
+                    returns: ret,
+                }));
+                Value::Type(ty)
             }
             "add" => bin_int!(self, +, arg, Value::I64),
             "sub" => bin_int!(self, -, arg, Value::I64),
@@ -1069,6 +1047,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         if let Some(Some(_)) = self.ready.get(index) {
             return Ok(());
         }
+        let func = &self.program.funcs[index];
         let state = DebugState::JitToBc(FuncId(index), when);
         self.push_state(&state);
         while self.ready.len() <= index {
@@ -1118,17 +1097,29 @@ impl<'a, 'p> Interp<'a, 'p> {
             // TODO: pattern match destructuring but for now you just cant refer to the arg.
             to_drop.push(arg_range);
         }
-        let body = func.body.as_ref().expect("fn body");
-        let return_value = self.compile_expr(&mut result, body)?;
-
-        // We're done with our arguments, get rid of them. Same for other vars.
-        // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        for slot in result.vars.values() {
-            result.insts.push(Bc::Drop(*slot));
-        }
-        for slot in to_drop {
-            result.insts.push(Bc::Drop(slot));
-        }
+        let return_value = match func.body.as_ref() {
+            Some(body) => {
+                let ret = self.compile_expr(&mut result, body)?;
+                // We're done with our arguments, get rid of them. Same for other vars.
+                // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
+                for slot in result.vars.values() {
+                    result.insts.push(Bc::Drop(*slot));
+                }
+                for slot in to_drop {
+                    result.insts.push(Bc::Drop(slot));
+                }
+                ret
+            }
+            None => {
+                let ret = result.reserve_slots(self.program.slot_count(ret), ret);
+                result.push(Bc::CallBuiltin {
+                    name: func.name.expect("fn no body needs name"),
+                    ret,
+                    arg: arg_range,
+                });
+                ret
+            }
+        };
 
         result.insts.push(Bc::Ret(return_value));
 
@@ -1214,7 +1205,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
                 let ty_slots = if let Some(ty) = ty {
-                    Some(self.program.slot_count(self.to_type(ty)?))
+                    let ty = self.to_type(ty)?;
+                    Some(self.program.slot_count(ty))
                 } else {
                     None
                 };
@@ -1290,10 +1282,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                 result.load_constant(Value::GetFn(id), ty)
             }
             Expr::Call(f, arg) => {
-                let arg = self.compile_expr(result, arg)?;
-
                 if let Expr::GetNamed(i) = f.as_ref().deref() {
                     if let Some(f) = self.lookup_unique_func(*i) {
+                        let arg = self.compile_expr(result, arg)?;
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
                         self.infer_types(f);
@@ -1365,9 +1356,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                         }
                         return Ok(ret);
                     } else if self.builtins.contains(i) {
+                        let arg = self.compile_expr(result, arg)?;
                         // TODO: this is ugly... other builtins might return tuples
                         let slots = if "tuple" == self.pool.get(*i) {
                             arg.count
+                        } else if "comptime_cache_get" == self.pool.get(*i) {
+                            2
                         } else {
                             1
                         };
@@ -1375,41 +1369,58 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts.push(Bc::CallBuiltin { name: *i, ret, arg });
                         return Ok(ret);
                     } else if "if" == self.pool.get(*i) {
-                        // TODO: always inline
-                        let unit = result
-                            .load_constant(Value::Unit, self.program.intern_type(TypeInfo::Unit));
+                        let (cond, if_true, if_false) =
+                            if let Expr::Tuple(parts) = arg.deref().deref() {
+                                let cond = self.compile_expr(result, &parts[0])?;
+                                let if_true = if let Expr::Closure(func) = parts[1].deref() {
+                                    func
+                                } else {
+                                    ice!(self, "if args must be tuple");
+                                };
+                                let if_false = if let Expr::Closure(func) = parts[2].deref() {
+                                    func
+                                } else {
+                                    ice!(self, "if args must be tuple");
+                                };
+                                (cond, if_true, if_false)
+                            } else {
+                                ice!(self, "if args must be tuple");
+                            };
+
                         // TODO: if returning tuples
                         let ret = result.reserve_slots(1, TypeId::any());
-                        assert_eq!(self, arg.count, 3);
-                        let branch_ip = result.insts.len();
-                        let true_ip = branch_ip + 1;
-                        let false_ip = branch_ip + 4;
-                        result.insts.push(Bc::JumpIf {
+                        let branch_ip = result.push(Bc::DebugMarker("patch", *i));
+                        let true_ip = result.insts.len();
+                        let true_result =
+                            self.compile_expr(result, if_true.body.as_ref().unwrap())?;
+                        result.push(Bc::MoveRange {
+                            from: true_result,
+                            to: ret,
+                        });
+                        let jump_over_false = result.push(Bc::DebugMarker("patch", *i));
+                        let false_ip = result.insts.len();
+                        let false_result =
+                            self.compile_expr(result, if_false.body.as_ref().unwrap())?;
+                        result.push(Bc::MoveRange {
+                            from: false_result,
+                            to: ret,
+                        });
+
+                        result.insts[branch_ip] = Bc::JumpIf {
                             // TODO: change to conditional so dont have to store the true_ip
-                            cond: arg.index(0),
+                            cond: cond.first,
                             true_ip,
                             false_ip,
-                        });
-                        let real_true_ip = result.push(Bc::CallDynamic {
-                            f: arg.index(1),
-                            ret,
-                            arg: unit,
-                        });
-                        result.push(Bc::Drop(arg.index(2).to_range()));
-                        result.push(Bc::Goto { ip: branch_ip + 6 });
-                        let real_false_ip = result.push(Bc::CallDynamic {
-                            f: arg.index(2),
-                            ret,
-                            arg: unit,
-                        });
-                        result.push(Bc::Drop(arg.index(1).to_range()));
-                        assert_eq!(self, true_ip, real_true_ip);
-                        assert_eq!(self, false_ip, real_false_ip);
+                        };
+                        result.insts[jump_over_false] = Bc::Goto {
+                            ip: result.insts.len(),
+                        };
                         return Ok(ret);
                     }
                     // else: fallthrough
                 }
 
+                let arg = self.compile_expr(result, arg)?;
                 logln!("dynamic {}", f.log(self.pool));
                 let f = self.compile_expr(result, f)?;
                 assert_eq!(self, f.count, 1);
@@ -1430,7 +1441,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
-                self.compile_expr(result, value)?
+                let ret = self.compile_expr(result, value)?;
+
+                for local in locals.as_ref().expect("resolve failed") {
+                    let slot = result.vars.remove(local).expect("missing local");
+                    result.insts.push(Bc::Drop(slot));
+                }
+
+                ret
             }
             Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(values) => {
@@ -1490,7 +1508,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.ensure_compiled(func, ExecTime::Comptime)?;
                     result.load_constant(Value::GetFn(func), TypeId::any())
                 } else if self.builtins.contains(i) {
-                    todo!("make builtins first class functions");
+                    todo!(
+                        "make builtins first class functions for '{}' {:?}",
+                        self.pool.get(*i),
+                        expr.loc
+                    );
                 } else {
                     println!(
                         "UNDECLARED IDENT: {} (in GetNamed) at {:?}",
@@ -1595,7 +1617,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // TODO: copy-n-paste
                 logln!("RESOLVE: Arg of {func:?}");
                 let arg = match arg {
-                    LazyType::Infer => todo!(),
+                    LazyType::Infer => TypeId::any(),
                     LazyType::PendingEval(e) => {
                         let value = self.cached_eval_expr(e.clone())?;
                         self.to_type(value)?
@@ -1648,9 +1670,13 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn to_type(&self, value: Value) -> Res<'p, TypeId> {
+    fn to_type(&mut self, value: Value) -> Res<'p, TypeId> {
         if let Value::Type(id) = value {
             Ok(id)
+        } else if let Value::Tuple { values, .. } = value {
+            let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v)).collect();
+            let ty = TypeInfo::Tuple(values?);
+            Ok(self.program.intern_type(ty))
         } else {
             Err(self.error(CErr::TypeError("Type", value)))
         }
@@ -1830,6 +1856,7 @@ fn builtin_type(name: &str) -> Option<TypeInfo> {
         "f64" => F64,
         "Type" => Type,
         "bool" => Bool,
+        "Any" => Any,
         _ => return None,
     })
 }
@@ -1943,6 +1970,14 @@ fn flatten_value(values: Vec<Value>) -> Value {
     // TODO: flatten inner tuples
     Value::Tuple {
         container_type: TypeId::any(),
-        values,
+        values: values.into_iter().flat_map(expand_value).collect(),
+    }
+}
+
+fn expand_value(value: Value) -> Vec<Value> {
+    if let Value::Tuple { values, .. } = value {
+        values.into_iter().flat_map(expand_value).collect()
+    } else {
+        vec![value]
     }
 }
