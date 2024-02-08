@@ -135,27 +135,32 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
     interp.add_declarations(ast);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
     let result = interp.run(f, arg.clone(), ExecTime::Runtime);
-    let result = result.unwrap();
-    let end = Instant::now();
-
-    logln!("{arg:?} -> {result:?}");
-    assert_eq!(result, expect);
-    // TODO: change this when i add assert(bool)
-    let assertion_count = src.split("assert_eq(").count() - 1;
-    assert_eq!(interp.assertion_count, assertion_count);
-    println!(
-        "{assertion_count} assertions passed. {} comptime evaluations.",
-        interp.anon_fn_counter
-    );
-    let seconds = (end - start).as_secs_f32();
-    let lines = full_src
-        .split('\n')
-        .filter(|s| !s.split("//").next().unwrap().is_empty())
-        .count();
-    println!(
-            "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
-            lines as f32 / seconds
+    if let Ok(result) = result {
+        let end = Instant::now();
+        logln!("{arg:?} -> {result:?}");
+        assert_eq!(result, expect);
+        // TODO: change this when i add assert(bool)
+        let assertion_count = src.split("assert_eq(").count() - 1;
+        assert_eq!(
+            interp.assertion_count, assertion_count,
+            "vm missed assertions?"
         );
+        println!(
+            "{assertion_count} assertions passed. {} comptime evaluations.",
+            interp.anon_fn_counter
+        );
+        let seconds = (end - start).as_secs_f32();
+        let lines = full_src
+            .split('\n')
+            .filter(|s| !s.split("//").next().unwrap().is_empty())
+            .count();
+        println!(
+                "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                lines as f32 / seconds
+            );
+    } else {
+        println!("{:?}", result.unwrap_err());
+    }
 
     #[cfg(feature = "some_log")]
     if let Some(path) = save {

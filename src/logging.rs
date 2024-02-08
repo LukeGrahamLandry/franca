@@ -55,6 +55,7 @@ macro_rules! assert_eq {
     };
 }
 
+// TODO: use this for interp bounds checks and accept an enum so you can turn them off individually. Distinguish between runtime/comptime.
 macro_rules! check {
     ($self:expr, $cond:expr, $($arg:tt)+) => {{
         if !($cond) {
@@ -66,6 +67,7 @@ macro_rules! check {
         check!($self, $cond, "")
     }};
 }
+pub(crate) use check;
 
 // I want to be as easy to use my error system as just paniking.
 // Use this one for things that aren't supported yet or should have been caught in a previous stage of compilation.
@@ -75,6 +77,25 @@ macro_rules! ice {
         return err!($self, CErr::IceFmt(msg))
     }};
 }
+pub(crate) use ice;
+
+// TODO: compile errors should include the line number of the most recent ast node.
+
+// TODO: have an enum for distringuishing ice from invalid input and use that everywhere instead of having two of each macro.
+// TODO: I really like stringify! for error messages. make sure ast macros in my language have that.
+// Convert a missing option into a compile error with a message.
+macro_rules! unwrap {
+    ($self:expr, $maybe:expr, $($arg:tt)*) => {{
+        if let Some(value) = $maybe {
+            value
+        } else {
+            let msg = format!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*));
+            return err!($self, CErr::IceFmt(msg))
+        }
+    }};
+}
+
+pub(crate) use unwrap;
 
 pub enum LogTag {
     Parsing,
@@ -90,6 +111,8 @@ macro_rules! log {
         }
     }};
 }
+pub(crate) use log;
+
 macro_rules! logln {
     // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
     ($($arg:tt)*) => {{
@@ -98,20 +121,17 @@ macro_rules! logln {
         }
     }};
 }
+pub(crate) use logln;
 
 pub(crate) use assert;
 pub(crate) use assert_eq;
 pub(crate) use bin_int;
-pub(crate) use check;
 pub(crate) use err;
-pub(crate) use ice;
-pub(crate) use log;
-pub(crate) use logln;
 use tree_sitter::Point;
 
 use crate::{
     ast::{Expr, FatExpr, Func, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
-    interp::{Bc, FnBody, Interp, StackOffset, StackRange, Value},
+    interp::{Bc, DebugInfo, FnBody, Interp, StackOffset, StackRange, Value},
     pool::StringPool,
 };
 
@@ -181,7 +201,7 @@ impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
             s += &self.program.funcs[i].log(pool);
             s += "\n";
             if let Some(bc) = f {
-                writeln!(s, "{:?}", bc);
+                writeln!(s, "{}", bc.log(pool));
             } else {
                 writeln!(s, "NOT JITTED");
             }
@@ -330,36 +350,54 @@ impl<'p> PoolLog<'p> for Func<'p> {
     }
 }
 
-impl Debug for FnBody<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when)?;
-        writeln!(f, "TYPES: {:?}", &self.slot_types)?;
-        for (i, bc) in self.insts.iter().enumerate() {
-            writeln!(f, "{i}. {bc:?}")?;
-        }
-        writeln!(f, "{}", self.why)?;
-        Ok(())
+impl<'p> PoolLog<'p> for DebugInfo<'p> {
+    fn log(&self, pool: &StringPool<'p>) -> String {
+        format!("// {} | {} ", self.src_loc, self.internal_loc)
     }
 }
 
-impl Debug for Bc<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'p> PoolLog<'p> for FnBody<'p> {
+    fn log(&self, pool: &StringPool<'p>) -> String {
+        let mut f = String::new();
+        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when);
+        writeln!(f, "TYPES: {:?}", &self.slot_types);
+        let width = 55;
+        for (i, bc) in self.insts.iter().enumerate() {
+            let bc = format!("{i}. {}", bc.log(pool));
+            writeln!(
+                f,
+                "{:width$} {}",
+                bc,
+                self.debug
+                    .get(i)
+                    .map(|d| d.log(pool))
+                    .unwrap_or_else(|| String::from("// ???"))
+            );
+        }
+        writeln!(f, "{}", self.why);
+        f
+    }
+}
+
+impl<'p> PoolLog<'p> for Bc<'p> {
+    fn log(&self, pool: &StringPool<'p>) -> String {
+        let mut f = String::new();
         match self {
             Bc::CallDynamic {
                 f: func_slot,
                 ret,
                 arg,
-            } => write!(f, "{ret:?} = call({func_slot:?}, {arg:?});")?,
+            } => write!(f, "{ret:?} = call({func_slot:?}, {arg:?});"),
             Bc::CallDirect { f: func, ret, arg } => {
-                write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)?
+                write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)
             }
             Bc::CallDirectMaybeCached { f: func, ret, arg } => {
-                write!(f, "{ret:?} = cached_call(f({:?}), {arg:?});", func.0)?
+                write!(f, "{ret:?} = cached_call(f({:?}), {arg:?});", func.0)
             }
             Bc::CallBuiltin { name, ret, arg } => {
-                write!(f, "{ret:?} = builtin(i({}), {arg:?});", name.0)?
+                write!(f, "{ret:?} = builtin(S{}, {arg:?});", name.0)
             }
-            Bc::LoadConstant { slot, value } => write!(f, "{:?} = {:?};", slot, value)?,
+            Bc::LoadConstant { slot, value } => write!(f, "{:?} = {:?};", slot, value),
             Bc::JumpIf {
                 cond,
                 true_ip,
@@ -368,25 +406,26 @@ impl Debug for Bc<'_> {
                 f,
                 "if ({:?}) goto {} else goto {};",
                 cond, true_ip, false_ip
-            )?,
-            Bc::Goto { ip } => write!(f, "goto {ip};",)?,
+            ),
+            Bc::Goto { ip } => write!(f, "goto {ip};",),
             Bc::MoveCreateTuple { values, target } => {
-                write!(f, "{target:?} = move{values:?};")?;
+                write!(f, "{target:?} = move{values:?};")
             }
             Bc::CloneCreateTuple { values, target } => {
-                write!(f, "{target:?} = @clone{values:?};")?;
+                write!(f, "{target:?} = @clone{values:?};")
             }
-            Bc::Ret(i) => write!(f, "return {i:?};")?,
-            Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
-            Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from)?,
-            Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
-            Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
-            Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from)?,
-            Bc::Drop(i) => write!(f, "drop({:?});", i)?,
-            Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of)?,
-            Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?});", s, i)?,
-        }
-        Ok(())
+            Bc::Ret(i) => write!(f, "return {i:?};"),
+            Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
+            Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
+            Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from),
+            Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from),
+            Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
+            Bc::Drop(i) => write!(f, "drop({:?});", i),
+            Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
+            Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
+            Bc::DebugLine(loc) => write!(f, "debug({});", loc),
+        };
+        f
     }
 }
 

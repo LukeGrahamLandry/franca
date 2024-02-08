@@ -1,4 +1,9 @@
 
+## general closures
+
+- i did a special case for if but need to do that for all. 
+  resolver does it right but need to be able to inline call into same result. 
+
 ## scope (Feb 7)
 
 - do arg vars based my new thing

@@ -8,3 +8,8 @@
 - parse interfaces written in other languages and generate bindings. 
 - highly configureable semantics to match many different target languages. 
 - macros are functions that directly manipulate the ast  
+
+## Tradeoffs
+
+I strongly believe in conservation of misery so if there's a bunch of stuff I like about this language
+there must be propoertional terrible things or I'm probably just lying. 

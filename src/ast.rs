@@ -112,19 +112,24 @@ pub enum Expr<'p> {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ConstKnown {
-    Yes,
-    No,
+pub enum Known {
+    // Known at comptime but could be computed at runtime too.
+    Foldable,
+    RuntimeOnly,
     Maybe,
+    // Types, function literals (can convert to FnPtr for runtime if no captures)
+    ComptimeOnly,
 }
 
+// Some common data needed by all expression types.
+// This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
 #[derive(Clone, Debug, Eq)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Point,
     pub id: usize,
     pub ty: Option<TypeId>,
-    pub known: ConstKnown,
+    pub known: Known,
 }
 
 impl<'p> FatExpr<'p> {
@@ -138,7 +143,7 @@ impl<'p> FatExpr<'p> {
             },
             id: 123456789,
             ty: None,
-            known: ConstKnown::No,
+            known: Known::RuntimeOnly,
         }
     }
 }
