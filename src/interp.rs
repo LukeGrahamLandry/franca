@@ -10,6 +10,7 @@ use std::{
     ptr,
 };
 
+use crate::ast::VarType;
 use crate::logging::PoolLog;
 use crate::{
     ast::{
@@ -199,6 +200,7 @@ pub struct FnBody<'p> {
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
     pub func: FuncId,
+    pub why: String,
 }
 
 impl<'p> FnBody<'p> {
@@ -228,8 +230,9 @@ pub struct Interp<'a, 'p> {
     log_depth: usize,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
-    anon_fn_counter: usize,
+    pub anon_fn_counter: usize,
     pub assertion_count: usize,
+    pub constants: HashMap<Var<'p>, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -288,6 +291,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             debug_trace: vec![],
             anon_fn_counter: 0,
             assertion_count: 0,
+            constants: Default::default(),
         }
     }
 
@@ -316,9 +320,14 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn log_trace(&self) {
-        logln!("=== TRACE ===");
-        logln!("{}", Location::caller());
+    fn log_trace(&self) -> String {
+        let mut out = String::new();
+        #[cfg(not(feature = "some_log"))]
+        {
+            return out;
+        }
+        writeln!(out, "=== TRACE ===");
+        writeln!(out, "{}", Location::caller());
         let show_f = |func: FuncId| {
             format!(
                 "f{}:{:?}:{}",
@@ -329,28 +338,30 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
 
         for (i, s) in self.debug_trace.iter().enumerate() {
-            log!("{i}");
+            write!(out, "{i}");
             match s {
                 DebugState::OuterCall(f, arg) => {
-                    log!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
+                    write!(out, "| Prep Interp | {} on val:{arg:?}", show_f(*f))
                 }
                 DebugState::JitToBc(f, when) => {
-                    log!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
+                    write!(out, "| Jit Bytecode| {} for {:?}", show_f(*f), when)
                 }
-                DebugState::RunInstLoop(f) => log!("| Loop Insts  | {}", show_f(*f)),
-                DebugState::ComputeCached(e) => log!("| Cache Eval  | {}", e.log(self.pool)),
+                DebugState::RunInstLoop(f) => write!(out, "| Loop Insts  | {}", show_f(*f)),
+                DebugState::ComputeCached(e) => write!(out, "| Cache Eval  | {}", e.log(self.pool)),
                 DebugState::ResolveFnType(f, arg, ret) => {
-                    log!(
+                    write!(
+                        out,
                         "| Resolve Type| {} is fn({}) {}",
                         show_f(*f),
                         arg.log(self.pool),
                         ret.log(self.pool)
                     )
                 }
-            }
-            logln!(";")
+            };
+            writeln!(out, ";");
         }
-        logln!("=============");
+        writeln!(out, "=============");
+        out
     }
 
     pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) -> Res<'p, ()> {
@@ -360,6 +371,25 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.program.add_func(func);
                 }
                 Stmt::Noop => {}
+                Stmt::DeclVar {
+                    name,
+                    ty,
+                    value,
+                    dropping,
+                    kind,
+                } => {
+                    assert_eq!(self, kind, VarType::Const, "toplevel expected 'const'");
+                    let value = match value {
+                        Some(value) => self.cached_eval_expr(value)?,
+                        None => {
+                            let name = self.pool.get(name.0);
+                            self.builtin_constant(name)
+                                .unwrap_or_else(|| panic!("toplevel undefined {:?}", name))
+                                .0
+                        }
+                    };
+                    self.constants.insert(name, value);
+                }
                 _ => ice!(
                     self,
                     "Stmt {} {stmt:?} is not supported at top level.",
@@ -763,6 +793,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ty = self.to_type(arg)?;
                 Value::Type(self.program.intern_type(TypeInfo::Ptr(ty)))
             }
+            "Slice" => {
+                let ty = self.to_type(arg)?;
+                Value::Type(self.program.intern_type(TypeInfo::Ptr(ty)))
+            }
             "is_oob_stack" => {
                 let addr = self.to_stack_addr(arg)?;
                 Value::Bool(addr.first.0 >= self.value_stack.len())
@@ -961,6 +995,10 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn log_stack(&self) {
+        #[cfg(not(feature = "spam_log"))]
+        {
+            return;
+        }
         log!("STACK ");
         let frame = self.call_stack.last().unwrap();
         for i in 0..frame.stack_base.0 {
@@ -1074,7 +1112,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             when,
             slot_types: vec![TypeId::any(); arg_slots],
             func: FuncId(index),
+            why: self.log_trace(),
         };
+
         let arg_range = StackRange {
             first: StackOffset(0),
             count: arg_slots,
@@ -1201,6 +1241,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 ty,
                 value,
                 dropping,
+                ..
             } => {
                 let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
@@ -1238,7 +1279,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             Stmt::SetVar(var, expr) => {
                 let value = self.compile_expr(result, expr)?;
                 let slot = result.vars.get(var);
-                let slot = *slot.expect("SetNamed: var must be declared");
+                let slot =
+                    *slot.unwrap_or_else(|| panic!("SetVar: var must be declared: {:?}", var));
                 result.push(Bc::Drop(slot));
                 assert_eq!(self, value.count, slot.count);
                 for i in 0..value.count {
@@ -1488,8 +1530,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.insts.push(Bc::CloneRange { from, to });
                     }
                     to
+                } else if let Some(value) = self.constants.get(var) {
+                    // TODO: constant tuples
+                    let slot = result.reserve_slots(1, TypeId::any());
+                    result.insts.push(Bc::LoadConstant {
+                        slot: slot.first,
+                        value: value.clone(),
+                    });
+                    slot
                 } else {
-                    println!("{:?}", result.vars);
+                    println!("VARS: {:?}", result.vars);
+                    println!("GLOBALS: {:?}", self.constants);
                     ice!(
                         self,
                         "Missing resolved variable {:?} '{}' at line {}",
@@ -1500,26 +1551,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Expr::GetNamed(i) => {
-                if let Some((value, ty)) = self.builtin_constant(self.pool.get(*i)) {
-                    result.load_constant(value, ty)
-                } else if let Some(func) = self.program.declarations.get(i) {
+                if let Some(func) = self.program.declarations.get(i) {
                     assert_eq!(self, func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(func, ExecTime::Comptime)?;
                     result.load_constant(Value::GetFn(func), TypeId::any())
-                } else if self.builtins.contains(i) {
-                    todo!(
-                        "make builtins first class functions for '{}' {:?}",
-                        self.pool.get(*i),
-                        expr.loc
-                    );
                 } else {
-                    println!(
-                        "UNDECLARED IDENT: {} (in GetNamed) at {:?}",
-                        self.pool.get(*i),
-                        expr.loc
-                    );
-                    return Err(self.error(CErr::UndeclaredIdent(*i)));
+                    ice!(self, "Scope resolution failed {}", expr.log(self.pool));
                 }
             }
             Expr::EnumLiteral(_) => todo!(),
@@ -1568,7 +1606,17 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
-        if let Some(ty) = builtin_type(name) {
+        use TypeInfo::*;
+        let ty = match name {
+            "Unit" => Some(Unit),
+            "i64" => Some(I64),
+            "f64" => Some(F64),
+            "Type" => Some(Type),
+            "bool" => Some(Bool),
+            "Any" => Some(Any),
+            _ => None,
+        };
+        if let Some(ty) = ty {
             let ty = self.program.intern_type(ty);
             let tyty = self.program.intern_type(TypeInfo::Type);
             return Some((Value::Type(ty), tyty));
@@ -1578,6 +1626,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "unit" => (Value::Unit, TypeId::unit()),
             "true" => (Value::Bool(true), self.program.intern_type(TypeInfo::Bool)),
             "false" => (Value::Bool(false), self.program.intern_type(TypeInfo::Bool)),
+
             _ => return None,
         })
     }
@@ -1639,8 +1688,22 @@ impl<'a, 'p> Interp<'a, 'p> {
         )
     }
 
-    // TODO: fast path for builtin type identifiers
     fn cached_eval_expr(&mut self, e: FatExpr<'p>) -> Res<'p, Value> {
+        match e.deref() {
+            Expr::Value(value) => return Ok(value.clone()),
+            Expr::GetVar(var) => {
+                // fast path for builtin type identifiers
+                if let Some(value) = self.constants.get(var) {
+                    debug_assert_ne!(value, &Value::Poison);
+                    return Ok(value.clone());
+                }
+                // fallthrough
+            }
+            Expr::Call(f, arg) => {
+                // TODO: fast path for checking the generics cache
+            }
+            _ => {} // fallthrough
+        }
         let state = DebugState::ComputeCached(e.clone());
         self.push_state(&state);
         let name = format!("@eval_{}@", self.anon_fn_counter);
@@ -1846,19 +1909,6 @@ impl FnBody<'_> {
         });
         to
     }
-}
-
-fn builtin_type(name: &str) -> Option<TypeInfo> {
-    use TypeInfo::*;
-    Some(match name {
-        "Unit" => Unit,
-        "i64" => I64,
-        "f64" => F64,
-        "Type" => Type,
-        "bool" => Bool,
-        "Any" => Any,
-        _ => return None,
-    })
 }
 
 /// https://users.rust-lang.org/t/convenience-method-for-flipping-option-result-to-result-option/13695

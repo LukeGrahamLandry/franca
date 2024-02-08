@@ -5,14 +5,15 @@ use std::{
 };
 
 use crate::{
-    ast::{Expr, FatExpr, Func, Stmt, Var},
+    ast::{Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
     pool::Ident,
 };
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ResolveScope<'p> {
     next_var: usize,
     scopes: Vec<Vec<Var<'p>>>,
+    info: Vec<VarInfo>,
 }
 
 impl<'p> ResolveScope<'p> {
@@ -20,7 +21,7 @@ impl<'p> ResolveScope<'p> {
     //       then functions could be delt with here too.
     // TODO: will need to keep some state about this for macros that want to add vars?
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut [Stmt]) {
+    pub fn of(stmts: &mut [Stmt]) -> Vec<VarInfo> {
         let mut resolver = ResolveScope::default();
 
         resolver.push_scope();
@@ -29,13 +30,29 @@ impl<'p> ResolveScope<'p> {
         }
         let globals = resolver.pop_scope();
 
-        assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes")
+        assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
+        resolver.info
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) {
         self.push_scope();
         for name in func.arg_names.iter().flatten() {
             self.decl_var(name);
+        }
+        match &mut func.ty {
+            LazyFnType::Finished(_, _) => {}
+            LazyFnType::Pending { arg, ret } => {
+                match arg {
+                    LazyType::Infer => {}
+                    LazyType::PendingEval(ty) => self.resolve_expr(ty),
+                    LazyType::Finished(_) => {}
+                }
+                match ret {
+                    LazyType::Infer => {}
+                    LazyType::PendingEval(ty) => self.resolve_expr(ty),
+                    LazyType::Finished(_) => {}
+                }
+            }
         }
         self.push_scope();
         if let Some(body) = &mut func.body {
@@ -48,16 +65,29 @@ impl<'p> ResolveScope<'p> {
 
     fn resolve_stmt(&mut self, stmt: &mut Stmt<'p>) {
         match stmt {
-            Stmt::DeclNamed { name, ty, value } => {
+            Stmt::DeclNamed {
+                name,
+                ty,
+                value,
+                kind,
+            } => {
+                if let Some(ty) = ty {
+                    self.resolve_expr(ty);
+                }
                 if let Some(value) = value {
                     self.resolve_expr(value);
                 }
                 let (old, new) = self.decl_var(name);
+                self.info.push(VarInfo {
+                    ty: TypeId::any(),
+                    kind: *kind,
+                });
                 *stmt = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, Some(FatExpr::null())),
                     value: mem::replace(value, Some(FatExpr::null())),
                     dropping: old,
+                    kind: *kind,
                 }
             }
             Stmt::SetNamed(name, e) => {
@@ -69,7 +99,7 @@ impl<'p> ResolveScope<'p> {
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
             Stmt::DeclFunc(func) => self.resolve_func(func),
-            Stmt::DeclVar { .. } | Stmt::SetVar(_, _) | Stmt::EndScope(_) => {
+            Stmt::DeclVar { .. } | Stmt::SetVar(_, _) => {
                 unreachable!("added by this pass {stmt:?}")
             }
         }

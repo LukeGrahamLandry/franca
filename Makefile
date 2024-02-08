@@ -2,7 +2,7 @@ grammar: grammar/grammar.js
 	cd grammar && ./node_modules/.bin/tree-sitter generate
     
 run: grammar
-	cargo run --features logging
+	cargo run --features log_spam
 
 test: grammar
 	cargo test

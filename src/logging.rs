@@ -85,7 +85,7 @@ pub enum LogTag {
 macro_rules! log {
     // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
     ($($arg:tt)*) => {{
-        if cfg!(feature = "logging") {
+        if cfg!(feature = "spam_log") {
             print!($($arg)*);
         }
     }};
@@ -93,7 +93,7 @@ macro_rules! log {
 macro_rules! logln {
     // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
     ($($arg:tt)*) => {{
-        if cfg!(feature = "logging") {
+        if cfg!(feature = "spam_log") {
             println!($($arg)*);
         }
     }};
@@ -107,6 +107,7 @@ pub(crate) use err;
 pub(crate) use ice;
 pub(crate) use log;
 pub(crate) use logln;
+use tree_sitter::Point;
 
 use crate::{
     ast::{Expr, FatExpr, Func, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
@@ -204,8 +205,13 @@ impl<'p> PoolLog<'p> for LazyFnType<'p> {
 impl<'p> PoolLog<'p> for Stmt<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            Stmt::DeclNamed { name, ty, value } => format!(
-                "let {}: {} = {};",
+            Stmt::DeclNamed {
+                name,
+                ty,
+                value,
+                kind,
+            } => format!(
+                "{kind:?} {}: {} = {};",
                 pool.get(*name),
                 ty.as_ref()
                     .map(|v| v.log(pool))
@@ -303,7 +309,8 @@ impl<'p> PoolLog<'p> for FatExpr<'p> {
 
 impl<'p> PoolLog<'p> for Var<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        format!("{}%{}", pool.get(self.0), self.1)
+        let i = self.1;
+        format!("{}%{}", pool.get(self.0), i)
     }
 }
 
@@ -405,6 +412,31 @@ impl Debug for TypeId {
             write!(f, "TyAny")
         } else {
             write!(f, "Ty{}", self.0)
+        }
+    }
+}
+
+impl Stmt<'_> {
+    pub fn get_loc(&self) -> Option<Point> {
+        match self {
+            Stmt::Noop => None,
+            Stmt::Eval(e) => Some(e.loc),
+            Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
+            Stmt::SetVar(_, e) => Some(e.loc),
+            Stmt::DeclVar {
+                name,
+                ty,
+                value,
+                dropping,
+                kind,
+            } => value.as_ref().or(ty.as_ref()).map(|e| e.loc),
+            Stmt::DeclNamed {
+                name,
+                ty,
+                value,
+                kind,
+            } => todo!(),
+            Stmt::SetNamed(_, _) => todo!(),
         }
     }
 }

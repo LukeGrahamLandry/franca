@@ -54,6 +54,13 @@ pub struct FuncFlags {
     pub intrinsic: bool,
 }
 
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
+pub enum VarType {
+    Let,
+    Var,
+    Const,
+}
+
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub enum TypeInfo {
     Any,
@@ -161,14 +168,15 @@ pub enum Stmt<'p> {
         ty: Option<FatExpr<'p>>,
         value: Option<FatExpr<'p>>,
         dropping: Option<Var<'p>>, // if this is a redeclaration, immediatly call the drop handler on the old one
+        kind: VarType,
     },
-    EndScope(Vec<Var<'p>>),
 
     // Frontend only
     DeclNamed {
         name: Ident<'p>,
         ty: Option<FatExpr<'p>>,
         value: Option<FatExpr<'p>>,
+        kind: VarType,
     },
     SetNamed(Ident<'p>, FatExpr<'p>),
 }
@@ -212,6 +220,12 @@ pub enum LazyType<'p> {
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub struct FuncId(pub usize);
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+pub struct VarInfo {
+    pub ty: TypeId,
+    pub kind: VarType,
+}
+
 #[derive(Clone)]
 pub struct Program<'p> {
     pub types: Vec<TypeInfo>,
@@ -223,6 +237,7 @@ pub struct Program<'p> {
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     pub generics_memo: HashMap<(FuncId, Value), Value>,
+    pub vars: Vec<VarInfo>,
 }
 
 impl<'p> Stmt<'p> {
@@ -281,6 +296,7 @@ impl<'p> Default for Program<'p> {
             func_lookup: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
+            vars: vec![],
         }
     }
 }

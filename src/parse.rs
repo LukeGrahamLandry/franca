@@ -9,7 +9,10 @@ use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
 // I FUCKING TAKE IT BACK I HATE TREE SITTER SO MUCH
 
 use crate::{
-    ast::{Annotation, ConstKnown, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId},
+    ast::{
+        Annotation, ConstKnown, Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId, VarInfo,
+        VarType,
+    },
     interp::Value,
     logging::PoolLog,
     pool::{Ident, StringPool},
@@ -32,6 +35,11 @@ fn print_but_not_fucking_stupid(
     node: Node,
     limit: usize,
 ) {
+    #[cfg(not(feature = "spam_log"))]
+    {
+        return;
+    }
+
     log!("{}({child_id}): {}", "=".repeat(depth * 2), node.kind());
     if node.kind() == "identifier" || node.kind() == "names" {
         log!(" |{}|", node.utf8_text(src).unwrap());
@@ -55,7 +63,11 @@ fn print_but_not_fucking_stupid(
 }
 
 impl<'a, 'p> WalkParser<'a, 'p> {
-    pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<Stmt<'p>> {
+    pub fn parse(
+        mut p: Parser,
+        src: &'p str,
+        pool: &'a StringPool<'p>,
+    ) -> (Vec<Stmt<'p>>, Vec<VarInfo>) {
         logln!("SRC:\n{src}");
         let tree = p.parse(src, None).unwrap();
         logln!("PARSE:\n{}", tree.root_node().to_sexp());
@@ -73,12 +85,12 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             stmts.push(p.parse_stmt(&mut tree));
         }
 
-        ResolveScope::of(&mut stmts);
+        let vars = ResolveScope::of(&mut stmts);
         for s in &stmts {
             logln!("finished stmt: {}", s.log(p.pool))
         }
 
-        stmts
+        (stmts, vars)
     }
 
     fn parse_stmt(&mut self, cursor: &mut TreeCursor) -> Stmt<'p> {
@@ -101,7 +113,14 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             }
             "expr" => Stmt::Eval(self.parse_expr(cursor)),
             "declare" => {
-                self.assert_literal(node.child(0).unwrap(), "let");
+                let qualifier = node.child(0).unwrap();
+                let qualifier = qualifier.utf8_text(self.src).unwrap();
+                let qualifier = match qualifier {
+                    "let" => VarType::Let,
+                    "var" => VarType::Var,
+                    "const" => VarType::Const,
+                    _ => panic!("Expected let/var/const but found {:?}", qualifier),
+                };
                 let binding = self.parse_binding(node.child(1).unwrap());
 
                 let value = node.child(2).map(|eq_sign| {
@@ -113,6 +132,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                     name: binding.0.expect("binding name"),
                     ty: binding.1,
                     value,
+                    kind: qualifier,
                 }
             }
             "assign" => {

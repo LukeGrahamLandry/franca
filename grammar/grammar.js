@@ -12,7 +12,12 @@ module.exports = grammar({
 
     _statement: ($) =>
       choice($.func_def, seq(choice($.expr, $.declare, $.assign), ";"), ";"),
-    declare: ($) => seq("let", $.binding_type, optional(seq("=", $.expr))),
+    declare: ($) =>
+      seq(
+        choice("let", "var", "const"),
+        $.binding_type,
+        optional(seq("=", $.expr)),
+      ),
     assign: ($) => seq($.names, "=", $.expr),
     block: ($) =>
       seq(

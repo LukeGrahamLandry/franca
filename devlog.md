@@ -6,7 +6,11 @@
 - allow shadowing 
 - now that vars are numbered, how to do inlining becomes obvious. 
  i ended up just doing it on the bytecode tho but might want to renumber the ast as well later? 
-
+ - forgot to resolve types in functions/vars which was very confusing when tried to switch builtins to being definied as constants in a prelude. 
+- putting a bunch of cfg checks in logging functions (mostly in parse.rs) makes it like 2x faster (release mode) 
+  so i guess it wasnt optimising out my big recursive traversals even though the log macros did nothing. 
+  
+ 
 ## Interp (Feb 1)
 
 Having a linear type system seems very debuggable. 
