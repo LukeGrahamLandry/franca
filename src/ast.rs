@@ -87,7 +87,7 @@ pub struct Annotation<'p> {
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Var<'p>(pub Ident<'p>, pub usize);
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Eq)]
 pub enum Expr<'p> {
     Value(Value),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
@@ -133,18 +133,21 @@ pub struct FatExpr<'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    // used for moving out of ast
-    pub fn null() -> Self {
+    pub fn synthetic(expr: Expr<'p>) -> Self {
         FatExpr {
-            expr: Expr::Value(Value::Poison),
+            expr,
             loc: Point {
                 row: 0,
                 column: 123456789,
             },
             id: 123456789,
             ty: None,
-            known: Known::RuntimeOnly,
+            known: Known::ComptimeOnly,
         }
+    }
+    // used for moving out of ast
+    pub fn null() -> Self {
+        FatExpr::synthetic(Expr::Value(Value::Poison))
     }
 }
 
@@ -160,7 +163,7 @@ impl Hash for FatExpr<'_> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Eq)]
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
@@ -186,7 +189,7 @@ pub enum Stmt<'p> {
     SetNamed(Ident<'p>, FatExpr<'p>),
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Eq)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Option<Ident<'p>>,   // it might be an annonomus closure
@@ -194,6 +197,8 @@ pub struct Func<'p> {
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
     pub arg_vars: Option<Vec<Var<'p>>>,
+    pub capture_vars: Vec<Var<'p>>,
+    pub local_constants: Vec<Var<'p>>,
 }
 
 impl<'p> Func<'p> {

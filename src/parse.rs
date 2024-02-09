@@ -63,11 +63,7 @@ fn print_but_not_fucking_stupid(
 }
 
 impl<'a, 'p> WalkParser<'a, 'p> {
-    pub fn parse(
-        mut p: Parser,
-        src: &'p str,
-        pool: &'a StringPool<'p>,
-    ) -> (Vec<Stmt<'p>>, Vec<VarInfo>) {
+    pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<Stmt<'p>> {
         logln!("SRC:\n{src}");
         let tree = p.parse(src, None).unwrap();
         logln!("PARSE:\n{}", tree.root_node().to_sexp());
@@ -85,12 +81,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             stmts.push(p.parse_stmt(&mut tree));
         }
 
-        let vars = ResolveScope::of(&mut stmts);
         for s in &stmts {
-            logln!("finished stmt: {}", s.log(p.pool))
+            logln!("finished stmt: {}", s.log(pool))
         }
 
-        (stmts, vars)
+        stmts
     }
 
     fn parse_stmt(&mut self, cursor: &mut TreeCursor) -> Stmt<'p> {
@@ -436,6 +431,8 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             arg_names,
             annotations,
             arg_vars: None,
+            capture_vars: vec![],
+            local_constants: Default::default(),
         };
         logln!("GOT FUNC: {}", func.log(self.pool));
         func

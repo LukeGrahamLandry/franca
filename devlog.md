@@ -3,6 +3,10 @@
 
 - i did a special case for if but need to do that for all. 
   resolver does it right but need to be able to inline call into same result. 
+- painful debugging but made logging a lot better
+- want to track captures so know which need inline. 
+  was confused by it thinking almost everything was a closure but it's finding the type constants in the outer scope. 
+  i guess constants never need to be treated as captures since you just inline them into the function anyway. 
 
 ## scope (Feb 7)
 

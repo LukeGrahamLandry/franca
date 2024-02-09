@@ -1,5 +1,8 @@
 use core::fmt;
-use std::fmt::{Debug, Write};
+use std::{
+    fmt::{Debug, Write},
+    panic::Location,
+};
 
 macro_rules! bin_int {
     ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
@@ -130,8 +133,12 @@ pub(crate) use err;
 use tree_sitter::Point;
 
 use crate::{
-    ast::{Expr, FatExpr, Func, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
-    interp::{Bc, DebugInfo, FnBody, Interp, StackOffset, StackRange, Value},
+    ast::{
+        Expr, FatExpr, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var,
+    },
+    interp::{
+        Bc, CompileError, DebugInfo, DebugState, FnBody, Interp, StackOffset, StackRange, Value,
+    },
     pool::StringPool,
 };
 
@@ -337,7 +344,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         format!(
-            "[fn {} {:?} {} = {}; A:{:?}]",
+            "[fn {} {:?} {} = {}; A:{:?}]\n{}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ty.log(pool),
@@ -345,14 +352,27 @@ impl<'p> PoolLog<'p> for Func<'p> {
                 .as_ref()
                 .map(|e| e.log(pool))
                 .unwrap_or_else(|| "@forward_decl()".to_owned()),
-            self.annotations.iter().map(|i| pool.get(i.name))
+            self.annotations.iter().map(|i| pool.get(i.name)),
+            if self.capture_vars.is_empty() {
+                String::from("Raw function, no captures.")
+            } else {
+                format!(
+                    "Closure capturing: {:?}.",
+                    self.capture_vars
+                        .iter()
+                        .map(|v| v.log(pool))
+                        .collect::<Vec<_>>()
+                )
+            }
         )
     }
 }
 
 impl<'p> PoolLog<'p> for DebugInfo<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        format!("// {} | {} ", self.src_loc, self.internal_loc)
+        let loc = format!("{}", self.src_loc);
+        let width = 10;
+        format!("// {:width$} | {} ", loc, self.internal_loc)
     }
 }
 
@@ -361,7 +381,7 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
         let mut f = String::new();
         writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when);
         writeln!(f, "TYPES: {:?}", &self.slot_types);
-        let width = 55;
+        let width = 75;
         for (i, bc) in self.insts.iter().enumerate() {
             let bc = format!("{i}. {}", bc.log(pool));
             writeln!(
@@ -476,6 +496,121 @@ impl Stmt<'_> {
                 kind,
             } => todo!(),
             Stmt::SetNamed(_, _) => todo!(),
+        }
+    }
+}
+
+impl<'a, 'p> Interp<'a, 'p> {
+    #[track_caller]
+    pub fn log_trace(&self) -> String {
+        let mut out = String::new();
+        #[cfg(not(feature = "some_log"))]
+        {
+            return out;
+        }
+        writeln!(out, "=== TRACE ===");
+        writeln!(out, "{}", Location::caller());
+
+        for (i, s) in self.debug_trace.iter().enumerate() {
+            writeln!(out, "{i} {};", s.log(self.pool, self.program));
+        }
+        writeln!(out, "=============");
+        out
+    }
+
+    pub fn log_stack(&self) {
+        #[cfg(not(feature = "spam_log"))]
+        {
+            return;
+        }
+        log!("STACK ");
+        let frame = self.call_stack.last().unwrap();
+        for i in 0..frame.stack_base.0 {
+            if self.value_stack[i] != Value::Poison {
+                log!("({i}|{:?}), ", self.value_stack[i]);
+            }
+        }
+        for i in frame.stack_base.0..self.value_stack.len() {
+            if self.value_stack[i] != Value::Poison {
+                let slot = i - frame.stack_base.0;
+                log!("[{i}|${slot}|{:?}], ", self.value_stack[i]);
+            }
+        }
+        logln!("END");
+    }
+
+    pub fn log_callstack(&self) -> String {
+        let mut s = String::new();
+        write!(s, "CALLS ");
+        for frame in &self.call_stack {
+            write!(s, "[{}], ", self.pool.get(frame.debug_name));
+        }
+        write!(s, "END");
+        s
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::F64(v) => write!(f, "{v}"),
+            Value::I64(v) => write!(f, "{v}"),
+            Value::Bool(v) => write!(f, "{v}"),
+            Value::Enum {
+                container_type,
+                tag,
+                value,
+            } => todo!(),
+            Value::Tuple {
+                container_type,
+                values,
+            } => {
+                write!(f, "(");
+                for v in values {
+                    write!(f, "{v}, ")?;
+                }
+                write!(f, ")")
+            }
+            _ => write!(f, "{self:?}"),
+        }
+    }
+}
+
+impl<'p> Debug for CompileError<'p> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "COMPILATION ERROR:")?;
+        writeln!(f, "{:?}", self.reason)?;
+        write!(f, "{}", self.trace)
+    }
+}
+
+impl<'p> DebugState<'p> {
+    fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
+        let show_f = |func: FuncId| {
+            format!(
+                "f{}:{:?}:{}",
+                func.0,
+                program.funcs[func.0].get_name(pool),
+                program.funcs[func.0].synth_name(pool)
+            )
+        };
+        match self {
+            DebugState::OuterCall(f, arg) => {
+                format!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
+            }
+            DebugState::JitToBc(f, when) => {
+                format!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
+            }
+            DebugState::RunInstLoop(f) => format!("| Loop Insts  | {}", show_f(*f)),
+            DebugState::ComputeCached(e) => format!("| Cache Eval  | {}", e.log(pool)),
+            DebugState::ResolveFnType(f, arg, ret) => {
+                format!(
+                    "| Resolve Type| {} is fn({}) {}",
+                    show_f(*f),
+                    arg.log(pool),
+                    ret.log(pool)
+                )
+            }
         }
     }
 }

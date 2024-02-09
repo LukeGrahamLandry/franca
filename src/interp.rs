@@ -1,4 +1,5 @@
 #![allow(clippy::wrong_self_convention)]
+#![deny(unused_must_use)] // Its a massive pain in the ass if you forget to make a compile error bubble up.
 use std::fmt::{self, Write};
 use std::marker::PhantomData;
 use std::mem;
@@ -187,13 +188,13 @@ pub enum Bc<'p> {
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct CallFrame<'p> {
-    stack_base: StackAbsolute,
+    pub stack_base: StackAbsolute,
     current_func: FuncId,
     current_ip: usize,
     return_slot: StackAbsolute,
     return_count: usize,
     is_rust_marker: bool,
-    debug_name: Ident<'p>,
+    pub debug_name: Ident<'p>,
     when: ExecTime,
 }
 
@@ -204,6 +205,7 @@ pub struct DebugInfo<'p> {
     pub p: PhantomData<&'p str>,
 }
 
+#[derive(Clone)]
 pub struct FnBody<'p> {
     pub insts: Vec<Bc<'p>>,
     pub debug: Vec<DebugInfo<'p>>,
@@ -222,12 +224,16 @@ impl<'p> FnBody<'p> {
     fn push(&mut self, inst: Bc<'p>) -> usize {
         let ip = self.insts.len();
         self.insts.push(inst);
-        self.debug.push(DebugInfo {
-            internal_loc: Location::caller(),
-            src_loc: self.last_loc,
-            p: Default::default(),
-        });
-        debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
+
+        #[cfg(feature = "some_log")]
+        {
+            self.debug.push(DebugInfo {
+                internal_loc: Location::caller(),
+                src_loc: self.last_loc,
+                p: Default::default(),
+            });
+            debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
+        }
         ip
     }
 }
@@ -258,11 +264,12 @@ pub struct Interp<'a, 'p> {
     pub prelude_length: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct StackHeights {
+#[derive(Clone)]
+struct StackHeights<'p> {
     value_stack: usize,
     call_stack: usize,
     debug_trace: usize,
+    result: FnBody<'p>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -274,17 +281,17 @@ pub enum DebugState<'p> {
     ResolveFnType(FuncId, LazyType<'p>, LazyType<'p>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CompileError<'p> {
-    loc: &'static Location<'static>,
-    reason: CErr<'p>,
-    trace: Vec<DebugState<'p>>,
-    value_stack: Vec<Value>,
-    call_stack: Vec<CallFrame<'p>>,
+    pub loc: &'static Location<'static>,
+    pub reason: CErr<'p>,
+    pub trace: String,
+    pub value_stack: Vec<Value>,
+    pub call_stack: Vec<CallFrame<'p>>,
 }
 
 #[derive(Clone, Debug)]
-enum CErr<'p> {
+pub enum CErr<'p> {
     UndeclaredIdent(Ident<'p>),
     ComptimeCallAtRuntime,
     Ice(&'static str),
@@ -294,18 +301,6 @@ enum CErr<'p> {
     AddrRvalue(FatExpr<'p>),
     TypeError(&'static str, Value),
     Msg(String),
-}
-
-// Just in case im stupid and forget to unwrap one somewhere.
-// TODO: why am i not getting must use warnings from the result?
-// TODO: i need better formating for errors because rn it prints the entire stack of poisons
-//       the benifit of this drop even when no bugs is it puts the actual problem under my giant log message
-impl<'p> Drop for CompileError<'p> {
-    fn drop(&mut self) {
-        println!("=============");
-        println!("COMPILE ERROR: {:?} (Internal: {})", self.reason, self.loc);
-        println!("=============");
-    }
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
@@ -345,91 +340,15 @@ impl<'a, 'p> Interp<'a, 'p> {
         CompileError {
             loc: Location::caller(),
             reason,
-            trace: self.debug_trace.clone(),
+            trace: self.log_trace(),
             value_stack: self.value_stack.clone(),
             call_stack: self.call_stack.clone(),
         }
     }
 
-    #[track_caller]
-    fn log_trace(&self) -> String {
-        let mut out = String::new();
-        #[cfg(not(feature = "some_log"))]
-        {
-            return out;
-        }
-        writeln!(out, "=== TRACE ===");
-        writeln!(out, "{}", Location::caller());
-        let show_f = |func: FuncId| {
-            format!(
-                "f{}:{:?}:{}",
-                func.0,
-                self.program.funcs[func.0].get_name(self.pool),
-                self.program.funcs[func.0].synth_name(self.pool)
-            )
-        };
-
-        for (i, s) in self.debug_trace.iter().enumerate() {
-            write!(out, "{i}");
-            match s {
-                DebugState::OuterCall(f, arg) => {
-                    write!(out, "| Prep Interp | {} on val:{arg:?}", show_f(*f))
-                }
-                DebugState::JitToBc(f, when) => {
-                    write!(out, "| Jit Bytecode| {} for {:?}", show_f(*f), when)
-                }
-                DebugState::RunInstLoop(f) => write!(out, "| Loop Insts  | {}", show_f(*f)),
-                DebugState::ComputeCached(e) => write!(out, "| Cache Eval  | {}", e.log(self.pool)),
-                DebugState::ResolveFnType(f, arg, ret) => {
-                    write!(
-                        out,
-                        "| Resolve Type| {} is fn({}) {}",
-                        show_f(*f),
-                        arg.log(self.pool),
-                        ret.log(self.pool)
-                    )
-                }
-            };
-            writeln!(out, ";");
-        }
-        writeln!(out, "=============");
-        out
-    }
-
-    pub fn add_declarations(&mut self, ast: Vec<Stmt<'p>>) -> Res<'p, ()> {
-        for stmt in ast {
-            match stmt {
-                Stmt::DeclFunc(func) => {
-                    self.program.add_func(func);
-                }
-                Stmt::Noop => {}
-                Stmt::DeclVar {
-                    name,
-                    ty,
-                    value,
-                    dropping,
-                    kind,
-                } => {
-                    assert_eq!(self, kind, VarType::Const, "toplevel expected 'const'");
-                    let value = match value {
-                        Some(value) => self.cached_eval_expr(value)?,
-                        None => {
-                            let name = self.pool.get(name.0);
-                            self.builtin_constant(name)
-                                .unwrap_or_else(|| panic!("toplevel undefined {:?}", name))
-                                .0
-                        }
-                    };
-                    let found_ty = self.program.type_of(&value);
-                    self.constants.insert(name, (value, found_ty));
-                }
-                _ => ice!(
-                    self,
-                    "Stmt {} {stmt:?} is not supported at top level.",
-                    stmt.log(self.pool)
-                ),
-            }
-        }
+    pub fn add_declarations(&mut self, ast: Func<'p>) -> Res<'p, ()> {
+        let f = self.program.add_func(ast);
+        self.ensure_compiled(f, ExecTime::Comptime)?;
         Ok(())
     }
 
@@ -1023,37 +942,6 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn log_stack(&self) {
-        #[cfg(not(feature = "spam_log"))]
-        {
-            return;
-        }
-        log!("STACK ");
-        let frame = self.call_stack.last().unwrap();
-        for i in 0..frame.stack_base.0 {
-            if self.value_stack[i] != Value::Poison {
-                log!("({i}|{:?}), ", self.value_stack[i]);
-            }
-        }
-        for i in frame.stack_base.0..self.value_stack.len() {
-            if self.value_stack[i] != Value::Poison {
-                let slot = i - frame.stack_base.0;
-                log!("[{i}|${slot}|{:?}], ", self.value_stack[i]);
-            }
-        }
-        logln!("END");
-    }
-
-    fn log_callstack(&self) -> String {
-        let mut s = String::new();
-        write!(s, "CALLS ");
-        for frame in &self.call_stack {
-            write!(s, "[{}], ", self.pool.get(frame.debug_name));
-        }
-        write!(s, "END");
-        s
-    }
-
     fn bump_ip(&mut self) {
         let frame = self.call_stack.last_mut().unwrap();
         frame.current_ip += 1;
@@ -1130,7 +1018,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             FuncId(index),
             self.program.funcs[index].log(self.pool)
         );
-        self.infer_types(FuncId(index));
+        self.infer_types(FuncId(index))?;
         let mut func = &self.program.funcs[index];
         let (arg, ret) = func.ty.unwrap();
         let arg_slots = self.program.slot_count(arg);
@@ -1159,7 +1047,17 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         result.push(Bc::Ret(return_value));
 
-        logln!("{:?}", result.log(self.pool));
+        logln!("{}", result.log(self.pool));
+        assert!(
+            self,
+            result.vars.is_empty(),
+            "undropped vars {:?}",
+            result
+                .vars
+                .iter()
+                .map(|v| (v.0.log(self.pool), v.1))
+                .collect::<Vec<_>>()
+        );
         self.ready[index] = Some(result);
         logln!(
             "{} Done JIT: {:?} {}",
@@ -1172,7 +1070,10 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    // This is used for (emiting normal functions into a fresh FnBody)
+    // This is used for
+    // - emiting normal functions into a fresh FnBody
+    // -
+    // -
     fn emit_body(
         &mut self,
         result: &mut FnBody<'p>,
@@ -1226,18 +1127,23 @@ impl<'a, 'p> Interp<'a, 'p> {
                     args: None,
                 });
                 let ret = result.reserve_slots(self.program.slot_count(ret), ret);
+                let name = unwrap!(self, func.name, "fn no body needs name");
                 result.push(Bc::CallBuiltin {
-                    name: unwrap!(self, func.name, "fn no body needs name"),
+                    name,
                     ret,
                     arg: arg_range,
                 });
+                for var in arguments {
+                    // TODO: why isn't it always there?
+                    result.vars.remove(var);
+                    // dont drop. was moved to call
+                }
                 ret
             }
         };
         Ok(return_value)
     }
 
-    // footgun: a capturing call has no return statement so you can't inline one?
     fn emit_capturing_call(
         &mut self,
         result: &mut FnBody<'p>,
@@ -1247,12 +1153,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     ) -> Res<'p, ()> {
         let name = self.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:capturing_call", name));
-
-        // let new_arg = result.reserve_slots(arg.count, TypeId::any());
-        // result.push(Bc::CloneRange {
-        //     from: arg,
-        //     to: new_arg,
-        // });
+        self.infer_types(f)?;
         assert!(
             self,
             !self.currently_inlining.contains(&f),
@@ -1282,9 +1183,10 @@ impl<'a, 'p> Interp<'a, 'p> {
             "Tried to inline recursive function."
         );
         self.currently_inlining.push(f);
-        self.ensure_compiled(f, result.when);
+        self.ensure_compiled(f, result.when)?;
         let name = self.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:inline_call", name));
+        // This move ensures they end up at the base of the renumbered stack. TODO: it can't be capturing
         let arg_slots = result.reserve_slots(arg.count, TypeId::any()); // These are included in the new function's stack
         result.push(Bc::MoveRange {
             from: arg,
@@ -1307,10 +1209,16 @@ impl<'a, 'p> Interp<'a, 'p> {
                     from: return_value,
                     to: ret,
                 });
-                result.debug.push(result.debug[i].clone());
+                #[cfg(feature = "some_log")]
+                {
+                    result.debug.push(result.debug[i].clone());
+                }
             } else {
                 result.insts.push(inst);
-                result.debug.push(result.debug[i].clone());
+                #[cfg(feature = "some_log")]
+                {
+                    result.debug.push(result.debug[i].clone());
+                }
             }
         }
         assert!(
@@ -1339,8 +1247,19 @@ impl<'a, 'p> Interp<'a, 'p> {
             } => {
                 let ty = invert(ty.clone().map(|ty| self.cached_eval_expr(ty)))?;
                 if *kind == VarType::Const {
-                    let value = value.clone().expect("uninit (non-blessed) const");
-                    let value = self.cached_eval_expr(value)?;
+                    let value = match value {
+                        Some(value) => self.cached_eval_expr(value.clone())?,
+                        None => {
+                            let name = self.pool.get(name.0);
+                            unwrap!(
+                                self,
+                                self.builtin_constant(name),
+                                "uninit (non-blessed) const: {:?}",
+                                name
+                            )
+                            .0
+                        }
+                    };
                     let ty = ty
                         .map(|ty| self.to_type(ty).unwrap())
                         .unwrap_or_else(|| self.program.type_of(&value));
@@ -1379,8 +1298,15 @@ impl<'a, 'p> Interp<'a, 'p> {
                 };
                 let prev = result.vars.insert(*name, value);
                 assert!(self, prev.is_none(), "shadow is still new var");
-                // Current thought is be like rust and dont call drop on the shadowed thing until the end of scope.
-                // Its consistant and it means you can reference its data if you do a chain of transforming something with the same name.
+
+                if let Some(dropping) = dropping {
+                    // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
+                    // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
+                    // But need to change my debugging check that everything was dropped.
+                    // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
+                    let (slot, _) = unwrap!(self, result.vars.remove(dropping), "missing shadow");
+                    result.push(Bc::Drop(slot));
+                }
             }
             Stmt::SetVar(var, expr) => {
                 let kind = self.program.vars[var.1].kind;
@@ -1459,7 +1385,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         }
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-                        self.infer_types(f);
+                        self.infer_types(f)?;
                         let func = &self.program.funcs[f.0];
                         let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
                         // TODO: some huristic based on how many times called and how big the body is.
@@ -1496,14 +1422,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                             None
                         };
                         let ret = result.reserve_slots(self.return_stack_slots(f), ret_ty_expected);
+                        let func = &self.program.funcs[f.0];
                         if returns_type {
                             result.push(Bc::CallDirectMaybeCached { f, ret, arg });
+                        } else if !func.capture_vars.is_empty() {
+                            // TODO: check that you're calling from the same place as the definition.
+                            assert!(self, !deny_inline, "capturing calls are always inlined.");
+                            self.emit_capturing_call(result, arg, ret, f)?;
                         } else if will_inline {
                             self.emit_inline_call(result, arg, ret, f)?;
                         } else {
-                            // result.push(Bc::CallDirect { f, ret, arg });
-                            self.emit_capturing_call(result, arg, ret, f);
-                            // TODO: only when capturing
+                            result.push(Bc::CallDirect { f, ret, arg });
                         }
                         if let Some(cache_arg) = cache_arg {
                             let f_arg_ret = result.reserve_slots(3, TypeId::unit());
@@ -1695,11 +1624,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
-                        let state = self.mark_state();
+                        let state = self.mark_state(result.clone());
                         let res = self.compile_expr(result, arg);
                         assert!(self, res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
-                        self.restore_state(state);
+                        *result = self.restore_state(state);
                         let ty = self.program.intern_type(TypeInfo::Unit);
 
                         (result.load_constant(Value::Unit, ty), ty)
@@ -1710,18 +1639,20 @@ impl<'a, 'p> Interp<'a, 'p> {
         })
     }
 
-    fn mark_state(&self) -> StackHeights {
+    fn mark_state(&self, result: FnBody<'p>) -> StackHeights<'p> {
         StackHeights {
             value_stack: self.value_stack.len(),
             call_stack: self.call_stack.len(),
             debug_trace: self.debug_trace.len(),
+            result,
         }
     }
 
-    fn restore_state(&mut self, state: StackHeights) {
+    fn restore_state(&mut self, state: StackHeights<'p>) -> FnBody<'p> {
         drops(&mut self.value_stack, state.value_stack);
         drops(&mut self.call_stack, state.call_stack);
         drops(&mut self.debug_trace, state.debug_trace);
+        state.result
     }
 
     fn resolve_function(&self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Option<FuncId> {
@@ -1743,7 +1674,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 } else {
                     ice!(self, "typecheck failed to resolve function expr {f:?}")
                 };
-                self.ensure_compiled(fid, ExecTime::Comptime);
+                self.ensure_compiled(fid, ExecTime::Comptime)?;
                 let (_, ret) = self.program.funcs[fid.0].ty.unwrap();
                 ret
             }
@@ -1900,6 +1831,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             arg_names: vec![],
             annotations: vec![],
             arg_vars: Some(vec![]),
+            capture_vars: vec![],
+            local_constants: Default::default(),
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
@@ -2073,12 +2006,12 @@ impl<'a, 'p> Interp<'a, 'p> {
         let ((cond, cond_ty), if_true, if_false) = if let Expr::Tuple(parts) = arg.deref() {
             let cond = self.compile_expr(result, &parts[0])?;
             let if_true = if let Expr::Closure(func) = parts[1].deref() {
-                func
+                self.program.add_func(*func.clone())
             } else {
                 ice!(self, "if args must be tuple");
             };
             let if_false = if let Expr::Closure(func) = parts[2].deref() {
-                func
+                self.program.add_func(*func.clone())
             } else {
                 ice!(self, "if args must be tuple");
             };
@@ -2087,25 +2020,17 @@ impl<'a, 'p> Interp<'a, 'p> {
             ice!(self, "if args must be tuple");
         };
 
+        let arg = result.load_constant(Value::Unit, self.program.intern_type(TypeInfo::Unit));
         // TODO: if returning tuples
         let ret = result.reserve_slots(1, TypeId::any());
+
         let name = self.pool.intern("builtin:if");
         let branch_ip = result.push(Bc::DebugMarker("patch", name));
         let true_ip = result.insts.len();
-        let (true_result, true_result_ty) =
-            self.compile_expr(result, if_true.body.as_ref().unwrap())?;
-        result.push(Bc::MoveRange {
-            from: true_result,
-            to: ret,
-        });
+        self.emit_capturing_call(result, arg, ret, if_true)?;
         let jump_over_false = result.push(Bc::DebugMarker("patch", name));
         let false_ip = result.insts.len();
-        let (false_result, false_result_ty) =
-            self.compile_expr(result, if_false.body.as_ref().unwrap())?;
-        result.push(Bc::MoveRange {
-            from: false_result,
-            to: ret,
-        });
+        self.emit_capturing_call(result, arg, ret, if_false)?;
 
         result.insts[branch_ip] = Bc::JumpIf {
             // TODO: change to conditional so dont have to store the true_ip
@@ -2117,7 +2042,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             ip: result.insts.len(),
         };
         // TODO: check branches are same ty[e]
-        Ok((ret, true_result_ty))
+        Ok((ret, TypeId::any()))
     }
 }
 
@@ -2230,32 +2155,6 @@ impl<'p> Bc<'p> {
                 to.0 += stack_offset;
             }
             Bc::DebugLine(_) | Bc::DebugMarker(_, _) => {}
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::F64(v) => write!(f, "{v}"),
-            Value::I64(v) => write!(f, "{v}"),
-            Value::Bool(v) => write!(f, "{v}"),
-            Value::Enum {
-                container_type,
-                tag,
-                value,
-            } => todo!(),
-            Value::Tuple {
-                container_type,
-                values,
-            } => {
-                write!(f, "(");
-                for v in values {
-                    write!(f, "{v}, ")?;
-                }
-                write!(f, ")")
-            }
-            _ => write!(f, "{self:?}"),
         }
     }
 }

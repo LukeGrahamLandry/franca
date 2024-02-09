@@ -2,8 +2,9 @@
 
 use std::{env, fs, io::read_to_string, path::PathBuf, time::Instant};
 
-use ast::Program;
+use ast::{Expr, FatExpr, Func, LazyFnType, Program, TypeId};
 use interp::Value;
+use scope::ResolveScope;
 use tree_sitter::Parser;
 
 use crate::{
@@ -126,13 +127,32 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
     let pool = StringPool::default();
     let mut p = Parser::new();
     p.set_language(tree_sitter_inferd::language());
-    let (ast, vars) = WalkParser::parse(p, &full_src, &pool);
+    let stmts = WalkParser::parse(p, &full_src, &pool);
+
+    let mut global = Func {
+        annotations: vec![],
+        name: Some(pool.intern("@toplevel@")),
+        ty: LazyFnType::Finished(TypeId::any(), TypeId::any()),
+        body: Some(FatExpr::synthetic(ast::Expr::Block {
+            body: stmts,
+            result: Box::new(FatExpr::synthetic(Expr::Value(Value::Unit))),
+            locals: None,
+        })),
+        arg_names: vec![],
+        arg_vars: None,
+        capture_vars: vec![],
+        local_constants: vec![],
+    };
+
+    logln!("{}", global.log(&pool));
+
+    let vars = ResolveScope::of(&mut global);
     let mut program = Program {
         vars,
         ..Default::default()
     };
     let mut interp = Interp::new(&pool, &mut program);
-    interp.add_declarations(ast);
+    interp.add_declarations(global);
     let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
     let result = interp.run(f, arg.clone(), ExecTime::Runtime);
     if let Ok(result) = result {

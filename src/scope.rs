@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     ast::{Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
+    interp::Value,
     pool::Ident,
 };
 
@@ -13,7 +14,10 @@ use crate::{
 pub struct ResolveScope<'p> {
     next_var: usize,
     scopes: Vec<Vec<Var<'p>>>,
+    track_captures_before_scope: Vec<usize>,
+    captures: Vec<Var<'p>>,
     info: Vec<VarInfo>,
+    local_constants: Vec<Vec<Var<'p>>>,
 }
 
 impl<'p> ResolveScope<'p> {
@@ -21,21 +25,20 @@ impl<'p> ResolveScope<'p> {
     //       then functions could be delt with here too.
     // TODO: will need to keep some state about this for macros that want to add vars?
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut [Stmt]) -> Vec<VarInfo> {
+    pub fn of(stmts: &mut Func<'p>) -> Vec<VarInfo> {
         let mut resolver = ResolveScope::default();
 
-        resolver.push_scope();
-        for s in stmts {
-            resolver.resolve_stmt(s);
-        }
-        let globals = resolver.pop_scope();
+        resolver.push_scope(true);
+        resolver.resolve_func(stmts);
+        let (globals, _) = resolver.pop_scope();
 
         assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
         resolver.info
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) {
-        self.push_scope();
+        self.local_constants.push(Default::default());
+        self.push_scope(true);
         for name in func.arg_names.iter().flatten() {
             self.decl_var(name);
             self.info.push(VarInfo {
@@ -58,13 +61,22 @@ impl<'p> ResolveScope<'p> {
                 }
             }
         }
-        self.push_scope();
+        self.push_scope(false);
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)
         }
-        self.pop_scope();
+        let (outer_locals, _) = self.pop_scope();
+        assert!(outer_locals.is_empty(), "function needs block");
 
-        func.arg_vars = Some(self.pop_scope());
+        let (args, captures) = self.pop_scope();
+        func.arg_vars = Some(args);
+        let capures = captures.unwrap();
+        // Now check which things we captured from *our* parent.
+        for c in &capures {
+            self.find_var(&c.0); // This adds it back to self.captures if needed
+        }
+        func.capture_vars = capures;
+        func.local_constants = self.local_constants.pop().unwrap();
     }
 
     fn resolve_stmt(&mut self, stmt: &mut Stmt<'p>) {
@@ -86,6 +98,9 @@ impl<'p> ResolveScope<'p> {
                     ty: TypeId::any(),
                     kind: *kind,
                 });
+                if *kind == VarType::Const {
+                    self.local_constants.last_mut().unwrap().push(new);
+                }
                 *stmt = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, Some(FatExpr::null())),
@@ -121,12 +136,12 @@ impl<'p> ResolveScope<'p> {
                 locals,
             } => {
                 assert!(locals.is_none());
-                self.push_scope();
+                self.push_scope(false);
                 for stmt in body {
                     self.resolve_stmt(stmt);
                 }
                 self.resolve_expr(result);
-                let vars = self.pop_scope();
+                let (vars, _) = self.pop_scope();
                 mem::replace(locals, Some(vars));
             }
             Expr::ArrayLiteral(values) | Expr::Tuple(values) => {
@@ -149,10 +164,19 @@ impl<'p> ResolveScope<'p> {
         }
     }
 
-    fn find_var(&self, name: &Ident<'p>) -> Option<Var<'p>> {
-        for scope in self.scopes.iter().rev() {
+    fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
+        let boundery = *self.track_captures_before_scope.last().unwrap();
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
             if let Some(found) = scope.iter().position(|v| v.0 == *name) {
-                return Some(scope[found]);
+                let v = scope[found];
+                if i < boundery
+                    && !self.captures.contains(&v)
+                    && self.info[v.1].kind != VarType::Const
+                {
+                    // We got it from our parent function.
+                    self.captures.push(v);
+                }
+                return Some(v);
             }
         }
         None
@@ -173,11 +197,24 @@ impl<'p> ResolveScope<'p> {
         (old, var)
     }
 
-    fn push_scope(&mut self) {
+    fn push_scope(&mut self, track_captures: bool) {
+        self.track_captures_before_scope.push(if track_captures {
+            self.scopes.len()
+        } else {
+            *self.track_captures_before_scope.last().unwrap()
+        });
         self.scopes.push(Default::default());
     }
 
-    fn pop_scope(&mut self) -> Vec<Var<'p>> {
-        self.scopes.pop().unwrap()
+    #[must_use]
+    fn pop_scope(&mut self) -> (Vec<Var<'p>>, Option<Vec<Var<'p>>>) {
+        let boundery = self.track_captures_before_scope.pop().unwrap();
+        let vars = self.scopes.pop().unwrap();
+        let captures = if boundery == self.scopes.len() {
+            Some(mem::take(&mut self.captures))
+        } else {
+            None
+        };
+        (vars, captures)
     }
 }
