@@ -45,7 +45,7 @@ macro_rules! check_cmp {
 
 fn main() {
     run_main(
-        &fs::read_to_string("src/tests.txt").unwrap(),
+        &fs::read_to_string("tests/basic.txt").unwrap(),
         Value::I64(0),
         Value::I64(0),
         Some("target/latest_log/interp.txt"),
@@ -55,7 +55,7 @@ fn main() {
 #[test]
 fn tests_txt() {
     run_main(
-        include_str!("tests.txt"),
+        &fs::read_to_string("tests/basic.txt").unwrap(),
         Value::I64(0),
         Value::I64(0),
         None,
@@ -121,7 +121,8 @@ fn passing_tuple_to_multiargs() {
 }
 
 fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
-    let full_src = format!("{}\n{}", include_str!("interp_builtins.txt"), src); // TODO: this means wrong line numbers
+    let prelude = &fs::read_to_string("lib/interp_builtins.txt").unwrap();
+    let full_src = format!("{}\n{}", prelude, src); // TODO: this means wrong line numbers
 
     let start = Instant::now();
     let pool = StringPool::default();
@@ -155,7 +156,6 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
     // damn turns out defer would maybe be a good idea
     let result = interp.add_declarations(&SharedConstants::default(), global);
     if result.is_ok() {
-        println!("{:?}", interp.program.declarations);
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
         let id = toplevel.unwrap();
         let constants = interp.ready[id.0].as_ref().unwrap().constants.clone();

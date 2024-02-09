@@ -281,6 +281,7 @@ pub enum DebugState<'p> {
     RunInstLoop(FuncId),
     ComputeCached(FatExpr<'p>),
     ResolveFnType(FuncId, LazyType<'p>, LazyType<'p>),
+    EvalConstants(FuncId),
 }
 
 #[derive(Clone)]
@@ -1063,11 +1064,13 @@ impl<'a, 'p> Interp<'a, 'p> {
             let mut result = self.empty_fn(0, vec![], when, FuncId(index + 10000000));
             result.constants.parents.push(constants.clone().bake());
             let new_constants = func.local_constants.clone();
-            println!("Evaluating {} Local Constants", new_constants.len());
-            println!("Parenet Constants: {:?}", result.constants);
+
+            let state = DebugState::EvalConstants(FuncId(index));
+            self.push_state(&state);
             for stmt in new_constants {
                 self.compile_stmt(&mut result, &stmt)?;
             }
+            self.pop_state(state);
             let func = &mut self.program.funcs[index];
             constants.parents.push(result.constants.bake())
         }
@@ -1320,7 +1323,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let ty = ty
                         .map(|ty| self.to_type(ty).unwrap())
                         .unwrap_or_else(|| self.program.type_of(&value));
-                    println!("store const {}", name.log(self.pool));
                     result.constants.insert(*name, (value, ty));
                     return Ok(());
                 }
@@ -1868,15 +1870,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         constants: &SharedConstants<'p>,
         e: FatExpr<'p>,
     ) -> Res<'p, Value> {
-        println!("cached_eval_expr {:?}", constants);
         match e.deref() {
             Expr::Value(value) => return Ok(value.clone()),
             Expr::GetVar(var) => {
                 // fast path for builtin type identifiers
-                // if let Some((value, _)) = result.local_constants.get(var) {
-                //     debug_assert_ne!(value, &Value::Poison);
-                //     return Ok(value.clone());
-                // }
+                if let Some((value, _)) = constants.get(var) {
+                    debug_assert_ne!(value, Value::Poison);
+                    return Ok(value);
+                }
                 // fallthrough
             }
             Expr::Call(f, arg) => {

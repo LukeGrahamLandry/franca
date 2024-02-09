@@ -606,6 +606,9 @@ impl<'p> DebugState<'p> {
             DebugState::JitToBc(f, when) => {
                 format!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
             }
+            DebugState::EvalConstants(f) => {
+                format!("| Eval Consts | {:?}", show_f(*f))
+            }
             DebugState::RunInstLoop(f) => format!("| Loop Insts  | {}", show_f(*f)),
             DebugState::ComputeCached(e) => format!("| Cache Eval  | {}", e.log(pool)),
             DebugState::ResolveFnType(f, arg, ret) => {
