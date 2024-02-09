@@ -8,7 +8,7 @@ use scope::ResolveScope;
 use tree_sitter::Parser;
 
 use crate::{
-    interp::{ExecTime, Interp},
+    interp::{ExecTime, Interp, SharedConstants},
     logging::{logln, PoolLog},
     parse::WalkParser,
     pool::StringPool,
@@ -152,32 +152,45 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
         ..Default::default()
     };
     let mut interp = Interp::new(&pool, &mut program);
-    interp.add_declarations(global);
-    let f = interp.lookup_unique_func(pool.intern("main")).unwrap();
-    let result = interp.run(f, arg.clone(), ExecTime::Runtime);
-    if let Ok(result) = result {
-        let end = Instant::now();
-        logln!("{arg:?} -> {result:?}");
-        assert_eq!(result, expect);
-        // TODO: change this when i add assert(bool)
-        let assertion_count = src.split("assert_eq(").count() - 1;
-        assert_eq!(
-            interp.assertion_count, assertion_count,
-            "vm missed assertions?"
-        );
-        println!(
-            "{assertion_count} assertions passed. {} comptime evaluations.",
-            interp.anon_fn_counter
-        );
-        let seconds = (end - start).as_secs_f32();
-        let lines = full_src
-            .split('\n')
-            .filter(|s| !s.split("//").next().unwrap().is_empty())
-            .count();
-        println!(
-                "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                lines as f32 / seconds
-            );
+    // damn turns out defer would maybe be a good idea
+    let result = interp.add_declarations(&SharedConstants::default(), global);
+    if result.is_ok() {
+        println!("{:?}", interp.program.declarations);
+        let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
+        let id = toplevel.unwrap();
+        let constants = interp.ready[id.0].as_ref().unwrap().constants.clone();
+        let name = pool.intern("main");
+        if let Some(f) = interp.lookup_unique_func(name) {
+            let result = interp.run(Some(&constants), f, arg.clone(), ExecTime::Runtime);
+            if let Ok(result) = result {
+                let end = Instant::now();
+                logln!("{arg:?} -> {result:?}");
+                assert_eq!(result, expect);
+                // TODO: change this when i add assert(bool)
+                let assertion_count = src.split("assert_eq(").count() - 1;
+                assert_eq!(
+                    interp.assertion_count, assertion_count,
+                    "vm missed assertions?"
+                );
+                println!(
+                    "{assertion_count} assertions passed. {} comptime evaluations.",
+                    interp.anon_fn_counter
+                );
+                let seconds = (end - start).as_secs_f32();
+                let lines = full_src
+                    .split('\n')
+                    .filter(|s| !s.split("//").next().unwrap().is_empty())
+                    .count();
+                println!(
+                        "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                        lines as f32 / seconds
+                    );
+            } else {
+                println!("{:?}", result.unwrap_err());
+            }
+        } else {
+            println!("FN {name:?} = 'MAIN' NOT FOUND");
+        }
     } else {
         println!("{:?}", result.unwrap_err());
     }

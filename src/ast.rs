@@ -198,7 +198,7 @@ pub struct Func<'p> {
     pub arg_names: Vec<Option<Ident<'p>>>,
     pub arg_vars: Option<Vec<Var<'p>>>,
     pub capture_vars: Vec<Var<'p>>,
-    pub local_constants: Vec<Var<'p>>,
+    pub local_constants: Vec<Stmt<'p>>,
 }
 
 impl<'p> Func<'p> {

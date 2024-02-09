@@ -17,7 +17,7 @@ pub struct ResolveScope<'p> {
     track_captures_before_scope: Vec<usize>,
     captures: Vec<Var<'p>>,
     info: Vec<VarInfo>,
-    local_constants: Vec<Vec<Var<'p>>>,
+    local_constants: Vec<Vec<Stmt<'p>>>,
 }
 
 impl<'p> ResolveScope<'p> {
@@ -98,15 +98,18 @@ impl<'p> ResolveScope<'p> {
                     ty: TypeId::any(),
                     kind: *kind,
                 });
-                if *kind == VarType::Const {
-                    self.local_constants.last_mut().unwrap().push(new);
-                }
-                *stmt = Stmt::DeclVar {
+                let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, Some(FatExpr::null())),
                     value: mem::replace(value, Some(FatExpr::null())),
                     dropping: old,
                     kind: *kind,
+                };
+                if *kind == VarType::Const {
+                    self.local_constants.last_mut().unwrap().push(decl);
+                    *stmt = Stmt::Noop;
+                } else {
+                    *stmt = decl;
                 }
             }
             Stmt::SetNamed(name, e) => {
@@ -117,7 +120,13 @@ impl<'p> ResolveScope<'p> {
             }
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
-            Stmt::DeclFunc(func) => self.resolve_func(func),
+            Stmt::DeclFunc(func) => {
+                self.resolve_func(func);
+                self.local_constants
+                    .last_mut()
+                    .unwrap()
+                    .push(mem::replace(stmt, Stmt::Noop));
+            }
             Stmt::DeclVar { .. } | Stmt::SetVar(_, _) => {
                 unreachable!("added by this pass {stmt:?}")
             }
