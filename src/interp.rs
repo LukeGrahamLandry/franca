@@ -627,14 +627,6 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
-            // Construct a tuple type from the arguments
-            "Tuple" => {
-                let types = self.to_seq(arg)?;
-                let types: Res<'_, Vec<_>> = types.into_iter().map(|t| self.to_type(t)).collect();
-                let ty = TypeInfo::Tuple(types?);
-                let ty = self.program.intern_type(ty);
-                Value::Type(ty)
-            }
             "assert_eq" => {
                 let (a, b) = self.split_to_pair(arg)?;
                 assert_eq!(self, a, b, "runtime_builtin:assert_eq");
@@ -1584,13 +1576,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .collect();
                 let values = values?;
                 let required_slots: usize = values.iter().map(|(range, _)| range.count).sum();
-                let ret = result.reserve_slots(required_slots, TypeId::any());
+                let types: Vec<_> = values.iter().map(|(_, ty)| *ty).collect();
+                let ty = self.program.intern_type(TypeInfo::Tuple(types));
+
+                let ret = result.reserve_slots(required_slots, ty);
                 // TODO: they might already be consecutive
                 let base = ret.first.0;
                 let mut count = 0;
-                let mut types = vec![];
                 for (v, ty) in values {
-                    types.push(ty);
                     for i in 0..v.count {
                         result.push(Bc::Move {
                             from: StackOffset(v.first.0 + i),
@@ -1600,12 +1593,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                 }
                 assert_eq!(self, count, ret.count);
-                (ret, self.program.intern_type(TypeInfo::Tuple(types)))
+                (ret, ty)
             }
             Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
                 if let Some((from, ty)) = result.vars.get(var).cloned() {
-                    let to = result.reserve_slots(from.count, TypeId::any());
+                    let to = result.reserve_slots(from.count, ty);
                     if from.count == 1 {
                         result.push(Bc::Clone {
                             from: from.first,
@@ -1616,7 +1609,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     (to, ty)
                 } else if let Some((value, ty)) = result.constants.get(var) {
-                    let slot = result.reserve_slots(1, TypeId::any());
+                    let slot = result.reserve_slots(self.program.slot_count(ty), ty);
                     result.push(Bc::LoadConstant {
                         slot: slot.first,
                         value: value.clone(),
@@ -1639,10 +1632,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(self, func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(&result.constants, func, ExecTime::Comptime)?;
-                    let (param, returns) = self.program.funcs[func.0].ty.unwrap();
-                    let ty = self
-                        .program
-                        .intern_type(TypeInfo::Fn(FnType { param, returns }));
+                    let ty = self.program.func_type(func);
                     (result.load_constant(Value::GetFn(func), ty), ty)
                 } else {
                     ice!(self, "Scope resolution failed {}", expr.log(self.pool));
@@ -1667,42 +1657,35 @@ impl<'a, 'p> Interp<'a, 'p> {
                     container_type: TypeId::any(),
                     values: fields,
                 };
-                let map = result.load_constant(map, TypeId::any());
+                let map = result.load_constant(map, TypeId::any()); // TODO
                 (map, TypeId::any())
             }
             Expr::Value(value) => {
-                let to = result.reserve_slots(1, TypeId::any());
-                result.push(Bc::LoadConstant {
-                    slot: to.first,
-                    value: value.clone(),
-                });
-                (to, self.program.type_of(value))
+                let ty = self.program.type_of(value);
+                (result.load_constant(value.clone(), ty), ty)
             }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
+                    // Note: arg is not evalutated
                     "addr" => match arg.deref().deref() {
                         Expr::GetVar(var) => {
-                            let (stack_slot, value_ty) = *result
-                                .vars
-                                .get(var)
-                                .expect("Missing resolved var. (TODO: addr of const?)");
-                            let addr_slot = result.reserve_slots(1, TypeId::any());
-                            result.push(Bc::AbsoluteStackAddr {
-                                of: stack_slot,
-                                to: addr_slot.first,
-                            });
-                            let ptr_ty = self.program.intern_type(TypeInfo::Ptr(value_ty));
-                            (addr_slot, ptr_ty)
+                            if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
+                                let ptr_ty = self.program.ptr_type(value_ty);
+                                let addr_slot = result.reserve_slots(1, ptr_ty);
+                                result.push(Bc::AbsoluteStackAddr {
+                                    of: stack_slot,
+                                    to: addr_slot.first,
+                                });
+                                (addr_slot, ptr_ty)
+                            } else if result.constants.get(var).is_some() {
+                                err!(self, "Took address of constant {}", var.log(self.pool))
+                            } else {
+                                ice!(self, "Missing var {} (in !addr)", var.log(self.pool))
+                            }
                         }
-                        &Expr::GetNamed(i) => {
-                            logln!(
-                                "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
-                                self.pool.get(i)
-                            );
-                            return Err(self.error(CErr::UndeclaredIdent(i)));
-                        }
+                        &Expr::GetNamed(i) => return Err(self.error(CErr::UndeclaredIdent(i))),
                         _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
                     },
                     "type" => {

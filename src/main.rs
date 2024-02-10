@@ -136,7 +136,7 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
     let start = Instant::now();
     let pool = StringPool::default();
     let mut p = Parser::new();
-    p.set_language(tree_sitter_inferd::language());
+    p.set_language(tree_sitter_franca::language());
     let stmts = WalkParser::parse(p, &full_src, &pool);
 
     let mut global = Func {

@@ -415,6 +415,10 @@ impl<'p> Program<'p> {
         let (param, returns) = self.funcs[id.0].ty.unwrap();
         self.intern_type(TypeInfo::Fn(FnType { param, returns }))
     }
+
+    pub fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
+        self.intern_type(TypeInfo::Ptr(value_ty))
+    }
 }
 
 impl<'p> Deref for FatExpr<'p> {
