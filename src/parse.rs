@@ -10,7 +10,7 @@ use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
 
 use crate::{
     ast::{
-        Annotation, Expr, FatExpr, Func, Known, LazyFnType, LazyType, Stmt, TypeId, VarInfo,
+        Annotation, Expr, FatExpr, Field, Func, Known, LazyFnType, LazyType, Stmt, TypeId, VarInfo,
         VarType,
     },
     interp::Value,
@@ -211,8 +211,7 @@ impl<'a, 'p> WalkParser<'a, 'p> {
         logln!("Parse Expr: {:?}", cursor.node().to_sexp());
         match node.kind() {
             "identifier" => {
-                let name = node.utf8_text(self.src).unwrap();
-                let name = self.pool.intern(name);
+                let name = self.parse_ident(node);
                 self.expr(Expr::GetNamed(name), node.start_position(), Known::Maybe)
             }
             "type_expr" => {
@@ -312,6 +311,23 @@ impl<'a, 'p> WalkParser<'a, 'p> {
                         Known::Maybe,
                     )
                 }
+            }
+            "map_expr" => {
+                let mut fields = vec![];
+                for child in node.children(&mut node.walk()) {
+                    if child.kind() == "field_decl" {
+                        let (name, ty) = self.parse_binding(child.child(0).unwrap());
+                        fields.push(Field {
+                            name: name.unwrap(),
+                            ty: ty.unwrap(),
+                        })
+                    }
+                }
+                self.expr(
+                    Expr::StructLiteral(fields),
+                    node.start_position(),
+                    Known::Maybe,
+                )
             }
             _ => todo!("parse expr for {}", node.kind()),
         }
@@ -457,6 +473,11 @@ impl<'a, 'p> WalkParser<'a, 'p> {
             .map(|child| self.parse_expr(child.walk()));
         let e = Expr::Tuple(args.collect());
         self.expr(e, node.start_position(), Known::Maybe)
+    }
+
+    fn parse_ident(&self, node: Node<'_>) -> Ident<'p> {
+        let name = node.utf8_text(self.src).unwrap();
+        self.pool.intern(name)
     }
 
     // fn find_one(&mut self, cursor: &mut TreeCursor, field_name: &str) {

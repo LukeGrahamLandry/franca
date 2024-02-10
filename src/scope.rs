@@ -167,8 +167,12 @@ impl<'p> ResolveScope<'p> {
                 }
                 // else it might be a global, like a function with overloading, or undeclared. We'll find out later.
             }
+            Expr::StructLiteral(fields) => {
+                for field in fields {
+                    self.resolve_expr(&mut field.ty);
+                }
+            }
             Expr::EnumLiteral(_) => todo!(),
-            Expr::StructLiteral(_) => todo!(),
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
         }
     }

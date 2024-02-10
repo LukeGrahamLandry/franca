@@ -44,12 +44,21 @@ macro_rules! check_cmp {
 }
 
 fn main() {
-    run_main(
-        &fs::read_to_string("tests/basic.txt").unwrap(),
-        Value::I64(0),
-        Value::I64(0),
-        Some("target/latest_log/interp.txt"),
-    );
+    for case in fs::read_dir("tests").unwrap() {
+        let case = case.unwrap();
+        run_main(
+            &fs::read_to_string(case.path()).unwrap(),
+            Value::I64(0),
+            Value::I64(0),
+            Some(
+                case.file_name()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".txt")
+                    .unwrap(),
+            ),
+        );
+    }
 }
 
 #[test]
@@ -185,6 +194,16 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
                         "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
                         lines as f32 / seconds
                     );
+                let inst_count: usize = interp
+                    .ready
+                    .iter()
+                    .flatten()
+                    .map(|func| func.insts.len())
+                    .sum();
+                println!(
+                    "Generated {inst_count} instructions ({:.0} per second).",
+                    inst_count as f32 / seconds
+                );
             } else {
                 println!("{:?}", result.unwrap_err());
             }
@@ -197,7 +216,7 @@ fn run_main(src: &str, arg: Value, expect: Value, save: Option<&str>) {
 
     #[cfg(feature = "some_log")]
     if let Some(path) = save {
-        let path = PathBuf::from(path);
+        let path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,

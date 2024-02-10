@@ -14,6 +14,7 @@ use std::{
     ptr,
 };
 
+use interp_derive::InterpSend;
 use tree_sitter::Point;
 
 use crate::ast::{Annotation, VarType};
@@ -52,7 +53,6 @@ pub enum Value {
         value: *mut Self,
     },
     // Both closures and types don't have values at runtime, all uses must be inlined.
-    Fn(TypeId, usize),
     Type(TypeId),
     GetFn(FuncId),
     /// The empty tuple.
@@ -1036,7 +1036,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             vars: Default::default(),
             arg_names,
             when,
-            slot_types: vec![TypeId::any(); arg_slots],
+            slot_types: vec![],
             func,
             why: self.log_trace(),
             debug: vec![],
@@ -1105,6 +1105,18 @@ impl<'a, 'p> Interp<'a, 'p> {
         result.push(Bc::Ret(return_value));
 
         logln!("{}", result.log(self.pool));
+
+        // TODO: even the test i thought this would fix it didnt, it cant tell which are const.
+        // TODO: why are constants in my vars at all?
+        // for v in result.vars.iter() {
+        //     assert_eq!(
+        //         self,
+        //         self.program.vars[v.0 .1].kind,
+        //         VarType::Const,
+        //         "{}",
+        //         v.0.log(self.pool)
+        //     );
+        // }
         assert!(
             self,
             result.vars.is_empty(),
@@ -1140,6 +1152,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         let func = self.program.funcs[f.0].clone();
         let (arg, ret) = func.ty.unwrap();
         let mut to_drop = vec![];
+        // TODO: this should add to result.slot_types?
+        //       should use normal reserve_slots instead of whatever this is doing and then get it for free?
         let arguments = func.arg_vars.as_ref().unwrap();
         if arguments.len() == 1 {
             // if there's one name, it refers to the whole tuple.
@@ -1359,6 +1373,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let prev = result.vars.insert(*name, value);
                 assert!(self, prev.is_none(), "shadow is still new var");
 
+                // TODO: what if shadow is const? that would be more consistant if did it like rust.
                 if let Some(dropping) = dropping {
                     // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
                     // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
@@ -1426,10 +1441,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::Closure(func) => {
                 let id = self.program.add_func(*func.clone());
                 self.ensure_compiled(&result.constants, id, result.when)?;
-                let ty = self.program.intern_type(TypeInfo::Fn(FnType {
-                    param: TypeId::any(),
-                    returns: TypeId::any(),
-                })); // TODO: infer here?
+                let ty = self.program.func_type(id);
                 (result.load_constant(Value::GetFn(id), ty), ty)
             }
             Expr::Call(f, arg) => {
@@ -1450,14 +1462,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
                         // TODO: some huristic based on how many times called and how big the body is.
                         // TODO: pre-intern all these constants so its not a hash lookup everytime
-                        let force_inline = func
-                            .annotations
-                            .iter()
-                            .any(|a| a.name == self.pool.intern("inline"));
-                        let deny_inline = func
-                            .annotations
-                            .iter()
-                            .any(|a| a.name == self.pool.intern("noinline"));
+                        let force_inline = func.has_tag(self.pool, "inline");
+                        let deny_inline = func.has_tag(self.pool, "noinline");
                         assert!(
                             self,
                             !(force_inline && deny_inline),
@@ -1525,7 +1531,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // else: fallthrough
                 }
 
-                let (arg, arg_ty_expected) = self.compile_expr(result, arg)?;
+                let (arg, arg_ty_found) = self.compile_expr(result, arg)?;
                 logln!("dynamic {}", f.log(self.pool));
                 let (f, func_ty) = self.compile_expr(result, f)?;
                 let ret_ty = if let TypeInfo::Fn(ty) = &self.program.types[func_ty.0] {
@@ -1558,7 +1564,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     if let Some((slot, ty)) = result.vars.remove(local) {
                         result.push(Bc::Drop(slot));
                     } else if VarType::Const == self.program.vars[local.1].kind {
-                        // That's fine, constants dont need to be dropped.
+                        assert!(
+                            self,
+                            result.vars.remove(local).is_none(),
+                            "constants are not locals"
+                        );
                     } else {
                         ice!(self, "Missing local {local:?}")
                     }
@@ -1639,7 +1649,27 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Expr::EnumLiteral(_) => todo!(),
-            Expr::StructLiteral(_) => todo!(),
+            Expr::StructLiteral(fields) => {
+                let values: Res<'p, Vec<_>> = fields
+                    .iter()
+                    .map(|field| self.cached_eval_expr(&result.constants, field.ty.clone()))
+                    .collect();
+                let fields: Vec<_> = values?
+                    .into_iter()
+                    .zip(fields.iter())
+                    .map(|(v, f)| Value::Tuple {
+                        container_type: TypeId::any(),
+                        values: vec![Value::Symbol(f.name.0), v],
+                    })
+                    .collect();
+
+                let map = Value::Tuple {
+                    container_type: TypeId::any(),
+                    values: fields,
+                };
+                let map = result.load_constant(map, TypeId::any());
+                (map, TypeId::any())
+            }
             Expr::Value(value) => {
                 let to = result.reserve_slots(1, TypeId::any());
                 result.push(Bc::LoadConstant {
@@ -2276,3 +2306,15 @@ impl<'p> SharedConstants<'p> {
         Rc::new(self)
     }
 }
+
+// TODO
+pub trait InterpSend<'p> {
+    fn get_type(interp: &mut Interp<'_, 'p>) -> TypeId;
+    fn serialize(self) -> Value;
+    fn deserialize(value: Value) -> Self;
+}
+
+// #[derive(Debug, InterpSend)]
+// struct HelloWorld {
+//     a: i64,
+// }

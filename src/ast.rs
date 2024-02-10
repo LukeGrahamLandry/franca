@@ -62,7 +62,7 @@ pub enum VarType {
 }
 
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
-pub enum TypeInfo {
+pub enum TypeInfo<'p> {
     Any,
     Never,
     F64,
@@ -71,14 +71,13 @@ pub enum TypeInfo {
     Fn(FnType),
     Tuple(Vec<TypeId>),
     Ptr(TypeId),
-    Array(TypeId),
-    Struct(TypeId),
-    Enum(Vec<TypeId>),
+    Struct(Vec<(Ident<'p>, TypeId)>),
+    Unique(Ident<'p>, TypeId),
     Type,
     Unit, // TODO: same as empty tuple but easier to type
 }
 
-#[derive(Clone, PartialEq, Hash, Eq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
     pub args: Option<FatExpr<'p>>,
@@ -87,7 +86,7 @@ pub struct Annotation<'p> {
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Var<'p>(pub Ident<'p>, pub usize);
 
-#[derive(Clone, PartialEq, Debug, Eq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Expr<'p> {
     Value(Value),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
@@ -100,15 +99,21 @@ pub enum Expr<'p> {
     Tuple(Vec<FatExpr<'p>>),
     RefType(Box<FatExpr<'p>>),
     EnumLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
-    StructLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
     Closure(Box<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
+    StructLiteral(Vec<Field<'p>>),
 
     // Backend only
     GetVar(Var<'p>),
 
     // Frontend only
     GetNamed(Ident<'p>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field<'p> {
+    pub name: Ident<'p>,
+    pub ty: FatExpr<'p>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -123,7 +128,7 @@ pub enum Known {
 
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Point,
@@ -163,7 +168,7 @@ impl Hash for FatExpr<'_> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Eq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
@@ -189,7 +194,7 @@ pub enum Stmt<'p> {
     SetNamed(Ident<'p>, FatExpr<'p>),
 }
 
-#[derive(Clone, PartialEq, Debug, Eq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Option<Ident<'p>>,   // it might be an annonomus closure
@@ -209,9 +214,14 @@ impl<'p> Func<'p> {
     pub fn get_name(&self, pool: &StringPool<'p>) -> Ident<'p> {
         self.name.unwrap_or_else(|| pool.intern("@anon@"))
     }
+
+    /// Find annotation ignoring arguments
+    pub fn has_tag(&self, pool: &StringPool<'p>, name: &str) -> bool {
+        self.annotations.iter().any(|a| a.name == pool.intern(name))
+    }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Hash)]
 pub enum LazyFnType<'p> {
     Finished(TypeId, TypeId),
     Pending {
@@ -220,7 +230,7 @@ pub enum LazyFnType<'p> {
     },
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq)]
+#[derive(Clone, PartialEq, Debug, Hash)]
 pub enum LazyType<'p> {
     Infer,
     PendingEval(FatExpr<'p>),
@@ -238,7 +248,7 @@ pub struct VarInfo {
 
 #[derive(Clone)]
 pub struct Program<'p> {
-    pub types: Vec<TypeInfo>,
+    pub types: Vec<TypeInfo<'p>>,
     // At the call site, you know the name but not the type.
     // So you need to look at everybody that might be declaring the function you're trying to call.
     pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
@@ -321,7 +331,7 @@ impl<'p> Program<'p> {
     }
 
     // TODO: this is O(n), at the very least make sure the common types are at the beginning.
-    pub fn intern_type(&mut self, ty: TypeInfo) -> TypeId {
+    pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
         let id = self
             .types
             .iter()
@@ -377,7 +387,6 @@ impl<'p> Program<'p> {
                 container_type,
                 value,
             } => *container_type,
-            Value::Fn(_, _) => todo!(),
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             Value::GetFn(f) => {
                 // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
@@ -400,6 +409,11 @@ impl<'p> Program<'p> {
 
     pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
         self.types[ty.0] == expect
+    }
+
+    pub fn func_type(&mut self, id: FuncId) -> TypeId {
+        let (param, returns) = self.funcs[id.0].ty.unwrap();
+        self.intern_type(TypeInfo::Fn(FnType { param, returns }))
     }
 }
 

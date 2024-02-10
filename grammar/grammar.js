@@ -71,6 +71,8 @@ module.exports = grammar({
             $.number,
             $.anon_arg,
             $.index_expr,
+            $.map_expr,
+            $.field_expr,
           ),
           optional($.suffix_macro),
         ),
@@ -79,6 +81,12 @@ module.exports = grammar({
       prec.left(
         seq($.expr, "[", optional($.expr), "]", optional(seq("=", $.expr))),
       ),
+
+    field_expr: ($) => seq($.expr, ".", $.identifier),
+
+    map_expr: ($) =>
+      seq("{", repeat1(seq($.field_decl, ",")), optional($.field_decl), "}"),
+    field_decl: ($) => $.binding_type,
     suffix_macro: ($) => seq("!", $.identifier),
     anon_arg: ($) => prec(5, seq("$", $.number)),
     call_expr: ($) => prec(2, seq($.expr, $.tuple)),

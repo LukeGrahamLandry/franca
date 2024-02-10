@@ -156,8 +156,9 @@ impl<'p> Program<'p> {
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
             TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
-            TypeInfo::Array(e) => format!("Array({})", self.log_type(*e)),
-            TypeInfo::Struct(e) => format!("Struct({}, {})", t.0, self.log_type(*e)),
+
+            TypeInfo::Struct(_) => "Struct()".to_string(),
+            TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
             TypeInfo::Fn(f) => format!(
                 "fn({}) {}",
                 self.log_type(f.param),
@@ -167,7 +168,6 @@ impl<'p> Program<'p> {
                 let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
                 format!("Tuple({})", v.join(", "))
             }
-            TypeInfo::Enum(_) => "Enum(TODO)".to_owned(),
             TypeInfo::Type => "Type".to_owned(),
             TypeInfo::Unit => "Unit".to_owned(),
         }
