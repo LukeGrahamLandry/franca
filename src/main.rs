@@ -16,8 +16,10 @@ use crate::{
 
 mod ast;
 mod interp;
+mod lex;
 mod logging;
 mod parse;
+mod parse2;
 mod pool;
 mod scope;
 
