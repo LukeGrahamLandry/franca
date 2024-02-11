@@ -61,9 +61,6 @@ impl<'a, 'p> Parser<'a, 'p> {
         let mut stmts: Vec<FatStmt<'p>> = vec![];
         while p.peek() != Eof {
             stmts.push(p.parse_stmt()?);
-            if Semicolon == p.peek() {
-                p.eat(Semicolon)?;
-            }
         }
         let full = p.end_subexpr();
 
@@ -128,7 +125,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         ret,
                     },
                     body: Some(body),
-                    arg_names: vec![],
+                    arg_names: arg.names,
                     arg_loc: vec![],
                     arg_vars: None,
                     capture_vars: vec![],
@@ -140,19 +137,27 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.eat(LeftSquiggle)?;
                 let mut body = vec![];
+                let mut trailing_semi = false;
                 while self.peek() != RightSquiggle {
                     body.push(self.parse_stmt()?);
-                    // TODO: make sure stmt doesnt eat the semicolon
-                    if !self.maybe(Semicolon) {
-                        break;
-                    }
                 }
-                let result = if RightSquiggle == self.peek() {
+
+                let result = if let Some(s) = body.last() {
+                    if let Stmt::Eval(_) = s.deref() {
+                        if let Stmt::Eval(e) = body.pop().unwrap().stmt {
+                            e
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        self.start_subexpr();
+                        self.expr(Expr::Value(Value::Unit))
+                    }
+                } else {
                     self.start_subexpr();
                     self.expr(Expr::Value(Value::Unit))
-                } else {
-                    self.parse_expr()?
                 };
+
                 self.eat(RightSquiggle)?;
                 Ok(self.expr(Expr::Block {
                     body,
@@ -243,9 +248,15 @@ impl<'a, 'p> Parser<'a, 'p> {
                     LazyType::Infer
                 };
 
-                let body = match self.pop().kind {
-                    Semicolon => None,
-                    Equals => Some(self.parse_expr()?),
+                let body = match self.peek() {
+                    Semicolon => {
+                        self.eat(Semicolon)?;
+                        None
+                    }
+                    Equals => {
+                        self.eat(Equals)?;
+                        Some(self.parse_expr()?)
+                    }
                     _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
                 };
 
@@ -257,7 +268,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         ret,
                     },
                     body,
-                    arg_names: vec![],
+                    arg_names: arg.names,
                     arg_loc: vec![],
                     arg_vars: None,
                     capture_vars: vec![],
@@ -275,15 +286,19 @@ impl<'a, 'p> Parser<'a, 'p> {
                     None
                 };
                 assert!(binding.names.len() == 1 && binding.types.len() <= 1);
+                self.eat(Semicolon)?;
                 // TODO: this could just carry the pattern forward.
                 Stmt::DeclNamed {
-                    name: binding.names[0],
+                    name: binding.names[0].unwrap(),
                     ty: binding.types.first().unwrap().clone(),
                     value,
                     kind,
                 }
             }
-            Semicolon => Stmt::Noop,
+            Semicolon => {
+                self.eat(Semicolon)?;
+                Stmt::Noop
+            }
             _ => {
                 let e = self.parse_expr()?;
                 if self.maybe(Equals) {
@@ -294,6 +309,10 @@ impl<'a, 'p> Parser<'a, 'p> {
                         return Err(self.todo("left of assign not plain ident"));
                     }
                 } else {
+                    if !matches!(self.peek(), Semicolon | RightSquiggle) {
+                        return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
+                    }
+                    // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
                     Stmt::Eval(e)
                 }
             }
@@ -321,14 +340,24 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn comma_sep_expr(&mut self) -> Res<Vec<FatExpr<'p>>> {
         let mut values: Vec<FatExpr<'p>> = vec![];
 
-        while RightParen != self.peek() {
-            values.push(self.parse_expr()?);
-            if Comma == self.peek() {
-                // inner and optional trailing
-                self.eat(Comma)?;
-            } else {
-                // No trailing comma is fine
-                break;
+        if RightParen != self.peek() {
+            loop {
+                values.push(self.parse_expr()?);
+                match self.peek() {
+                    Comma => {
+                        self.eat(Comma)?;
+                        if RightParen == self.peek() {
+                            break;
+                        }
+                    }
+                    RightParen => {
+                        // No trailing comma is fine
+                        break;
+                    }
+                    _ => {
+                        return Err(self.expected("',' or ')' after tuple element"));
+                    }
+                }
             }
         }
 
@@ -387,7 +416,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             vec![None]
         };
         Ok(Pattern {
-            names: vec![name],
+            names: vec![Some(name)],
             types,
             loc,
         })
@@ -454,6 +483,12 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn expr(&mut self, expr: Expr<'p>) -> FatExpr<'p> {
+        logln!(
+            "{}({}) EXPR {}",
+            "=".repeat(self.spans.len() * 2),
+            self.spans.len(),
+            expr.log(self.pool)
+        );
         self.expr_id += 1;
         FatExpr {
             expr,
@@ -466,6 +501,12 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn stmt(&mut self, annotations: Vec<Annotation<'p>>, stmt: Stmt<'p>) -> FatStmt<'p> {
+        logln!(
+            "{}({}) STMT {}",
+            "=".repeat(self.spans.len() * 2),
+            self.spans.len(),
+            stmt.log(self.pool)
+        );
         FatStmt {
             stmt,
             annotations,

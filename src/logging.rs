@@ -261,13 +261,9 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
                     .map(|v| v.log(pool))
                     .unwrap_or_else(|| String::from("uninit()"))
             ),
-            Stmt::Eval(e) => format!("L{:?}# {}", e.loc, e.log(pool)),
+            Stmt::Eval(e) => e.log(pool),
             Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
-            Stmt::DeclFunc(func) => format!(
-                "L{:?}# declare(fn {})",
-                func.body.as_ref().map(|b| b.loc),
-                func.synth_name(pool)
-            ),
+            Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
             Stmt::Noop => "".to_owned(),
             _ => format!("{:?}", self),
         }
@@ -318,7 +314,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             Expr::Value(Value::Unit) => "unit".to_string(),
             Expr::Value(v) => format!("{:?}", v),
             Expr::GetVar(v) => v.log(pool),
-            Expr::Closure(f) => format!("declare(fn {})", f.synth_name(pool)),
+            Expr::Closure(f) => format!("closure(fn {})", f.synth_name(pool)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.log(pool), pool.get(*i)),
             _ => format!("{:?}", self),
         }

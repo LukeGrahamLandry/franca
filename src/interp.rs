@@ -264,6 +264,7 @@ pub struct Interp<'a, 'p> {
     pub assertion_count: usize,
     currently_inlining: Vec<FuncId>,
     pub prelude_length: usize,
+    last_loc: Option<Span>,
 }
 
 #[derive(Clone)]
@@ -286,7 +287,8 @@ pub enum DebugState<'p> {
 
 #[derive(Clone)]
 pub struct CompileError<'p> {
-    pub loc: &'static Location<'static>,
+    pub internal_loc: &'static Location<'static>,
+    pub loc: Option<Span>,
     pub reason: CErr<'p>,
     pub trace: String,
     pub value_stack: Vec<Value>,
@@ -320,7 +322,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             anon_fn_counter: 0,
             assertion_count: 0,
             currently_inlining: vec![],
-            prelude_length: 0, // TODO
+            prelude_length: 0,
+            last_loc: None,
         }
     }
 
@@ -340,7 +343,8 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn error(&self, reason: CErr<'p>) -> CompileError<'p> {
         CompileError {
-            loc: Location::caller(),
+            internal_loc: Location::caller(),
+            loc: self.last_loc,
             reason,
             trace: self.log_trace(),
             value_stack: self.value_stack.clone(),
@@ -421,6 +425,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let state = DebugState::RunInstLoop(func);
         self.push_state(&state);
         loop {
+            self.update_debug();
             let i = self.next_inst();
             logln!("I: {:?}", i.log(self.pool));
             self.log_stack();
@@ -1435,6 +1440,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         expr: &FatExpr<'p>,
     ) -> Res<'p, (StackRange, TypeId)> {
         result.last_loc = expr.loc;
+        self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
             Expr::Closure(func) => {
@@ -1642,7 +1648,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let ty = self.program.func_type(func);
                     (result.load_constant(Value::GetFn(func), ty), ty)
                 } else {
-                    ice!(self, "Scope resolution failed {}", expr.log(self.pool));
+                    ice!(
+                        self,
+                        "Scope resolution failed {} (in Expr::GetNamed)",
+                        expr.log(self.pool)
+                    );
                 }
             }
             Expr::EnumLiteral(_) => todo!(),
@@ -1840,6 +1850,18 @@ impl<'a, 'p> Interp<'a, 'p> {
             .as_ref()
             .unwrap();
         body.insts.get(frame.current_ip).unwrap()
+    }
+
+    // TOOD: @track_caller
+    fn update_debug(&mut self) {
+        let frame = self.call_stack.last().unwrap();
+        let body = self
+            .ready
+            .get(frame.current_func.0)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
     }
 
     fn current_fn_body(&self) -> &FnBody {

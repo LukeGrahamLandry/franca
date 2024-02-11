@@ -4,7 +4,7 @@ use std::{env, fs, io::read_to_string, path::PathBuf, time::Instant};
 
 use ast::{Expr, FatExpr, Func, LazyFnType, Program, TypeId};
 use codemap::CodeMap;
-use codemap_diagnostic::{ColorConfig, Emitter};
+use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use interp::Value;
 use scope::ResolveScope;
 
@@ -39,6 +39,7 @@ fn main() {
 
     for case in fs::read_dir("tests").unwrap() {
         let case = case.unwrap();
+        println!("TEST: {}", case.file_name().to_str().unwrap());
         run_main(
             pool,
             fs::read_to_string(case.path()).unwrap(),
@@ -159,7 +160,20 @@ fn run_main<'a: 'p, 'p>(
                     inst_count as f32 / seconds
                 );
             } else {
-                println!("{:?}", result.unwrap_err());
+                let e = result.unwrap_err();
+                let d = vec![Diagnostic {
+                    level: Level::Error,
+                    message: format!("{:?}", e.reason),
+                    code: None,
+                    spans: vec![SpanLabel {
+                        span: e.loc.unwrap(),
+                        label: None,
+                        style: SpanStyle::Primary,
+                    }],
+                }];
+                let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(&codemap));
+                emitter.emit(&d);
+                println!("{}", e.trace);
             }
         } else {
             println!("FN {name:?} = 'MAIN' NOT FOUND");

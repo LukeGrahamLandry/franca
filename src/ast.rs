@@ -142,7 +142,7 @@ pub struct FatExpr<'p> {
 // argument of a function and left of variable declaration.
 #[derive(Clone, Debug)]
 pub struct Pattern<'p> {
-    pub names: Vec<Ident<'p>>,
+    pub names: Vec<Option<Ident<'p>>>,
     pub types: Vec<Option<FatExpr<'p>>>,
     pub loc: Span,
 }

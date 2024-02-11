@@ -84,6 +84,7 @@ impl<'p> ResolveScope<'p> {
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
         let loc = stmt.loc;
+        let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
             Stmt::DeclNamed {
                 name,
@@ -129,6 +130,7 @@ impl<'p> ResolveScope<'p> {
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
             Stmt::DeclFunc(func) => {
+                func.annotations = aaa;
                 self.resolve_func(func);
                 self.local_constants
                     .last_mut()
