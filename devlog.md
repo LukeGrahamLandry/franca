@@ -1,5 +1,12 @@
 
-## general closures
+
+## trying to finish structs (Feb 10)
+
+Normal assign left can be a tuple for pattern match-y assign multiple at once (like rust/python).
+But that means you can't put an annotation there because its ambigous if the tuple is names or a call on the annotation?
+@a    (x, y) = z;   but no, because @a(x, y)   = z; is illegal so what's the problem. 
+
+## general closures (Feb 8)
 
 - i did a special case for if but need to do that for all. 
   resolver does it right but need to be able to inline call into same result. 

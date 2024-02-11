@@ -86,12 +86,12 @@ pub struct Annotation<'p> {
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct Var<'p>(pub Ident<'p>, pub usize);
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub enum Expr<'p> {
     Value(Value),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
-        body: Vec<Stmt<'p>>,
+        body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
         locals: Option<Vec<Var<'p>>>, // useful information for calling drop
     },
@@ -168,7 +168,7 @@ impl Hash for FatExpr<'_> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
@@ -194,7 +194,13 @@ pub enum Stmt<'p> {
     SetNamed(Ident<'p>, FatExpr<'p>),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
+pub struct FatStmt<'p> {
+    pub stmt: Stmt<'p>,
+    pub annotations: Vec<Annotation<'p>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Option<Ident<'p>>,   // it might be an annonomus closure
@@ -203,7 +209,7 @@ pub struct Func<'p> {
     pub arg_names: Vec<Option<Ident<'p>>>,
     pub arg_vars: Option<Vec<Var<'p>>>,
     pub capture_vars: Vec<Var<'p>>,
-    pub local_constants: Vec<Stmt<'p>>,
+    pub local_constants: Vec<FatStmt<'p>>,
 }
 
 impl<'p> Func<'p> {
@@ -432,5 +438,44 @@ impl<'p> Deref for FatExpr<'p> {
 impl<'p> DerefMut for FatExpr<'p> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.expr
+    }
+}
+
+impl<'p> Deref for FatStmt<'p> {
+    type Target = Stmt<'p>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stmt
+    }
+}
+
+impl<'p> DerefMut for FatStmt<'p> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stmt
+    }
+}
+
+impl<'p> Stmt<'p> {
+    pub fn fat_empty(self) -> FatStmt<'p> {
+        FatStmt {
+            stmt: self,
+            annotations: vec![],
+        }
+    }
+
+    pub fn fat_with(self, annotations: Vec<Annotation<'p>>) -> FatStmt<'p> {
+        FatStmt {
+            stmt: self,
+            annotations,
+        }
+    }
+}
+
+impl<'p> FatStmt<'p> {
+    pub fn null() -> Self {
+        FatStmt {
+            stmt: Stmt::null(),
+            annotations: vec![],
+        }
     }
 }

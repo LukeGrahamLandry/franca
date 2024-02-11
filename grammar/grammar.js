@@ -8,22 +8,25 @@ module.exports = grammar({
     // token(seq("/*", /.*/, "*/")),
   ],
   rules: {
-    source_file: ($) => repeat($._statement),
+    source_file: ($) => repeat($.statement),
 
-    _statement: ($) =>
-      choice($.func_def, seq(choice($.expr, $.declare, $.assign), ";"), ";"),
+    statement: ($) =>
+      seq(
+        field("annotation", repeat($.annotation)),
+        choice($.func_def, seq(choice($.expr, $.declare, $.assign), ";"), ";"),
+      ),
     declare: ($) =>
       seq(
-        choice("let", "var", "const"),
+        field("kind", choice("let", "var", "const")),
         $.binding_type,
-        optional(seq("=", $.expr)),
+        optional(seq("=", field("value", $.expr))),
       ),
     assign: ($) => seq($.names, "=", $.expr),
+
     block: ($) =>
       seq(
-        optional(field("annotation", repeat($.annotation))),
         "{",
-        field("body", repeat($._statement)),
+        field("body", repeat($.statement)),
         field("result", optional($.expr)),
         "}",
       ),
@@ -32,7 +35,6 @@ module.exports = grammar({
       prec(
         5,
         seq(
-          optional(field("annotation", repeat($.annotation))),
           "fn",
           field("name", $.identifier),
           field("proto", $.func_proto),
@@ -43,7 +45,7 @@ module.exports = grammar({
           ),
         ),
       ),
-    annotation: ($) => seq("@", $.identifier, optional($.tuple)),
+    annotation: ($) => prec.left(seq("@", $.identifier, optional($.tuple))),
     func_proto: ($) =>
       prec.left(
         seq(

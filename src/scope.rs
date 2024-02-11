@@ -5,7 +5,9 @@ use std::{
 };
 
 use crate::{
-    ast::{Expr, FatExpr, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
+    ast::{
+        Expr, FatExpr, FatStmt, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType,
+    },
     interp::Value,
     pool::Ident,
 };
@@ -17,7 +19,7 @@ pub struct ResolveScope<'p> {
     track_captures_before_scope: Vec<usize>,
     captures: Vec<Var<'p>>,
     info: Vec<VarInfo>,
-    local_constants: Vec<Vec<Stmt<'p>>>,
+    local_constants: Vec<Vec<FatStmt<'p>>>,
 }
 
 impl<'p> ResolveScope<'p> {
@@ -79,8 +81,8 @@ impl<'p> ResolveScope<'p> {
         func.local_constants = self.local_constants.pop().unwrap();
     }
 
-    fn resolve_stmt(&mut self, stmt: &mut Stmt<'p>) {
-        match stmt {
+    fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
+        match stmt.deref_mut() {
             Stmt::DeclNamed {
                 name,
                 ty,
@@ -106,17 +108,20 @@ impl<'p> ResolveScope<'p> {
                     kind: *kind,
                 };
                 if *kind == VarType::Const {
-                    self.local_constants.last_mut().unwrap().push(decl);
-                    *stmt = Stmt::Noop;
+                    self.local_constants
+                        .last_mut()
+                        .unwrap()
+                        .push(decl.fat_with(mem::take(&mut stmt.annotations)));
+                    stmt.stmt = Stmt::Noop;
                 } else {
-                    *stmt = decl;
+                    stmt.stmt = decl;
                 }
             }
             Stmt::SetNamed(name, e) => {
                 self.resolve_expr(e);
                 let var = self.find_var(name).expect("undeclared var");
                 let value = mem::replace(e, FatExpr::null());
-                *stmt = Stmt::SetVar(var, value);
+                stmt.stmt = Stmt::SetVar(var, value);
             }
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
@@ -125,7 +130,7 @@ impl<'p> ResolveScope<'p> {
                 self.local_constants
                     .last_mut()
                     .unwrap()
-                    .push(mem::replace(stmt, Stmt::Noop));
+                    .push(mem::replace(stmt, Stmt::Noop.fat_empty()));
             }
             Stmt::DeclVar { .. } | Stmt::SetVar(_, _) => {
                 unreachable!("added by this pass {stmt:?}")

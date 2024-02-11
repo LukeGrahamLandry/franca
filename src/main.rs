@@ -44,6 +44,16 @@ macro_rules! check_cmp {
 }
 
 fn main() {
+    if let Some(name) = env::args().nth(1) {
+        run_main(
+            &fs::read_to_string(format!("tests/{name}.txt")).unwrap(),
+            Value::I64(0),
+            Value::I64(0),
+            Some(&name),
+        );
+        return;
+    }
+
     for case in fs::read_dir("tests").unwrap() {
         let case = case.unwrap();
         run_main(
