@@ -24,6 +24,7 @@ pub enum TokenType<'p> {
     Symbol(Ident<'p>),
     Number(i64),
     Quoted(Ident<'p>),
+    DotLeftSquiggle,
     LeftSquiggle,
     RightSquiggle,
     LeftParen,
@@ -41,6 +42,14 @@ pub enum TokenType<'p> {
     Eof,
     Qualifier(VarType),
     Semicolon,
+    Star,
+    UpArrow,
+    Amp,
+    Question,
+    DoubleSquare,
+    DoubleSquigle,
+    PlusEq,
+    MinusEq,
     Error(LexErr),
 }
 
@@ -93,20 +102,43 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '"' | '“' | '”' | '\'' => self.lex_quoted(),
             '0'..='9' => self.lex_num(),
             'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(),
-            '{' => self.one(LeftSquiggle),
+            '{' => self.pair('}', LeftSquiggle, DoubleSquigle),
             '}' => self.one(RightSquiggle),
             '(' => self.one(LeftParen),
             ')' => self.one(RightParen),
             ',' => self.one(Comma),
             ':' => self.one(Colon),
             '@' => self.one(At),
-            '.' => self.one(Dot),
+            '.' => self.pair('{', Dot, DotLeftSquiggle),
             '!' => self.one(Bang),
-            '[' => self.one(LeftSquare),
+            '[' => self.pair(']', LeftSquare, DoubleSquare),
             ']' => self.one(RightSquare),
             ';' => self.one(Semicolon),
+            '=' => self.one(Equals),
+            '*' => self.one(Star),
+            '^' => self.one(UpArrow),
+            '&' => self.one(Amp),
+            '?' => self.one(Question),
+            '+' => self.pair('=', Error(LexErr::Unexpected('+')), PlusEq),
+            '-' => self.pair('=', Error(LexErr::Unexpected('-')), MinusEq),
             c => self.err(LexErr::Unexpected(c)),
         }
+    }
+
+    fn pair(
+        &mut self,
+        second: char,
+        single: TokenType<'static>,
+        double: TokenType<'static>,
+    ) -> Token<'p> {
+        self.pop();
+        let t = if self.peek_c() == second {
+            self.pop();
+            double
+        } else {
+            single
+        };
+        self.token(t, self.start, self.current)
     }
 
     // generate enough to look ahead i tokens.

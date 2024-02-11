@@ -46,6 +46,7 @@ impl<'p> ResolveScope<'p> {
             self.info.push(VarInfo {
                 ty: TypeId::any(),
                 kind: VarType::Var,
+                loc: func.loc,
             });
         }
         match &mut func.ty {
@@ -100,6 +101,7 @@ impl<'p> ResolveScope<'p> {
                 self.info.push(VarInfo {
                     ty: TypeId::any(),
                     kind: *kind,
+                    loc,
                 });
                 let decl = Stmt::DeclVar {
                     name: new,
@@ -181,6 +183,11 @@ impl<'p> ResolveScope<'p> {
             Expr::EnumLiteral(_) => todo!(),
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(_, _) => todo!(),
+            Expr::StructLiteralP(p) => {
+                for e in p.types.iter_mut().flatten() {
+                    self.resolve_expr(e);
+                }
+            }
         }
     }
 

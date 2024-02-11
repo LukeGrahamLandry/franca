@@ -131,7 +131,6 @@ pub(crate) use assert;
 pub(crate) use assert_eq;
 pub(crate) use bin_int;
 pub(crate) use err;
-use tree_sitter::Point;
 
 use crate::{
     ast::{
@@ -446,7 +445,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::Drop(i) => write!(f, "drop({:?});", i),
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
             Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
-            Bc::DebugLine(loc) => write!(f, "debug({});", loc),
+            Bc::DebugLine(loc) => write!(f, "debug({:?});", loc),
         };
         f
     }

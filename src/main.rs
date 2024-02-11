@@ -69,17 +69,24 @@ fn run_main<'a: 'p, 'p>(
     let code = codemap.add_file("main_file".into(), src.clone());
     let mut stmts = Vec::<FatStmt<'p>>::new();
     let mut parse = |file| match Parser::parse(&codemap, file, pool, false) {
-        Ok(new) => stmts.extend(new),
+        Ok(new) => {
+            stmts.extend(new);
+            true
+        }
         Err(e) => {
+            println!("Parse error (Internal: {})", e.loc);
             let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(&codemap));
             emitter.emit(&e.diagnostic);
-
-            panic!("Parse error (Internal: {})", e.loc);
+            false
         }
     };
 
-    parse(lib.clone());
-    parse(code);
+    if !parse(lib.clone()) {
+        return;
+    }
+    if !parse(code) {
+        return;
+    }
 
     let mut global = Func {
         annotations: vec![],
@@ -98,6 +105,7 @@ fn run_main<'a: 'p, 'p>(
         capture_vars: vec![],
         local_constants: vec![],
         loc: lib.span,
+        arg_loc: vec![],
     };
 
     logln!("{}", global.log(pool));

@@ -1,5 +1,4 @@
 use codemap::Span;
-use tree_sitter::Point;
 
 use crate::{
     interp::Value,
@@ -104,6 +103,7 @@ pub enum Expr<'p> {
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     StructLiteral(Vec<Field<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
+    StructLiteralP(Pattern<'p>),
 
     // Backend only
     GetVar(Var<'p>),
@@ -143,8 +143,74 @@ pub struct FatExpr<'p> {
 #[derive(Clone, Debug)]
 pub struct Pattern<'p> {
     pub names: Vec<Ident<'p>>,
-    pub types: Vec<FatExpr<'p>>,
+    pub types: Vec<Option<FatExpr<'p>>>,
+    pub loc: Span,
 }
+
+impl<'p> Pattern<'p> {
+    pub fn empty(loc: Span) -> Self {
+        Self {
+            names: vec![],
+            types: vec![],
+            loc,
+        }
+    }
+
+    // Useful for function args.
+    pub fn then(&mut self, other: Self) {
+        self.names.extend(other.names);
+        self.types.extend(other.types);
+    }
+
+    pub fn make_ty(self) -> LazyType<'p> {
+        match self.types.len() {
+            // Note: this is the *type* `Unit`, NOT the *value* `unit`
+            0 => LazyType::Infer,
+            1 => {
+                let ty = self.types.into_iter().next().unwrap();
+                match ty {
+                    Some(e) => LazyType::PendingEval(e),
+                    None => LazyType::Infer,
+                }
+            }
+            _ => {
+                let any_type_expr = FatExpr {
+                    expr: Expr::Value(Value::Type(TypeId::any())),
+                    loc: self.loc,
+                    id: 3456789,
+                    ty: None,
+                    known: Known::Foldable,
+                };
+                let e = FatExpr {
+                    expr: Expr::Tuple(
+                        self.types
+                            .into_iter()
+                            .map(|ty| ty.unwrap_or_else(|| any_type_expr.clone()))
+                            .collect(),
+                    ),
+                    loc: self.loc,
+                    id: 3456789,
+                    ty: None,
+                    known: Known::Foldable,
+                };
+                LazyType::PendingEval(e)
+            }
+        }
+    }
+}
+
+// Some(
+//     self.expr(
+//         Expr::Tuple(
+//             arg_types
+//                 .into_iter()
+//                 .map(|ty| ty.unwrap_or_else(|| any_type_expr.clone()))
+//                 .collect(),
+//         ),
+//         node.start_position(),
+//         Known::Foldable,
+//     ),
+// ),
 
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
@@ -214,6 +280,7 @@ pub struct Func<'p> {
     pub ty: LazyFnType<'p>,        // We might not have typechecked yet.
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
+    pub arg_loc: Vec<Option<Span>>,
     pub arg_vars: Option<Vec<Var<'p>>>,
     pub capture_vars: Vec<Var<'p>>,
     pub local_constants: Vec<FatStmt<'p>>,
@@ -258,6 +325,7 @@ pub struct FuncId(pub usize);
 pub struct VarInfo {
     pub ty: TypeId,
     pub kind: VarType,
+    pub loc: Span,
 }
 
 #[derive(Clone)]

@@ -1,10 +1,18 @@
 
 
-## trying to finish structs (Feb 10)
+## parser rewrite (Feb 10)
 
 Normal assign left can be a tuple for pattern match-y assign multiple at once (like rust/python).
 But that means you can't put an annotation there because its ambigous if the tuple is names or a call on the annotation?
 @a    (x, y) = z;   but no, because @a(x, y)   = z; is illegal so what's the problem. 
+
+I gave up. Maybe its just a skill issue but its so easy if you just write the boring code. 
+There's no way the parsing is the slow part. I need to have error messages. 
+I don't understand why they wouldn't tell me what tokens it was expecting. 
+As bonus with the privilege of error messages you also get to trivially target wasm without figuring out how to ask the c compiler to do it. 
+It seems like it wont really be that much more code than the hoops I was jumping through to get a useful ast out of thier parse tree.
+Maybe I should have tried to find something that genreated types off the tree sitter thing but the only one i saw seemed to 
+generate a ridiculously big amount of code. 
 
 ## general closures (Feb 8)
 

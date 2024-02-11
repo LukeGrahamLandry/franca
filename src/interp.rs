@@ -16,7 +16,6 @@ use std::{
 
 use codemap::Span;
 use interp_derive::InterpSend;
-use tree_sitter::Point;
 
 use crate::ast::{Annotation, VarType};
 use crate::logging::PoolLog;
@@ -155,7 +154,7 @@ pub enum Bc<'p> {
         to: StackOffset,
     },
     DebugMarker(&'static str, Ident<'p>),
-    DebugLine(Point),
+    DebugLine(Span),
     // Clone, Move, and Drop are for managing linear types.
     Clone {
         from: StackOffset,
@@ -1718,6 +1717,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Expr::FieldAccess(_, _) => todo!(),
+            Expr::StructLiteralP(_) => todo!(),
         })
     }
 
@@ -1803,6 +1803,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             Expr::GetNamed(_) => todo!(),
             Expr::FieldAccess(_, _) => todo!(),
+            Expr::StructLiteralP(_) => todo!(),
         })
     }
 
@@ -1921,6 +1922,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             capture_vars: vec![],
             local_constants: Default::default(),
             loc: e.loc,
+            arg_loc: vec![],
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
