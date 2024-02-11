@@ -80,6 +80,7 @@ macro_rules! ice {
         return err!($self, CErr::IceFmt(msg))
     }};
 }
+use codemap::Span;
 pub(crate) use ice;
 
 // TODO: compile errors should include the line number of the most recent ast node.
@@ -261,14 +262,11 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
                     .map(|v| v.log(pool))
                     .unwrap_or_else(|| String::from("uninit()"))
             ),
-            Stmt::Eval(e) => format!("L{}# {}", e.loc.row + 1, e.log(pool)),
+            Stmt::Eval(e) => format!("L{:?}# {}", e.loc, e.log(pool)),
             Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
             Stmt::DeclFunc(func) => format!(
-                "L{}# declare(fn {})",
-                func.body
-                    .as_ref()
-                    .map(|b| b.loc.row + 1)
-                    .unwrap_or(1234567890),
+                "L{:?}# declare(fn {})",
+                func.body.as_ref().map(|b| b.loc),
                 func.synth_name(pool)
             ),
             Stmt::Noop => "".to_owned(),
@@ -375,7 +373,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
 
 impl<'p> PoolLog<'p> for DebugInfo<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        let loc = format!("{}", self.src_loc);
+        let loc = format!("{:?}", self.src_loc);
         let width = 10;
         format!("// {:width$} | {} ", loc, self.internal_loc)
     }
@@ -481,7 +479,7 @@ impl Debug for TypeId {
 }
 
 impl Stmt<'_> {
-    pub fn get_loc(&self) -> Option<Point> {
+    pub fn get_loc(&self) -> Option<Span> {
         match self {
             Stmt::Noop => None,
             Stmt::Eval(e) => Some(e.loc),

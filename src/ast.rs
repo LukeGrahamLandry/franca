@@ -1,3 +1,4 @@
+use codemap::Span;
 use tree_sitter::Point;
 
 use crate::{
@@ -102,6 +103,7 @@ pub enum Expr<'p> {
     Closure(Box<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     StructLiteral(Vec<Field<'p>>),
+    FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
 
     // Backend only
     GetVar(Var<'p>),
@@ -131,28 +133,32 @@ pub enum Known {
 #[derive(Clone, Debug)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
-    pub loc: Point,
+    pub loc: Span,
     pub id: usize,
     pub ty: Option<TypeId>,
     pub known: Known,
 }
 
+// argument of a function and left of variable declaration.
+#[derive(Clone, Debug)]
+pub struct Pattern<'p> {
+    pub names: Vec<Ident<'p>>,
+    pub types: Vec<FatExpr<'p>>,
+}
+
 impl<'p> FatExpr<'p> {
-    pub fn synthetic(expr: Expr<'p>) -> Self {
+    pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
         FatExpr {
             expr,
-            loc: Point {
-                row: 0,
-                column: 123456789,
-            },
+            loc,
             id: 123456789,
             ty: None,
             known: Known::ComptimeOnly,
         }
     }
     // used for moving out of ast
-    pub fn null() -> Self {
-        FatExpr::synthetic(Expr::Value(Value::Poison))
+    pub fn null(loc: Span) -> Self {
+        FatExpr::synthetic(Expr::Value(Value::Poison), loc)
     }
 }
 
@@ -198,6 +204,7 @@ pub enum Stmt<'p> {
 pub struct FatStmt<'p> {
     pub stmt: Stmt<'p>,
     pub annotations: Vec<Annotation<'p>>,
+    pub loc: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +217,7 @@ pub struct Func<'p> {
     pub arg_vars: Option<Vec<Var<'p>>>,
     pub capture_vars: Vec<Var<'p>>,
     pub local_constants: Vec<FatStmt<'p>>,
+    pub loc: Span,
 }
 
 impl<'p> Func<'p> {
@@ -268,8 +276,8 @@ pub struct Program<'p> {
 
 impl<'p> Stmt<'p> {
     // used for moving out of ast
-    pub fn null() -> Stmt<'p> {
-        Stmt::Eval(FatExpr::null())
+    pub fn null(loc: Span) -> Stmt<'p> {
+        Stmt::Eval(FatExpr::null(loc))
     }
 }
 
@@ -456,26 +464,29 @@ impl<'p> DerefMut for FatStmt<'p> {
 }
 
 impl<'p> Stmt<'p> {
-    pub fn fat_empty(self) -> FatStmt<'p> {
+    pub fn fat_empty(self, loc: Span) -> FatStmt<'p> {
         FatStmt {
             stmt: self,
             annotations: vec![],
+            loc,
         }
     }
 
-    pub fn fat_with(self, annotations: Vec<Annotation<'p>>) -> FatStmt<'p> {
+    pub fn fat_with(self, annotations: Vec<Annotation<'p>>, loc: Span) -> FatStmt<'p> {
         FatStmt {
             stmt: self,
             annotations,
+            loc,
         }
     }
 }
 
 impl<'p> FatStmt<'p> {
-    pub fn null() -> Self {
+    pub fn null(loc: Span) -> Self {
         FatStmt {
-            stmt: Stmt::null(),
+            stmt: Stmt::null(loc),
             annotations: vec![],
+            loc,
         }
     }
 }

@@ -82,6 +82,7 @@ impl<'p> ResolveScope<'p> {
     }
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
+        let loc = stmt.loc;
         match stmt.deref_mut() {
             Stmt::DeclNamed {
                 name,
@@ -102,8 +103,8 @@ impl<'p> ResolveScope<'p> {
                 });
                 let decl = Stmt::DeclVar {
                     name: new,
-                    ty: mem::replace(ty, Some(FatExpr::null())),
-                    value: mem::replace(value, Some(FatExpr::null())),
+                    ty: mem::replace(ty, Some(FatExpr::null(loc))),
+                    value: mem::replace(value, Some(FatExpr::null(loc))),
                     dropping: old,
                     kind: *kind,
                 };
@@ -111,7 +112,7 @@ impl<'p> ResolveScope<'p> {
                     self.local_constants
                         .last_mut()
                         .unwrap()
-                        .push(decl.fat_with(mem::take(&mut stmt.annotations)));
+                        .push(decl.fat_with(mem::take(&mut stmt.annotations), stmt.loc));
                     stmt.stmt = Stmt::Noop;
                 } else {
                     stmt.stmt = decl;
@@ -120,7 +121,7 @@ impl<'p> ResolveScope<'p> {
             Stmt::SetNamed(name, e) => {
                 self.resolve_expr(e);
                 let var = self.find_var(name).expect("undeclared var");
-                let value = mem::replace(e, FatExpr::null());
+                let value = mem::replace(e, FatExpr::null(loc));
                 stmt.stmt = Stmt::SetVar(var, value);
             }
             Stmt::Noop => {}
@@ -130,7 +131,7 @@ impl<'p> ResolveScope<'p> {
                 self.local_constants
                     .last_mut()
                     .unwrap()
-                    .push(mem::replace(stmt, Stmt::Noop.fat_empty()));
+                    .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
             }
             Stmt::DeclVar { .. } | Stmt::SetVar(_, _) => {
                 unreachable!("added by this pass {stmt:?}")
@@ -179,6 +180,7 @@ impl<'p> ResolveScope<'p> {
             }
             Expr::EnumLiteral(_) => todo!(),
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
+            Expr::FieldAccess(_, _) => todo!(),
         }
     }
 

@@ -14,6 +14,7 @@ use std::{
     ptr,
 };
 
+use codemap::Span;
 use interp_derive::InterpSend;
 use tree_sitter::Point;
 
@@ -203,7 +204,7 @@ pub struct CallFrame<'p> {
 #[derive(Debug, Clone)]
 pub struct DebugInfo<'p> {
     pub internal_loc: &'static Location<'static>,
-    pub src_loc: Point,
+    pub src_loc: Span,
     pub p: PhantomData<&'p str>,
 }
 
@@ -218,7 +219,7 @@ pub struct FnBody<'p> {
     pub slot_types: Vec<TypeId>,
     pub func: FuncId,
     pub why: String,
-    pub last_loc: Point,
+    pub last_loc: Span,
     pub constants: SharedConstants<'p>,
 }
 
@@ -1021,6 +1022,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg_names: Vec<Option<Ident<'p>>>,
         when: ExecTime,
         func: FuncId,
+        loc: Span,
     ) -> FnBody<'p> {
         FnBody {
             insts: vec![],
@@ -1032,7 +1034,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             func,
             why: self.log_trace(),
             debug: vec![],
-            last_loc: Default::default(),
+            last_loc: loc,
             constants: Default::default(),
         }
     }
@@ -1053,7 +1055,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         if !func.local_constants.is_empty() {
             // TODO: pass in comptime known args
             // TODO: do i even need to pass an index? probably just for debugging
-            let mut result = self.empty_fn(0, vec![], when, FuncId(index + 10000000));
+            let mut result = self.empty_fn(0, vec![], when, FuncId(index + 10000000), func.loc);
             result.constants.parents.push(constants.clone().bake());
             let new_constants = func.local_constants.clone();
 
@@ -1083,7 +1085,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         let arg_slots = self.program.slot_count(arg);
         logln!("{:?} has arg {} slots", FuncId(index), arg_slots);
         assert_ne!(arg_slots, 0);
-        let mut result = self.empty_fn(arg_slots, func.arg_names.clone(), when, FuncId(index));
+        let mut result = self.empty_fn(
+            arg_slots,
+            func.arg_names.clone(),
+            when,
+            FuncId(index),
+            func.loc,
+        );
         result.constants = constants;
 
         let arg_range = StackRange {
@@ -1620,10 +1628,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                     println!("GLOBALS: {:?}", result.constants);
                     ice!(
                         self,
-                        "Missing resolved variable {:?} '{}' at line {}",
+                        "Missing resolved variable {:?} '{}' at {:?}",
                         var,
                         self.pool.get(var.0),
-                        expr.loc.row + 1
+                        expr.loc
                     )
                 }
             }
@@ -1709,6 +1717,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
             }
+            Expr::FieldAccess(_, _) => todo!(),
         })
     }
 
@@ -1793,6 +1802,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Expr::GetNamed(_) => todo!(),
+            Expr::FieldAccess(_, _) => todo!(),
         })
     }
 
@@ -1910,6 +1920,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             arg_vars: Some(vec![]),
             capture_vars: vec![],
             local_constants: Default::default(),
+            loc: e.loc,
         };
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
