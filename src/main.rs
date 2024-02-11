@@ -12,7 +12,7 @@ use crate::{
     ast::FatStmt,
     interp::{ExecTime, Interp, SharedConstants},
     logging::{logln, PoolLog},
-    parse2::Parser,
+    parse::Parser,
     pool::StringPool,
 };
 
@@ -20,7 +20,7 @@ mod ast;
 mod interp;
 mod lex;
 mod logging;
-mod parse2;
+mod parse;
 mod pool;
 mod scope;
 

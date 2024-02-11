@@ -1,576 +1,557 @@
-use std::{ops::Deref, rc::Rc};
+#![deny(unused_must_use)]
 
-use codemap::{CodeMap, Span, SpanLoc};
+use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
+
+use codemap::{CodeMap, File, Span, SpanLoc};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use tree_sitter::{Language, Node, Parser, Point, Tree, TreeCursor};
-
-// TODO: this sucks ass. very possible im just using the api wrong because i didn't read the docs, i just looked at the functions i could call.
-//       or maybe the anti-parser-generator people were right.
-//       one thing i dont understand: they always say you need a manually written one for good error reporting,
-//       but are syntax errors really the thing you care about?maybe im just brainwashed by rust being super agressive about other stuff.
-// I FUCKING TAKE IT BACK I HATE TREE SITTER SO MUCH
 
 use crate::{
     ast::{
-        Annotation, Expr, FatExpr, FatStmt, Field, Func, Known, LazyFnType, LazyType, Stmt, TypeId,
-        VarInfo, VarType,
+        Annotation, Expr, FatExpr, FatStmt, Field, Func, Known, LazyFnType, LazyType, Pattern,
+        Stmt, TypeId, VarInfo, VarType,
     },
     interp::Value,
+    lex::{Lexer, Token, TokenType},
     logging::PoolLog,
     pool::{Ident, StringPool},
     scope::ResolveScope,
 };
-
+use TokenType::*;
 #[macro_use]
 use crate::logging::{logln, log};
 
-pub struct WalkParser<'a, 'p> {
-    pool: &'a StringPool<'p>,
-    src: &'a [u8],
+pub struct Parser<'a, 'p> {
+    pool: &'p StringPool<'p>,
+    src: &'a str,
     expr_id: usize,
+    lexer: Lexer<'a, 'p>,
+    file: Arc<File>,
+    codemap: &'a CodeMap,
+    spans: Vec<Span>,
+    track_err: bool,
 }
 
-fn print_but_not_fucking_stupid(
-    child_id: usize,
-    src: &[u8],
-    depth: usize,
-    node: Node,
-    limit: usize,
-) {
-    #[cfg(not(feature = "spam_log"))]
-    {
-        return;
-    }
+type Res<T> = Result<T, ParseErr>;
 
-    log!("{}({child_id}): {}", "=".repeat(depth * 2), node.kind());
-    if node.kind() == "identifier" || node.kind() == "names" {
-        log!(" |{}|", node.utf8_text(src).unwrap());
-    }
-    if node.start_position().row != node.end_position().row {
-        logln!(
-            "   [Lines {} to {}]",
-            node.start_position().row + 1,
-            node.end_position().row + 1
-        );
-    } else {
-        logln!("   [Line {}]", node.start_position().row + 1);
-    }
-
-    if limit == 0 {
-        return;
-    }
-    for (i, child) in node.children(&mut node.walk()).enumerate() {
-        print_but_not_fucking_stupid(i, src, depth + 1, child, limit - 1);
-    }
+#[derive(Debug)]
+pub struct ParseErr {
+    pub loc: &'static Location<'static>,
+    pub diagnostic: Vec<Diagnostic>,
 }
 
-fn print_for_error(child_id: usize, src: &[u8], depth: usize, node: Node) {
-    if node.has_error() {
-        print!("{}({child_id}): {}", "=".repeat(depth * 2), node.kind());
-        if node.kind() == "identifier" || node.kind() == "names" || node.is_error() {
-            print!(" |{}|", node.utf8_text(src).unwrap());
-        }
-        if node.start_position().row != node.end_position().row {
-            print!(
-                "   [Lines {} to {},  ",
-                node.start_position().row + 1,
-                node.end_position().row + 1
-            );
-        } else {
-            print!("   [Line {},  ", node.start_position().row + 1);
-        }
-        println!("Col {}]", node.start_position().column + 1);
-    }
-
-    for (i, child) in node.children(&mut node.walk()).enumerate() {
-        print_for_error(i, src, depth + 1, child);
-    }
-}
-
-impl<'a, 'p> WalkParser<'a, 'p> {
-    pub fn parse(mut p: Parser, src: &'p str, pool: &'a StringPool<'p>) -> Vec<FatStmt<'p>> {
-        logln!("SRC:\n{src}");
-        let tree = p.parse(src, None).unwrap();
-        logln!("PARSE:\n{}", tree.root_node().to_sexp());
-        print_but_not_fucking_stupid(0, src.as_bytes(), 1, tree.root_node(), 9999);
-        let mut p = WalkParser {
+impl<'a, 'p> Parser<'a, 'p> {
+    pub fn parse(
+        codemap: &'a CodeMap,
+        file: Arc<File>,
+        pool: &'p StringPool<'p>,
+        track_err: bool,
+    ) -> Res<Vec<FatStmt<'p>>> {
+        let mut p = Parser {
+            file: file.clone(),
             pool,
-            src: src.as_bytes(),
+            lexer: Lexer::new(file.source(), pool, file.span),
+            src: file.source(),
             expr_id: 0,
+            codemap,
+            spans: vec![],
+            track_err,
         };
 
-        let mut tree = tree.walk();
-        tree.goto_first_child();
-        let mut stmts = vec![];
-        stmts.push(p.parse_stmt(&mut tree));
-        while tree.goto_next_sibling() {
-            stmts.push(p.parse_stmt(&mut tree));
+        p.start_subexpr();
+        let mut stmts: Vec<FatStmt<'p>> = vec![];
+        while p.peek() != Eof {
+            stmts.push(p.parse_stmt()?);
         }
+        let full = p.end_subexpr();
 
         for s in &stmts {
             logln!("finished stmt: {}", s.log(pool))
         }
 
-        stmts
+        Ok(stmts)
     }
 
-    fn parse_stmt(&mut self, cursor: &mut TreeCursor) -> FatStmt<'p> {
-        let node = cursor.node();
-        assert_eq!(node.kind(), "statement");
-
-        let mut cursor = node.walk();
-        let mut entries = node.children_by_field_name("annotation", &mut cursor);
-
-        let mut annotations = vec![];
-        for annotation in entries {
-            self.check_err(annotation);
-            self.assert_literal(annotation.child(0).unwrap(), "@");
-            let name = annotation.child(1).unwrap();
-            let name = name.utf8_text(self.src).unwrap();
-            let name = self.pool.intern(name);
-            let args = annotation.child(2).map(|args| self.parse_expr(args.walk()));
-            annotations.push(Annotation { name, args })
+    fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
+        let modifiers = [
+            Amp,
+            Star,
+            Question,
+            DoubleSquare,
+            DoubleSquigle,
+            Bang,
+            UpArrow,
+        ];
+        let mut found = vec![];
+        while modifiers.contains(&self.peek()) {
+            found.push(self.pop());
         }
 
-        let stmt = self.parse_stmt_inner(&mut cursor);
-        stmt.fat_with(annotations)
+        let prefix = self.parse_expr_inner()?;
+        self.maybe_parse_suffix(prefix)
     }
 
-    fn parse_stmt_inner(&mut self, cursor: &mut TreeCursor) -> Stmt<'p> {
-        let node = cursor.node();
-        let mut cursor = node.walk();
-        // logln!("Parse Stmt {}", node.to_sexp());
-        logln!("PARSE STMT:");
-        print_but_not_fucking_stupid(0, self.src, 0, node, 2);
-        let stmt = match node.kind() {
-            "func_def" => {
-                let func = self.parse_func(node);
-                Stmt::DeclFunc(func)
-            }
-            "expr" => Stmt::Eval(self.parse_expr(cursor)),
-            "declare" => {
-                let qualifier = node.child_by_field_name("kind").unwrap();
-                let qualifier = qualifier.utf8_text(self.src).unwrap();
-                let qualifier = match qualifier {
-                    "let" => VarType::Let,
-                    "var" => VarType::Var,
-                    "const" => VarType::Const,
-                    _ => panic!("Expected let/var/const but found {:?}", qualifier),
-                };
-                let binding = self.parse_binding(node.child(1).unwrap());
-
-                let value = node
-                    .child_by_field_name("value")
-                    .map(|value| self.parse_expr(value.walk()));
-
-                Stmt::DeclNamed {
-                    name: binding.0.expect("binding name"),
-                    ty: binding.1,
-                    value,
-                    kind: qualifier,
+    fn parse_expr_inner(&mut self) -> Res<FatExpr<'p>> {
+        match self.peek() {
+            // TODO: use no body as type expr?
+            // No name, require body, optional (args).
+            Fn => {
+                self.start_subexpr();
+                let loc = self.eat(Fn)?;
+                if let Symbol(_) = self.peek() {
+                    return Err(self.error_next("Fn expr must not have name".into()));
                 }
-            }
-            "assign" => {
-                let names = self.parse_expr(node.child(0).unwrap().walk());
-                self.assert_literal(node.child(1).unwrap(), "=");
-                let value = self.parse_expr(node.child(2).unwrap().walk());
-                let name = match names.deref() {
-                    Expr::GetNamed(i) => i,
-                    _ => todo!("assign to {names:?}"),
-                };
-                Stmt::SetNamed(*name, value)
-            }
-            ";" => Stmt::Noop,
-            s => {
-                if let Some(parent) = node.parent() {
-                    logln!("ERROR PARENT:");
-                    logln!("{}", parent.utf8_text(self.src).unwrap());
-                    logln!("ERROR TEXT:");
-                    logln!("{}", node.utf8_text(self.src).unwrap());
-                }
-                todo!("Wanted Stmt found {s}: {:?}\n {}", node, node.to_sexp())
-            }
-        };
-        logln!("GOT STMT: \n-{stmt:?} \n-{}", stmt.log(self.pool));
-        logln!("================");
-        stmt
-    }
-
-    fn assert_literal(&self, node: Node, expected: &str) {
-        let name = node.utf8_text(self.src).unwrap();
-        assert_eq!(name, expected);
-    }
-
-    /// <Expr>!<?Ident>
-    fn parse_expr(&mut self, mut cursor: TreeCursor) -> FatExpr<'p> {
-        let node = cursor.node();
-        self.check_err(node);
-        logln!("PARSE EXPR");
-        print_but_not_fucking_stupid(0, self.src, 0, node, 3);
-        logln!("=============");
-        if node.is_error() || node.is_missing() || node.has_error() {
-            print_for_error(0, self.src, 0, node);
-            panic!(
-                "PARSE ERROR: {}\n===\n{}\n===",
-                node.start_position(),
-                node.utf8_text(self.src).unwrap()
-            );
-        }
-        let expr = if node.kind() == "expr" {
-            let expr = self.parse_expr_inner(node.child(0).unwrap().walk());
-
-            let mut bang = node
-                .children(&mut cursor)
-                .filter(|n| n.kind() == "suffix_macro");
-            let macro_node = bang.next();
-            logln!("suffix macro is {:?}", macro_node);
-            let macro_name = macro_node.map(|result| {
-                self.assert_literal(result.child(0).unwrap(), "!");
-                self.parse_expr(result.child(1).unwrap().walk())
-            });
-            assert!(bang.next().is_none());
-
-            match macro_name {
-                Some(name_expr) => {
-                    if let &Expr::GetNamed(i) = name_expr.deref() {
-                        self.expr(
-                            Expr::SuffixMacro(i, Box::new(expr)),
-                            name_expr.loc,
-                            Known::Maybe,
-                        )
-                    } else {
-                        panic!("Suffix macro must be an identifier not {name_expr:?}")
-                    }
-                }
-                None => expr,
-            }
-        } else {
-            // TODO: try to never get here because it probably means there's somewhere you cant do `expr!thing`.
-            self.parse_expr_inner(cursor)
-        };
-        logln!("FOUND EXPR: {:?}", expr.log(self.pool));
-        logln!("=============");
-        expr
-    }
-
-    /// Expr
-    fn parse_expr_inner(&mut self, mut cursor: TreeCursor) -> FatExpr<'p> {
-        let node = cursor.node();
-        logln!("Parse Expr: {:?}", cursor.node().to_sexp());
-        match node.kind() {
-            "identifier" => self.expr(
-                Expr::GetNamed(self.parse_ident(node)),
-                node.start_position(),
-                Known::Maybe,
-            ),
-            "type_expr" => {
-                let child = node.child(0).unwrap();
-                let kind = child.kind();
-                if kind == "&" {
-                    let inner = node.child(1).unwrap();
-                    let e = Expr::RefType(Box::new(self.parse_expr(inner.walk())));
-                    self.expr(e, node.start_position(), Known::Foldable)
-                } else if kind == "tuple" {
-                    self.parse_tuple(node) // TODO: this shouldnt be a type_expr branch
+                // Args are optional so you can do `if(a, fn=b, fn=c)`
+                let arg = if self.maybe(LeftParen) {
+                    let a = self.parse_args()?;
+                    self.eat(RightParen)?;
+                    a
                 } else {
-                    todo!("Unknown typeexpr kind {kind}");
-                }
-            }
-            "tuple" => self.parse_tuple(node),
-            "closure_expr" => {
-                let func = self.parse_func(node);
-                assert!(func.body.is_some(), "CLOSURE MISSING BODY: \n{:?}", func);
-                self.expr(
-                    Expr::Closure(Box::new(func)),
-                    node.start_position(),
-                    Known::Foldable,
-                )
-            }
-            "call_expr" => {
-                let f = node.child(0).unwrap();
-                let args = node.child(1).unwrap();
-                let f = self.parse_expr(f.walk());
-                let args = self.parse_expr(args.walk());
-                self.expr(
-                    Expr::Call(Box::new(f), Box::new(args)),
-                    node.start_position(),
-                    Known::Maybe,
-                )
-            }
-            "names" => {
-                let mut cursor = node.walk();
-                let names: Vec<_> = node
-                    .children(&mut cursor)
-                    .map(|result| self.parse_expr(result.walk()))
-                    .collect();
-                assert_eq!(names.len(), 1);
-                names[0].clone()
-            }
-            "number" => {
-                let text = node.utf8_text(self.src).unwrap();
-                match text.parse::<i64>() {
-                    Ok(i) => self.expr(
-                        Expr::Value(Value::I64(i)),
-                        node.start_position(),
-                        Known::Foldable,
-                    ),
-                    Err(e) => todo!("{:?}", e),
-                }
-            }
-            "block" => {
-                let mut cursor = node.walk();
-                let mut stmts = node.children_by_field_name("body", &mut cursor);
+                    Pattern::empty(loc)
+                };
 
-                let body_stmts: Vec<_> = stmts
-                    .map(|stmt| self.parse_stmt(&mut stmt.walk()))
-                    .collect();
+                let ret = if Equals != self.peek() {
+                    LazyType::PendingEval(self.parse_expr()?)
+                } else {
+                    LazyType::Infer
+                };
+                self.eat(Equals)?;
+                let body = self.parse_expr()?;
 
-                let mut entries = node.children_by_field_name("result", &mut cursor);
-                let result = if let Some(result) = entries.next() {
-                    logln!("Return {:?}", result.to_sexp());
-                    Some(self.parse_expr(result.walk()))
+                Ok(self.expr(Expr::Closure(Box::new(Func {
+                    annotations: vec![],
+                    name: None,
+                    ty: LazyFnType::Pending {
+                        arg: arg.clone().make_ty(),
+                        ret,
+                    },
+                    body: Some(body),
+                    arg_names: arg.names,
+                    arg_loc: vec![],
+                    arg_vars: None,
+                    capture_vars: vec![],
+                    local_constants: vec![],
+                    loc,
+                }))))
+            }
+            LeftSquiggle => {
+                self.start_subexpr();
+                self.eat(LeftSquiggle)?;
+                let mut body = vec![];
+                let mut trailing_semi = false;
+                while self.peek() != RightSquiggle {
+                    body.push(self.parse_stmt()?);
+                }
+
+                let result = if let Some(s) = body.last() {
+                    if let Stmt::Eval(_) = s.deref() {
+                        if let Stmt::Eval(e) = body.pop().unwrap().stmt {
+                            e
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        self.start_subexpr();
+                        self.expr(Expr::Value(Value::Unit))
+                    }
+                } else {
+                    self.start_subexpr();
+                    self.expr(Expr::Value(Value::Unit))
+                };
+
+                self.eat(RightSquiggle)?;
+                Ok(self.expr(Expr::Block {
+                    body,
+                    result: Box::new(result),
+                    locals: None,
+                }))
+            }
+            DotLeftSquiggle => {
+                self.start_subexpr();
+                self.eat(DotLeftSquiggle)?;
+                let pattern = self.parse_args()?;
+                self.eat(RightSquiggle)?;
+
+                Ok(self.expr(Expr::StructLiteralP(pattern)))
+            }
+            LeftParen => self.parse_tuple(),
+            Number(f) => {
+                self.start_subexpr();
+                self.pop();
+                Ok(self.expr(Expr::Value(Value::I64(f))))
+            }
+            Symbol(i) => {
+                self.start_subexpr();
+                self.pop();
+                Ok(self.expr(Expr::GetNamed(i)))
+            }
+            Quoted(i) => Err(self.todo("quoted string")),
+            _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or Num or Ident...")),
+        }
+    }
+
+    fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>) -> Res<FatExpr<'p>> {
+        loop {
+            prefix = match self.peek() {
+                LeftParen => {
+                    self.start_subexpr();
+                    let arg = self.parse_tuple()?;
+                    self.expr(Expr::Call(Box::new(prefix), Box::new(arg)))
+                }
+                Bang => {
+                    self.start_subexpr();
+                    self.eat(Bang)?;
+                    let name = self.ident()?;
+                    self.expr(Expr::SuffixMacro(name, Box::new(prefix)))
+                }
+                Dot => {
+                    self.start_subexpr();
+                    self.eat(Dot)?;
+                    let name = self.ident()?;
+                    self.expr(Expr::FieldAccess(Box::new(prefix), name))
+                }
+                LeftSquare => {
+                    self.eat(LeftSquare)?;
+                    // a[b] or a[b] = c
+                    return Err(self.todo("index expr"));
+                }
+                _ => return Ok(prefix),
+            };
+        }
+    }
+
+    fn parse_tuple(&mut self) -> Res<FatExpr<'p>> {
+        self.start_subexpr();
+        self.eat(LeftParen)?;
+        let args = self.comma_sep_expr()?;
+        self.eat(RightParen)?;
+        Ok(self.expr(Expr::Tuple(args)))
+    }
+
+    fn parse_stmt(&mut self) -> Res<FatStmt<'p>> {
+        self.start_subexpr();
+        let annotations = self.parse_annotations()?;
+        let stmt = match self.peek() {
+            // Require name, optional body.
+            Fn => {
+                let loc = self.lexer.nth(0).span;
+                self.start_subexpr();
+                self.eat(Fn)?;
+                let name = self.ident()?;
+
+                self.eat(LeftParen)?;
+                let arg = self.parse_args()?;
+                self.eat(RightParen)?;
+
+                let ret = if Equals != self.peek() && Semicolon != self.peek() {
+                    LazyType::PendingEval(self.parse_expr()?)
+                } else {
+                    LazyType::Infer
+                };
+
+                let body = match self.peek() {
+                    Semicolon => {
+                        self.eat(Semicolon)?;
+                        None
+                    }
+                    Equals => {
+                        self.eat(Equals)?;
+                        Some(self.parse_expr()?)
+                    }
+                    _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
+                };
+
+                Stmt::DeclFunc(Func {
+                    annotations: vec![],
+                    name: Some(name),
+                    ty: LazyFnType::Pending {
+                        arg: arg.clone().make_ty(),
+                        ret,
+                    },
+                    body,
+                    arg_names: arg.names,
+                    arg_loc: vec![],
+                    arg_vars: None,
+                    capture_vars: vec![],
+                    local_constants: vec![],
+                    loc,
+                })
+            }
+            Qualifier(kind) => {
+                self.pop();
+                let binding = self.parse_type_binding()?;
+                let value = if Equals == self.peek() {
+                    self.eat(Equals)?;
+                    Some(self.parse_expr()?)
                 } else {
                     None
                 };
-                assert!(entries.next().is_none());
-
-                if body_stmts.is_empty() {
-                    result.unwrap_or_else(|| {
-                        self.expr(
-                            Expr::Value(Value::Unit),
-                            node.end_position(),
-                            Known::Foldable,
-                        )
-                    })
-                } else {
-                    let result = result.unwrap_or_else(|| {
-                        self.expr(
-                            Expr::Value(Value::Unit),
-                            node.end_position(),
-                            Known::Foldable,
-                        )
-                    });
-                    self.expr(
-                        Expr::Block {
-                            body: body_stmts,
-                            result: Box::new(result),
-                            locals: None,
-                        },
-                        node.start_position(),
-                        Known::Maybe,
-                    )
+                assert!(binding.names.len() == 1 && binding.types.len() <= 1);
+                self.eat(Semicolon)?;
+                // TODO: this could just carry the pattern forward.
+                Stmt::DeclNamed {
+                    name: binding.names[0].unwrap(),
+                    ty: binding.types.first().unwrap().clone(),
+                    value,
+                    kind,
                 }
             }
-            "map_expr" => {
-                let mut fields = vec![];
-                for child in node.children(&mut node.walk()) {
-                    if child.kind() == "field_decl" {
-                        let (name, ty) = self.parse_binding(child.child(0).unwrap());
-                        fields.push(Field {
-                            name: name.unwrap(),
-                            ty: ty.unwrap(),
-                        })
+            Semicolon => {
+                self.eat(Semicolon)?;
+                Stmt::Noop
+            }
+            _ => {
+                let e = self.parse_expr()?;
+                if self.maybe(Equals) {
+                    if let Expr::GetNamed(name) = e.deref() {
+                        let value = self.parse_expr()?;
+                        Stmt::SetNamed(*name, value)
+                    } else {
+                        return Err(self.todo("left of assign not plain ident"));
+                    }
+                } else {
+                    if !matches!(self.peek(), Semicolon | RightSquiggle) {
+                        return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
+                    }
+                    // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
+                    Stmt::Eval(e)
+                }
+            }
+        };
+        Ok(self.stmt(annotations, stmt))
+    }
+
+    // | @name(args) |
+    fn parse_annotations(&mut self) -> Res<Vec<Annotation<'p>>> {
+        let mut annotations = vec![];
+        while let At = self.peek() {
+            self.eat(At)?;
+            let name = self.ident()?;
+            let args = if LeftParen == self.peek() {
+                Some(self.parse_tuple()?)
+            } else {
+                None
+            };
+            annotations.push(Annotation { name, args });
+        }
+        Ok(annotations)
+    }
+
+    /// `Expr, Expr, ` ends at `)`
+    fn comma_sep_expr(&mut self) -> Res<Vec<FatExpr<'p>>> {
+        let mut values: Vec<FatExpr<'p>> = vec![];
+
+        if RightParen != self.peek() {
+            loop {
+                values.push(self.parse_expr()?);
+                match self.peek() {
+                    Comma => {
+                        self.eat(Comma)?;
+                        if RightParen == self.peek() {
+                            break;
+                        }
+                    }
+                    RightParen => {
+                        // No trailing comma is fine
+                        break;
+                    }
+                    _ => {
+                        return Err(self.expected("',' or ')' after tuple element"));
                     }
                 }
-                self.expr(
-                    Expr::StructLiteral(fields),
-                    node.start_position(),
-                    Known::Maybe,
-                )
             }
-            _ => todo!("parse expr for {}", node.kind()),
         }
+
+        Ok(values)
     }
 
-    fn parse_binding(&mut self, arg: Node<'_>) -> (Option<Ident<'p>>, Option<FatExpr<'p>>) {
-        assert_eq!(arg.kind(), "binding_type");
-        logln!("do_parse_binding");
-        print_but_not_fucking_stupid(0, self.src, 0, arg, 2);
-        let mut cursor = arg.walk();
+    // TODO: its a bit weird that im using a pattern for both of those.
+    //       its good for struct decl to be pattern that the instantiation has to match.
+    //       and i like struct decl being just an instantiation of a map of types so i think this is good.
+    //       do i like letting you do pattern matchy things in struct decls? That's kinda a cool side effect.
+    /// Used for fn sig args and also struct literals.
+    /// `Names: Expr, Names: Expr` ends with ')' or '}' or missing comma
+    fn parse_args(&mut self) -> Res<Pattern<'p>> {
+        let mut args = Pattern::empty(self.lexer.nth(0).span);
 
-        let name = self.parse_expr(arg.child(0).unwrap().walk());
-        if let Some(result) = arg.child(1) {
-            assert_eq!(result.kind(), ":")
+        loop {
+            match self.peek() {
+                RightParen | RightSquiggle => break,
+                Comma => return Err(self.expected("Expr")),
+                _ => {
+                    args.then(self.parse_type_binding()?);
+                    if Comma == self.peek() {
+                        // inner and optional trailing
+                        self.eat(Comma)?;
+                    } else {
+                        // No trailing comma is fine
+                        break;
+                    }
+                }
+            }
         }
 
-        let ty = arg.child(2).map(|result| self.parse_expr(result.walk()));
-        logln!("ty: {ty:?}");
-        if let Expr::GetNamed(name) = name.deref() {
-            (Some(*name), ty)
-        } else {
-            panic!("expected argument name found {}", name.log(self.pool));
+        while RightParen != self.peek() && RightSquiggle != self.peek() {
+            args.then(self.parse_type_binding()?);
+            if Comma == self.peek() {
+                // inner and optional trailing
+                self.eat(Comma)?;
+            } else {
+                // No trailing comma is fine
+                break;
+            }
         }
+
+        Ok(args)
     }
 
-    fn parse_func(&mut self, node: Node) -> Func<'p> {
-        let mut cursor = node.walk();
-        let mut entries = node.children_by_field_name("name", &mut cursor);
-        let name = entries.next().map(|result| {
-            let name = result.utf8_text(self.src).unwrap();
-            let name = self.pool.intern(name);
-            name
-        });
-        assert!(entries.next().is_none());
-        drop(entries);
-
-        let mut entries = node.children_by_field_name("proto", &mut cursor);
-        let proto = entries.next().unwrap();
-        assert!(entries.next().is_none());
-
-        let mut cursor = proto.walk();
-
-        // TODO: its actially down in the tree somehwere
-        let mut entries = proto.children_by_field_name("return_type", &mut cursor);
-        let return_type = entries.next().map(|result| self.parse_expr(result.walk()));
-        assert!(entries.next().is_none());
-        drop(entries);
-
-        let mut arg_names: Vec<Option<Ident>> = vec![];
-        let mut arg_types: Vec<Option<FatExpr>> = vec![];
-        let mut args = proto
-            .children_by_field_name("params", &mut cursor)
-            .filter(|arg| arg.kind() != ",");
-        for arg in args {
-            logln!("Arg: {}", arg.to_sexp());
-            let (names, ty) = self.parse_binding(arg);
-            arg_names.push(names);
-            arg_types.push(ty);
-        }
-
-        let mut cursor = node.walk();
-
-        let mut entries = node.children_by_field_name("body", &mut cursor);
-        let body = if let Some(body) = entries.next() {
-            logln!("FUNCTION BODY");
-            print_but_not_fucking_stupid(0, self.src, 0, body, 3);
-            logln!("=============");
-
-            Some(self.parse_expr(body.walk()))
+    // TODO: rn just one ident but support tuple for pattern matching
+    /// `Names ':' ?Expr`
+    fn parse_type_binding(&mut self) -> Res<Pattern<'p>> {
+        let loc = self.lexer.nth(0).span;
+        let name = self.ident()?;
+        let types = if Colon == self.peek() {
+            self.pop();
+            vec![Some(self.parse_expr()?)]
         } else {
-            None
+            vec![None]
         };
-        assert!(entries.next().is_none());
+        Ok(Pattern {
+            names: vec![Some(name)],
+            types,
+            loc,
+        })
+    }
 
-        let any_type_expr = self.expr(
-            Expr::Value(Value::Type(TypeId::any())),
-            node.start_position(),
-            Known::Foldable,
+    #[track_caller]
+    fn ident(&mut self) -> Res<Ident<'p>> {
+        if let TokenType::Symbol(i) = self.peek() {
+            self.pop();
+            Ok(i)
+        } else {
+            Err(self.expected("Ident"))
+        }
+    }
+
+    #[track_caller]
+    fn maybe(&mut self, ty: TokenType) -> bool {
+        if self.peek() == ty {
+            self.pop();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[track_caller]
+    fn eat(&mut self, ty: TokenType) -> Res<Span> {
+        if self.peek() == ty {
+            let t = self.pop();
+            Ok(t.span)
+        } else {
+            Err(self.expected(&format!("{ty:?}")))
+        }
+    }
+
+    // start a new subexpression
+    // this must be called once for every .expr because that calls end
+    fn start_subexpr(&mut self) {
+        self.spans.push(self.lexer.nth(0).span);
+    }
+
+    // return the span of the working expression but also add it to the previous one.
+    #[track_caller]
+    fn end_subexpr(&mut self) -> Span {
+        let done = self.spans.pop().unwrap();
+        if let Some(prev) = self.spans.last_mut() {
+            *prev = prev.merge(done);
+        }
+        done
+    }
+
+    // get a token and track its span on the working expression
+    #[track_caller]
+    fn pop(&mut self) -> Token<'p> {
+        let t = self.lexer.next();
+        let prev = self.spans.last().unwrap();
+        *self.spans.last_mut().unwrap() = prev.merge(t.span);
+        t
+    }
+
+    fn peek(&mut self) -> TokenType<'p> {
+        self.lexer.nth(0).kind
+    }
+
+    #[track_caller]
+    fn expr(&mut self, expr: Expr<'p>) -> FatExpr<'p> {
+        logln!(
+            "{}({}) EXPR {}",
+            "=".repeat(self.spans.len() * 2),
+            self.spans.len(),
+            expr.log(self.pool)
         );
-
-        let arg = match arg_types.len() {
-            // Note: this is the *type* `Unit`, NOT the *value* `unit`
-            0 => Some(any_type_expr),
-            1 => arg_types.into_iter().next().unwrap(),
-            _ => Some(
-                self.expr(
-                    Expr::Tuple(
-                        arg_types
-                            .into_iter()
-                            .map(|ty| ty.unwrap_or_else(|| any_type_expr.clone()))
-                            .collect(),
-                    ),
-                    node.start_position(),
-                    Known::Foldable,
-                ),
-            ),
-        };
-
-        let func = Func {
-            name,
-            ty: LazyFnType::of(arg, return_type),
-            body,
-            arg_names,
-            annotations: vec![],
-            arg_vars: None,
-            capture_vars: vec![],
-            local_constants: Default::default(),
-        };
-        logln!("GOT FUNC: {}", func.log(self.pool));
-        func
-    }
-
-    fn expr(&mut self, expr: Expr<'p>, loc: Point, known: Known) -> FatExpr<'p> {
         self.expr_id += 1;
         FatExpr {
             expr,
-            loc,
+            loc: self.end_subexpr(),
             id: self.expr_id,
             ty: None,
-            known,
+            known: Known::Maybe,
         }
     }
 
-    fn parse_tuple(&mut self, node: Node<'_>) -> FatExpr<'p> {
-        let mut cursor = node.walk();
-        let args = node
-            .children(&mut cursor)
-            .filter(|child| child.kind() != "(" && child.kind() != ")" && child.kind() != ",") // TODO: wtf
-            .map(|child| self.parse_expr(child.walk()));
-        let e = Expr::Tuple(args.collect());
-        self.expr(e, node.start_position(), Known::Maybe)
-    }
-
-    fn parse_ident(&self, node: Node<'_>) -> Ident<'p> {
-        let name = node.utf8_text(self.src).unwrap();
-        self.pool.intern(name)
-    }
-
-    fn check_err(&self, node: Node<'_>) {
-        if node.has_error() {
-            self.error(node);
-            panic!("Parse Error")
-        }
-    }
-
-    fn error(&self, node: Node<'_>) {
-        println!("PARSE ERROR");
-        println!("========================");
-        print_for_error(0, self.src, 0, node);
-        println!("========================");
-
-        let mut codemap = CodeMap::new();
-        let file = codemap.add_file(
-            "src".to_owned(),
-            String::from_utf8(self.src.to_owned()).unwrap(),
+    #[track_caller]
+    fn stmt(&mut self, annotations: Vec<Annotation<'p>>, stmt: Stmt<'p>) -> FatStmt<'p> {
+        logln!(
+            "{}({}) STMT {}",
+            "=".repeat(self.spans.len() * 2),
+            self.spans.len(),
+            stmt.log(self.pool)
         );
+        FatStmt {
+            stmt,
+            annotations,
+            loc: self.end_subexpr(),
+        }
+    }
 
-        let d = Diagnostic {
-            level: Level::Error,
-            message: "Parse Error".to_owned(),
-            code: None,
-            spans: collect_errs(file.span, node)
-                .into_iter()
-                .map(|span| SpanLabel {
-                    span,
-                    label: None,
-                    style: SpanStyle::Primary,
-                })
-                .collect(),
+    #[track_caller]
+    fn todo(&mut self, msg: &str) -> ParseErr {
+        self.error_next(format!("Not yet implemented: {msg}."))
+    }
+
+    #[track_caller]
+    fn error_next(&mut self, message: String) -> ParseErr {
+        let token = self.lexer.next();
+        let last = if self.spans.len() < 2 {
+            *self.spans.last().unwrap()
+        } else {
+            self.spans[self.spans.len() - 1]
         };
-        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(&codemap));
-        emitter.emit(&[d]);
+        ParseErr {
+            loc: Location::caller(),
+            diagnostic: vec![Diagnostic {
+                level: Level::Error,
+                message,
+                code: None,
+                spans: vec![
+                    SpanLabel {
+                        span: last,
+                        label: None,
+                        style: SpanStyle::Secondary,
+                    },
+                    SpanLabel {
+                        span: token.span,
+                        label: Some(String::from("next")),
+                        style: SpanStyle::Primary,
+                    },
+                ],
+            }],
+        }
     }
 
-    // fn find_one(&mut self, cursor: &mut TreeCursor, field_name: &str) {
-    //     let node = cursor.node();
-    //     println!("Parse Stmt {}", node.to_sexp());
-    //     let mut entries = node.children_by_field_name(field_name, cursor);
-    //     let result = entries.next().unwrap();
-    //     assert!(entries.next().is_none());
-    //     result
-    // }
-}
-
-fn collect_errs(root: Span, node: Node<'_>) -> Vec<Span> {
-    let mut errs = if node.is_error() {
-        let range = node.byte_range();
-        return vec![root.subspan(range.start as u64, range.end as u64)];
-    } else {
-        vec![]
-    };
-
-    for child in node.children(&mut node.walk()) {
-        errs.extend(collect_errs(root, child));
+    #[track_caller]
+    fn expected(&mut self, msg: &str) -> ParseErr {
+        let s = format!("Expected: {msg} but found {:?}", self.peek());
+        self.error_next(s)
     }
-    errs
 }

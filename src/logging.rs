@@ -368,9 +368,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
 
 impl<'p> PoolLog<'p> for DebugInfo<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        let loc = format!("{:?}", self.src_loc);
-        let width = 10;
-        format!("// {:width$} | {} ", loc, self.internal_loc)
+        format!("// {} ", self.internal_loc)
     }
 }
 
