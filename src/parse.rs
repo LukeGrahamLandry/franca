@@ -224,7 +224,14 @@ impl<'a, 'p> Parser<'a, 'p> {
         self.eat(LeftParen)?;
         let args = self.comma_sep_expr()?;
         self.eat(RightParen)?;
-        Ok(self.expr(Expr::Tuple(args)))
+        Ok(match args.len() {
+            0 => self.expr(Expr::Value(Value::Unit)),
+            1 => {
+                self.end_subexpr();
+                args.into_iter().next().unwrap()
+            }
+            _ => self.expr(Expr::Tuple(args)),
+        })
     }
 
     fn parse_stmt(&mut self) -> Res<FatStmt<'p>> {

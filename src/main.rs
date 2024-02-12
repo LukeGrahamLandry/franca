@@ -163,7 +163,7 @@ fn run_main<'a: 'p, 'p>(
                 let e = result.unwrap_err();
                 let d = vec![Diagnostic {
                     level: Level::Error,
-                    message: format!("{:?}", e.reason),
+                    message: e.reason.log(interp.program, pool),
                     code: None,
                     spans: vec![SpanLabel {
                         span: e.loc.unwrap(),

@@ -137,7 +137,8 @@ use crate::{
         Expr, FatExpr, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var,
     },
     interp::{
-        Bc, CompileError, DebugInfo, DebugState, FnBody, Interp, StackOffset, StackRange, Value,
+        Bc, CErr, CompileError, DebugInfo, DebugState, FnBody, Interp, StackOffset, StackRange,
+        Value,
     },
     pool::StringPool,
 };
@@ -159,11 +160,7 @@ impl<'p> Program<'p> {
 
             TypeInfo::Struct(_) => "Struct()".to_string(),
             TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
-            TypeInfo::Fn(f) => format!(
-                "fn({}) {}",
-                self.log_type(f.param),
-                self.log_type(f.returns)
-            ),
+            TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
             TypeInfo::Tuple(v) => {
                 let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
                 format!("Tuple({})", v.join(", "))
@@ -610,6 +607,20 @@ impl<'p> DebugState<'p> {
                     ret.log(pool)
                 )
             }
+        }
+    }
+}
+
+impl<'p> CErr<'p> {
+    pub fn log(&self, program: &Program<'p>, pool: &StringPool<'p>) -> String {
+        match self {
+            CErr::UndeclaredIdent(i) => format!("Undeclared Ident: {i:?} = {}", pool.get(*i)),
+            CErr::TypeCheck(found, expected, msg) => format!(
+                "Type check expected {expected:?} = {} but found {found:?} = {}\n{msg}",
+                program.log_type(*expected),
+                program.log_type(*found)
+            ),
+            _ => format!("{:?}", self),
         }
     }
 }

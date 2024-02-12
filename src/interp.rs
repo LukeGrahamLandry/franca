@@ -103,9 +103,16 @@ pub struct StackRange {
 }
 
 impl StackRange {
-    fn index(&self, offset: usize) -> StackOffset {
+    #[track_caller]
+    fn offset(&self, offset: usize) -> StackOffset {
         debug_assert!(offset < self.count);
         StackOffset(self.first.0 + offset)
+    }
+
+    #[track_caller]
+    fn single(&self) -> StackOffset {
+        debug_assert_eq!(self.count, 1);
+        self.first
     }
 }
 
@@ -187,13 +194,13 @@ pub enum Bc<'p> {
         target: StackOffset,
     },
 }
+
 #[derive(Debug, Clone)]
 pub struct CallFrame<'p> {
     pub stack_base: StackAbsolute,
     current_func: FuncId,
     current_ip: usize,
-    return_slot: StackAbsolute,
-    return_count: usize,
+    return_slot: StackAbsoluteRange,
     is_rust_marker: bool,
     pub debug_name: Ident<'p>,
     when: ExecTime,
@@ -220,25 +227,6 @@ pub struct FnBody<'p> {
     pub why: String,
     pub last_loc: Span,
     pub constants: SharedConstants<'p>,
-}
-
-impl<'p> FnBody<'p> {
-    #[track_caller]
-    fn push(&mut self, inst: Bc<'p>) -> usize {
-        let ip = self.insts.len();
-        self.insts.push(inst);
-
-        #[cfg(feature = "some_log")]
-        {
-            self.debug.push(DebugInfo {
-                internal_loc: Location::caller(),
-                src_loc: self.last_loc,
-                p: Default::default(),
-            });
-            debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
-        }
-        ip
-    }
 }
 
 //
@@ -305,6 +293,7 @@ pub enum CErr<'p> {
     StackDepthLimit,
     AddrRvalue(FatExpr<'p>),
     TypeError(&'static str, Value),
+    TypeCheck(TypeId, TypeId, &'static str),
     Msg(String),
 }
 
@@ -387,8 +376,10 @@ impl<'a, 'p> Interp<'a, 'p> {
             stack_base: StackAbsolute(0),
             current_func: FuncId(0), // TODO: actually reserve 0 cause i do this a lot
             current_ip: 0,
-            return_slot: StackAbsolute(0),
-            return_count: 0,
+            return_slot: StackAbsoluteRange {
+                first: StackAbsolute(0),
+                count: 0,
+            },
             is_rust_marker: true, // used for exiting the run loop. this is the only place we set it true.
             debug_name: self.pool.intern("@interp::run@"),
             when,
@@ -447,8 +438,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.take_slots(arg);
                     let key = (f, arg);
                     if let Some(prev) = self.program.generics_memo.get(&key).cloned() {
-                        let ret_first = self.slot_to_index(ret.first);
-                        self.expand_maybe_tuple(prev.clone(), ret_first, ret.count)?;
+                        let ret = self.range_to_index(ret);
+                        self.expand_maybe_tuple(prev.clone(), ret)?;
                     } else {
                         let when = self.call_stack.last().unwrap().when;
                         self.push_callframe(f, ret, key.1, when)?;
@@ -483,7 +474,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.take_slots(arg);
                     let value = self.runtime_builtin(name, arg.clone())?;
                     let abs = self.range_to_index(ret);
-                    self.expand_maybe_tuple(value, abs.first, abs.count)?;
+                    self.expand_maybe_tuple(value, abs)?;
                     self.bump_ip();
                 }
                 &Bc::Ret(slot) => {
@@ -494,11 +485,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                         "return from {:?} --- {:?} --- to {:?} count:{}",
                         slot,
                         value,
-                        frame.return_slot,
-                        frame.return_count
+                        frame.return_slot.first,
+                        frame.return_slot.count
                     );
 
-                    self.expand_maybe_tuple(value, frame.return_slot, frame.return_count)?;
+                    self.expand_maybe_tuple(value, frame.return_slot)?;
 
                     // Release our stack space.
                     let size = self.value_stack.len() - frame.stack_base.0;
@@ -538,7 +529,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 &Bc::CloneCreateTuple { values, target } => {
                     let values = (0..values.count)
-                        .map(|i| self.clone_slot(values.index(i)))
+                        .map(|i| self.clone_slot(values.offset(i)))
                         .collect();
                     *self.get_slot_mut(target) = Value::Tuple {
                         container_type: TypeId::any(),
@@ -559,29 +550,29 @@ impl<'a, 'p> Interp<'a, 'p> {
                 &Bc::CloneRange { from, to } => {
                     debug_assert_eq!(from.count, to.count);
                     for i in 0..from.count {
-                        let v = self.clone_slot(from.index(i));
-                        *self.get_slot_mut(to.index(i)) = v;
+                        let v = self.clone_slot(from.offset(i));
+                        *self.get_slot_mut(to.offset(i)) = v;
                     }
                     self.bump_ip();
                 }
                 &Bc::MoveRange { from, to } => {
                     debug_assert_eq!(from.count, to.count);
                     for i in 0..from.count {
-                        let v = self.take_slot(from.index(i));
-                        *self.get_slot_mut(to.index(i)) = v;
+                        let v = self.take_slot(from.offset(i));
+                        *self.get_slot_mut(to.offset(i)) = v;
                     }
                     self.bump_ip();
                 }
                 &Bc::ExpandTuple { from, to } => {
                     let tuple = self.take_slot(from);
-                    let slot = self.slot_to_index(to.first);
-                    self.expand_maybe_tuple(tuple, slot, to.count)?;
+                    let to = self.range_to_index(to);
+                    self.expand_maybe_tuple(tuple, to)?;
                     self.bump_ip();
                 }
                 &Bc::Drop(slot) => {
                     assert_ne!(slot.count, 0);
                     for i in 0..slot.count {
-                        let _ = self.take_slot(slot.index(i));
+                        let _ = self.take_slot(slot.offset(i));
                     }
                     self.bump_ip();
                 }
@@ -597,24 +588,19 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    fn expand_maybe_tuple(
-        &mut self,
-        value: Value,
-        first: StackAbsolute,
-        expected_count: usize,
-    ) -> Res<'p, ()> {
-        logln!("Expand {:?} TO {} slots", value, expected_count);
-        match expected_count.cmp(&1) {
+    fn expand_maybe_tuple(&mut self, value: Value, target: StackAbsoluteRange) -> Res<'p, ()> {
+        logln!("Expand {:?} TO {} slots", value, target.count);
+        match target.count.cmp(&1) {
             std::cmp::Ordering::Equal => {
-                self.value_stack[first.0] = value;
+                self.value_stack[target.first.0] = value;
             }
             std::cmp::Ordering::Less => {
                 todo!("zero argument return. probably just works but untested.")
             }
             std::cmp::Ordering::Greater => {
                 let values = self.to_seq(value)?;
-                assert_eq!(self, values.len(), expected_count);
-                let base = first.0;
+                assert_eq!(self, values.len(), target.count);
+                let base = target.first.0;
                 for (i, v) in values.into_iter().enumerate() {
                     // TODO: this needs to be a macro cause the cloning is a problem
                     assert!(
@@ -875,10 +861,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "Fn" => {
                 let (arg, ret) = self.to_pair(arg)?;
                 let (arg, ret) = (self.to_type(arg)?, self.to_type(ret)?);
-                let ty = self.program.intern_type(TypeInfo::Fn(FnType {
-                    param: arg,
-                    returns: ret,
-                }));
+                let ty = self.program.intern_type(TypeInfo::Fn(FnType { arg, ret }));
                 Value::Type(ty)
             }
             "add" => bin_int!(self, +, arg, Value::I64),
@@ -922,7 +905,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         );
         let constants = func.unwrap().constants.clone().bake();
         // Calling Convention: arguments passed to a function are moved out of your stack.
-        let return_slot = self.slot_to_index(ret.first); // TODO: what about tuple returns?
+        let return_slot = self.range_to_index(ret);
         let stack_base = self.value_stack.len(); // Our stack includes the argument but not the return slot.
         self.push_expanded(arg);
         let debug_name = self.program.funcs[f.0].get_name(self.pool);
@@ -931,7 +914,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             current_func: f,
             current_ip: 0,
             return_slot,
-            return_count: ret.count,
             is_rust_marker: false,
             debug_name,
             when,
@@ -1168,7 +1150,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             for (i, var) in arguments.iter().enumerate() {
                 // This always starts at 0 for normal functions, but for inlined closures, the args could be anywhere because we're sharing the parent's stack frame.
                 let range = StackRange {
-                    first: arg_range.index(i),
+                    first: arg_range.offset(i),
                     count: 1,
                 };
                 let prev = result.vars.insert(*var, (range, TypeId::any()));
@@ -1201,7 +1183,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     name: self.pool.intern("inline"),
                     args: None,
                 });
-                let ret = result.reserve_slots(self.program.slot_count(ret), ret);
+                let ret = result.reserve_slots(self.program, ret);
                 let name = unwrap!(self, func.name, "fn no body needs name");
                 result.push(Bc::CallBuiltin {
                     name,
@@ -1262,7 +1244,9 @@ impl<'a, 'p> Interp<'a, 'p> {
         let name = self.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:inline_call", name));
         // This move ensures they end up at the base of the renumbered stack. TODO: it can't be capturing
-        let arg_slots = result.reserve_slots(arg.count, TypeId::any()); // These are included in the new function's stack
+        let (arg_ty, _) = self.program.funcs[f.0].ty.unwrap();
+        let arg_slots = result.reserve_slots(self.program, arg_ty); // These are included in the new function's stack
+        debug_assert_eq!(arg_slots.count, arg.count);
         result.push(Bc::MoveRange {
             from: arg,
             to: arg_slots,
@@ -1320,7 +1304,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 dropping,
                 kind,
             } => {
-                let ty = invert(
+                let expected_ty = invert(
                     ty.clone()
                         .map(|ty| self.cached_eval_expr(&result.constants, ty)),
                 )?;
@@ -1338,15 +1322,23 @@ impl<'a, 'p> Interp<'a, 'p> {
                             .0
                         }
                     };
-                    let ty = ty
+                    let ty = expected_ty
                         .map(|ty| self.to_type(ty).unwrap())
                         .unwrap_or_else(|| self.program.type_of(&value));
                     result.constants.insert(*name, (value, ty));
                     return Ok(());
                 }
 
+                // match value {
+                //     Some(value) => {
+                //         let (init, init_ty) = self.compile_expr(result, value)?;
+
+                //     }
+                //     None => todo!(),
+                // }
+
                 let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
-                let ty_slots = if let Some(ty) = ty {
+                let ty_slots = if let Some(ty) = expected_ty {
                     let ty = self.to_type(ty)?;
                     Some(self.program.slot_count(ty))
                 } else {
@@ -1354,16 +1346,18 @@ impl<'a, 'p> Interp<'a, 'p> {
                 };
 
                 let value = match (value, ty_slots) {
-                    (None, Some(slots)) => {
-                        (result.reserve_slots(slots, TypeId::any()), TypeId::any())
-                    }
+                    (None, Some(slots)) => (
+                        result.reserve_slots_raw(self.program, slots, TypeId::any()),
+                        TypeId::any(),
+                    ),
                     (Some(value), None) => value,
                     (Some((value, ty)), Some(slots)) => {
                         if slots == value.count {
                             (value, ty)
                         } else {
                             assert_eq!(self, value.count, 1);
-                            let expanded = result.reserve_slots(slots, TypeId::any());
+                            let expanded =
+                                result.reserve_slots_raw(self.program, slots, TypeId::any());
                             result.push(Bc::ExpandTuple {
                                 from: value.first,
                                 to: expanded,
@@ -1372,7 +1366,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                         }
                     }
                     // TODO: make this an error. dont guess.
-                    (None, None) => (result.reserve_slots(1, TypeId::any()), TypeId::any()),
+                    (None, None) => (
+                        result.reserve_slots_raw(self.program, 1, TypeId::any()),
+                        TypeId::any(),
+                    ),
                 };
                 let prev = result.vars.insert(*name, value);
                 assert!(self, prev.is_none(), "shadow is still new var");
@@ -1407,8 +1404,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 assert_eq!(self, value.count, slot.count);
                 for i in 0..value.count {
                     result.push(Bc::Move {
-                        from: value.index(i),
-                        to: slot.index(i),
+                        from: value.offset(i),
+                        to: slot.offset(i),
                     });
                 }
             }
@@ -1446,8 +1443,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::Closure(func) => {
                 let id = self.program.add_func(*func.clone());
                 self.ensure_compiled(&result.constants, id, result.when)?;
-                let ty = self.program.func_type(id);
-                (result.load_constant(Value::GetFn(id), ty), ty)
+                result.load_constant_new(self.program, Value::GetFn(id))
             }
             Expr::Call(f, arg) => {
                 if let Expr::GetNamed(i) = f.as_ref().deref() {
@@ -1455,10 +1451,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let (mut arg, arg_ty_found) = self.compile_expr(result, arg)?;
                         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
                         if arg.count == 0 {
-                            arg = result.load_constant(
-                                Value::Unit,
-                                self.program.intern_type(TypeInfo::Unit),
-                            );
+                            arg = result.load_constant_new(self.program, Value::Unit).0;
                         }
                         // Note: f might not be compiled yet, we'll find out the first time we try to call it.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
@@ -1483,16 +1476,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                                 ExecTime::Comptime,
                                 "Cannot call function returning type at runtime."
                             );
-                            let cache_arg = result.reserve_slots(1, arg_ty_expected);
+                            let cache_arg = result.reserve_slots(self.program, TypeId::any());
                             result.push(Bc::CloneCreateTuple {
                                 values: arg,
-                                target: cache_arg.first,
+                                target: cache_arg.single(),
                             });
                             Some(cache_arg)
                         } else {
                             None
                         };
-                        let ret = result.reserve_slots(self.return_stack_slots(f), ret_ty_expected);
+                        let ret = result.reserve_slots(self.program, ret_ty_expected);
+                        assert_eq!(self, self.return_stack_slots(f), ret.count);
                         let func = &self.program.funcs[f.0];
                         if returns_type {
                             result.push(Bc::CallDirectMaybeCached { f, ret, arg });
@@ -1506,20 +1500,26 @@ impl<'a, 'p> Interp<'a, 'p> {
                             result.push(Bc::CallDirect { f, ret, arg });
                         }
                         if let Some(cache_arg) = cache_arg {
-                            let f_arg_ret = result.reserve_slots(3, TypeId::unit());
+                            let ty = self.program.intern_type(TypeInfo::Tuple(vec![
+                                TypeId::any(),
+                                TypeId::any(),
+                                TypeId::any(),
+                            ]));
+                            let f_arg_ret = result.reserve_slots(self.program, ty);
+                            debug_assert_eq!(f_arg_ret.count, 3);
                             result.push(Bc::LoadConstant {
-                                slot: f_arg_ret.index(0),
+                                slot: f_arg_ret.offset(0),
                                 value: Value::GetFn(f),
                             });
                             result.push(Bc::Move {
-                                from: cache_arg.first,
-                                to: f_arg_ret.index(1),
+                                from: cache_arg.single(),
+                                to: f_arg_ret.offset(1),
                             });
                             result.push(Bc::CloneCreateTuple {
                                 values: ret,
-                                target: f_arg_ret.index(2),
+                                target: f_arg_ret.offset(2),
                             });
-                            let nothing = result.reserve_slots(1, TypeId::unit());
+                            let nothing = result.reserve_slots_raw(self.program, 1, TypeId::unit());
                             // TODO: put next to for call.
                             result.push(Bc::CallBuiltin {
                                 name: self.pool.intern("comptime_cache_insert"),
@@ -1540,14 +1540,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 logln!("dynamic {}", f.log(self.pool));
                 let (f, func_ty) = self.compile_expr(result, f)?;
                 let ret_ty = if let TypeInfo::Fn(ty) = &self.program.types[func_ty.0] {
-                    ty.returns
+                    ty.ret
                 } else {
-                    // TODO
-                    TypeId::any()
+                    assert!(self, func_ty.is_any());
+                    TypeId::any() // TODO
                 };
                 assert_eq!(self, f.count, 1);
-                // TODO: not all function ptrs have 1 return value
-                let ret = result.reserve_slots(1, TypeId::any());
+                let ret = result.reserve_slots(self.program, ret_ty);
                 result.push(Bc::CallDynamic {
                     f: f.first,
                     ret,
@@ -1583,6 +1582,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(values) => {
+                debug_assert!(values.len() > 1, "no trivial tuples");
                 let values: Res<'p, Vec<_>> = values
                     .iter()
                     .map(|v| self.compile_expr(result, v))
@@ -1592,8 +1592,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let types: Vec<_> = values.iter().map(|(_, ty)| *ty).collect();
                 let ty = self.program.intern_type(TypeInfo::Tuple(types));
 
-                let ret = result.reserve_slots(required_slots, ty);
-                // TODO: they might already be consecutive
+                let ret = result.reserve_slots(self.program, ty);
+                // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
                 let base = ret.first.0;
                 let mut count = 0;
                 for (v, ty) in values {
@@ -1611,7 +1611,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
                 if let Some((from, ty)) = result.vars.get(var).cloned() {
-                    let to = result.reserve_slots(from.count, ty);
+                    let to = result.reserve_slots(self.program, ty);
+                    debug_assert_eq!(from.count, to.count);
                     if from.count == 1 {
                         result.push(Bc::Clone {
                             from: from.first,
@@ -1622,12 +1623,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     (to, ty)
                 } else if let Some((value, ty)) = result.constants.get(var) {
-                    let slot = result.reserve_slots(self.program.slot_count(ty), ty);
-                    result.push(Bc::LoadConstant {
-                        slot: slot.first,
-                        value: value.clone(),
-                    });
-                    (slot, ty)
+                    result.load_constant_new(self.program, value)
                 } else {
                     println!("VARS: {:?}", result.vars);
                     println!("GLOBALS: {:?}", result.constants);
@@ -1645,8 +1641,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(self, func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(&result.constants, func, ExecTime::Comptime)?;
-                    let ty = self.program.func_type(func);
-                    (result.load_constant(Value::GetFn(func), ty), ty)
+                    result.load_constant_new(self.program, Value::GetFn(func))
                 } else {
                     ice!(
                         self,
@@ -1674,13 +1669,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                     container_type: TypeId::any(),
                     values: fields,
                 };
-                let map = result.load_constant(map, TypeId::any()); // TODO
-                (map, TypeId::any())
+                result.load_constant_new(self.program, map)
             }
-            Expr::Value(value) => {
-                let ty = self.program.type_of(value);
-                (result.load_constant(value.clone(), ty), ty)
-            }
+            Expr::Value(value) => result.load_constant_new(self.program, value.clone()),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1690,7 +1681,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         Expr::GetVar(var) => {
                             if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
                                 let ptr_ty = self.program.ptr_type(value_ty);
-                                let addr_slot = result.reserve_slots(1, ptr_ty);
+                                let addr_slot = result.reserve_slots(self.program, ptr_ty);
                                 result.push(Bc::AbsoluteStackAddr {
                                     of: stack_slot,
                                     to: addr_slot.first,
@@ -1709,8 +1700,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
                         let ty = self.type_of(result, arg)?;
-                        let tyty = self.program.intern_type(TypeInfo::Type);
-                        (result.load_constant(Value::Type(ty), tyty), tyty)
+                        result.load_constant_new(self.program, Value::Type(ty))
                     }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
@@ -1719,9 +1709,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         assert!(self, res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
-                        let ty = self.program.intern_type(TypeInfo::Unit);
-
-                        (result.load_constant(Value::Unit, ty), ty)
+                        result.load_constant_new(self.program, Value::Unit)
                     }
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
@@ -1871,8 +1859,10 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // Resolve the lazy types for Arg and Ret
-    fn infer_types(&mut self, constants: &SharedConstants<'p>, func: FuncId) -> Res<'p, ()> {
-        match self.program.funcs[func.0].ty.clone() {
+    fn infer_types(&mut self, constants: &SharedConstants<'p>, func: FuncId) -> Res<'p, FnType> {
+        let f = &self.program.funcs[func.0];
+        self.last_loc = Some(f.loc);
+        match f.ty.clone() {
             LazyFnType::Pending { arg, ret } => {
                 let state = DebugState::ResolveFnType(func, arg.clone(), ret.clone());
                 self.push_state(&state);
@@ -1901,7 +1891,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             LazyFnType::Finished(_, _) => {} // easy
         }
-        Ok(())
+        // TODO: go find everywhere that calls this and then immediatly unwraps.
+        let (arg, ret) = self.program.funcs[func.0].ty.unwrap();
+        Ok(FnType { arg, ret })
     }
 
     fn unit_to_type(&mut self) -> LazyFnType<'p> {
@@ -2110,6 +2102,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
+    // TODO: make this not a special case.
     fn emit_call_if(
         &mut self,
         result: &mut FnBody<'p>,
@@ -2132,10 +2125,18 @@ impl<'a, 'p> Interp<'a, 'p> {
             ice!(self, "if args must be tuple");
         };
 
-        let arg = result.load_constant(Value::Unit, self.program.intern_type(TypeInfo::Unit));
-        // TODO: if returning tuples
-        let ret = result.reserve_slots(1, TypeId::any());
+        let true_ty = self.infer_types(&result.constants, if_true)?;
+        let unit = self.program.intern_type(TypeInfo::Unit);
+        let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
+        self.type_check_eq(true_ty.arg, unit, sig)?;
+        let false_ty = self.infer_types(&result.constants, if_false)?;
+        self.type_check_eq(false_ty.arg, unit, sig)?;
+        self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
 
+        // TODO: if returning tuples
+        let ret = result.reserve_slots(self.program, true_ty.ret);
+
+        let arg = result.load_constant_new(self.program, Value::Unit).0; // Note: before you start doing ip stuff!
         let name = self.pool.intern("builtin:if");
         let branch_ip = result.push(Bc::DebugMarker("patch", name));
         let true_ip = result.insts.len();
@@ -2153,8 +2154,17 @@ impl<'a, 'p> Interp<'a, 'p> {
         result.insts[jump_over_false] = Bc::Goto {
             ip: result.insts.len(),
         };
-        // TODO: check branches are same ty[e]
-        Ok((ret, TypeId::any()))
+
+        Ok((ret, true_ty.ret))
+    }
+
+    #[track_caller]
+    fn type_check_eq(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+        if found == expected {
+            Ok(())
+        } else {
+            err!(self, CErr::TypeCheck(found, expected, msg))
+        }
     }
 }
 
@@ -2164,35 +2174,64 @@ pub enum ExecTime {
     Runtime,
 }
 
-impl FnBody<'_> {
-    fn reserve_slots(&mut self, count: usize, ty: TypeId) -> StackRange {
+impl<'p> FnBody<'p> {
+    fn reserve_slots_raw(&mut self, program: &Program<'p>, count: usize, ty: TypeId) -> StackRange {
+        let first = StackOffset(self.stack_slots);
         if ty.is_any() {
+            // debug_assert_eq!(count, 1, "no any tuple");
             for _ in 0..count {
                 self.slot_types.push(TypeId::any());
             }
+            self.stack_slots += count;
         } else if count == 1 {
             self.slot_types.push(ty);
+            self.stack_slots += count;
         } else {
-            // TODO: expand from tuple
-            for _ in 0..count {
-                self.slot_types.push(TypeId::any());
+            let types = program.tuple_types(ty).unwrap();
+            let mut found = 0;
+            for ty in types {
+                found += self.reserve_slots(program, *ty).count;
             }
+            debug_assert_eq!(found, count, "bad tuple size");
+            // Note: don't bump self.stack_slots here.
         }
-        let range = StackRange {
-            first: StackOffset(self.stack_slots),
-            count,
-        };
-        self.stack_slots += count;
-        range
+        StackRange { first, count }
     }
 
-    fn load_constant(&mut self, value: Value, ty: TypeId) -> StackRange {
-        let to = self.reserve_slots(1, ty);
+    fn reserve_slots(&mut self, program: &Program<'p>, ty: TypeId) -> StackRange {
+        let count = program.slot_count(ty);
+        self.reserve_slots_raw(program, count, ty)
+    }
+
+    fn load_constant_new(
+        &mut self,
+        program: &mut Program<'p>,
+        value: Value,
+    ) -> (StackRange, TypeId) {
+        let ty = program.type_of(&value);
+        let to = self.reserve_slots(program, ty);
         self.push(Bc::LoadConstant {
             slot: to.first,
             value,
         });
-        to
+        (to, ty)
+    }
+
+    #[track_caller]
+    fn push(&mut self, inst: Bc<'p>) -> usize {
+        let ip = self.insts.len();
+        self.insts.push(inst);
+
+        #[cfg(feature = "some_log")]
+        {
+            self.debug.push(DebugInfo {
+                internal_loc: Location::caller(),
+                src_loc: self.last_loc,
+                p: Default::default(),
+            });
+            debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
+        }
+        ip
     }
 }
 

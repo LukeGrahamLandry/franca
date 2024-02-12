@@ -1,5 +1,10 @@
 
 
+I really like the Zed thing where you get a file of all the errors. 
+It's great for mass changes like adding an argument to a function when you're always in a context where you can trivially get the arg anyway. 
+Tho sometimes the same place shows up twice which is unfortunate. 
+Same err from rustc and rust-analyzer? 
+
 ## parser rewrite (Feb 10)
 
 Normal assign left can be a tuple for pattern match-y assign multiple at once (like rust/python).

@@ -23,8 +23,8 @@ pub struct TypeId(pub usize);
 #[derive(Clone, PartialEq, Hash, Eq, Debug)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
-    pub param: TypeId,
-    pub returns: TypeId,
+    pub arg: TypeId,
+    pub ret: TypeId,
 }
 
 impl TypeId {
@@ -165,7 +165,7 @@ impl<'p> Pattern<'p> {
     pub fn make_ty(self) -> LazyType<'p> {
         match self.types.len() {
             // Note: this is the *type* `Unit`, NOT the *value* `unit`
-            0 => LazyType::Infer,
+            0 => LazyType::Finished(TypeId::unit()),
             1 => {
                 let ty = self.types.into_iter().next().unwrap();
                 match ty {
@@ -404,6 +404,9 @@ impl<'p> Default for Program<'p> {
 }
 
 impl<'p> Program<'p> {
+    // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
+    //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
+    //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub fn slot_count(&self, ty: TypeId) -> usize {
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
@@ -447,6 +450,10 @@ impl<'p> Program<'p> {
         ty == &TypeInfo::Type
     }
 
+    // TODO: The world might be a better place if the root types were in TypeId,
+    //       So you didn't need to do the interning dance for i64/f64/unit/any
+    //       The important thing is that they're copy and quick to compare no matter how much nesting.
+    //       Tho number types might become something with flags so maybe just Type, Unit, Any should be blessed.
     pub fn type_of(&mut self, v: &Value) -> TypeId {
         match v {
             Value::F64(_) => todo!(),
@@ -470,11 +477,8 @@ impl<'p> Program<'p> {
                 value,
             } => *container_type,
             Value::Type(_) => self.intern_type(TypeInfo::Type),
-            Value::GetFn(f) => {
-                // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
-                let (param, returns) = self.funcs[f.0].ty.unwrap();
-                self.intern_type(TypeInfo::Fn(FnType { param, returns }))
-            }
+            // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
+            Value::GetFn(f) => self.func_type(*f),
             Value::Unit => self.intern_type(TypeInfo::Unit),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Slice(_) => todo!(),
@@ -494,12 +498,21 @@ impl<'p> Program<'p> {
     }
 
     pub fn func_type(&mut self, id: FuncId) -> TypeId {
-        let (param, returns) = self.funcs[id.0].ty.unwrap();
-        self.intern_type(TypeInfo::Fn(FnType { param, returns }))
+        let (arg, ret) = self.funcs[id.0].ty.unwrap();
+        self.intern_type(TypeInfo::Fn(FnType { arg, ret }))
     }
 
     pub fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Ptr(value_ty))
+    }
+
+    pub fn tuple_types(&self, ty: TypeId) -> Option<&[TypeId]> {
+        match &self.types[ty.0] {
+            TypeInfo::Tuple(types) => Some(types),
+            TypeInfo::Struct(_) => todo!(),
+            TypeInfo::Unique(_, _) => todo!(),
+            _ => None,
+        }
     }
 }
 
