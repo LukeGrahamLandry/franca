@@ -157,7 +157,6 @@ impl<'p> Program<'p> {
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
             TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
-
             TypeInfo::Struct(_) => "Struct()".to_string(),
             TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
             TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
@@ -373,7 +372,11 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut f = String::new();
         writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when);
-        writeln!(f, "TYPES: {:?}", &self.slot_types);
+        writeln!(f, "TYPES: ");
+        for (i, ty) in self.slot_types.iter().enumerate() {
+            write!(f, "${i}:{ty:?}, ");
+        }
+        writeln!(f);
         let width = 75;
         for (i, bc) in self.insts.iter().enumerate() {
             let bc = format!("{i}. {}", bc.log(pool));
@@ -460,11 +463,7 @@ impl Debug for StackRange {
 
 impl Debug for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_any() {
-            write!(f, "TyAny")
-        } else {
-            write!(f, "Ty{}", self.0)
-        }
+        write!(f, "Ty{}", self.0)
     }
 }
 
@@ -616,10 +615,11 @@ impl<'p> CErr<'p> {
         match self {
             CErr::UndeclaredIdent(i) => format!("Undeclared Ident: {i:?} = {}", pool.get(*i)),
             CErr::TypeCheck(found, expected, msg) => format!(
-                "Type check expected {expected:?} = {} but found {found:?} = {}\n{msg}",
+                "{msg}. Type check expected {expected:?} = {} but found {found:?} = {}",
                 program.log_type(*expected),
                 program.log_type(*found)
             ),
+            CErr::Msg(s) => s.clone(),
             _ => format!("{:?}", self),
         }
     }

@@ -179,7 +179,20 @@ fn run_main<'a: 'p, 'p>(
             println!("FN {name:?} = 'MAIN' NOT FOUND");
         }
     } else {
-        println!("{:?}", result.unwrap_err());
+        let e = result.unwrap_err();
+        let d = vec![Diagnostic {
+            level: Level::Error,
+            message: e.reason.log(interp.program, pool),
+            code: None,
+            spans: vec![SpanLabel {
+                span: e.loc.unwrap(),
+                label: None,
+                style: SpanStyle::Primary,
+            }],
+        }];
+        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(&codemap));
+        emitter.emit(&d);
+        println!("{}", e.trace);
     }
 
     #[cfg(feature = "some_log")]

@@ -17,7 +17,7 @@ use std::{
 use codemap::Span;
 use interp_derive::InterpSend;
 
-use crate::ast::{Annotation, VarType};
+use crate::ast::{Annotation, FatStmt, VarType};
 use crate::logging::PoolLog;
 use crate::{
     ast::{
@@ -418,8 +418,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         loop {
             self.update_debug();
             let i = self.next_inst();
-            logln!("I: {:?}", i.log(self.pool));
             self.log_stack();
+            logln!("I: {:?}", i.log(self.pool));
             match i {
                 &Bc::CallDirect { f, ret, arg } => {
                     // preincrement our ip because ret doesn't do it.
@@ -740,9 +740,18 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::I64(addr.count as i64)
             }
             "Ptr" => {
+                log!("Ptr: {:?} =", arg);
                 // TODO: pointers shouldn't have a length
-                let ty = self.to_type(arg)?;
-                Value::Type(self.program.intern_type(TypeInfo::Ptr(ty)))
+                let inner_ty = self.to_type(arg)?;
+                logln!("{}", self.program.log_type(inner_ty));
+                let ty = self.program.intern_type(TypeInfo::Ptr(inner_ty));
+                // println!(
+                //     "{} => {}",
+                //     self.program.log_type(inner_ty),
+                //     self.program.log_type(ty)
+                // );
+                // todo!();
+                Value::Type(ty)
             }
             "Slice" => {
                 let ty = self.to_type(arg)?;
@@ -859,9 +868,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             "Fn" => {
+                // println!("Fn: {:?}", arg);
                 let (arg, ret) = self.to_pair(arg)?;
                 let (arg, ret) = (self.to_type(arg)?, self.to_type(ret)?);
                 let ty = self.program.intern_type(TypeInfo::Fn(FnType { arg, ret }));
+                // println!("=> {}", self.program.log_type(ty));
                 Value::Type(ty)
             }
             "add" => bin_int!(self, +, arg, Value::I64),
@@ -880,6 +891,21 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // TODO: this is really inefficient. it boxes them from the stack and then writes them all back again?
                 arg
             }
+            "Ty" => {
+                if let Value::Type(ty) = arg {
+                    assert!(
+                        self,
+                        false,
+                        "Ty arg should be tuple of types not type {:?}",
+                        self.program.log_type(ty)
+                    );
+                }
+                print!("Ty: {:?}", arg);
+                let ty = self.to_type(arg)?;
+                // println!(" => {:?}", self.program.log_type(ty));
+                Value::Type(ty)
+            }
+
             _ => ice!(self, "Known builtin is not implemented. {}", name),
         };
         Ok(value)
@@ -1004,7 +1030,6 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     pub fn empty_fn(
         &self,
-        arg_slots: usize,
         arg_names: Vec<Option<Ident<'p>>>,
         when: ExecTime,
         func: FuncId,
@@ -1012,7 +1037,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     ) -> FnBody<'p> {
         FnBody {
             insts: vec![],
-            stack_slots: arg_slots,
+            stack_slots: 0,
             vars: Default::default(),
             arg_names,
             when,
@@ -1041,7 +1066,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         if !func.local_constants.is_empty() {
             // TODO: pass in comptime known args
             // TODO: do i even need to pass an index? probably just for debugging
-            let mut result = self.empty_fn(0, vec![], when, FuncId(index + 10000000), func.loc);
+            let mut result = self.empty_fn(vec![], when, FuncId(index + 10000000), func.loc);
             result.constants.parents.push(constants.clone().bake());
             let new_constants = func.local_constants.clone();
 
@@ -1068,23 +1093,9 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.infer_types(&constants, FuncId(index))?;
         let mut func = &self.program.funcs[index];
         let (arg, ret) = func.ty.unwrap();
-        let arg_slots = self.program.slot_count(arg);
-        logln!("{:?} has arg {} slots", FuncId(index), arg_slots);
-        assert_ne!(arg_slots, 0);
-        let mut result = self.empty_fn(
-            arg_slots,
-            func.arg_names.clone(),
-            when,
-            FuncId(index),
-            func.loc,
-        );
+        let mut result = self.empty_fn(func.arg_names.clone(), when, FuncId(index), func.loc);
         result.constants = constants;
-
-        let arg_range = StackRange {
-            first: StackOffset(0),
-            count: arg_slots,
-        };
-
+        let arg_range = result.reserve_slots(self.program, arg);
         let return_value = self.emit_body(&mut result, arg_range, FuncId(index))?;
         let mut func = &self.program.funcs[index];
 
@@ -1138,14 +1149,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         let func = self.program.funcs[f.0].clone();
         let (arg, ret) = func.ty.unwrap();
         let mut to_drop = vec![];
-        // TODO: this should add to result.slot_types?
-        //       should use normal reserve_slots instead of whatever this is doing and then get it for free?
         let arguments = func.arg_vars.as_ref().unwrap();
         if arguments.len() == 1 {
             // if there's one name, it refers to the whole tuple.
             let prev = result.vars.insert(arguments[0], (arg_range, arg));
             assert!(self, prev.is_none(), "overwrite arg?");
         } else if arguments.len() == arg_range.count {
+            let types = self.program.tuple_types(arg).unwrap();
             // if they match, each element has its own name.
             for (i, var) in arguments.iter().enumerate() {
                 // This always starts at 0 for normal functions, but for inlined closures, the args could be anywhere because we're sharing the parent's stack frame.
@@ -1153,7 +1163,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     first: arg_range.offset(i),
                     count: 1,
                 };
-                let prev = result.vars.insert(*var, (range, TypeId::any()));
+                let prev = result.vars.insert(*var, (range, types[i]));
                 assert!(self, prev.is_none(), "overwrite arg?");
             }
         } else {
@@ -1259,10 +1269,9 @@ impl<'a, 'p> Interp<'a, 'p> {
         result.slot_types.extend(func.slot_types.iter());
         let mut has_returned = false; // TODO: remove
         for (i, mut inst) in func.insts.iter().cloned().enumerate() {
-            assert!(self, !has_returned);
+            assert!(self, !has_returned); // TODO
             inst.renumber(stack_offset, ip_offset);
             if let Bc::Ret(return_value) = inst {
-                // TODO: what if there are multiple returns?
                 has_returned = true;
                 result.insts.push(Bc::MoveRange {
                     from: return_value,
@@ -1291,8 +1300,9 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &Stmt<'p>) -> Res<'p, ()> {
-        match stmt {
+    fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &FatStmt<'p>) -> Res<'p, ()> {
+        self.last_loc = Some(stmt.loc);
+        match stmt.deref() {
             Stmt::Eval(expr) => {
                 let (value, _) = self.compile_expr(result, expr)?;
                 result.push(Bc::Drop(value));
@@ -1307,9 +1317,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let expected_ty = invert(
                     ty.clone()
                         .map(|ty| self.cached_eval_expr(&result.constants, ty)),
-                )?;
+                )?
+                .map(|ty| self.to_type(ty).unwrap());
                 if *kind == VarType::Const {
-                    let value = match value {
+                    let mut value = match value {
                         Some(value) => self.cached_eval_expr(&result.constants, value.clone())?,
                         None => {
                             let name = self.pool.get(name.0);
@@ -1322,66 +1333,46 @@ impl<'a, 'p> Interp<'a, 'p> {
                             .0
                         }
                     };
-                    let ty = expected_ty
-                        .map(|ty| self.to_type(ty).unwrap())
-                        .unwrap_or_else(|| self.program.type_of(&value));
-                    result.constants.insert(*name, (value, ty));
-                    return Ok(());
-                }
 
-                // match value {
-                //     Some(value) => {
-                //         let (init, init_ty) = self.compile_expr(result, value)?;
-
-                //     }
-                //     None => todo!(),
-                // }
-
-                let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
-                let ty_slots = if let Some(ty) = expected_ty {
-                    let ty = self.to_type(ty)?;
-                    Some(self.program.slot_count(ty))
-                } else {
-                    None
-                };
-
-                let value = match (value, ty_slots) {
-                    (None, Some(slots)) => (
-                        result.reserve_slots_raw(self.program, slots, TypeId::any()),
-                        TypeId::any(),
-                    ),
-                    (Some(value), None) => value,
-                    (Some((value, ty)), Some(slots)) => {
-                        if slots == value.count {
-                            (value, ty)
-                        } else {
-                            assert_eq!(self, value.count, 1);
-                            let expanded =
-                                result.reserve_slots_raw(self.program, slots, TypeId::any());
-                            result.push(Bc::ExpandTuple {
-                                from: value.first,
-                                to: expanded,
-                            });
-                            (expanded, ty)
+                    let found_ty = self.program.type_of(&value);
+                    if let Some(expected_ty) = expected_ty {
+                        if self.program.types[expected_ty.0] == TypeInfo::Type {
+                            // HACK. todo: general overloads for cast()
+                            value = Value::Type(self.to_type(value)?)
                         }
+                        let found_ty = self.program.type_of(&value);
+                        self.type_check_eq(found_ty, expected_ty, "var decl")?;
                     }
-                    // TODO: make this an error. dont guess.
-                    (None, None) => (
-                        result.reserve_slots_raw(self.program, 1, TypeId::any()),
-                        TypeId::any(),
-                    ),
-                };
-                let prev = result.vars.insert(*name, value);
-                assert!(self, prev.is_none(), "shadow is still new var");
+                    let found_ty = self.program.type_of(&value);
+                    result.constants.insert(*name, (value, found_ty));
+                } else {
+                    let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
+                    self.last_loc = Some(stmt.loc);
+                    let value = match (value, expected_ty) {
+                        (None, Some(expected_ty)) => {
+                            (result.reserve_slots(self.program, expected_ty), expected_ty)
+                        }
+                        (Some(value), None) => value,
+                        (Some((value, ty)), Some(expected_ty)) => {
+                            self.type_check_eq(ty, expected_ty, "var decl")?;
+                            (value, ty)
+                        }
 
-                // TODO: what if shadow is const? that would be more consistant if did it like rust.
-                if let Some(dropping) = dropping {
-                    // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
-                    // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
-                    // But need to change my debugging check that everything was dropped.
-                    // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
-                    let (slot, _) = unwrap!(self, result.vars.remove(dropping), "missing shadow");
-                    result.push(Bc::Drop(slot));
+                        (None, None) => err!(self, "{:?} decl with unknown type and no init", name),
+                    };
+                    let prev = result.vars.insert(*name, value);
+                    assert!(self, prev.is_none(), "shadow is still new var");
+
+                    // TODO: what if shadow is const? that would be more consistant if did it like rust.
+                    if let Some(dropping) = dropping {
+                        // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
+                        // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
+                        // But need to change my debugging check that everything was dropped.
+                        // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
+                        let (slot, _) =
+                            unwrap!(self, result.vars.remove(dropping), "missing shadow");
+                        result.push(Bc::Drop(slot));
+                    }
                 }
             }
             Stmt::SetVar(var, expr) => {
@@ -1458,6 +1449,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                         self.infer_types(&result.constants, f)?;
                         let func = &self.program.funcs[f.0];
                         let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
+                        self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
+                        self.type_check_arg(arg_ty_found, arg_ty_expected, "bad arg")?;
                         // TODO: some huristic based on how many times called and how big the body is.
                         // TODO: pre-intern all these constants so its not a hash lookup everytime
                         let force_inline = func.has_tag(self.pool, "inline");
@@ -1542,6 +1535,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ret_ty = if let TypeInfo::Fn(ty) = &self.program.types[func_ty.0] {
                     ty.ret
                 } else {
+                    println!("Called Any {:?}", expr.log(self.pool));
                     assert!(self, func_ty.is_any());
                     TypeId::any() // TODO
                 };
@@ -1709,6 +1703,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                         assert!(self, res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
+                        result.load_constant_new(self.program, Value::Unit)
+                    }
+                    "log" => {
+                        println!("EXPR : {}", arg.log(self.pool));
+                        let value = self.cached_eval_expr(&result.constants, *arg.clone());
+                        println!("VALUE: {:?}", value);
                         result.load_constant_new(self.program, Value::Unit)
                     }
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
@@ -1960,15 +1960,19 @@ impl<'a, 'p> Interp<'a, 'p> {
         if let Value::Type(id) = value {
             Ok(id)
         } else if let Value::Tuple { values, .. } = value {
-            let ty = if !values.is_empty() {
-                let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v)).collect();
-                TypeInfo::Tuple(values?)
-            } else {
-                TypeInfo::Unit
+            let ty = match values.len() {
+                0 => TypeId::unit(),
+                1 => self.to_type(values.into_iter().next().unwrap())?,
+                _ => {
+                    // println!("Type Tuple: {:?}", values);
+                    let values: Res<'_, Vec<_>> =
+                        values.into_iter().map(|v| self.to_type(v)).collect();
+                    self.program.intern_type(TypeInfo::Tuple(values?))
+                }
             };
-            Ok(self.program.intern_type(ty))
+            Ok(ty)
         } else if let Value::Unit = value {
-            // This lets you use the literal `()` as a type (i dont parse it as a tuple because reasons).
+            // This lets you use the literal `()` as a type (i dont parse it as a tuple because reasons). TODO: check if that still true with new parser
             Ok(self.program.intern_type(TypeInfo::Unit))
         } else {
             Err(self.error(CErr::TypeError("Type", value)))
@@ -2163,6 +2167,42 @@ impl<'a, 'p> Interp<'a, 'p> {
         if found == expected {
             Ok(())
         } else {
+            err!(self, CErr::TypeCheck(found, expected, msg))
+        }
+    }
+
+    // #[track_caller]
+    fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+        if found == expected || found.is_any() || expected.is_any() {
+            Ok(())
+        } else {
+            match (
+                &self.program.types[found.0],
+                &self.program.types[expected.0],
+            ) {
+                (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
+                    if f.len() == e.len() {
+                        let ok = f
+                            .iter()
+                            .zip(e.iter())
+                            .all(|(f, e)| self.type_check_arg(*f, *e, msg).is_ok());
+                        if ok {
+                            return Ok(());
+                        }
+                    }
+                }
+                (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
+                    if self.type_check_arg(f, e, msg).is_ok() {
+                        return Ok(());
+                    }
+                }
+                (TypeInfo::Tuple(_), TypeInfo::Type) | (TypeInfo::Type, TypeInfo::Tuple(_)) => {
+                    return Ok(())
+                }
+                (f, e) => {
+                    // println!("f={:?} e={:?}", f, e)
+                }
+            }
             err!(self, CErr::TypeCheck(found, expected, msg))
         }
     }
