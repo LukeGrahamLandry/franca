@@ -206,4 +206,5 @@ fn run_main<'a: 'p, 'p>(
         .unwrap();
         println!("Wrote log to {:?}", path);
     }
+    println!("=================================");
 }

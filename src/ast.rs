@@ -20,7 +20,7 @@ use crate::logging::logln;
 #[derive(Copy, Clone, PartialEq, Hash, Eq)]
 pub struct TypeId(pub usize);
 
-#[derive(Clone, PartialEq, Hash, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub arg: TypeId,
@@ -495,6 +495,14 @@ impl<'p> Program<'p> {
 
     pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
         self.types[ty.0] == expect
+    }
+
+    pub fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
+        if let TypeInfo::Fn(ty) = self.types[id.0] {
+            Some(ty)
+        } else {
+            None
+        }
     }
 
     pub fn func_type(&mut self, id: FuncId) -> TypeId {

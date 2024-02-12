@@ -602,12 +602,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 assert_eq!(self, values.len(), target.count);
                 let base = target.first.0;
                 for (i, v) in values.into_iter().enumerate() {
-                    // TODO: this needs to be a macro cause the cloning is a problem
-                    assert!(
-                        self,
-                        self.value_stack[base + i] == Value::Poison,
-                        "leaked value",
-                    );
+                    assert_eq!(self, self.value_stack[base + i], Value::Poison);
                     self.value_stack[base + i] = v;
                 }
             }
@@ -1253,15 +1248,19 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.ensure_compiled(&result.constants, f, result.when)?;
         let name = self.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:inline_call", name));
-        // This move ensures they end up at the base of the renumbered stack. TODO: it can't be capturing
-        let (arg_ty, _) = self.program.funcs[f.0].ty.unwrap();
+        // This move ensures they end up at the base of the renumbered stack.
+        let func = &self.program.funcs[f.0];
+        let msg = "capturing calls are already inlined. what are you doing here?";
+        assert_eq!(self, func.capture_vars.len(), 0, "{}", msg);
+        let (arg_ty, _) = func.ty.unwrap();
+        let stack_offset = result.stack_slots;
         let arg_slots = result.reserve_slots(self.program, arg_ty); // These are included in the new function's stack
         debug_assert_eq!(arg_slots.count, arg.count);
         result.push(Bc::MoveRange {
             from: arg,
             to: arg_slots,
         });
-        let (stack_offset, ip_offset) = (result.stack_slots - arg_slots.count, result.insts.len());
+        let ip_offset = result.insts.len();
         let func = self.ready[f.0].as_ref().unwrap();
         // TODO: check for recusion somewhere.
         // TODO: put constants somewhere so dont have to clone them each time a function is inlined.
@@ -1298,6 +1297,60 @@ impl<'a, 'p> Interp<'a, 'p> {
         result.push(Bc::DebugMarker("end:inline_call", name));
         self.currently_inlining.retain(|check| *check != f);
         Ok(())
+    }
+
+    // Return type is allowed to use args.
+    fn emit_comptime_call(
+        &mut self,
+        result: &mut FnBody<'p>,
+        f: FuncId,
+        arg_expr: &FatExpr<'p>,
+    ) -> Res<'p, Value> {
+        let mut func = self.program.funcs[f.0].clone();
+
+        let arg_value = self.cached_eval_expr(&result.constants, arg_expr.clone())?;
+        let arg_ty = self.program.type_of(&arg_value);
+        let ret = match &func.ty {
+            &LazyFnType::Finished(arg, ret) => {
+                self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
+                ret
+            }
+            LazyFnType::Pending { arg, ret } => {
+                match arg {
+                    LazyType::Infer => todo!(),
+                    LazyType::PendingEval(arg) => {
+                        let arg = self.cached_eval_expr(&result.constants, arg.clone())?;
+                        let arg = self.to_type(arg)?;
+                        self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
+                    }
+                    &LazyType::Finished(arg) => {
+                        self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
+                    }
+                }
+                match ret {
+                    LazyType::Infer => todo!(),
+                    LazyType::PendingEval(ret) => {
+                        // Bind the arg into my own result so the ret calculation can use it.
+                        let arguments = self.program.funcs[f.0].arg_vars.as_ref().unwrap();
+                        if arguments.len() == 1 {
+                            let prev = result.constants.insert(arguments[0], (arg_value, arg_ty));
+                            // TODO: remove at the end so can do again.
+                            assert!(self, prev.is_none(), "overwrite comptime arg?");
+                        } else {
+                            todo!()
+                        }
+
+                        let ret = self.cached_eval_expr(&result.constants, ret.clone())?;
+                        self.to_type(ret)?
+                    }
+                    &LazyType::Finished(ret) => ret,
+                }
+            }
+        };
+
+        let result = self.cached_eval_expr(&result.constants, func.body.unwrap())?;
+
+        Ok(result)
     }
 
     fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &FatStmt<'p>) -> Res<'p, ()> {
@@ -1438,7 +1491,14 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             Expr::Call(f, arg) => {
                 if let Expr::GetNamed(i) = f.as_ref().deref() {
-                    if let Some(f) = self.lookup_unique_func(*i) {
+                    if let Some(f) = self.resolve_function(result, f) {
+                        let func = &self.program.funcs[f.0];
+                        let is_comptime = func.has_tag(self.pool, "comptime");
+                        if is_comptime {
+                            let ret = self.emit_comptime_call(result, f, arg)?;
+                            return Ok(result.load_constant_new(self.program, ret));
+                        }
+
                         let (mut arg, arg_ty_found) = self.compile_expr(result, arg)?;
                         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
                         if arg.count == 0 {
@@ -1451,6 +1511,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
                         self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
                         self.type_check_arg(arg_ty_found, arg_ty_expected, "bad arg")?;
+                        debug_assert_eq!(
+                            self.program.slot_count(arg_ty_found),
+                            self.program.slot_count(arg_ty_expected)
+                        );
                         // TODO: some huristic based on how many times called and how big the body is.
                         // TODO: pre-intern all these constants so its not a hash lookup everytime
                         let force_inline = func.has_tag(self.pool, "inline");
@@ -1530,19 +1594,27 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
 
                 let (arg, arg_ty_found) = self.compile_expr(result, arg)?;
-                logln!("dynamic {}", f.log(self.pool));
-                let (f, func_ty) = self.compile_expr(result, f)?;
+                let (f_slot, func_ty) = self.compile_expr(result, f)?;
+                logln!(
+                    "dynamic {} is {}",
+                    f.log(self.pool),
+                    self.program.log_type(func_ty)
+                );
+                if !func_ty.is_any() {
+                    let ty = unwrap!(self, self.program.fn_ty(func_ty), "expected fn for call");
+                    self.type_check_arg(arg_ty_found, ty.arg, "dyn call bad arg")?;
+                }
                 let ret_ty = if let TypeInfo::Fn(ty) = &self.program.types[func_ty.0] {
                     ty.ret
                 } else {
-                    println!("Called Any {:?}", expr.log(self.pool));
+                    logln!("WARNING: Called Any {:?}", expr.log(self.pool));
                     assert!(self, func_ty.is_any());
                     TypeId::any() // TODO
                 };
-                assert_eq!(self, f.count, 1);
+                assert_eq!(self, f_slot.count, 1);
                 let ret = result.reserve_slots(self.program, ret_ty);
                 result.push(Bc::CallDynamic {
-                    f: f.first,
+                    f: f_slot.first,
                     ret,
                     arg,
                 });
@@ -1705,7 +1777,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         *result = self.restore_state(state);
                         result.load_constant_new(self.program, Value::Unit)
                     }
-                    "log" => {
+                    "comptime_print" => {
                         println!("EXPR : {}", arg.log(self.pool));
                         let value = self.cached_eval_expr(&result.constants, *arg.clone());
                         println!("VALUE: {:?}", value);
@@ -2395,8 +2467,8 @@ impl<'p> SharedConstants<'p> {
         })
     }
 
-    pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) {
-        self.local.insert(k, v);
+    pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
+        self.local.insert(k, v)
     }
 
     pub fn bake(self) -> Rc<Self> {
