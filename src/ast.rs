@@ -41,6 +41,11 @@ impl TypeId {
     pub fn unit() -> TypeId {
         TypeId(1)
     }
+
+    // Be careful that this is in the pool correctly!
+    pub fn ty() -> TypeId {
+        TypeId(2)
+    }
 }
 
 pub struct FuncFlags {
@@ -389,9 +394,9 @@ impl<'p> Default for Program<'p> {
             types: vec![
                 TypeInfo::Any,
                 TypeInfo::Unit,
+                TypeInfo::Type,
                 TypeInfo::I64,
                 TypeInfo::Bool,
-                TypeInfo::Type,
                 TypeInfo::F64,
             ],
             declarations: Default::default(),

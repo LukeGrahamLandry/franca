@@ -1167,7 +1167,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
         let return_value = match func.body.as_ref() {
             Some(body) => {
-                let (ret, found_ret_ty) = self.compile_expr(result, body)?;
+                let (ret_val, found_ret_ty) = self.compile_expr(result, body)?;
+                self.type_check_arg(found_ret_ty, ret, "bad return value")?;
                 // We're done with our arguments, get rid of them. Same for other vars.
                 // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
                 result.push(Bc::DebugMarker("drop_args", func.get_name(self.pool)));
@@ -1178,7 +1179,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 for other in to_drop {
                     result.push(Bc::Drop(other));
                 }
-                ret
+                ret_val
             }
             None => {
                 // Functions without a body are always builtins.
@@ -1307,8 +1308,19 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg_expr: &FatExpr<'p>,
     ) -> Res<'p, Value> {
         let mut func = self.program.funcs[f.0].clone();
-
-        let arg_value = self.cached_eval_expr(&result.constants, arg_expr.clone())?;
+        let arg_ty = match &func.ty {
+            &LazyFnType::Finished(arg, ret) => arg,
+            LazyFnType::Pending { arg, ret } => match arg {
+                LazyType::Infer => todo!(),
+                LazyType::PendingEval(arg) => {
+                    let arg =
+                        self.cached_eval_expr(&result.constants, arg.clone(), TypeId::ty())?;
+                    self.to_type(arg)?
+                }
+                &LazyType::Finished(arg) => arg,
+            },
+        };
+        let arg_value = self.cached_eval_expr(&result.constants, arg_expr.clone(), arg_ty)?;
         let arg_ty = self.program.type_of(&arg_value);
         let ret = match &func.ty {
             &LazyFnType::Finished(arg, ret) => {
@@ -1319,7 +1331,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 match arg {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(arg) => {
-                        let arg = self.cached_eval_expr(&result.constants, arg.clone())?;
+                        let arg =
+                            self.cached_eval_expr(&result.constants, arg.clone(), TypeId::ty())?;
                         let arg = self.to_type(arg)?;
                         self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
                     }
@@ -1340,7 +1353,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                             todo!()
                         }
 
-                        let ret = self.cached_eval_expr(&result.constants, ret.clone())?;
+                        let ret =
+                            self.cached_eval_expr(&result.constants, ret.clone(), TypeId::ty())?;
                         self.to_type(ret)?
                     }
                     &LazyType::Finished(ret) => ret,
@@ -1348,7 +1362,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
         };
 
-        let result = self.cached_eval_expr(&result.constants, func.body.unwrap())?;
+        let result = self.cached_eval_expr(&result.constants, func.body.unwrap(), ret)?;
+        let ty = self.program.type_of(&result);
+        self.type_check_arg(ty, ret, "generic result")?;
 
         Ok(result)
     }
@@ -1369,12 +1385,16 @@ impl<'a, 'p> Interp<'a, 'p> {
             } => {
                 let expected_ty = invert(
                     ty.clone()
-                        .map(|ty| self.cached_eval_expr(&result.constants, ty)),
+                        .map(|ty| self.cached_eval_expr(&result.constants, ty, TypeId::ty())),
                 )?
                 .map(|ty| self.to_type(ty).unwrap());
                 if *kind == VarType::Const {
                     let mut value = match value {
-                        Some(value) => self.cached_eval_expr(&result.constants, value.clone())?,
+                        Some(value) => self.cached_eval_expr(
+                            &result.constants,
+                            value.clone(),
+                            expected_ty.unwrap_or(TypeId::any()),
+                        )?,
                         None => {
                             let name = self.pool.get(name.0);
                             unwrap!(
@@ -1720,7 +1740,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::StructLiteral(fields) => {
                 let values: Res<'p, Vec<_>> = fields
                     .iter()
-                    .map(|field| self.cached_eval_expr(&result.constants, field.ty.clone()))
+                    .map(|field| {
+                        self.cached_eval_expr(&result.constants, field.ty.clone(), TypeId::any())
+                    })
                     .collect();
                 let fields: Vec<_> = values?
                     .into_iter()
@@ -1779,7 +1801,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     "comptime_print" => {
                         println!("EXPR : {}", arg.log(self.pool));
-                        let value = self.cached_eval_expr(&result.constants, *arg.clone());
+                        let value =
+                            self.cached_eval_expr(&result.constants, *arg.clone(), TypeId::any());
                         println!("VALUE: {:?}", value);
                         result.load_constant_new(self.program, Value::Unit)
                     }
@@ -1930,6 +1953,10 @@ impl<'a, 'p> Interp<'a, 'p> {
         body.as_ref().expect("jit current function")
     }
 
+    fn tyty(&mut self) -> TypeId {
+        self.program.intern_type(TypeInfo::Type)
+    }
+
     // Resolve the lazy types for Arg and Ret
     fn infer_types(&mut self, constants: &SharedConstants<'p>, func: FuncId) -> Res<'p, FnType> {
         let f = &self.program.funcs[func.0];
@@ -1942,7 +1969,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let arg = match arg {
                     LazyType::Infer => TypeId::any(),
                     LazyType::PendingEval(e) => {
-                        let value = self.cached_eval_expr(constants, e.clone())?;
+                        let value = self.cached_eval_expr(constants, e.clone(), TypeId::ty())?;
                         self.to_type(value)?
                     }
                     LazyType::Finished(id) => id, // easy
@@ -1953,7 +1980,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ret = match ret {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(e) => {
-                        let value = self.cached_eval_expr(constants, e.clone())?;
+                        let value = self.cached_eval_expr(constants, e.clone(), TypeId::ty())?;
                         self.to_type(value)?
                     }
                     LazyType::Finished(id) => id, // easy
@@ -1968,17 +1995,15 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(FnType { arg, ret })
     }
 
-    fn unit_to_type(&mut self) -> LazyFnType<'p> {
-        LazyFnType::Finished(
-            self.program.intern_type(TypeInfo::Unit),
-            self.program.intern_type(TypeInfo::Type),
-        )
+    fn unit_to(&mut self, ret: TypeId) -> LazyFnType<'p> {
+        LazyFnType::Finished(self.program.intern_type(TypeInfo::Unit), ret)
     }
 
     fn cached_eval_expr(
         &mut self,
         constants: &SharedConstants<'p>,
         e: FatExpr<'p>,
+        ret_ty: TypeId,
     ) -> Res<'p, Value> {
         match e.deref() {
             Expr::Value(value) => return Ok(value.clone()),
@@ -2000,7 +2025,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let name = format!("@eval_{}@", self.anon_fn_counter);
         let fake_func: Func<'p> = Func {
             name: Some(self.pool.intern(&name)),
-            ty: self.unit_to_type(),
+            ty: self.unit_to(ret_ty),
             body: Some(e.clone()),
             arg_names: vec![],
             annotations: vec![],
@@ -2270,6 +2295,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 (TypeInfo::Tuple(_), TypeInfo::Type) | (TypeInfo::Type, TypeInfo::Tuple(_)) => {
                     return Ok(())
+                }
+                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
+                    if self.type_check_arg(f.arg, e.arg, msg).is_ok()
+                        && self.type_check_arg(f.ret, e.ret, msg).is_ok()
+                    {
+                        return Ok(());
+                    }
                 }
                 (f, e) => {
                     // println!("f={:?} e={:?}", f, e)
