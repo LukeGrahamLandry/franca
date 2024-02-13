@@ -942,17 +942,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg: Value,
         when: ExecTime,
     ) -> Res<'p, ()> {
-        let constants = if let Some(prev) = self.call_stack.last() {
-            prev.constants.clone()
-        } else {
-            Rc::new(SharedConstants::default())
-        };
-        self.ensure_compiled(&constants, f, when)?;
         let func = self.ready[f.0].as_ref();
         assert!(
             self,
             func.is_some(),
-            "ICE: ensure_compiled didn't work on {f:?}"
+            "ICE: tried to call {f:?} but not compiled."
         );
         let constants = func.unwrap().constants.clone().bake();
         // Calling Convention: arguments passed to a function are moved out of your stack.
@@ -1050,6 +1044,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
+    #[track_caller]
     pub fn empty_fn(&self, when: ExecTime, func: FuncId, loc: Span) -> FnBody<'p> {
         FnBody {
             insts: vec![],
@@ -1079,14 +1074,15 @@ impl<'a, 'p> Interp<'a, 'p> {
         let func = &self.program.funcs[index];
         let mut constants = constants.clone();
         if !func.local_constants.is_empty() {
+            let state = DebugState::EvalConstants(FuncId(index));
+            self.push_state(&state);
+            let func = &self.program.funcs[index];
+
             // TODO: pass in comptime known args
             // TODO: do i even need to pass an index? probably just for debugging
             let mut result = self.empty_fn(when, FuncId(index + 10000000), func.loc);
             result.constants.parents.push(constants.clone().bake());
             let new_constants = func.local_constants.clone();
-
-            let state = DebugState::EvalConstants(FuncId(index));
-            self.push_state(&state);
             for stmt in new_constants {
                 self.compile_stmt(&mut result, &stmt)?;
             }
@@ -1291,6 +1287,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             inst.renumber(stack_offset, ip_offset);
             if let Bc::Ret(return_value) = inst {
                 has_returned = true;
+                debug_assert_eq!(return_value.count, ret.count);
                 result.insts.push(Bc::MoveRange {
                     from: return_value,
                     to: ret,
@@ -1603,6 +1600,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         } else if will_inline {
                             self.emit_inline_call(result, arg, ret, f)?;
                         } else {
+                            self.ensure_compiled(&result.constants, f, result.when)?;
                             result.push(Bc::CallDirect { f, ret, arg });
                         }
                         if let Some(cache_arg) = cache_arg {
@@ -2264,7 +2262,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_triple(&self, value: Value) -> Res<'p, (Value, Value, Value)> {
         let values = self.to_seq(value)?;
-        assert_eq!(self, values.len(), 3, "{:?}", values);
+        assert_eq!(self, values.len(), 3, "arity {:?}", values);
         Ok((values[0].clone(), values[1].clone(), values[2].clone()))
     }
 
@@ -2280,7 +2278,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
-        assert_eq!(self, values.len(), 2);
+        assert_eq!(self, values.len(), 2, "arity");
         Ok((values[0].clone(), values[1].clone()))
     }
 
@@ -2293,7 +2291,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             return Ok((values[0].clone(), values[1].clone()));
         }
 
-        assert_eq!(self, values.len() % 2, 0);
+        assert_eq!(self, values.len() % 2, 0, "arity");
         let first = (values[0..values.len() / 2]).to_vec();
         let second = (values[values.len() / 2..]).to_vec();
 
@@ -2541,9 +2539,7 @@ fn invert<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
 
 fn to_flat_seq(value: Value) -> Vec<Value> {
     match value {
-        Value::Tuple { values, .. } | Value::Array { values, .. } => {
-            values.into_iter().flat_map(to_flat_seq).collect()
-        }
+        Value::Tuple { values, .. } => values.into_iter().flat_map(to_flat_seq).collect(),
         e => vec![e],
     }
 }

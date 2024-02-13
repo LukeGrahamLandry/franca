@@ -26,6 +26,27 @@ static LIB: &str = include_str!(concat!(
     "/lib/interp_builtins.txt"
 ));
 
+pub fn run_tests() {
+    let pool = Box::leak(Box::<StringPool>::default());
+    for case in fs::read_dir("tests").unwrap() {
+        let case = case.unwrap();
+        println!("TEST: {}", case.file_name().to_str().unwrap());
+        run_main(
+            pool,
+            fs::read_to_string(case.path()).unwrap(),
+            Value::I64(0),
+            Value::I64(0),
+            Some(
+                case.file_name()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".txt")
+                    .unwrap(),
+            ),
+        );
+    }
+}
+
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
     src: String,
@@ -119,7 +140,8 @@ pub fn run_main<'a: 'p, 'p>(
                         assert_eq!(result, expect);
                         // TODO: change this when i add assert(bool)
                         let assertion_count = src.split("assert_eq(").count() - 1;
-                        assert_eq!(
+                        // debug so dont crash in web if not using my system of one run per occurance.
+                        debug_assert_eq!(
                             interp.assertion_count, assertion_count,
                             "vm missed assertions?"
                         );
@@ -132,6 +154,7 @@ pub fn run_main<'a: 'p, 'p>(
                             .split('\n')
                             .filter(|s| !s.split("//").next().unwrap().is_empty())
                             .count();
+                        // TODO: make sure everything's compiled before starting to run and just report frontend time.
                         outln!(
                             "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
                             lines as f64 / seconds
@@ -168,14 +191,19 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
         let mut emitter = Emitter::vec(&mut out, Some(codemap));
         emitter.emit(diagnostic);
         drop(emitter);
-        outln!("{}", String::from_utf8(out).unwrap());
+        outln!(
+            "{}",
+            String::from_utf8(out).unwrap_or_else(|_| "ICE: diagnostic was not valid utf8".into())
+        );
     } else {
         let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(codemap));
         emitter.emit(diagnostic);
     }
 }
 
+// TODO: its unfortunate that ifdefing this out means i don't get ide here.
 /// C ABI callable from js when targeting wasm.
+#[cfg(target_arch = "wasm32")]
 pub mod web {
     #![allow(clippy::missing_safety_doc)]
     use crate::interp::Value;
@@ -185,10 +213,16 @@ pub mod web {
     use std::alloc::{alloc, Layout};
     use std::ffi::{c_char, CStr, CString};
     use std::ptr::slice_from_raw_parts;
+    static mut POOL: Option<StringPool> = None;
 
     /// len does NOT include null terminator.
     #[no_mangle]
     pub unsafe extern "C" fn run(input_query: *const u8, len: usize) {
+        if POOL.is_none() {
+            POOL = Some(StringPool::default());
+        }
+        let pool = POOL.as_ref().unwrap();
+
         let src = &*slice_from_raw_parts(input_query, len);
         let src = match String::from_utf8(src.to_vec()) {
             Ok(src) => src,
@@ -197,8 +231,8 @@ pub mod web {
                 return;
             }
         };
-        let pool = Box::leak(Box::<StringPool>::default());
         run_main(pool, src, Value::Unit, Value::Unit, None);
+        flush_console();
     }
 
     /// len DOES include null terminator
@@ -218,7 +252,35 @@ pub mod web {
         CStr::from_ptr(ptr).to_bytes().len()
     }
 
-    #[cfg(target_arch = "wasm32")]
+    // TODO: should just use Write for my logging stuff so this could be less clunky.
+    // TODO: this means you won't get output if I don't catch an error and fully panic but I want that to not happen anyway.
+    //       ice should always tel you waht it was trying to do because i care about debugging the compiler.
+    //       but also infinite loops and you have to wait for the program to finish before you get anything.
+    //       but i dont have loops yet so who cares.
+
+    /// Printing one line is slower than parsing my example so buffering seems important.
+    static mut CONSOLE: Vec<String> = vec![];
+
+    pub fn flush_console() {
+        unsafe {
+            // This is overkill because printing is slow anyway but I want fewer calls between wasm and js.
+            let len = CONSOLE.iter().map(|s| s.len() + 1).sum();
+            let mut out = String::with_capacity(len);
+            for msg in CONSOLE.drain(0..) {
+                out.push_str(&msg);
+                out.push('\n');
+            }
+            console_log(out.as_ptr(), out.len());
+        }
+    }
+
+    pub fn push_console(msg: String) {
+        // Safety: There's only one thread.
+        unsafe {
+            CONSOLE.push(msg);
+        }
+    }
+
     extern "C" {
         pub fn console_log(ptr: *const u8, len: usize);
         pub fn timestamp() -> f64;

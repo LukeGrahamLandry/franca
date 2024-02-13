@@ -94,10 +94,7 @@ pub(crate) use unwrap;
 macro_rules! outln {
     ($($arg:tt)*) => {{
         #[cfg(target_arch = "wasm32")]
-        unsafe {
-            let msg = format!($($arg)*);
-            $crate::web::console_log(msg.as_ptr(), msg.len());
-        }
+        { $crate::web::push_console(format!($($arg)*)); }
         #[cfg(not(target_arch = "wasm32"))]
         println!($($arg)*);
     }};
@@ -499,7 +496,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     pub fn log_trace(&self) -> String {
         let mut out = String::new();
-        if !cfg!(feature = "spam_log") {
+        if !cfg!(feature = "some_log") {
             return out;
         }
         writeln!(out, "=== TRACE ===");
@@ -585,7 +582,7 @@ impl<'p> DebugState<'p> {
                 format!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
             }
             DebugState::JitToBc(f, when) => {
-                format!("| Jit Bytecode| {} for {:?}", show_f(*f), when)
+                format!("|   Comp BC   | {} for {:?}", show_f(*f), when)
             }
             DebugState::EvalConstants(f) => {
                 format!("| Eval Consts | {:?}", show_f(*f))

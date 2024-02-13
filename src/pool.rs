@@ -18,6 +18,10 @@ pub struct StringPool<'pool> {
     values: RwLock<Vec<Ptr<str>>>,
 }
 
+// There is one thread i do not care.
+unsafe impl Send for StringPool<'_> {}
+unsafe impl Sync for StringPool<'_> {}
+
 impl<'pool> StringPool<'pool> {
     pub fn get(&self, i: Ident) -> &'pool str {
         let v = self.values.read().unwrap();

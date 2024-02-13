@@ -1,4 +1,21 @@
 
+
+Trying to ensure_compiled preemptivly instead of jitting so it can be more like real compilation,
+but that makes it pass ((a, b)) isntead of (a, b) to assert_eq. But really its just making 
+inline calls actually happen for builtin wrappers which is what i was trying to do anyway.
+so we've just learned inlining passes arguments wrong somehow. doesn't unbox them. 
+Fuck, it's on a function labeled `// TODO: this needs to be an error`.
+distressing that inlining changed behaviour tho. 
+
+## web
+
+static LIB: &str = include_str!(...)
+I think I don't want a const because I don't want it inlined at every use (if there were ever more than one).
+Do they really do that?
+
+Looking in devtools profiler, print is as long as whole parsing. Need to buffer it. 
+TODO: why does opening the devtools profiler make the loc/sec better? is my counting fucked up somehow?
+
 ## structs
 
 I need to let expected type flow down the tree so it will treat your map literal as the type of your variable. 
