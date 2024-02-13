@@ -1,14 +1,9 @@
-use std::{
-    collections::HashMap,
-    default, mem,
-    ops::{Deref, DerefMut},
-};
+use std::{mem, ops::DerefMut};
 
 use crate::{
     ast::{
         Expr, FatExpr, FatStmt, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType,
     },
-    interp::Value,
     pool::Ident,
 };
 
@@ -32,7 +27,7 @@ impl<'p> ResolveScope<'p> {
 
         resolver.push_scope(true);
         resolver.resolve_func(stmts);
-        let (globals, _) = resolver.pop_scope();
+        let (_globals, _) = resolver.pop_scope();
 
         assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
         resolver.info
@@ -42,7 +37,7 @@ impl<'p> ResolveScope<'p> {
         self.local_constants.push(Default::default());
         self.push_scope(true);
         for name in func.arg_names.iter().flatten() {
-            self.decl_var(name);
+            let _ = self.decl_var(name);
             self.info.push(VarInfo {
                 ty: TypeId::any(),
                 kind: VarType::Var,
@@ -161,7 +156,7 @@ impl<'p> ResolveScope<'p> {
                 }
                 self.resolve_expr(result);
                 let (vars, _) = self.pop_scope();
-                mem::replace(locals, Some(vars));
+                *locals = Some(vars);
             }
             Expr::ArrayLiteral(values) | Expr::Tuple(values) => {
                 for value in values {
@@ -173,7 +168,7 @@ impl<'p> ResolveScope<'p> {
             Expr::Value(_) => {}
             Expr::GetNamed(name) => {
                 if let Some(var) = self.find_var(name) {
-                    mem::replace(expr.deref_mut(), Expr::GetVar(var));
+                    *expr.deref_mut() = Expr::GetVar(var);
                 }
                 // else it might be a global, like a function with overloading, or undeclared. We'll find out later.
             }

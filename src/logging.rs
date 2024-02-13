@@ -1,3 +1,5 @@
+// nobody cares its just logging
+#![allow(unused_must_use)]
 use core::fmt;
 use std::{
     fmt::{Debug, Write},
@@ -17,6 +19,7 @@ macro_rules! err {
     }};
     ($self:expr, $($arg:tt)*) => {{
         let msg = format!($($arg)*);
+        #[allow(unreachable_code)]
         return err!($self, CErr::Msg(msg))
     }};
 }
@@ -25,6 +28,7 @@ macro_rules! assert {
     ($self:expr, $cond:expr, $($arg:tt)+) => {{
         if !($cond) {
             let msg = format!("Assertion Failed: {}\n{}", stringify!($cond), format!($($arg)*));
+            #[allow(unreachable_code)]
             return err!($self, CErr::Msg(msg))
         }
     }};
@@ -58,26 +62,12 @@ macro_rules! assert_eq {
     };
 }
 
-// TODO: use this for interp bounds checks and accept an enum so you can turn them off individually. Distinguish between runtime/comptime.
-macro_rules! check {
-    ($self:expr, $cond:expr, $($arg:tt)+) => {{
-        if !($cond) {
-            let msg = format!("Builtin Safety Check Failed: {}\n{}", stringify!($cond), format!($($arg)*));
-            return err!($self, CErr::Msg(msg))
-        }
-    }};
-    ($self:expr, $cond:expr $(,)?) => {{
-        check!($self, $cond, "")
-    }};
-}
-pub(crate) use check;
-
 // I want to be as easy to use my error system as just paniking.
 // Use this one for things that aren't supported yet or should have been caught in a previous stage of compilation.
 macro_rules! ice {
     ($self:expr, $($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        return err!($self, CErr::IceFmt(msg))
+        err!($self, CErr::IceFmt(msg))
     }};
 }
 use codemap::Span;
@@ -94,7 +84,7 @@ macro_rules! unwrap {
             value
         } else {
             let msg = format!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*));
-            return err!($self, CErr::IceFmt(msg))
+            err!($self, CErr::IceFmt(msg))
         }
     }};
 }
@@ -108,7 +98,6 @@ pub enum LogTag {
 }
 
 macro_rules! log {
-    // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
     ($($arg:tt)*) => {{
         if cfg!(feature = "spam_log") {
             print!($($arg)*);
@@ -157,13 +146,9 @@ impl<'p> Program<'p> {
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
             TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
-            TypeInfo::Struct {
-                fields,
-                size,
-                as_tuple,
-            } => {
+            TypeInfo::Struct { fields, .. } => {
                 // TODO: factor out iter().join(str), how does that not already exist
-                let v: Vec<_> = fields.iter().map(|(f)| format!("{f:?}")).collect();
+                let v: Vec<_> = fields.iter().map(|f| format!("{f:?}")).collect();
                 format!("Struct({})", v.join(", "))
             }
             TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
@@ -196,7 +181,7 @@ impl<'p> Program<'p> {
 }
 
 impl<'p> PoolLog<'p> for Program<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, _: &StringPool<'p>) -> String {
         let mut s = String::new();
         s += &self.log_cached_types();
         s
@@ -291,11 +276,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 format!("{}({})", func.log(pool), arg.log(pool))
             }
             &Expr::GetNamed(i) => pool.get(i).to_string(),
-            Expr::Block {
-                body,
-                result,
-                locals,
-            } => {
+            Expr::Block { body, result, .. } => {
                 let es: Vec<_> = body
                     .iter()
                     .map(|e| e.log(pool))
@@ -371,7 +352,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
 }
 
 impl<'p> PoolLog<'p> for DebugInfo<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, _: &StringPool<'p>) -> String {
         format!("// {} ", self.internal_loc)
     }
 }
@@ -444,6 +425,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
+            Bc::DerefPtr { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
             Bc::Drop(i) => write!(f, "drop({:?});", i),
             Bc::SlicePtr {
                 base,
@@ -492,19 +474,8 @@ impl Stmt<'_> {
             Stmt::Eval(e) => Some(e.loc),
             Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
             Stmt::SetVar(_, e) => Some(e.loc),
-            Stmt::DeclVar {
-                name,
-                ty,
-                value,
-                dropping,
-                kind,
-            } => value.as_ref().or(ty.as_ref()).map(|e| e.loc),
-            Stmt::DeclNamed {
-                name,
-                ty,
-                value,
-                kind,
-            } => todo!(),
+            Stmt::DeclVar { ty, value, .. } => value.as_ref().or(ty.as_ref()).map(|e| e.loc),
+            Stmt::DeclNamed { .. } => todo!(),
             Stmt::SetNamed(_, _) => todo!(),
         }
     }
@@ -514,8 +485,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     pub fn log_trace(&self) -> String {
         let mut out = String::new();
-        #[cfg(not(feature = "some_log"))]
-        {
+        if !cfg!(feature = "spam_log") {
             return out;
         }
         writeln!(out, "=== TRACE ===");
@@ -529,8 +499,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     pub fn log_stack(&self) {
-        #[cfg(not(feature = "spam_log"))]
-        {
+        if cfg!(not(feature = "spam_log")) {
             return;
         }
         log!("STACK ");
@@ -566,15 +535,8 @@ impl fmt::Display for Value {
             Value::F64(v) => write!(f, "{v}"),
             Value::I64(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
-            Value::Enum {
-                container_type,
-                tag,
-                value,
-            } => todo!(),
-            Value::Tuple {
-                container_type,
-                values,
-            } => {
+            Value::Enum { .. } => todo!(),
+            Value::Tuple { values, .. } => {
                 write!(f, "(");
                 for v in values {
                     write!(f, "{v}, ")?;

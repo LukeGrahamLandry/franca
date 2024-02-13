@@ -2,20 +2,13 @@ use codemap::Span;
 
 use crate::{
     interp::Value,
-    logging::PoolLog,
     pool::{Ident, StringPool},
 };
 use std::{
     collections::HashMap,
-    fmt::{format, Debug},
     hash::Hash,
-    marker::PhantomData,
     ops::{Deref, DerefMut},
-    rc::Rc,
-    sync::RwLock,
 };
-#[macro_use]
-use crate::logging::logln;
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq)]
 pub struct TypeId(pub usize);
@@ -471,23 +464,11 @@ impl<'p> Program<'p> {
             Value::F64(_) => todo!(),
             Value::I64(_) => self.intern_type(TypeInfo::I64),
             Value::Bool(_) => self.intern_type(TypeInfo::Bool),
-            Value::Enum {
-                container_type,
-                tag,
-                value,
-            } => *container_type,
-            Value::Tuple {
-                container_type,
-                values,
+            Value::Enum { container_type, .. } => *container_type,
+            Value::Tuple { container_type, .. } | Value::Array { container_type, .. } => {
+                *container_type
             }
-            | Value::Array {
-                container_type,
-                values,
-            } => *container_type,
-            Value::Ptr {
-                container_type,
-                value,
-            } => *container_type,
+            Value::Ptr { container_type, .. } => *container_type,
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
             Value::GetFn(f) => self.func_type(*f),
@@ -497,11 +478,7 @@ impl<'p> Program<'p> {
             Value::Map(_, _) => todo!(),
             Value::Symbol(_) => todo!(),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
-            Value::Heap {
-                value,
-                first,
-                count,
-            } => TypeId::any(),
+            Value::Heap { .. } => TypeId::any(),
         }
     }
 
@@ -541,6 +518,15 @@ impl<'p> Program<'p> {
             TypeInfo::Unique(_, _) => todo!(),
             _ => None,
         }
+    }
+
+    pub fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
+        let mut d = 0;
+        while let &TypeInfo::Ptr(inner) = &self.types[ptr_ty.0] {
+            d += 1;
+            ptr_ty = inner;
+        }
+        d
     }
 }
 

@@ -1,6 +1,4 @@
-use std::{
-    borrow::Cow, collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock,
-};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);

@@ -1,21 +1,11 @@
 #![allow(clippy::wrong_self_convention)]
-#![deny(unused_must_use)] // Its a massive pain in the ass if you forget to make a compile error bubble up.
-use std::fmt::{self, Write};
+#![deny(unused_must_use)]
 use std::marker::PhantomData;
 use std::mem;
-use std::path::Display;
 use std::rc::Rc;
-use std::{
-    collections::HashMap,
-    fmt::{format, Debug},
-    mem::replace,
-    ops::Deref,
-    panic::Location,
-    ptr,
-};
+use std::{collections::HashMap, mem::replace, ops::Deref, panic::Location};
 
 use codemap::Span;
-use interp_derive::InterpSend;
 
 use crate::ast::{Annotation, FatStmt, Field, VarType};
 use crate::logging::PoolLog;
@@ -27,8 +17,7 @@ use crate::{
     pool::{Ident, StringPool},
 };
 
-#[macro_use]
-use crate::logging::{logln, assert, assert_eq, ice, err, log, bin_int, unwrap};
+use crate::logging::{assert, assert_eq, bin_int, err, ice, logln, unwrap};
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum Value {
@@ -77,15 +66,6 @@ pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
 #[derive(Copy, Clone)]
 pub struct StackOffset(pub usize);
-
-impl StackOffset {
-    fn to_range(&self) -> StackRange {
-        StackRange {
-            first: *self,
-            count: 1,
-        }
-    }
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
 pub struct StackAbsolute(pub usize);
@@ -199,6 +179,10 @@ pub enum Bc<'p> {
         count: usize,
         ret: StackOffset,
     },
+    DerefPtr {
+        from: StackOffset,
+        to: StackRange,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +210,6 @@ pub struct FnBody<'p> {
     pub debug: Vec<DebugInfo<'p>>,
     pub stack_slots: usize,
     pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
-    arg_names: Vec<Option<Ident<'p>>>,
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
     pub func: FuncId,
@@ -250,7 +233,6 @@ pub struct Interp<'a, 'p> {
     pub call_stack: Vec<CallFrame<'p>>,
     pub program: &'a mut Program<'p>,
     pub ready: Vec<Option<FnBody<'p>>>,
-    builtins: Vec<Ident<'p>>,
     log_depth: usize,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
@@ -311,7 +293,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             call_stack: vec![],
             program,
             ready: vec![],
-            builtins: vec![],
             log_depth: 0,
             debug_trace: vec![],
             anon_fn_counter: 0,
@@ -391,6 +372,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             when,
             constants,
         };
+        self.ensure_compiled(&marker_callframe.constants, f, when)?;
         self.call_stack.push(marker_callframe);
         // TODO: typecheck
         self.value_stack.push(Value::Poison); // For the return value.
@@ -409,7 +391,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         // Sanity checks that we didn't mess anything up for the next guy.
         assert!(self, result != Value::Poison);
         assert!(self, self.value_stack.pop() == Some(Value::Poison));
-        let final_callframe = self.call_stack.pop().unwrap();
+        let _final_callframe = self.call_stack.pop().unwrap();
         // assert!(self, final_callframe == marker_callframe, "bad frame");
         let end_heights = (self.call_stack.len(), self.value_stack.len());
         assert!(self, init_heights == end_heights, "bad stack size");
@@ -594,38 +576,15 @@ impl<'a, 'p> Interp<'a, 'p> {
                     ret,
                 } => {
                     let base = self.take_slot(base);
-                    let res = match base {
-                        Value::InterpAbsStackAddr(addr) => {
-                            assert!(self, count <= addr.count);
-                            Value::InterpAbsStackAddr(StackAbsoluteRange {
-                                first: StackAbsolute(addr.first.0 + offset),
-                                count,
-                            })
-                        }
-                        Value::Heap {
-                            value,
-                            first,
-                            count,
-                        } => {
-                            let abs_first = first + count;
-                            let abs_last = abs_first + count;
-                            // Slicing operations are bounds checked.
-                            let data = unsafe { &*value };
-                            assert!(
-                                self,
-                                data.references > 0
-                                    && abs_first < data.values.len()
-                                    && abs_last <= data.values.len()
-                            );
-                            Value::Heap {
-                                value,
-                                first: first + offset,
-                                count,
-                            }
-                        }
-                        _ => panic!("Wanted ptr found {:?}", base),
-                    };
+                    let res = self.slice_ptr(base, offset, count)?;
                     *self.get_slot_mut(ret) = res;
+                    self.bump_ip();
+                }
+                &Bc::DerefPtr { from, to } => {
+                    let arg = self.take_slot(from);
+                    let value = self.deref_ptr(arg)?;
+                    let ret = self.range_to_index(to);
+                    self.expand_maybe_tuple(value, ret)?;
                     self.bump_ip();
                 }
                 Bc::DebugLine(_) | Bc::DebugMarker(_, _) => self.bump_ip(),
@@ -657,6 +616,78 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
+    fn slice_ptr(&mut self, base: Value, offset: usize, count: usize) -> Res<'p, Value> {
+        match base {
+            Value::InterpAbsStackAddr(addr) => {
+                assert!(self, count <= addr.count);
+                Ok(Value::InterpAbsStackAddr(StackAbsoluteRange {
+                    first: StackAbsolute(addr.first.0 + offset),
+                    count,
+                }))
+            }
+            Value::Heap {
+                value,
+                first,
+                count,
+            } => {
+                let abs_first = first + count;
+                let abs_last = abs_first + count;
+                // Slicing operations are bounds checked.
+                let data = unsafe { &*value };
+                assert!(
+                    self,
+                    data.references > 0
+                        && abs_first < data.values.len()
+                        && abs_last <= data.values.len()
+                );
+                Ok(Value::Heap {
+                    value,
+                    first: first + offset,
+                    count,
+                })
+            }
+            _ => err!(self, "Wanted ptr found {:?}", base),
+        }
+    }
+
+    fn deref_ptr(&mut self, arg: Value) -> Res<'p, Value> {
+        match arg {
+            Value::InterpAbsStackAddr(addr) => {
+                if addr.count == 1 {
+                    let value = self.value_stack[addr.first.0].clone();
+                    assert_ne!(value, Value::Poison);
+                    Ok(value)
+                } else {
+                    let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
+                    Ok(Value::Tuple {
+                        container_type: TypeId::any(),
+                        values: values.to_vec(),
+                    })
+                }
+            }
+            Value::Heap {
+                value,
+                first,
+                count,
+            } => {
+                let data = unsafe { &*value };
+                assert!(self, data.references > 0);
+                Ok(if count == 1 {
+                    let value = data.values[0].clone();
+                    assert_ne!(value, Value::Poison);
+                    value
+                } else {
+                    let values = &data.values[first..first + count];
+                    Value::Tuple {
+                        container_type: TypeId::any(),
+                        values: values.to_vec(),
+                    }
+                })
+            }
+            _ => err!(self, "Wanted ptr found {:?}", arg),
+        }
+    }
+
     fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
@@ -671,41 +702,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let when = self.call_stack.last().unwrap().when;
                 Value::Bool(when == ExecTime::Comptime)
             }
-            "get" => match arg {
-                Value::InterpAbsStackAddr(addr) => {
-                    if addr.count == 1 {
-                        let value = self.value_stack[addr.first.0].clone();
-                        assert_ne!(value, Value::Poison);
-                        value
-                    } else {
-                        let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
-                        Value::Tuple {
-                            container_type: TypeId::any(),
-                            values: values.to_vec(),
-                        }
-                    }
-                }
-                Value::Heap {
-                    value,
-                    first,
-                    count,
-                } => {
-                    let data = unsafe { &*value };
-                    assert!(self, data.references > 0);
-                    if count == 1 {
-                        let value = data.values[0].clone();
-                        assert_ne!(value, Value::Poison);
-                        value
-                    } else {
-                        let values = &data.values[first..first + count];
-                        Value::Tuple {
-                            container_type: TypeId::any(),
-                            values: values.to_vec(),
-                        }
-                    }
-                }
-                _ => panic!("Wanted ptr found {:?}", arg),
-            },
+            "get" => self.deref_ptr(arg)?,
             "set" => {
                 let (addr, value) = self.to_pair(arg)?;
                 match addr {
@@ -742,7 +739,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             let values = self.to_seq(value)?;
                             assert_eq!(self, values.len(), count);
                             for (i, entry) in values.into_iter().enumerate() {
-                                ptr.values[first + 1] = entry;
+                                ptr.values[first + i] = entry;
                             }
                         }
                         Value::Unit
@@ -774,25 +771,15 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let result = range.iter().all(|v| v == &Value::Poison);
                 Value::Bool(result)
             }
-            "len" => {
-                if let Value::Tuple { .. } = arg {
-                    panic!("Bad argument to builtin len: {arg:?}. consider passing a pointer to the value instead.");
-                }
-                let addr = self.to_stack_addr(arg)?;
-                Value::I64(addr.count as i64)
-            }
+            "len" => match arg {
+                Value::InterpAbsStackAddr(addr) => Value::I64(addr.count as i64),
+                Value::Heap { count, .. } => Value::I64(count as i64),
+                _ => panic!("Wanted ptr found {:?}", arg),
+            },
             "Ptr" => {
-                log!("Ptr: {:?} =", arg);
                 // TODO: pointers shouldn't have a length
                 let inner_ty = self.to_type(arg)?;
-                logln!("{}", self.program.log_type(inner_ty));
                 let ty = self.program.intern_type(TypeInfo::Ptr(inner_ty));
-                // println!(
-                //     "{} => {}",
-                //     self.program.log_type(inner_ty),
-                //     self.program.log_type(ty)
-                // );
-                // todo!();
                 Value::Type(ty)
             }
             "Slice" => {
@@ -822,11 +809,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             count: (new_last - new_first) as usize,
                         })
                     }
-                    Value::Heap {
-                        value,
-                        first,
-                        count,
-                    } => {
+                    Value::Heap { value, first, .. } => {
                         let abs_first = first + new_first as usize;
                         let abs_last = first + new_last as usize;
                         // Slicing operations are bounds checked.
@@ -1000,10 +983,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     fn push_expanded(&mut self, arg: Value) {
         match arg {
-            Value::Tuple {
-                container_type,
-                values,
-            } => {
+            Value::Tuple { values, .. } => {
                 for v in values {
                     self.push_expanded(v);
                 }
@@ -1027,7 +1007,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     #[track_caller]
     fn take_slot(&mut self, slot: StackOffset) -> Value {
-        let mut value = replace(self.get_slot_mut(slot), Value::Poison);
+        let value = replace(self.get_slot_mut(slot), Value::Poison);
         debug_assert_ne!(value, Value::Poison);
         value
     }
@@ -1070,18 +1050,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    pub fn empty_fn(
-        &self,
-        arg_names: Vec<Option<Ident<'p>>>,
-        when: ExecTime,
-        func: FuncId,
-        loc: Span,
-    ) -> FnBody<'p> {
+    pub fn empty_fn(&self, when: ExecTime, func: FuncId, loc: Span) -> FnBody<'p> {
         FnBody {
             insts: vec![],
             stack_slots: 0,
             vars: Default::default(),
-            arg_names,
             when,
             slot_types: vec![],
             func,
@@ -1108,7 +1081,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         if !func.local_constants.is_empty() {
             // TODO: pass in comptime known args
             // TODO: do i even need to pass an index? probably just for debugging
-            let mut result = self.empty_fn(vec![], when, FuncId(index + 10000000), func.loc);
+            let mut result = self.empty_fn(when, FuncId(index + 10000000), func.loc);
             result.constants.parents.push(constants.clone().bake());
             let new_constants = func.local_constants.clone();
 
@@ -1118,10 +1091,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 self.compile_stmt(&mut result, &stmt)?;
             }
             self.pop_state(state);
-            let func = &mut self.program.funcs[index];
             constants.parents.push(result.constants.bake())
         }
-        let func = &self.program.funcs[index];
         while self.ready.len() <= index {
             self.ready.push(None);
         }
@@ -1133,13 +1104,13 @@ impl<'a, 'p> Interp<'a, 'p> {
             self.program.funcs[index].log(self.pool)
         );
         self.infer_types(&constants, FuncId(index))?;
-        let mut func = &self.program.funcs[index];
-        let (arg, ret) = func.ty.unwrap();
-        let mut result = self.empty_fn(func.arg_names.clone(), when, FuncId(index), func.loc);
+        let func = &self.program.funcs[index];
+        let (arg, _) = func.ty.unwrap();
+        let mut result = self.empty_fn(when, FuncId(index), func.loc);
         result.constants = constants;
         let arg_range = result.reserve_slots(self.program, arg);
         let return_value = self.emit_body(&mut result, arg_range, FuncId(index))?;
-        let mut func = &self.program.funcs[index];
+        let func = &self.program.funcs[index];
 
         result.push(Bc::Ret(return_value));
 
@@ -1315,7 +1286,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         result.stack_slots += func.stack_slots;
         result.slot_types.extend(func.slot_types.iter());
         let mut has_returned = false; // TODO: remove
-        for (i, mut inst) in func.insts.iter().cloned().enumerate() {
+        for (_, mut inst) in func.insts.iter().cloned().enumerate() {
             assert!(self, !has_returned); // TODO
             inst.renumber(stack_offset, ip_offset);
             if let Bc::Ret(return_value) = inst {
@@ -1347,6 +1318,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
+    // TODO: do the memo stuff here instead of my crazy other thing.
+    // TODO: maybe call this @generic instead of @comptime? cause other things can be comptime
     // Return type is allowed to use args.
     fn emit_comptime_call(
         &mut self,
@@ -1354,10 +1327,10 @@ impl<'a, 'p> Interp<'a, 'p> {
         f: FuncId,
         arg_expr: &FatExpr<'p>,
     ) -> Res<'p, Value> {
-        let mut func = self.program.funcs[f.0].clone();
+        let func = self.program.funcs[f.0].clone();
         let arg_ty = match &func.ty {
-            &LazyFnType::Finished(arg, ret) => arg,
-            LazyFnType::Pending { arg, ret } => match arg {
+            &LazyFnType::Finished(arg, _) => arg,
+            LazyFnType::Pending { arg, ret: _ } => match arg {
                 LazyType::Infer => todo!(),
                 LazyType::PendingEval(arg) => {
                     let arg =
@@ -1455,7 +1428,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                             }
                         };
 
-                        let found_ty = self.program.type_of(&value);
                         if let Some(expected_ty) = expected_ty {
                             if self.program.types[expected_ty.0] == TypeInfo::Type {
                                 // HACK. todo: general overloads for cast()
@@ -1480,7 +1452,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             }
                             (Some(value), None) => value,
                             (Some((value, ty)), Some(expected_ty)) => {
-                                self.type_check_eq(ty, expected_ty, "var decl")?;
+                                self.type_check_arg(ty, expected_ty, "var decl")?;
                                 (value, ty)
                             }
 
@@ -1505,13 +1477,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Stmt::SetVar(var, expr) => {
-                let kind = self.program.vars[var.1].kind;
+                let var_info = self.program.vars[var.1]; // TODO: the type here isn't set.
                 assert_eq!(
-                    self, kind,
+                    self, var_info.kind,
                     VarType::Var,
                     "Only 'var' can be reassigned (not let/const). {:?}", stmt
                 );
-                let (value, new_ty) = self.compile_expr(result, expr, None)?;
                 let slot = result.vars.get(var);
                 let (slot, oldty) = *unwrap!(
                     self,
@@ -1519,7 +1490,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                     "SetVar: var must be declared: {}",
                     var.log(self.pool)
                 );
-                assert_eq!(self, new_ty, oldty);
+
+                let (value, new_ty) = self.compile_expr(result, expr, Some(oldty))?;
+                self.type_check_arg(new_ty, oldty, "reassign var")?;
                 result.push(Bc::Drop(slot));
                 assert_eq!(self, value.count, slot.count);
                 for i in 0..value.count {
@@ -1530,14 +1503,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Stmt::SetNamed(name, _) => err!(self, CErr::UndeclaredIdent(*name)),
-            Stmt::DeclNamed { .. } | Stmt::SetNamed(_, _) => {
+            Stmt::DeclNamed { .. } => {
                 ice!(self, "Scope resolution failed {}", stmt.log(self.pool))
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
-                let func_id = self.program.add_func(func.clone());
+                self.program.add_func(func.clone());
             }
-            s => todo!("Compile Stmt {:?}", s),
         }
         Ok(())
     }
@@ -1581,7 +1553,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         if arg.count == 0 {
                             arg = result.load_constant_new(self.program, Value::Unit).0;
                         }
-                        // Note: f might not be compiled yet, we'll find out the first time we try to call it.
+                        // Note: f will be compiled differently depending on the calling convention.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
                         self.infer_types(&result.constants, f)?;
                         let func = &self.program.funcs[f.0];
@@ -1623,6 +1595,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         assert_eq!(self, self.return_stack_slots(f), ret.count);
                         let func = &self.program.funcs[f.0];
                         if returns_type {
+                            self.ensure_compiled(&result.constants, f, result.when)?;
                             result.push(Bc::CallDirectMaybeCached { f, ret, arg });
                         } else if !func.capture_vars.is_empty() {
                             // TODO: check that you're calling from the same place as the definition.
@@ -1708,7 +1681,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ret = self.compile_expr(result, value, requested)?;
 
                 for local in locals.as_ref().expect("resolve failed") {
-                    if let Some((slot, ty)) = result.vars.remove(local) {
+                    if let Some((slot, _ty)) = result.vars.remove(local) {
                         result.push(Bc::Drop(slot));
                     } else if VarType::Const == self.program.vars[local.1].kind {
                         assert!(
@@ -1731,7 +1704,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .map(|v| self.compile_expr(result, v, None))
                     .collect();
                 let values = values?;
-                let required_slots: usize = values.iter().map(|(range, _)| range.count).sum();
                 let types: Vec<_> = values.iter().map(|(_, ty)| *ty).collect();
                 let ty = self.program.intern_type(TypeInfo::Tuple(types));
 
@@ -1739,7 +1711,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
                 let base = ret.first.0;
                 let mut count = 0;
-                for (v, ty) in values {
+                for (v, _) in values {
                     for i in 0..v.count {
                         result.push(Bc::Move {
                             from: StackOffset(v.first.0 + i),
@@ -1765,7 +1737,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         result.push(Bc::CloneRange { from, to });
                     }
                     (to, ty)
-                } else if let Some((value, ty)) = result.constants.get(var) {
+                } else if let Some((value, _)) = result.constants.get(var) {
                     result.load_constant_new(self.program, value)
                 } else {
                     println!("VARS: {:?}", result.vars);
@@ -1801,6 +1773,16 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
                     "addr" => self.addr_macro(result, arg)?,
+                    "deref" => {
+                        let (from, ptr_ty) = self.compile_expr(result, arg, requested)?;
+                        let ty = unwrap!(self, self.program.unptr_ty(ptr_ty), "not ptr");
+                        let to = result.reserve_slots(self.program, ty);
+                        result.push(Bc::DerefPtr {
+                            from: from.single(),
+                            to,
+                        });
+                        (to, ty)
+                    }
                     "type" => {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
@@ -1873,14 +1855,25 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Expr::FieldAccess(e, name) => {
-                let (container_ptr, container_ptr_ty) = self.addr_macro(result, e)?;
-                let container_ty = unwrap!(self, self.program.unptr_ty(container_ptr_ty), "");
-                if let TypeInfo::Struct {
-                    fields,
-                    size,
-                    as_tuple,
-                } = &self.program.types[container_ty.0]
-                {
+                let (mut container_ptr, mut container_ptr_ty) = self.addr_macro(result, e)?;
+                // Auto deref for nested place expressions.
+                // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
+                let depth = self.program.ptr_depth(container_ptr_ty);
+                if depth > 1 {
+                    for _ in 0..(depth - 1) {
+                        container_ptr_ty =
+                            unwrap!(self, self.program.unptr_ty(container_ptr_ty), "");
+                        let ret = result.reserve_slots(self.program, container_ptr_ty);
+                        result.push(Bc::DerefPtr {
+                            from: container_ptr.single(),
+                            to: ret,
+                        });
+                        container_ptr = ret;
+                    }
+                }
+                let container_ty =
+                    unwrap!(self, self.program.unptr_ty(container_ptr_ty), "unreachable");
+                if let TypeInfo::Struct { fields, .. } = &self.program.types[container_ty.0] {
                     for f in fields {
                         if f.name == *name {
                             let f = *f;
@@ -1903,7 +1896,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                         self.program.log_type(container_ty)
                     );
                 } else {
-                    err!(self, "only structs support field access but found {:?}", e);
+                    err!(
+                        self,
+                        "only structs support field access but found {:?} which is {}",
+                        e.log(self.pool),
+                        self.program.log_type(container_ty)
+                    );
                 }
             }
             Expr::StructLiteralP(pattern) => {
@@ -1913,9 +1911,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let values: Option<_> = pattern.types.iter().cloned().collect();
                 let values: Vec<FatExpr<'_>> = values.unwrap();
                 if let TypeInfo::Struct {
-                    fields,
-                    size,
-                    as_tuple,
+                    fields, as_tuple, ..
                 } = self.program.types[requested.unwrap().0].clone()
                 {
                     assert_eq!(self, names.len(), values.len());
@@ -1974,6 +1970,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     ice!(self, "Missing var {} (in !addr)", var.log(self.pool))
                 }
             }
+            Expr::SuffixMacro(macro_name, _) => {
+                let name = self.pool.get(*macro_name);
+                ice!(self, "Took address of macro {name} not supported")
+            }
+            // TODO: this is a bit weird but it makes place expressions work.
+            Expr::FieldAccess(_, _) => self.compile_expr(result, arg, None),
             &Expr::GetNamed(i) => return Err(self.error(CErr::UndeclaredIdent(i))),
             _ => return Err(self.error(CErr::AddrRvalue(arg.clone()))),
         }
@@ -1995,7 +1997,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         state.result
     }
 
-    fn resolve_function(&self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Option<FuncId> {
+    fn resolve_function(&self, _result: &FnBody<'p>, expr: &FatExpr<'p>) -> Option<FuncId> {
         match expr.deref() {
             Expr::GetNamed(i) => self.lookup_unique_func(*i),
             _ => None,
@@ -2008,7 +2010,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
         Ok(match expr.deref() {
             Expr::Value(v) => self.program.type_of(v),
-            Expr::Call(f, arg) => {
+            Expr::Call(f, _) => {
                 let fid = if let Some(f) = self.resolve_function(result, f) {
                     f
                 } else {
@@ -2046,6 +2048,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                         _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
                     },
                     "type" => self.program.intern_type(TypeInfo::Type),
+                    "deref" => {
+                        let ptr_ty = self.type_of(result, arg)?;
+                        unwrap!(self, self.program.unptr_ty(ptr_ty), "")
+                    }
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
             }
@@ -2117,10 +2123,6 @@ impl<'a, 'p> Interp<'a, 'p> {
         body.as_ref().expect("jit current function")
     }
 
-    fn tyty(&mut self) -> TypeId {
-        self.program.intern_type(TypeInfo::Type)
-    }
-
     // Resolve the lazy types for Arg and Ret
     fn infer_types(&mut self, constants: &SharedConstants<'p>, func: FuncId) -> Res<'p, FnType> {
         let f = &self.program.funcs[func.0];
@@ -2179,7 +2181,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 // fallthrough
             }
-            Expr::Call(f, arg) => {
+            Expr::Call(_, _) => {
                 // TODO: fast path for checking the generics cache
             }
             _ => {} // fallthrough
@@ -2254,15 +2256,8 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_seq(&self, value: Value) -> Res<'p, Vec<Value>> {
         match value {
-            Value::Tuple {
-                container_type,
-                values,
-            }
-            | Value::Array {
-                container_type,
-                values,
-            } => Ok(values),
-            Value::Slice(values) => todo!(),
+            Value::Tuple { values, .. } | Value::Array { values, .. } => Ok(values),
+            Value::Slice(_) => todo!(),
             _ => Err(self.error(CErr::TypeError("AnyTuple | AnyArray", value))),
         }
     }
@@ -2349,10 +2344,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     // TODO: macros for each builtin arg type cause this sucks.
     fn load_int_pair(&self, v: Value) -> Res<'p, (i64, i64)> {
         match v {
-            Value::Tuple {
-                container_type,
-                mut values,
-            } => {
+            Value::Tuple { mut values, .. } => {
                 assert_eq!(self, values.len(), 2, "load_int_pair wrong arity");
                 let a = replace(&mut values[0], Value::Poison);
                 let b = replace(&mut values[1], Value::Poison);
@@ -2375,7 +2367,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         result: &mut FnBody<'p>,
         arg: &FatExpr<'p>,
     ) -> Result<(StackRange, TypeId), CompileError<'p>> {
-        let ((cond, cond_ty), if_true, if_false) = if let Expr::Tuple(parts) = arg.deref() {
+        let ((cond, _), if_true, if_false) = if let Expr::Tuple(parts) = arg.deref() {
             let cond = self.compile_expr(result, &parts[0], None)?;
             let if_true = if let Expr::Closure(func) = parts[1].deref() {
                 self.program.add_func(*func.clone())
@@ -2469,9 +2461,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         return Ok(());
                     }
                 }
-                (f, e) => {
-                    // println!("f={:?} e={:?}", f, e)
-                }
+                _ => {}
             }
             err!(self, CErr::TypeCheck(found, expected, msg))
         }
@@ -2552,14 +2542,9 @@ fn invert<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
 
 fn to_flat_seq(value: Value) -> Vec<Value> {
     match value {
-        Value::Tuple {
-            container_type,
-            values,
+        Value::Tuple { values, .. } | Value::Array { values, .. } => {
+            values.into_iter().flat_map(to_flat_seq).collect()
         }
-        | Value::Array {
-            container_type,
-            values,
-        } => values.into_iter().flat_map(to_flat_seq).collect(),
         e => vec![e],
     }
 }
@@ -2573,15 +2558,15 @@ impl<'p> Bc<'p> {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }
-            Bc::CallDirectMaybeCached { f, ret, arg } | Bc::CallDirect { f, ret, arg } => {
+            Bc::CallDirectMaybeCached { f: _, ret, arg } | Bc::CallDirect { f: _, ret, arg } => {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }
-            Bc::CallBuiltin { name, ret, arg } => {
+            Bc::CallBuiltin { ret, arg, .. } => {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }
-            Bc::LoadConstant { slot, value } => slot.0 += stack_offset,
+            Bc::LoadConstant { slot, .. } => slot.0 += stack_offset,
             Bc::JumpIf {
                 cond,
                 true_ip,
@@ -2592,7 +2577,7 @@ impl<'p> Bc<'p> {
                 *false_ip += ip_offset;
             }
             Bc::Goto { ip } => *ip += ip_offset,
-            Bc::CloneCreateTuple { values, target } | Bc::MoveCreateTuple { values, target } => {
+            Bc::CloneCreateTuple { target, .. } | Bc::MoveCreateTuple { target, .. } => {
                 target.0 += stack_offset;
             }
             Bc::Drop(arg) | Bc::Ret(arg) => {
@@ -2607,7 +2592,7 @@ impl<'p> Bc<'p> {
                 from.first.0 += stack_offset;
                 to.first.0 += stack_offset;
             }
-            Bc::ExpandTuple { from, to } => {
+            Bc::ExpandTuple { from, to } | Bc::DerefPtr { from, to } => {
                 from.0 += stack_offset;
                 to.first.0 += stack_offset;
             }
@@ -2616,10 +2601,7 @@ impl<'p> Bc<'p> {
                 to.0 += stack_offset;
             }
             Bc::SlicePtr {
-                base,
-                offset,
-                count,
-                ret,
+                base, offset, ret, ..
             } => {
                 base.0 += stack_offset;
                 *offset += stack_offset;

@@ -7,8 +7,7 @@ use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
 use std::collections::VecDeque;
 use std::iter::Peekable;
-use std::num::ParseFloatError;
-use std::ops::{Deref, Range};
+use std::ops::Deref;
 use std::str::Chars;
 
 // TODO: why tf is Range not copy
@@ -86,6 +85,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     // pop the first buffered token or generate a new one
+    #[allow(clippy::should_implement_trait)] // nobody cares bro
     pub fn next(&mut self) -> Token<'p> {
         if let Some(prev) = self.peeked.pop_front() {
             return prev;
@@ -175,7 +175,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
                 '\0' => return self.err(LexErr::UnterminatedStr),
                 _ => {}
-                _ => unreachable!(),
             }
         }
     }
@@ -190,7 +189,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 let text = &self.src[self.start..self.current];
                 let n = match text.parse::<i64>() {
                     Ok(n) => n,
-                    Err(err) => return self.err(LexErr::NumParseErr),
+                    Err(_) => return self.err(LexErr::NumParseErr),
                 };
                 return self.token(Number(n), self.start, self.current);
             }

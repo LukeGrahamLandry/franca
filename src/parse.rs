@@ -2,33 +2,24 @@
 
 use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
 
-use codemap::{CodeMap, File, Span, SpanLoc};
-use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
+use codemap::{File, Span};
+use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
+use crate::logging::logln;
 use crate::{
-    ast::{
-        Annotation, Expr, FatExpr, FatStmt, Field, Func, Known, LazyFnType, LazyType, Pattern,
-        Stmt, TypeId, VarInfo, VarType,
-    },
+    ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyFnType, LazyType, Pattern, Stmt},
     interp::Value,
     lex::{Lexer, Token, TokenType},
     logging::PoolLog,
     pool::{Ident, StringPool},
-    scope::ResolveScope,
 };
 use TokenType::*;
-#[macro_use]
-use crate::logging::{logln, log};
 
 pub struct Parser<'a, 'p> {
     pool: &'p StringPool<'p>,
-    src: &'a str,
     expr_id: usize,
     lexer: Lexer<'a, 'p>,
-    file: Arc<File>,
-    codemap: &'a CodeMap,
     spans: Vec<Span>,
-    track_err: bool,
 }
 
 type Res<T> = Result<T, ParseErr>;
@@ -40,21 +31,12 @@ pub struct ParseErr {
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
-    pub fn parse(
-        codemap: &'a CodeMap,
-        file: Arc<File>,
-        pool: &'p StringPool<'p>,
-        track_err: bool,
-    ) -> Res<Vec<FatStmt<'p>>> {
+    pub fn parse(file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
         let mut p = Parser {
-            file: file.clone(),
             pool,
             lexer: Lexer::new(file.source(), pool, file.span),
-            src: file.source(),
             expr_id: 0,
-            codemap,
             spans: vec![],
-            track_err,
         };
 
         p.start_subexpr();
@@ -62,7 +44,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         while p.peek() != Eof {
             stmts.push(p.parse_stmt()?);
         }
-        let full = p.end_subexpr();
+        let _full = p.end_subexpr();
 
         for s in &stmts {
             logln!("finished stmt: {}", s.log(pool))
@@ -137,7 +119,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.eat(LeftSquiggle)?;
                 let mut body = vec![];
-                let mut trailing_semi = false;
                 while self.peek() != RightSquiggle {
                     body.push(self.parse_stmt()?);
                 }
@@ -184,7 +165,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.pop();
                 Ok(self.expr(Expr::GetNamed(i)))
             }
-            Quoted(i) => Err(self.todo("quoted string")),
+            Quoted(_) => Err(self.todo("quoted string")),
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or Num or Ident...")),
         }
     }
