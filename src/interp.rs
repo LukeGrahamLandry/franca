@@ -17,7 +17,7 @@ use std::{
 use codemap::Span;
 use interp_derive::InterpSend;
 
-use crate::ast::{Annotation, FatStmt, VarType};
+use crate::ast::{Annotation, FatStmt, Field, VarType};
 use crate::logging::PoolLog;
 use crate::{
     ast::{
@@ -1167,7 +1167,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
         let return_value = match func.body.as_ref() {
             Some(body) => {
-                let (ret_val, found_ret_ty) = self.compile_expr(result, body)?;
+                let (ret_val, found_ret_ty) = self.compile_expr(result, body, None)?;
                 self.type_check_arg(found_ret_ty, ret, "bad return value")?;
                 // We're done with our arguments, get rid of them. Same for other vars.
                 // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
@@ -1373,7 +1373,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.last_loc = Some(stmt.loc);
         match stmt.deref() {
             Stmt::Eval(expr) => {
-                let (value, _) = self.compile_expr(result, expr)?;
+                let (value, _) = self.compile_expr(result, expr, None)?;
                 result.push(Bc::Drop(value));
             }
             Stmt::DeclVar {
@@ -1388,63 +1388,72 @@ impl<'a, 'p> Interp<'a, 'p> {
                         .map(|ty| self.cached_eval_expr(&result.constants, ty, TypeId::ty())),
                 )?
                 .map(|ty| self.to_type(ty).unwrap());
-                if *kind == VarType::Const {
-                    let mut value = match value {
-                        Some(value) => self.cached_eval_expr(
-                            &result.constants,
-                            value.clone(),
-                            expected_ty.unwrap_or(TypeId::any()),
-                        )?,
-                        None => {
-                            let name = self.pool.get(name.0);
-                            unwrap!(
-                                self,
-                                self.builtin_constant(name),
-                                "uninit (non-blessed) const: {:?}",
-                                name
-                            )
-                            .0
-                        }
-                    };
+                match kind {
+                    VarType::Const => {
+                        let mut value = match value {
+                            Some(value) => self.cached_eval_expr(
+                                &result.constants,
+                                value.clone(),
+                                expected_ty.unwrap_or(TypeId::any()),
+                            )?,
+                            None => {
+                                let name = self.pool.get(name.0);
+                                unwrap!(
+                                    self,
+                                    self.builtin_constant(name),
+                                    "uninit (non-blessed) const: {:?}",
+                                    name
+                                )
+                                .0
+                            }
+                        };
 
-                    let found_ty = self.program.type_of(&value);
-                    if let Some(expected_ty) = expected_ty {
-                        if self.program.types[expected_ty.0] == TypeInfo::Type {
-                            // HACK. todo: general overloads for cast()
-                            value = Value::Type(self.to_type(value)?)
+                        let found_ty = self.program.type_of(&value);
+                        if let Some(expected_ty) = expected_ty {
+                            if self.program.types[expected_ty.0] == TypeInfo::Type {
+                                // HACK. todo: general overloads for cast()
+                                value = Value::Type(self.to_type(value)?)
+                            }
+                            let found_ty = self.program.type_of(&value);
+                            self.type_check_eq(found_ty, expected_ty, "var decl")?;
                         }
                         let found_ty = self.program.type_of(&value);
-                        self.type_check_eq(found_ty, expected_ty, "var decl")?;
+                        result.constants.insert(*name, (value, found_ty));
                     }
-                    let found_ty = self.program.type_of(&value);
-                    result.constants.insert(*name, (value, found_ty));
-                } else {
-                    let value = invert(value.as_ref().map(|expr| self.compile_expr(result, expr)))?;
-                    self.last_loc = Some(stmt.loc);
-                    let value = match (value, expected_ty) {
-                        (None, Some(expected_ty)) => {
-                            (result.reserve_slots(self.program, expected_ty), expected_ty)
-                        }
-                        (Some(value), None) => value,
-                        (Some((value, ty)), Some(expected_ty)) => {
-                            self.type_check_eq(ty, expected_ty, "var decl")?;
-                            (value, ty)
-                        }
+                    VarType::Let | VarType::Var => {
+                        let value = invert(
+                            value
+                                .as_ref()
+                                .map(|expr| self.compile_expr(result, expr, expected_ty)),
+                        )?;
+                        self.last_loc = Some(stmt.loc);
+                        let value = match (value, expected_ty) {
+                            (None, Some(expected_ty)) => {
+                                (result.reserve_slots(self.program, expected_ty), expected_ty)
+                            }
+                            (Some(value), None) => value,
+                            (Some((value, ty)), Some(expected_ty)) => {
+                                self.type_check_eq(ty, expected_ty, "var decl")?;
+                                (value, ty)
+                            }
 
-                        (None, None) => err!(self, "{:?} decl with unknown type and no init", name),
-                    };
-                    let prev = result.vars.insert(*name, value);
-                    assert!(self, prev.is_none(), "shadow is still new var");
+                            (None, None) => {
+                                err!(self, "{:?} decl with unknown type and no init", name)
+                            }
+                        };
+                        let prev = result.vars.insert(*name, value);
+                        assert!(self, prev.is_none(), "shadow is still new var");
 
-                    // TODO: what if shadow is const? that would be more consistant if did it like rust.
-                    if let Some(dropping) = dropping {
-                        // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
-                        // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
-                        // But need to change my debugging check that everything was dropped.
-                        // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
-                        let (slot, _) =
-                            unwrap!(self, result.vars.remove(dropping), "missing shadow");
-                        result.push(Bc::Drop(slot));
+                        // TODO: what if shadow is const? that would be more consistant if did it like rust.
+                        if let Some(dropping) = dropping {
+                            // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
+                            // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
+                            // But need to change my debugging check that everything was dropped.
+                            // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
+                            let (slot, _) =
+                                unwrap!(self, result.vars.remove(dropping), "missing shadow");
+                            result.push(Bc::Drop(slot));
+                        }
                     }
                 }
             }
@@ -1455,7 +1464,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     VarType::Var,
                     "Only 'var' can be reassigned (not let/const). {:?}", stmt
                 );
-                let (value, new_ty) = self.compile_expr(result, expr)?;
+                let (value, new_ty) = self.compile_expr(result, expr, None)?;
                 let slot = result.vars.get(var);
                 let (slot, oldty) = *unwrap!(
                     self,
@@ -1499,6 +1508,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         &mut self,
         result: &mut FnBody<'p>,
         expr: &FatExpr<'p>,
+        requested: Option<TypeId>,
     ) -> Res<'p, (StackRange, TypeId)> {
         result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
@@ -1519,7 +1529,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             return Ok(result.load_constant_new(self.program, ret));
                         }
 
-                        let (mut arg, arg_ty_found) = self.compile_expr(result, arg)?;
+                        let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
                         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
                         if arg.count == 0 {
                             arg = result.load_constant_new(self.program, Value::Unit).0;
@@ -1613,8 +1623,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     // else: fallthrough
                 }
 
-                let (arg, arg_ty_found) = self.compile_expr(result, arg)?;
-                let (f_slot, func_ty) = self.compile_expr(result, f)?;
+                let (arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
+                let (f_slot, func_ty) = self.compile_expr(result, f, None)?;
                 logln!(
                     "dynamic {} is {}",
                     f.log(self.pool),
@@ -1648,7 +1658,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
-                let ret = self.compile_expr(result, value)?;
+                let ret = self.compile_expr(result, value, requested)?;
 
                 for local in locals.as_ref().expect("resolve failed") {
                     if let Some((slot, ty)) = result.vars.remove(local) {
@@ -1671,7 +1681,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 debug_assert!(values.len() > 1, "no trivial tuples");
                 let values: Res<'p, Vec<_>> = values
                     .iter()
-                    .map(|v| self.compile_expr(result, v))
+                    .map(|v| self.compile_expr(result, v, None))
                     .collect();
                 let values = values?;
                 let required_slots: usize = values.iter().map(|(range, _)| range.count).sum();
@@ -1737,28 +1747,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             Expr::EnumLiteral(_) => todo!(),
-            Expr::StructLiteral(fields) => {
-                let values: Res<'p, Vec<_>> = fields
-                    .iter()
-                    .map(|field| {
-                        self.cached_eval_expr(&result.constants, field.ty.clone(), TypeId::any())
-                    })
-                    .collect();
-                let fields: Vec<_> = values?
-                    .into_iter()
-                    .zip(fields.iter())
-                    .map(|(v, f)| Value::Tuple {
-                        container_type: TypeId::any(),
-                        values: vec![Value::Symbol(f.name.0), v],
-                    })
-                    .collect();
-
-                let map = Value::Tuple {
-                    container_type: TypeId::any(),
-                    values: fields,
-                };
-                result.load_constant_new(self.program, map)
-            }
             Expr::Value(value) => result.load_constant_new(self.program, value.clone()),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -1793,7 +1781,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
                         let state = self.mark_state(result.clone());
-                        let res = self.compile_expr(result, arg);
+                        let res = self.compile_expr(result, arg, None);
                         assert!(self, res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
@@ -1806,11 +1794,100 @@ impl<'a, 'p> Interp<'a, 'p> {
                         println!("VALUE: {:?}", value);
                         result.load_constant_new(self.program, Value::Unit)
                     }
+                    "struct" => {
+                        if let Expr::StructLiteralP(pattern) = arg.deref().deref() {
+                            let names: Vec<_> = pattern.names.iter().map(|n| n.unwrap()).collect();
+                            // TODO: why must this suck so bad
+                            let types: Res<'p, Vec<_>> = pattern
+                                .types
+                                .iter()
+                                .map(|ty| {
+                                    self.cached_eval_expr(
+                                        &result.constants,
+                                        ty.clone().unwrap(),
+                                        TypeId::ty(),
+                                    )
+                                })
+                                .collect();
+                            let types: Res<'p, Vec<_>> =
+                                types?.into_iter().map(|ty| self.to_type(ty)).collect();
+                            let types = types?;
+                            let as_tuple = self.program.intern_type(TypeInfo::Tuple(types.clone()));
+                            let mut fields = vec![];
+                            let mut size = 0;
+                            for (name, ty) in names.into_iter().zip(types.into_iter()) {
+                                let count = self.program.slot_count(ty);
+                                fields.push(Field {
+                                    name,
+                                    ty,
+                                    first: size,
+                                    count,
+                                });
+                                size += count;
+                            }
+                            let ty = TypeInfo::Struct {
+                                fields,
+                                size,
+                                as_tuple,
+                            };
+                            let ty = Value::Type(self.program.intern_type(ty));
+                            result.load_constant_new(self.program, ty)
+                        } else {
+                            err!(
+                                self,
+                                "expected map literal: .{{ name: Type, ... }} but found {:?}",
+                                arg
+                            );
+                        }
+                    }
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
             }
             Expr::FieldAccess(_, _) => todo!(),
-            Expr::StructLiteralP(_) => todo!(),
+            Expr::StructLiteralP(pattern) => {
+                assert!(self, requested.is_some());
+                let names: Vec<_> = pattern.names.iter().map(|n| n.unwrap()).collect();
+                // TODO: why must this suck so bad
+                let values: Option<_> = pattern.types.iter().cloned().collect();
+                let values: Vec<FatExpr<'_>> = values.unwrap();
+                if let TypeInfo::Struct {
+                    fields,
+                    size,
+                    as_tuple,
+                } = self.program.types[requested.unwrap().0].clone()
+                {
+                    assert_eq!(self, names.len(), values.len());
+                    assert_eq!(self, fields.len(), values.len());
+                    let all = names.into_iter().zip(values).zip(fields);
+                    let mut values = vec![];
+                    for ((name, value), field) in all {
+                        assert_eq!(self, name, field.name);
+                        let (value, found_ty) =
+                            self.compile_expr(result, &value, Some(field.ty))?;
+                        self.type_check_arg(found_ty, field.ty, "struct field")?;
+                        values.push(value);
+                    }
+
+                    let ret = result.reserve_slots(self.program, as_tuple);
+                    // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
+                    let base = ret.first.0;
+                    let mut count = 0;
+                    for v in values {
+                        result.push(Bc::MoveRange {
+                            from: v,
+                            to: StackRange {
+                                first: StackOffset(base + count),
+                                count: v.count,
+                            },
+                        });
+                        count += v.count;
+                    }
+                    assert_eq!(self, count, ret.count);
+                    (ret, requested.unwrap())
+                } else {
+                    err!(self, "struct literal but expected {:?}", requested);
+                }
+            }
         })
     }
 
@@ -1858,7 +1935,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             Expr::Tuple(_) => todo!(),
             Expr::RefType(_) => todo!(),
             Expr::EnumLiteral(_) => todo!(),
-            Expr::StructLiteral(_) => todo!(),
             Expr::Closure(_) => todo!(),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -2057,6 +2133,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         if let Value::Type(id) = value {
             Ok(id)
         } else if let Value::Tuple { values, .. } = value {
+            // TODO: fix horible special case. This causes infinite pain for tuple types because you need to put them in a const with a type annotation,
+            //       or they're passed as multiple arguments.
             let ty = match values.len() {
                 0 => TypeId::unit(),
                 1 => self.to_type(values.into_iter().next().unwrap())?,
@@ -2210,7 +2288,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg: &FatExpr<'p>,
     ) -> Result<(StackRange, TypeId), CompileError<'p>> {
         let ((cond, cond_ty), if_true, if_false) = if let Expr::Tuple(parts) = arg.deref() {
-            let cond = self.compile_expr(result, &parts[0])?;
+            let cond = self.compile_expr(result, &parts[0], None)?;
             let if_true = if let Expr::Closure(func) = parts[1].deref() {
                 self.program.add_func(*func.clone())
             } else {

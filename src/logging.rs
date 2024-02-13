@@ -157,7 +157,15 @@ impl<'p> Program<'p> {
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
             TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
-            TypeInfo::Struct(_) => "Struct()".to_string(),
+            TypeInfo::Struct {
+                fields,
+                size,
+                as_tuple,
+            } => {
+                // TODO: factor out iter().join(str), how does that not already exist
+                let v: Vec<_> = fields.iter().map(|(f)| format!("{f:?}")).collect();
+                format!("Struct({})", v.join(", "))
+            }
             TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
             TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
             TypeInfo::Tuple(v) => {

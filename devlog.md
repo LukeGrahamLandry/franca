@@ -1,4 +1,12 @@
 
+## structs
+
+I need to let expected type flow down the tree so it will treat your map literal as the type of your variable. 
+Don't want to deal with a generic map thing that i then convert rn.
+
+## generics
+
+## 
 
 I really like the Zed thing where you get a file of all the errors. 
 It's great for mass changes like adding an argument to a function when you're always in a context where you can trivially get the arg anyway. 

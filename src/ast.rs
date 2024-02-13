@@ -76,10 +76,24 @@ pub enum TypeInfo<'p> {
     Fn(FnType),
     Tuple(Vec<TypeId>),
     Ptr(TypeId),
-    Struct(Vec<(Ident<'p>, TypeId)>),
+    Struct {
+        // You probably always have few enough that this is faster than a hash map.
+        fields: Vec<Field<'p>>,
+        size: usize,
+        as_tuple: TypeId,
+    },
+    // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(Ident<'p>, TypeId),
     Type,
     Unit, // TODO: same as empty tuple but easier to type
+}
+
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq)]
+pub struct Field<'p> {
+    pub name: Ident<'p>,
+    pub ty: TypeId,
+    pub first: usize,
+    pub count: usize,
 }
 
 #[derive(Clone, PartialEq, Hash, Debug)]
@@ -106,7 +120,6 @@ pub enum Expr<'p> {
     EnumLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
     Closure(Box<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
-    StructLiteral(Vec<Field<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
 
@@ -115,12 +128,6 @@ pub enum Expr<'p> {
 
     // Frontend only
     GetNamed(Ident<'p>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Field<'p> {
-    pub name: Ident<'p>,
-    pub ty: FatExpr<'p>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -415,7 +422,7 @@ impl<'p> Program<'p> {
     pub fn slot_count(&self, ty: TypeId) -> usize {
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
-            TypeInfo::Struct(_) => todo!(),
+            &TypeInfo::Struct { size, .. } => size,
             _ => 1,
         }
     }
@@ -522,7 +529,7 @@ impl<'p> Program<'p> {
     pub fn tuple_types(&self, ty: TypeId) -> Option<&[TypeId]> {
         match &self.types[ty.0] {
             TypeInfo::Tuple(types) => Some(types),
-            TypeInfo::Struct(_) => todo!(),
+            &TypeInfo::Struct { as_tuple, .. } => self.tuple_types(as_tuple),
             TypeInfo::Unique(_, _) => todo!(),
             _ => None,
         }
