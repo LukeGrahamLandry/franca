@@ -179,7 +179,7 @@ impl<'p> ResolveScope<'p> {
             }
             Expr::EnumLiteral(_) => todo!(),
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
-            Expr::FieldAccess(_, _) => todo!(),
+            Expr::FieldAccess(e, _) => self.resolve_expr(e),
             Expr::StructLiteralP(p) => {
                 for e in p.types.iter_mut().flatten() {
                     self.resolve_expr(e);

@@ -193,6 +193,12 @@ pub enum Bc<'p> {
         values: StackRange,
         target: StackOffset,
     },
+    SlicePtr {
+        base: StackOffset,
+        offset: usize,
+        count: usize,
+        ret: StackOffset,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -579,6 +585,47 @@ impl<'a, 'p> Interp<'a, 'p> {
                 &Bc::AbsoluteStackAddr { of, to } => {
                     let ptr = self.range_to_index(of);
                     *self.get_slot_mut(to) = Value::InterpAbsStackAddr(ptr);
+                    self.bump_ip();
+                }
+                &Bc::SlicePtr {
+                    base,
+                    offset,
+                    count,
+                    ret,
+                } => {
+                    let base = self.take_slot(base);
+                    let res = match base {
+                        Value::InterpAbsStackAddr(addr) => {
+                            assert!(self, count <= addr.count);
+                            Value::InterpAbsStackAddr(StackAbsoluteRange {
+                                first: StackAbsolute(addr.first.0 + offset),
+                                count,
+                            })
+                        }
+                        Value::Heap {
+                            value,
+                            first,
+                            count,
+                        } => {
+                            let abs_first = first + count;
+                            let abs_last = abs_first + count;
+                            // Slicing operations are bounds checked.
+                            let data = unsafe { &*value };
+                            assert!(
+                                self,
+                                data.references > 0
+                                    && abs_first < data.values.len()
+                                    && abs_last <= data.values.len()
+                            );
+                            Value::Heap {
+                                value,
+                                first: first + offset,
+                                count,
+                            }
+                        }
+                        _ => panic!("Wanted ptr found {:?}", base),
+                    };
+                    *self.get_slot_mut(ret) = res;
                     self.bump_ip();
                 }
                 Bc::DebugLine(_) | Bc::DebugMarker(_, _) => self.bump_ip(),
@@ -1753,25 +1800,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    "addr" => match arg.deref().deref() {
-                        Expr::GetVar(var) => {
-                            if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
-                                let ptr_ty = self.program.ptr_type(value_ty);
-                                let addr_slot = result.reserve_slots(self.program, ptr_ty);
-                                result.push(Bc::AbsoluteStackAddr {
-                                    of: stack_slot,
-                                    to: addr_slot.first,
-                                });
-                                (addr_slot, ptr_ty)
-                            } else if result.constants.get(var).is_some() {
-                                err!(self, "Took address of constant {}", var.log(self.pool))
-                            } else {
-                                ice!(self, "Missing var {} (in !addr)", var.log(self.pool))
-                            }
-                        }
-                        &Expr::GetNamed(i) => return Err(self.error(CErr::UndeclaredIdent(i))),
-                        _ => return Err(self.error(CErr::AddrRvalue(*arg.clone()))),
-                    },
+                    "addr" => self.addr_macro(result, arg)?,
                     "type" => {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
@@ -1843,7 +1872,40 @@ impl<'a, 'p> Interp<'a, 'p> {
                     _ => return Err(self.error(CErr::UndeclaredIdent(*macro_name))),
                 }
             }
-            Expr::FieldAccess(_, _) => todo!(),
+            Expr::FieldAccess(e, name) => {
+                let (container_ptr, container_ptr_ty) = self.addr_macro(result, e)?;
+                let container_ty = unwrap!(self, self.program.unptr_ty(container_ptr_ty), "");
+                if let TypeInfo::Struct {
+                    fields,
+                    size,
+                    as_tuple,
+                } = &self.program.types[container_ty.0]
+                {
+                    for f in fields {
+                        if f.name == *name {
+                            let f = *f;
+                            let ty = self.program.ptr_type(f.ty);
+                            let ret = result.reserve_slots(self.program, ty);
+
+                            result.push(Bc::SlicePtr {
+                                base: container_ptr.single(),
+                                offset: f.first,
+                                count: f.count,
+                                ret: ret.single(),
+                            });
+                            return Ok((ret, ty));
+                        }
+                    }
+                    err!(
+                        self,
+                        "unknown name {} on {:?}",
+                        self.pool.get(*name),
+                        self.program.log_type(container_ty)
+                    );
+                } else {
+                    err!(self, "only structs support field access but found {:?}", e);
+                }
+            }
             Expr::StructLiteralP(pattern) => {
                 assert!(self, requested.is_some());
                 let names: Vec<_> = pattern.names.iter().map(|n| n.unwrap()).collect();
@@ -1889,6 +1951,32 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
         })
+    }
+
+    fn addr_macro(
+        &mut self,
+        result: &mut FnBody<'p>,
+        arg: &FatExpr<'p>,
+    ) -> Res<'p, (StackRange, TypeId)> {
+        match arg.deref().deref() {
+            Expr::GetVar(var) => {
+                if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
+                    let ptr_ty = self.program.ptr_type(value_ty);
+                    let addr_slot = result.reserve_slots(self.program, ptr_ty);
+                    result.push(Bc::AbsoluteStackAddr {
+                        of: stack_slot,
+                        to: addr_slot.first,
+                    });
+                    Ok((addr_slot, ptr_ty))
+                } else if result.constants.get(var).is_some() {
+                    err!(self, "Took address of constant {}", var.log(self.pool))
+                } else {
+                    ice!(self, "Missing var {} (in !addr)", var.log(self.pool))
+                }
+            }
+            &Expr::GetNamed(i) => return Err(self.error(CErr::UndeclaredIdent(i))),
+            _ => return Err(self.error(CErr::AddrRvalue(arg.clone()))),
+        }
     }
 
     fn mark_state(&self, result: FnBody<'p>) -> StackHeights<'p> {
@@ -2526,6 +2614,16 @@ impl<'p> Bc<'p> {
             Bc::AbsoluteStackAddr { of, to } => {
                 of.first.0 += stack_offset;
                 to.0 += stack_offset;
+            }
+            Bc::SlicePtr {
+                base,
+                offset,
+                count,
+                ret,
+            } => {
+                base.0 += stack_offset;
+                *offset += stack_offset;
+                ret.0 += stack_offset;
             }
             Bc::DebugLine(_) | Bc::DebugMarker(_, _) => {}
         }

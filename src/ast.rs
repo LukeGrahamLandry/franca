@@ -526,6 +526,14 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }
 
+    pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
+        if let TypeInfo::Ptr(ty) = self.types[ptr_ty.0] {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
     pub fn tuple_types(&self, ty: TypeId) -> Option<&[TypeId]> {
         match &self.types[ty.0] {
             TypeInfo::Tuple(types) => Some(types),

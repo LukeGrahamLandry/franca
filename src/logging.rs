@@ -445,6 +445,16 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::Drop(i) => write!(f, "drop({:?});", i),
+            Bc::SlicePtr {
+                base,
+                offset,
+                count,
+                ret,
+            } => write!(
+                f,
+                "{:?} = slice({:?}, first={}, count={});",
+                ret, base, offset, count
+            ),
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
             Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
             Bc::DebugLine(loc) => write!(f, "debug({:?});", loc),
