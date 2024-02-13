@@ -1,4 +1,4 @@
-// nobody cares its just logging
+// nobody cares its just logging. TODO: should do it anyway i guess.
 #![allow(unused_must_use)]
 use core::fmt;
 use std::{
@@ -90,6 +90,20 @@ macro_rules! unwrap {
 }
 
 pub(crate) use unwrap;
+
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        #[cfg(target_arch = "wasm32")]
+        unsafe {
+            let msg = format!($($arg)*);
+            $crate::web::console_log(msg.as_ptr(), msg.len());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        println!($($arg)*);
+    }};
+}
+
+pub(crate) use outln;
 
 pub enum LogTag {
     Parsing,

@@ -8,7 +8,7 @@ use std::{collections::HashMap, mem::replace, ops::Deref, panic::Location};
 use codemap::Span;
 
 use crate::ast::{Annotation, FatStmt, Field, VarType};
-use crate::logging::PoolLog;
+use crate::logging::{outln, PoolLog};
 use crate::{
     ast::{
         Expr, FatExpr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo,
@@ -857,11 +857,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Unit
             }
             "print" => {
-                println!("{}", arg);
+                outln!(">>> {}", arg);
                 Value::Unit
             }
             "print_callstack" => {
-                println!("{}", self.log_callstack());
+                outln!(">>> {}", self.log_callstack());
                 Value::Unit
             }
             "comptime_cache_insert" => {
@@ -1286,7 +1286,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         result.stack_slots += func.stack_slots;
         result.slot_types.extend(func.slot_types.iter());
         let mut has_returned = false; // TODO: remove
-        for (_, mut inst) in func.insts.iter().cloned().enumerate() {
+        for (i, mut inst) in func.insts.iter().cloned().enumerate() {
             assert!(self, !has_returned); // TODO
             inst.renumber(stack_offset, ip_offset);
             if let Bc::Ret(return_value) = inst {
@@ -1295,8 +1295,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     from: return_value,
                     to: ret,
                 });
-                #[cfg(feature = "some_log")]
-                {
+                if cfg!(feature = "some_log") {
                     result.debug.push(result.debug[i].clone());
                 }
             } else {

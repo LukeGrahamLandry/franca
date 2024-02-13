@@ -3,20 +3,57 @@
     <head>
         <title>Franca Lang</title>
         <style type="text/css" media="screen">
+            body {
+                background-color: #1a202b;
+            }
+
             #editor {
                 position: absolute;
                 top: 0;
                 right: 0;
-                bottom: 0;
                 left: 0;
-                width: 60%;
+                height: 70%;
             }
             #output {
                 position: absolute;
-                top: 0;
                 right: 0;
+                left: 0;
                 bottom: 0;
-                width: 40%;
+                height: 30%;
+                padding: 0;
+                margin: 0;
+            }
+            #log {
+                padding: 0;
+                margin: 0;
+                height: 100%;
+                width: 100%;
+                outline: none;
+                color: white;
+                overflow: auto;
+            }
+            #run {
+                font-size: 2rem;
+                right: 20px;
+                position: absolute;
+                z-index: 10;
+            }
+
+            .ace_scrollbar::-webkit-scrollbar {
+                height: 7px;
+                width: 7px;
+            }
+
+            .ace_scrollbar::-webkit-scrollbar-track {
+                box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.3);
+                background-color: #272822; /* Matches ace monokai */
+                border-radius: 10px;
+            }
+
+            .ace_scrollbar::-webkit-scrollbar-thumb {
+                background-color: darkgrey;
+                outline: 1px solid slategrey;
+                border-radius: 10px;
             }
         </style>
         <script
@@ -27,32 +64,32 @@
     </head>
 
     <body>
-        <div id="editor">
-            function foo(items) { var x = "All this is syntax highlighted";
-            return x; }
-        </div>
-        <div id="output" style="background-color: gray">
-            <div style="text-align: center">
-                <button id="run" style="margin: 15px; font-size: 2rem">
-                    Run
-                </button>
-            </div>
-            <textarea
-                id="log"
-                style="
-                    width: 100%;
-                    height: 70%;
-                    background-color: #1a202b;
-                    outline: none;
-                    color: white;
-                "
-            ></textarea>
+        <button id="run">Run</button>
+        <div id="editor">fn main() Unit = { print(1234); }</div>
+        <div id="output">
+            <pre id="log"></pre>
         </div>
         <script type="module">
+            const log = document.getElementById("log");
+            const save_key = "last_run_src";
             window.editor = ace.edit("editor");
             editor.setTheme("ace/theme/monokai");
+            editor.setShowPrintMargin(false);
             editor.resize();
-            const callbacks = { env: {} };
+            const saved = localStorage.getItem(save_key);
+            if (saved != null) {
+                editor.setValue(saved, 1);
+            }
+            const callbacks = {
+                env: {
+                    console_log: (ptr, len) => {
+                        let s = get_wasm_string(ptr, len);
+                        console.log(s);
+                        log.innerText += s + "\n";
+                    },
+                    timestamp: () => performance.now(),
+                },
+            };
             if (
                 typeof WebAssembly === "object" &&
                 WebAssembly.instantiateStreaming !== undefined
@@ -65,11 +102,42 @@
                 alert("Your Browser No Wasm");
             }
 
+            let Rust = null;
             function handle_wasm_loaded(wasm) {
-                let Rust = wasm.instance.exports;
-                document.getElementById("run").addEventListener("click", () => {
-                    console.log(editor.getValue());
+                Rust = wasm.instance.exports;
+                document.getElementById("run").addEventListener("click", run);
+                document.addEventListener("keydown", (e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+                        e.preventDefault();
+                        run();
+                    }
                 });
+            }
+
+            function run() {
+                let str = put_wasm_string(editor.getValue());
+                localStorage.setItem(save_key, editor.getValue());
+                log.innerText = "";
+                Rust.run(str.ptr, str.len);
+            }
+
+            const de = new TextDecoder();
+            const en = new TextEncoder();
+            function get_wasm_string(ptr, len) {
+                const buffer = new Uint8Array(Rust.memory.buffer, ptr, len);
+                return de.decode(buffer);
+            }
+            function put_wasm_string(str) {
+                let buf = en.encode(str);
+                let ptr = Rust.alloc_str(buf.length + 1);
+                const buffer = new Uint8Array(
+                    Rust.memory.buffer,
+                    ptr,
+                    buf.length + 1,
+                );
+                buffer.set(buf, 0);
+                buffer[buf.length] = 0;
+                return { ptr: ptr, len: buf.length };
             }
         </script>
     </body>
