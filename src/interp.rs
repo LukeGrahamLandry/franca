@@ -1,11 +1,10 @@
 #![allow(clippy::wrong_self_convention)]
-#![deny(unused_must_use)]
-use std::marker::PhantomData;
 use std::{mem::replace, panic::Location};
 
 use codemap::Span;
 
-use crate::compiler::{Bc, CErr, ExecTime, FnBody, Res};
+use crate::bc::*;
+use crate::compiler::{CErr, ExecTime, Res};
 use crate::logging::{outln, PoolLog};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
@@ -13,86 +12,6 @@ use crate::{
 };
 
 use crate::logging::{assert, assert_eq, bin_int, err, ice, logln};
-
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
-pub enum Value {
-    F64(u64), // TODO: hash
-    I64(i64),
-    Bool(bool),
-    Enum {
-        container_type: TypeId,
-        tag: usize,
-        value: Box<Self>,
-    },
-    Tuple {
-        container_type: TypeId,
-        values: Vec<Self>,
-    },
-    Array {
-        container_type: TypeId,
-        values: Vec<Self>,
-    },
-    Ptr {
-        container_type: TypeId,
-        value: *mut Self,
-    },
-    // Both closures and types don't have values at runtime, all uses must be inlined.
-    Type(TypeId),
-    GetFn(FuncId),
-    /// The empty tuple.
-    Unit,
-    // This is unsed to represent a function's empty stack space.
-    // Crash if you try to read one.
-    Poison,
-    InterpAbsStackAddr(StackAbsoluteRange),
-    Heap {
-        value: *mut InterpBox,
-        first: usize,
-        count: usize,
-    },
-
-    // These are needed because they're using for bootstrapping the comptime types.
-    Slice(TypeId),       // for `[]T`
-    Map(TypeId, TypeId), // for `{}(K, V)`
-    Symbol(usize),       // TODO: this is an Ident<'p> but i really dont want the lifetime
-}
-
-#[derive(Copy, Clone)]
-pub struct StackOffset(pub usize);
-
-#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
-pub struct StackAbsolute(pub usize);
-
-#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
-pub struct StackAbsoluteRange {
-    pub first: StackAbsolute,
-    pub count: usize,
-}
-
-#[derive(Copy, Clone)]
-pub struct StackRange {
-    pub first: StackOffset,
-    pub count: usize,
-}
-
-impl StackRange {
-    #[track_caller]
-    pub fn offset(&self, offset: usize) -> StackOffset {
-        debug_assert!(offset < self.count);
-        StackOffset(self.first.0 + offset)
-    }
-
-    #[track_caller]
-    pub fn single(&self) -> StackOffset {
-        debug_assert_eq!(self.count, 1);
-        self.first
-    }
-}
-
-pub struct InterpBox {
-    references: isize,
-    values: Vec<Value>,
-}
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'p> {
@@ -103,13 +22,6 @@ pub struct CallFrame<'p> {
     is_rust_marker: bool,
     pub debug_name: Ident<'p>,
     when: ExecTime,
-}
-
-#[derive(Debug, Clone)]
-pub struct DebugInfo<'p> {
-    pub internal_loc: &'static Location<'static>,
-    pub src_loc: Span,
-    pub p: PhantomData<&'p str>,
 }
 
 //
@@ -128,7 +40,7 @@ pub struct Interp<'a, 'p> {
     pub program: &'a mut Program<'p>,
     pub ready: Vec<Option<FnBody<'p>>>,
     pub assertion_count: usize,
-    last_loc: Option<Span>,
+    pub last_loc: Option<Span>,
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
@@ -182,6 +94,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         // assert!(self, final_callframe == marker_callframe, "bad frame");
         let end_heights = (self.call_stack.len(), self.value_stack.len());
         assert!(init_heights == end_heights, "bad stack size");
+        self.last_loc = None;
         Ok(result)
     }
 
@@ -631,11 +544,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Unit
             }
             "print" => {
-                outln!(">>> {}", arg);
+                outln!("{}", arg);
                 Value::Unit
             }
             "print_callstack" => {
-                outln!(">>> {}", self.log_callstack());
+                outln!("{}", self.log_callstack());
                 Value::Unit
             }
             "comptime_cache_insert" => {

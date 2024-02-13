@@ -1,10 +1,5 @@
-#![allow(unused)]
-
-use std::{env, fs, io::read_to_string, path::PathBuf, time::Instant};
-
-use codemap::CodeMap;
-use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use franca::{interp::Value, pool::StringPool, run_main, run_tests};
+use franca::{bc::Value, pool::StringPool, run_main};
+use std::{env, fs};
 
 fn main() {
     if let Some(name) = env::args().nth(1) {
@@ -16,8 +11,7 @@ fn main() {
             Value::I64(0),
             Some(&name),
         );
-        return;
+    } else {
+        println!("No file selected.");
     }
-
-    run_tests();
 }

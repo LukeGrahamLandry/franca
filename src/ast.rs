@@ -1,9 +1,9 @@
-use codemap::Span;
-
+//! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    interp::Value,
+    bc::Value,
     pool::{Ident, StringPool},
 };
+use codemap::Span;
 use std::{
     collections::HashMap,
     hash::Hash,

@@ -1,11 +1,12 @@
 use std::{fs, path::PathBuf};
 
+use bc::Value;
 use codemap::CodeMap;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use interp::Value;
 use pool::StringPool;
 
 pub mod ast;
+pub mod bc;
 pub mod compiler;
 pub mod interp;
 pub mod lex;
@@ -16,7 +17,8 @@ pub mod scope;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, LazyFnType, Program, TypeId},
-    compiler::{Compile, CompileError, ExecTime, SharedConstants},
+    bc::SharedConstants,
+    compiler::{Compile, CompileError, ExecTime},
     logging::{outln, PoolLog},
     parse::Parser,
     scope::ResolveScope,
@@ -27,26 +29,26 @@ static LIB: &str = include_str!(concat!(
     "/lib/interp_builtins.txt"
 ));
 
-pub fn run_tests() {
-    let pool = Box::leak(Box::<StringPool>::default());
-    for case in fs::read_dir("tests").unwrap() {
-        let case = case.unwrap();
-        println!("TEST: {}", case.file_name().to_str().unwrap());
-        run_main(
-            pool,
-            fs::read_to_string(case.path()).unwrap(),
-            Value::I64(0),
-            Value::I64(0),
-            Some(
-                case.file_name()
-                    .to_str()
-                    .unwrap()
-                    .strip_suffix(".txt")
-                    .unwrap(),
-            ),
-        );
-    }
+macro_rules! test_file {
+    ($case:ident) => {
+        #[test]
+        fn $case() {
+            let pool = Box::leak(Box::<StringPool>::default());
+
+            assert!(run_main(
+                pool,
+                fs::read_to_string(format!("tests/{}.txt", stringify!($case))).unwrap(),
+                Value::I64(0),
+                Value::I64(0),
+                Some(&stringify!($case)),
+            ));
+        }
+    };
 }
+
+test_file!(basic);
+test_file!(structs);
+test_file!(generics);
 
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
@@ -54,7 +56,7 @@ pub fn run_main<'a: 'p, 'p>(
     arg: Value,
     expect: Value,
     save: Option<&str>,
-) {
+) -> bool {
     let start = timestamp();
     let mut codemap = CodeMap::new();
     let lib = codemap.add_file("lib/interp_builtins.txt".into(), LIB.to_string());
@@ -75,7 +77,7 @@ pub fn run_main<'a: 'p, 'p>(
     };
 
     if !parse(lib.clone()) || !parse(code) {
-        return;
+        return false;
     }
 
     let mut global = Func {
@@ -123,6 +125,7 @@ pub fn run_main<'a: 'p, 'p>(
 
     if let Err(e) = result {
         log_err(codemap, &mut interp, e);
+        return false;
     } else {
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
         let id = toplevel.unwrap();
@@ -137,31 +140,20 @@ pub fn run_main<'a: 'p, 'p>(
                 outln!("FN {name:?} = 'MAIN' NOT FOUND");
             }
             Some(f) => {
-                let result = interp.run(Some(&constants), f, arg.clone(), ExecTime::Runtime);
-                match result {
-                    Err(e) => log_err(codemap, &mut interp, e),
-                    Ok(result) => {
+                match interp.compile(Some(&constants), f, ExecTime::Runtime) {
+                    Err(e) => {
+                        log_err(codemap, &mut interp, e);
+                        return false;
+                    }
+                    Ok(_) => {
                         let end = timestamp();
-                        assert_eq!(result, expect);
-                        // TODO: change this when i add assert(bool)
-                        let assertion_count = src.split("assert_eq(").count() - 1;
-                        // debug so dont crash in web if not using my system of one run per occurance.
-                        debug_assert_eq!(
-                            interp.interp.assertion_count, assertion_count,
-                            "vm missed assertions?"
-                        );
-                        outln!(
-                            "{assertion_count} assertions passed. {} comptime evaluations.",
-                            interp.anon_fn_counter
-                        );
                         let seconds = end - start;
                         let lines = format!("{}\n{}", LIB, src)
                             .split('\n')
                             .filter(|s| !s.split("//").next().unwrap().is_empty())
                             .count();
-                        // TODO: make sure everything's compiled before starting to run and just report frontend time.
                         outln!(
-                            "Finished {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                            "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
                             lines as f64 / seconds
                         );
                         let inst_count: usize = interp
@@ -172,9 +164,38 @@ pub fn run_main<'a: 'p, 'p>(
                             .map(|func| func.insts.len())
                             .sum();
                         outln!(
-                            "Generated {inst_count} instructions ({:.0} i/sec).",
+                            "   - Generated {inst_count} instructions ({:.0} i/sec).",
                             inst_count as f64 / seconds
                         );
+
+                        outln!("===============");
+                        let start = timestamp();
+                        match interp.run(f, arg.clone(), ExecTime::Runtime) {
+                            Err(e) => {
+                                log_err(codemap, &mut interp, e);
+                                return false;
+                            }
+                            Ok(result) => {
+                                let end = timestamp();
+                                let seconds = end - start;
+                                outln!("===============");
+                                outln!(
+                                    "Interpreter finished running main() in {seconds:.5} seconds."
+                                );
+                                debug_assert_eq!(result, expect);
+                                // TODO: change this when i add assert(bool)
+                                let assertion_count = src.split("assert_eq(").count() - 1;
+                                // debug so dont crash in web if not using my system of one run per occurance.
+                                debug_assert_eq!(
+                                    interp.interp.assertion_count, assertion_count,
+                                    "vm missed assertions?"
+                                );
+                                outln!(
+                                    "   - {assertion_count} assertions passed. {} comptime evaluations.",
+                                    interp.anon_fn_counter
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -193,6 +214,7 @@ pub fn run_main<'a: 'p, 'p>(
             outln!("Wrote log to {:?}", path);
         }
     }
+    true
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
@@ -216,7 +238,7 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
 #[cfg(target_arch = "wasm32")]
 pub mod web {
     #![allow(clippy::missing_safety_doc)]
-    use crate::interp::Value;
+    use crate::bc::Value;
     use crate::logging::outln;
     use crate::pool::StringPool;
     use crate::run_main;

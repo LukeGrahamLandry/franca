@@ -131,12 +131,13 @@ pub(crate) use assert_eq;
 pub(crate) use bin_int;
 pub(crate) use err;
 
+use crate::bc::*;
 use crate::{
     ast::{
         Expr, FatExpr, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var,
     },
-    compiler::{Bc, CErr, CompileError, DebugState, FnBody},
-    interp::{DebugInfo, Interp, StackOffset, StackRange, Value},
+    compiler::{CErr, CompileError, DebugInfo, DebugState},
+    interp::Interp,
     pool::StringPool,
 };
 
@@ -559,8 +560,8 @@ impl<'p> DebugState<'p> {
             )
         };
         match self {
-            DebugState::OuterCall(f, arg) => {
-                format!("| Prep Interp | {} on val:{arg:?}", show_f(*f))
+            DebugState::Compile(f) => {
+                format!("| Prep Interp | {}", show_f(*f))
             }
             DebugState::JitToBc(f, when) => {
                 format!("|   Comp BC   | {} for {:?}", show_f(*f), when)

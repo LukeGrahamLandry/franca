@@ -1,3 +1,4 @@
+//! Convert a stream of tokens into ASTs.
 #![deny(unused_must_use)]
 
 use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
@@ -8,7 +9,7 @@ use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 use crate::logging::logln;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyFnType, LazyType, Pattern, Stmt},
-    interp::Value,
+    bc::Value,
     lex::{Lexer, Token, TokenType},
     logging::PoolLog,
     pool::{Ident, StringPool},

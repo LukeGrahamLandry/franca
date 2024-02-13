@@ -1,19 +1,22 @@
+//! Converts ASTs into my bytecode-ish format.
+//! Type checking, overload resolution, implicit function calls, inlining, monomorphization, etc.
+//! Uses the interpreter for comptime evalutation (build scripts, generics, macros, etc).
+
 #![allow(clippy::wrong_self_convention)]
-#![deny(unused_must_use)]
+use codemap::Span;
 use std::fmt::Write;
+use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
-use std::{collections::HashMap, ops::Deref, panic::Location};
-
-use codemap::Span;
+use std::{ops::Deref, panic::Location};
 
 use crate::ast::{Annotation, FatStmt, Field, VarType};
-use crate::interp::{CallFrame, DebugInfo, Interp, StackOffset, StackRange, Value};
+use crate::bc::*;
+use crate::interp::{CallFrame, Interp};
 use crate::logging::PoolLog;
 use crate::{
     ast::{
         Expr, FatExpr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo,
-        Var,
     },
     pool::{Ident, StringPool},
 };
@@ -46,102 +49,11 @@ pub enum CErr<'p> {
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
-#[derive(Clone)]
-pub enum Bc<'p> {
-    CallDynamic {
-        f: StackOffset,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    CallDirectMaybeCached {
-        f: FuncId,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    CallDirect {
-        f: FuncId,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    CallBuiltin {
-        name: Ident<'p>,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    LoadConstant {
-        slot: StackOffset,
-        value: Value,
-    },
-    JumpIf {
-        cond: StackOffset,
-        true_ip: usize,
-        false_ip: usize,
-    },
-    Goto {
-        ip: usize,
-    },
-    Ret(StackRange),
-    AbsoluteStackAddr {
-        of: StackRange,
-        to: StackOffset,
-    },
-    DebugMarker(&'static str, Ident<'p>),
-    DebugLine(Span),
-    // Clone, Move, and Drop are for managing linear types.
-    Clone {
-        from: StackOffset,
-        to: StackOffset,
-    },
-    CloneRange {
-        from: StackRange,
-        to: StackRange,
-    },
-    Move {
-        from: StackOffset,
-        to: StackOffset,
-    },
-    MoveRange {
-        from: StackRange,
-        to: StackRange,
-    },
-    ExpandTuple {
-        from: StackOffset,
-        to: StackRange,
-    },
-    Drop(StackRange),
-    // TODO: having memory is bad!
-    MoveCreateTuple {
-        values: StackRange,
-        target: StackOffset,
-    },
-    CloneCreateTuple {
-        values: StackRange,
-        target: StackOffset,
-    },
-    SlicePtr {
-        base: StackOffset,
-        offset: usize,
-        count: usize,
-        ret: StackOffset,
-    },
-    DerefPtr {
-        from: StackOffset,
-        to: StackRange,
-    },
-}
-
-#[derive(Clone)]
-pub struct FnBody<'p> {
-    pub insts: Vec<Bc<'p>>,
-    pub debug: Vec<DebugInfo<'p>>,
-    pub stack_slots: usize,
-    pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
-    pub when: ExecTime,
-    pub slot_types: Vec<TypeId>,
-    pub func: FuncId,
-    pub why: String,
-    pub last_loc: Span,
-    pub constants: SharedConstants<'p>,
+#[derive(Debug, Clone)]
+pub struct DebugInfo<'p> {
+    pub internal_loc: &'static Location<'static>,
+    pub src_loc: Span,
+    pub p: PhantomData<&'p str>,
 }
 
 //
@@ -165,7 +77,7 @@ pub struct Compile<'a, 'p> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DebugState<'p> {
-    OuterCall(FuncId, Value),
+    Compile(FuncId),
     JitToBc(FuncId, ExecTime),
     RunInstLoop(FuncId),
     ComputeCached(FatExpr<'p>),
@@ -236,46 +148,52 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    pub fn run(
+    pub fn compile(
         &mut self,
         constants: Option<&SharedConstants<'p>>,
         f: FuncId,
-        arg: Value,
         when: ExecTime,
-    ) -> Res<'p, Value> {
-        let mut res = self.run_inner(constants, f, arg, when);
-        if let Err(err) = &mut res {
-            err.trace = self.log_trace();
-            err.value_stack = self.interp.value_stack.clone();
-            err.call_stack = self.interp.call_stack.clone();
-            if err.loc.is_none() {
-                err.loc = self.last_loc;
-            }
-        }
-        res
-    }
-
-    pub fn run_inner(
-        &mut self,
-        constants: Option<&SharedConstants<'p>>,
-        f: FuncId,
-        arg: Value,
-        when: ExecTime,
-    ) -> Res<'p, Value> {
-        let state = DebugState::OuterCall(f, arg.clone());
+    ) -> Res<'p, ()> {
+        let state = DebugState::Compile(f);
         self.push_state(&state);
         let init_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
         let constants =
             constants.map_or_else(|| Rc::new(SharedConstants::default()), |c| c.clone().bake());
-        self.ensure_compiled(&constants, f, when)?;
+        let result = self.ensure_compiled(&constants, f, when);
         let end_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
         assert!(init_heights == end_heights, "bad stack size");
         self.pop_state(state);
-        let state = DebugState::RunInstLoop(f);
-        self.push_state(&state);
-        let ret = self.interp.run(f, arg, when)?;
-        self.pop_state(state);
-        Ok(ret)
+        self.tag_err(result)
+    }
+
+    pub fn run(&mut self, f: FuncId, arg: Value, when: ExecTime) -> Res<'p, Value> {
+        let state2 = DebugState::RunInstLoop(f);
+        self.push_state(&state2);
+        let result = self.interp.run(f, arg, when);
+        self.pop_state(state2);
+        self.tag_err(result)
+    }
+
+    fn compile_and_run(
+        &mut self,
+        constants: Option<&SharedConstants<'p>>,
+        f: FuncId,
+        arg: Value,
+        when: ExecTime,
+    ) -> Res<'p, Value> {
+        self.compile(constants, f, when)?;
+        self.run(f, arg, when)
+    }
+
+    // This is much less painful than threading it through the macros
+    fn tag_err<T>(&self, mut res: Res<'p, T>) -> Res<'p, T> {
+        if let Err(err) = &mut res {
+            err.trace = self.log_trace();
+            err.value_stack = self.interp.value_stack.clone();
+            err.call_stack = self.interp.call_stack.clone();
+            err.loc = self.interp.last_loc.or(self.last_loc);
+        }
+        res
     }
 
     #[track_caller]
@@ -344,17 +262,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         logln!("{}", result.log(self.pool));
 
-        // TODO: even the test i thought this would fix it didnt, it cant tell which are const.
-        // TODO: why are constants in my vars at all?
-        // for v in result.vars.iter() {
-        //     assert_eq!(
-        //         self,
-        //         self.interp.program.vars[v.0 .1].kind,
-        //         VarType::Const,
-        //         "{}",
-        //         v.0.log(self.pool)
-        //     );
-        // }
         assert!(
             result.vars.is_empty(),
             "undropped vars {:?}",
@@ -1405,7 +1312,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             "Made anon: {func_id:?} = {}",
             self.interp.program.funcs[func_id.0].log(self.pool)
         );
-        let result = self.run(Some(constants), func_id, Value::Unit, ExecTime::Comptime)?;
+        let result =
+            self.compile_and_run(Some(constants), func_id, Value::Unit, ExecTime::Comptime)?;
         logln!(
             "COMPUTED: {} -> {:?} under {}",
             e.log(self.pool),
@@ -1687,34 +1595,6 @@ impl<'p> Bc<'p> {
 fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
     for _ in 0..(vec.len() - new_len) {
         vec.pop();
-    }
-}
-
-// TODO: This must be super fucking slow
-#[derive(Debug, Clone, Default)]
-pub struct SharedConstants<'p> {
-    parents: Vec<Rc<SharedConstants<'p>>>,
-    local: HashMap<Var<'p>, (Value, TypeId)>,
-}
-
-impl<'p> SharedConstants<'p> {
-    pub fn get(&self, var: &Var<'p>) -> Option<(Value, TypeId)> {
-        self.local.get(var).cloned().or_else(|| {
-            for p in &self.parents {
-                if let Some(v) = p.get(var) {
-                    return Some(v.clone());
-                }
-            }
-            None
-        })
-    }
-
-    pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
-        self.local.insert(k, v)
-    }
-
-    pub fn bake(self) -> Rc<Self> {
-        Rc::new(self)
     }
 }
 
