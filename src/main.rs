@@ -12,6 +12,23 @@ fn main() {
             Some(&name),
         );
     } else {
-        println!("No file selected.");
+        for case in fs::read_dir("tests").unwrap() {
+            let pool = Box::leak(Box::<StringPool>::default());
+            let case = case.unwrap();
+            println!("TEST: {}", case.file_name().to_str().unwrap());
+            run_main(
+                pool,
+                fs::read_to_string(case.path()).unwrap(),
+                Value::I64(0),
+                Value::I64(0),
+                Some(
+                    case.file_name()
+                        .to_str()
+                        .unwrap()
+                        .strip_suffix(".txt")
+                        .unwrap(),
+                ),
+            );
+        }
     }
 }

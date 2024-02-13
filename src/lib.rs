@@ -214,6 +214,7 @@ pub fn run_main<'a: 'p, 'p>(
             outln!("Wrote log to {:?}", path);
         }
     }
+    outln!("===============");
     true
 }
 

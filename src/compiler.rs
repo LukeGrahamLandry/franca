@@ -361,9 +361,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         &mut self,
         result: &mut FnBody<'p>,
         arg: StackRange,
-        ret: StackRange,
         f: FuncId,
-    ) -> Res<'p, ()> {
+    ) -> Res<'p, StackRange> {
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:capturing_call", name));
         self.infer_types(&result.constants, f)?;
@@ -373,22 +372,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         );
         self.currently_inlining.push(f);
         let return_range = self.emit_body(result, arg, f)?;
-        result.push(Bc::MoveRange {
-            from: return_range,
-            to: ret,
-        });
         result.push(Bc::DebugMarker("end:capturing_call", name));
         self.currently_inlining.retain(|check| *check != f);
-        Ok(())
+        Ok(return_range)
     }
 
     fn emit_inline_call(
         &mut self,
         result: &mut FnBody<'p>,
         arg: StackRange,
-        ret: StackRange,
         f: FuncId,
-    ) -> Res<'p, ()> {
+    ) -> Res<'p, StackRange> {
         assert!(
             !self.currently_inlining.contains(&f),
             "Tried to inline recursive function."
@@ -415,20 +409,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: put constants somewhere so dont have to clone them each time a function is inlined.
         result.stack_slots += func.stack_slots;
         result.slot_types.extend(func.slot_types.iter());
-        let mut has_returned = false; // TODO: remove
+        let mut ret = None;
         for (i, mut inst) in func.insts.iter().cloned().enumerate() {
-            assert!(!has_returned); // TODO
+            assert!(ret.is_none()); // TODO
             inst.renumber(stack_offset, ip_offset);
             if let Bc::Ret(return_value) = inst {
-                has_returned = true;
-                debug_assert_eq!(return_value.count, ret.count);
-                result.insts.push(Bc::MoveRange {
-                    from: return_value,
-                    to: ret,
-                });
-                if cfg!(feature = "some_log") {
-                    result.debug.push(result.debug[i].clone());
-                }
+                ret = Some(return_value);
             } else {
                 result.insts.push(inst);
                 #[cfg(feature = "some_log")]
@@ -438,13 +424,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         assert!(
-            has_returned,
+            ret.is_some(),
             "inline function had no ret instruction. \n{}",
             func.log(self.pool)
         );
         result.push(Bc::DebugMarker("end:inline_call", name));
         self.currently_inlining.retain(|check| *check != f);
-        Ok(())
+        Ok(ret.unwrap())
     }
 
     // TODO: do the memo stuff here instead of my crazy other thing.
@@ -717,22 +703,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                         } else {
                             None
                         };
-                        let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
-                        assert_eq!(self.return_stack_slots(f), ret.count);
                         let func = &self.interp.program.funcs[f.0];
-                        if returns_type {
+                        let ret = if returns_type {
                             self.ensure_compiled(&result.constants, f, result.when)?;
+                            let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
                             result.push(Bc::CallDirectMaybeCached { f, ret, arg });
+                            ret
                         } else if !func.capture_vars.is_empty() {
                             // TODO: check that you're calling from the same place as the definition.
                             assert!(!deny_inline, "capturing calls are always inlined.");
-                            self.emit_capturing_call(result, arg, ret, f)?;
+                            self.emit_capturing_call(result, arg, f)?
                         } else if will_inline {
-                            self.emit_inline_call(result, arg, ret, f)?;
+                            self.emit_inline_call(result, arg, f)?
                         } else {
+                            let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
                             self.ensure_compiled(&result.constants, f, result.when)?;
                             result.push(Bc::CallDirect { f, ret, arg });
-                        }
+                            ret
+                        };
+
+                        assert_eq!(self.return_stack_slots(f), ret.count);
+                        assert_eq!(self.interp.program.slot_count(ret_ty_expected), ret.count);
                         if let Some(cache_arg) = cache_arg {
                             let ty = self.interp.program.intern_type(TypeInfo::Tuple(vec![
                                 TypeId::any(),
@@ -833,22 +824,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let values = values?;
                 let types: Vec<_> = values.iter().map(|(_, ty)| *ty).collect();
                 let ty = self.interp.program.intern_type(TypeInfo::Tuple(types));
-
-                let ret = result.reserve_slots(self.interp.program, ty);
-                // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
-                let base = ret.first.0;
-                let mut count = 0;
-                for (v, _) in values {
-                    for i in 0..v.count {
-                        result.push(Bc::Move {
-                            from: StackOffset(v.first.0 + i),
-                            to: StackOffset(base + count),
-                        });
-                        count += 1;
-                    }
-                }
-                assert_eq!(count, ret.count);
-                (ret, ty)
+                result.produce_tuple(self.interp.program, values, ty)?
             }
             Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
@@ -1051,24 +1027,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let (value, found_ty) =
                             self.compile_expr(result, &value, Some(field.ty))?;
                         self.type_check_arg(found_ty, field.ty, "struct field")?;
-                        values.push(value);
+                        values.push((value, field.ty));
                     }
 
-                    let ret = result.reserve_slots(self.interp.program, as_tuple);
-                    // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
-                    let base = ret.first.0;
-                    let mut count = 0;
-                    for v in values {
-                        result.push(Bc::MoveRange {
-                            from: v,
-                            to: StackRange {
-                                first: StackOffset(base + count),
-                                count: v.count,
-                            },
-                        });
-                        count += v.count;
-                    }
-                    assert_eq!(count, ret.count);
+                    let (ret, _) = result.produce_tuple(self.interp.program, values, as_tuple)?;
                     (ret, requested.unwrap())
                 } else {
                     err!("struct literal but expected {:?}", requested);
@@ -1388,10 +1350,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         let name = self.pool.intern("builtin:if");
         let branch_ip = result.push(Bc::DebugMarker("patch", name));
         let true_ip = result.insts.len();
-        self.emit_capturing_call(result, arg, ret, if_true)?;
+        let true_ret = self.emit_capturing_call(result, arg, if_true)?;
+        result.push(Bc::MoveRange {
+            from: true_ret,
+            to: ret,
+        });
         let jump_over_false = result.push(Bc::DebugMarker("patch", name));
         let false_ip = result.insts.len();
-        self.emit_capturing_call(result, arg, ret, if_false)?;
+        let false_ret = self.emit_capturing_call(result, arg, if_false)?;
+        result.push(Bc::MoveRange {
+            from: false_ret,
+            to: ret,
+        });
 
         result.insts[branch_ip] = Bc::JumpIf {
             // TODO: change to conditional so dont have to store the true_ip
@@ -1521,6 +1491,50 @@ impl<'p> FnBody<'p> {
             debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
         }
         ip
+    }
+
+    pub fn produce_tuple(
+        &mut self,
+        program: &mut Program<'p>,
+        owned_values: Vec<(StackRange, TypeId)>,
+        tuple_ty: TypeId,
+    ) -> Res<'p, (StackRange, TypeId)> {
+        // They might already be consecutive
+
+        debug_assert!(!owned_values.is_empty());
+        let mut next = (owned_values[0].0).first;
+        let mut ok = true;
+        for (r, _) in &owned_values {
+            if r.first != next {
+                ok = false;
+                break;
+            }
+            next.0 += r.count;
+        }
+        let ret = if ok {
+            StackRange {
+                first: (owned_values[0].0).first,
+                count: program.slot_count(tuple_ty),
+            }
+        } else {
+            let ret = self.reserve_slots(program, tuple_ty);
+            // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
+            let base = ret.first.0;
+            let mut count = 0;
+            for (v, _) in owned_values {
+                for i in 0..v.count {
+                    self.push(Bc::Move {
+                        from: StackOffset(v.first.0 + i),
+                        to: StackOffset(base + count),
+                    });
+                    count += 1;
+                }
+            }
+            assert_eq!(count, ret.count);
+            ret
+        };
+
+        Ok((ret, tuple_ty))
     }
 }
 

@@ -148,7 +148,7 @@ pub enum Value {
     Symbol(usize),       // TODO: this is an Ident<'p> but i really dont want the lifetime
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub struct StackOffset(pub usize);
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
@@ -160,7 +160,7 @@ pub struct StackAbsoluteRange {
     pub count: usize,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub struct StackRange {
     pub first: StackOffset,
     pub count: usize,
