@@ -12,6 +12,7 @@ use std::{ops::Deref, panic::Location};
 
 use crate::ast::{Annotation, FatStmt, Field, VarType};
 use crate::bc::*;
+use crate::ffi::InterpSend;
 use crate::interp::{CallFrame, Interp};
 use crate::logging::PoolLog;
 use crate::{
@@ -396,13 +397,21 @@ impl<'a, 'p> Compile<'a, 'p> {
         let msg = "capturing calls are already inlined. what are you doing here?";
         assert_eq!(func.capture_vars.len(), 0, "{}", msg);
         let (arg_ty, _) = func.ty.unwrap();
-        let stack_offset = result.stack_slots;
-        let arg_slots = result.reserve_slots(self.interp.program, arg_ty); // These are included in the new function's stack
-        debug_assert_eq!(arg_slots.count, arg.count);
-        result.push(Bc::MoveRange {
-            from: arg,
-            to: arg_slots,
-        });
+
+        let stack_offset = if arg.first.0 == (result.stack_slots - arg.count) {
+            // It's already at the top of the stack so don't need to move
+            result.stack_slots - arg.count
+        } else {
+            let stack_offset = result.stack_slots;
+            let arg_slots = result.reserve_slots(self.interp.program, arg_ty); // These are included in the new function's stack
+            debug_assert_eq!(arg_slots.count, arg.count);
+            result.push(Bc::MoveRange {
+                from: arg,
+                to: arg_slots,
+            });
+            stack_offset
+        };
+
         let ip_offset = result.insts.len();
         let func = self.interp.ready[f.0].as_ref().unwrap();
         // TODO: check for recusion somewhere.
@@ -417,8 +426,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ret = Some(return_value);
             } else {
                 result.insts.push(inst);
-                #[cfg(feature = "some_log")]
-                {
+                if cfg!(feature = "some_log") {
                     result.debug.push(result.debug[i].clone());
                 }
             }
@@ -647,7 +655,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Closure(func) => {
                 let id = self.interp.program.add_func(*func.clone());
                 self.ensure_compiled(&result.constants, id, result.when)?;
-                result.load_constant_new(self.interp.program, Value::GetFn(id))
+                result.load_constant(self.interp.program, Value::GetFn(id))
             }
             Expr::Call(f, arg) => {
                 if let Expr::GetNamed(i) = f.as_ref().deref() {
@@ -656,13 +664,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let is_comptime = func.has_tag(self.pool, "comptime");
                         if is_comptime {
                             let ret = self.emit_comptime_call(result, f, arg)?;
-                            return Ok(result.load_constant_new(self.interp.program, ret));
+                            return Ok(result.load_constant(self.interp.program, ret));
                         }
 
                         let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
                         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
                         if arg.count == 0 {
-                            arg = result.load_constant_new(self.interp.program, Value::Unit).0;
+                            arg = result.load_constant(self.interp.program, Value::Unit).0;
                         }
                         // Note: f will be compiled differently depending on the calling convention.
                         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
@@ -841,7 +849,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     (to, ty)
                 } else if let Some((value, _)) = result.constants.get(var) {
-                    result.load_constant_new(self.interp.program, value)
+                    result.load_constant(self.interp.program, value)
                 } else {
                     println!("VARS: {:?}", result.vars);
                     println!("GLOBALS: {:?}", result.constants);
@@ -858,7 +866,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     assert_eq!(func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(&result.constants, func, ExecTime::Comptime)?;
-                    result.load_constant_new(self.interp.program, Value::GetFn(func))
+                    result.load_constant(self.interp.program, Value::GetFn(func))
                 } else {
                     ice!(
                         "Scope resolution failed {} (in Expr::GetNamed)",
@@ -867,7 +875,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::EnumLiteral(_) => todo!(),
-            Expr::Value(value) => result.load_constant_new(self.interp.program, value.clone()),
+            Expr::Value(value) => result.load_constant(self.interp.program, value.clone()),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -888,7 +896,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
                         let ty = self.type_of(result, arg)?;
-                        result.load_constant_new(self.interp.program, Value::Type(ty))
+                        result.load_constant(self.interp.program, Value::Type(ty))
                     }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
@@ -897,14 +905,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
-                        result.load_constant_new(self.interp.program, Value::Unit)
+                        result.load_constant(self.interp.program, Value::Unit)
                     }
                     "comptime_print" => {
                         println!("EXPR : {}", arg.log(self.pool));
                         let value =
                             self.cached_eval_expr(&result.constants, *arg.clone(), TypeId::any());
                         println!("VALUE: {:?}", value);
-                        result.load_constant_new(self.interp.program, Value::Unit)
+                        result.load_constant(self.interp.program, Value::Unit)
                     }
                     "struct" => {
                         if let Expr::StructLiteralP(pattern) = arg.deref().deref() {
@@ -946,7 +954,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 as_tuple,
                             };
                             let ty = Value::Type(self.interp.program.intern_type(ty));
-                            result.load_constant_new(self.interp.program, ty)
+                            result.load_constant(self.interp.program, ty)
                         } else {
                             err!(
                                 "expected map literal: .{{ name: Type, ... }} but found {:?}",
@@ -1346,7 +1354,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: if returning tuples
         let ret = result.reserve_slots(self.interp.program, true_ty.ret);
 
-        let arg = result.load_constant_new(self.interp.program, Value::Unit).0; // Note: before you start doing ip stuff!
+        let arg = result.load_constant(self.interp.program, Value::Unit).0; // Note: before you start doing ip stuff!
         let name = self.pool.intern("builtin:if");
         let branch_ip = result.push(Bc::DebugMarker("patch", name));
         let true_ip = result.insts.len();
@@ -1462,12 +1470,23 @@ impl<'p> FnBody<'p> {
         self.reserve_slots_raw(program, count, ty)
     }
 
-    fn load_constant_new(
+    fn load_constant(&mut self, program: &mut Program<'p>, value: Value) -> (StackRange, TypeId) {
+        let ty = program.type_of(&value);
+        let to = self.reserve_slots(program, ty);
+        self.push(Bc::LoadConstant {
+            slot: to.first,
+            value,
+        });
+        (to, ty)
+    }
+
+    fn serialize_constant<T: InterpSend<'p>>(
         &mut self,
         program: &mut Program<'p>,
-        value: Value,
+        value: T,
     ) -> (StackRange, TypeId) {
-        let ty = program.type_of(&value);
+        let ty = T::get_type(program);
+        let value = value.serialize();
         let to = self.reserve_slots(program, ty);
         self.push(Bc::LoadConstant {
             slot: to.first,
@@ -1611,15 +1630,3 @@ fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
         vec.pop();
     }
 }
-
-// TODO
-pub trait InterpSend<'p> {
-    fn get_type(interp: &mut Interp<'_, 'p>) -> TypeId;
-    fn serialize(self) -> Value;
-    fn deserialize(value: Value) -> Self;
-}
-
-// #[derive(Debug, InterpSend)]
-// struct HelloWorld {
-//     a: i64,
-// }

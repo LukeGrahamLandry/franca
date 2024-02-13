@@ -212,3 +212,13 @@ impl<'p> SharedConstants<'p> {
         Rc::new(self)
     }
 }
+
+impl Value {
+    pub fn to_tuple(self) -> Option<Vec<Value>> {
+        if let Value::Tuple { values, .. } = self {
+            Some(values)
+        } else {
+            None
+        }
+    }
+}

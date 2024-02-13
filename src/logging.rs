@@ -154,11 +154,15 @@ impl<'p> Program<'p> {
             TypeInfo::F64 => "f64".to_owned(),
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
+            // TODO: be careful of recursion
             TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
             TypeInfo::Struct { fields, .. } => {
                 // TODO: factor out iter().join(str), how does that not already exist
-                let v: Vec<_> = fields.iter().map(|f| format!("{f:?}")).collect();
-                format!("Struct({})", v.join(", "))
+                let v: Vec<_> = fields
+                    .iter()
+                    .map(|f| format!("{}: {}", self.pool.get(f.name), self.log_type(f.ty)))
+                    .collect();
+                format!("{{ {}}}!struct", v.join(", "))
             }
             TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
             TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),

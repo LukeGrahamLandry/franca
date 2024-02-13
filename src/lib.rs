@@ -8,6 +8,7 @@ use pool::StringPool;
 pub mod ast;
 pub mod bc;
 pub mod compiler;
+pub mod ffi;
 pub mod interp;
 pub mod lex;
 pub mod logging;
@@ -101,10 +102,7 @@ pub fn run_main<'a: 'p, 'p>(
     };
 
     let vars = ResolveScope::of(&mut global);
-    let mut program = Program {
-        vars,
-        ..Default::default()
-    };
+    let mut program = Program::new(vars, pool);
     let mut interp = Compile::new(pool, &mut program);
     // damn turns out defer would maybe be a good idea
     let result = interp.add_declarations(&SharedConstants::default(), global);

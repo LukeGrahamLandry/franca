@@ -335,6 +335,7 @@ pub struct VarInfo {
 
 #[derive(Clone)]
 pub struct Program<'p> {
+    pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
     // At the call site, you know the name but not the type.
     // So you need to look at everybody that might be declaring the function you're trying to call.
@@ -386,8 +387,8 @@ impl<'p> LazyType<'p> {
     }
 }
 
-impl<'p> Default for Program<'p> {
-    fn default() -> Self {
+impl<'p> Program<'p> {
+    pub fn new(vars: Vec<VarInfo>, pool: &'p StringPool<'p>) -> Self {
         Self {
             // Any needs to be first becuase I use TypeId(0) as a place holder.
             // The rest are just common ones that i want to find faster if i end up iterating the array.
@@ -403,7 +404,8 @@ impl<'p> Default for Program<'p> {
             func_lookup: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
-            vars: vec![],
+            vars,
+            pool,
         }
     }
 }
@@ -527,6 +529,30 @@ impl<'p> Program<'p> {
             ptr_ty = inner;
         }
         d
+    }
+
+    pub fn struct_type(&mut self, _todo_name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
+        let mut types = vec![];
+        let mut fields = vec![];
+        let mut size = 0;
+        for (name, ty) in fields_in {
+            let count = self.slot_count(*ty);
+            fields.push(Field {
+                name: self.pool.intern(name),
+                ty: *ty,
+                first: size,
+                count,
+            });
+            types.push(*ty);
+            size += count;
+        }
+        let as_tuple = self.intern_type(TypeInfo::Tuple(types));
+        let ty = TypeInfo::Struct {
+            fields,
+            size,
+            as_tuple,
+        };
+        self.intern_type(ty)
     }
 }
 
