@@ -1,10 +1,7 @@
 // nobody cares its just logging. TODO: should do it anyway i guess.
 #![allow(unused_must_use)]
 use core::fmt;
-use std::{
-    fmt::{Debug, Write},
-    panic::Location,
-};
+use std::fmt::{Debug, Write};
 
 macro_rules! bin_int {
     ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
@@ -14,38 +11,41 @@ macro_rules! bin_int {
 }
 
 macro_rules! err {
-    ($self:expr, $payload:expr) => {{
-        return Err($self.error($payload));
+    ($payload:expr) => {{
+        return Err($crate::compiler::CompileError {
+            internal_loc: Location::caller(),
+            loc: None,
+            reason: $payload,
+            trace: String::new(),
+            value_stack: vec![],
+            call_stack: vec![],
+        });
     }};
-    ($self:expr, $($arg:tt)*) => {{
+    ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        #[allow(unreachable_code)]
-        return err!($self, CErr::Msg(msg))
+        err!($crate::compiler::CErr::Msg(msg))
     }};
 }
 
 macro_rules! assert {
-    ($self:expr, $cond:expr, $($arg:tt)+) => {{
+    ($cond:expr, $($arg:tt)+) => {{
         if !($cond) {
-            let msg = format!("Assertion Failed: {}\n{}", stringify!($cond), format!($($arg)*));
-            #[allow(unreachable_code)]
-            return err!($self, CErr::Msg(msg))
+            err!("Assertion Failed: {}\n{}", stringify!($cond), format!($($arg)*))
         }
     }};
-    ($self:expr, $cond:expr $(,)?) => {{
-        assert!($self, $cond, "")
+    ($cond:expr $(,)?) => {{
+        assert!($cond, "")
     }};
 }
 
 // looks weird cause i stole it from the rust one. apparently its faster or whatever
 macro_rules! assert_eq {
-    ($self:expr, $left:expr, $right:expr, $($arg:tt)+) => {
+    ($left:expr, $right:expr, $($arg:tt)+) => {
         match (&$left, &$right) {
             (left_val, right_val) => {
                 if !(*left_val == *right_val) {
                     let msg = format!($($arg)*);
                     err!(
-                        $self,
                         "Expected {} == {}\nBut {:?} != {:?}\n{}",
                         stringify!($left_val),
                         stringify!($right_val),
@@ -57,17 +57,17 @@ macro_rules! assert_eq {
             }
         }
     };
-    ($self:expr, $left:expr, $right:expr) => {
-        assert_eq!($self, $left, $right, "");
+    ($left:expr, $right:expr) => {
+        assert_eq!($left, $right, "");
     };
 }
 
 // I want to be as easy to use my error system as just paniking.
 // Use this one for things that aren't supported yet or should have been caught in a previous stage of compilation.
 macro_rules! ice {
-    ($self:expr, $($arg:tt)*) => {{
+    ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        err!($self, CErr::IceFmt(msg))
+        err!(crate::compiler::CErr::IceFmt(msg))
     }};
 }
 use codemap::Span;
@@ -79,12 +79,11 @@ pub(crate) use ice;
 // TODO: I really like stringify! for error messages. make sure ast macros in my language have that.
 // Convert a missing option into a compile error with a message.
 macro_rules! unwrap {
-    ($self:expr, $maybe:expr, $($arg:tt)*) => {{
+    ($maybe:expr, $($arg:tt)*) => {{
         if let Some(value) = $maybe {
             value
         } else {
-            let msg = format!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*));
-            err!($self, CErr::IceFmt(msg))
+            ice!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*))
         }
     }};
 }
@@ -136,10 +135,8 @@ use crate::{
     ast::{
         Expr, FatExpr, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var,
     },
-    interp::{
-        Bc, CErr, CompileError, DebugInfo, DebugState, FnBody, Interp, StackOffset, StackRange,
-        Value,
-    },
+    compiler::{Bc, CErr, CompileError, DebugState, FnBody},
+    interp::{DebugInfo, Interp, StackOffset, StackRange, Value},
     pool::StringPool,
 };
 
@@ -493,22 +490,6 @@ impl Stmt<'_> {
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
-    #[track_caller]
-    pub fn log_trace(&self) -> String {
-        let mut out = String::new();
-        if !cfg!(feature = "some_log") {
-            return out;
-        }
-        writeln!(out, "=== TRACE ===");
-        writeln!(out, "{}", Location::caller());
-
-        for (i, s) in self.debug_trace.iter().enumerate() {
-            writeln!(out, "{i} {};", s.log(self.pool, self.program));
-        }
-        writeln!(out, "=============");
-        out
-    }
-
     pub fn log_stack(&self) {
         if cfg!(not(feature = "spam_log")) {
             return;
@@ -568,7 +549,7 @@ impl<'p> Debug for CompileError<'p> {
 }
 
 impl<'p> DebugState<'p> {
-    fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
+    pub fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
         let show_f = |func: FuncId| {
             format!(
                 "f{}:{:?}:{}",

@@ -6,6 +6,7 @@ use interp::Value;
 use pool::StringPool;
 
 pub mod ast;
+pub mod compiler;
 pub mod interp;
 pub mod lex;
 pub mod logging;
@@ -15,7 +16,7 @@ pub mod scope;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, LazyFnType, Program, TypeId},
-    interp::{CompileError, ExecTime, Interp, SharedConstants},
+    compiler::{Compile, CompileError, ExecTime, SharedConstants},
     logging::{outln, PoolLog},
     parse::Parser,
     scope::ResolveScope,
@@ -102,13 +103,13 @@ pub fn run_main<'a: 'p, 'p>(
         vars,
         ..Default::default()
     };
-    let mut interp = Interp::new(pool, &mut program);
+    let mut interp = Compile::new(pool, &mut program);
     // damn turns out defer would maybe be a good idea
     let result = interp.add_declarations(&SharedConstants::default(), global);
-    fn log_err<'p>(codemap: CodeMap, interp: &mut Interp<'_, 'p>, e: CompileError<'p>) {
+    fn log_err<'p>(codemap: CodeMap, interp: &mut Compile<'_, 'p>, e: CompileError<'p>) {
         let diagnostic = vec![Diagnostic {
             level: Level::Error,
-            message: e.reason.log(interp.program, interp.pool),
+            message: e.reason.log(interp.interp.program, interp.pool),
             code: None,
             spans: vec![SpanLabel {
                 span: e.loc.unwrap(),
@@ -125,7 +126,11 @@ pub fn run_main<'a: 'p, 'p>(
     } else {
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
         let id = toplevel.unwrap();
-        let constants = interp.ready[id.0].as_ref().unwrap().constants.clone();
+        let constants = interp.interp.ready[id.0]
+            .as_ref()
+            .unwrap()
+            .constants
+            .clone();
         let name = pool.intern("main");
         match interp.lookup_unique_func(name) {
             None => {
@@ -142,7 +147,7 @@ pub fn run_main<'a: 'p, 'p>(
                         let assertion_count = src.split("assert_eq(").count() - 1;
                         // debug so dont crash in web if not using my system of one run per occurance.
                         debug_assert_eq!(
-                            interp.assertion_count, assertion_count,
+                            interp.interp.assertion_count, assertion_count,
                             "vm missed assertions?"
                         );
                         outln!(
@@ -160,6 +165,7 @@ pub fn run_main<'a: 'p, 'p>(
                             lines as f64 / seconds
                         );
                         let inst_count: usize = interp
+                            .interp
                             .ready
                             .iter()
                             .flatten()
@@ -179,7 +185,11 @@ pub fn run_main<'a: 'p, 'p>(
         if let Some(path) = save {
             let path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, format!("{}\nAt {:?}", interp.log(pool), timestamp())).unwrap();
+            fs::write(
+                &path,
+                format!("{}\nAt {:?}", interp.interp.log(pool), timestamp()),
+            )
+            .unwrap();
             outln!("Wrote log to {:?}", path);
         }
     }
