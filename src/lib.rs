@@ -107,7 +107,8 @@ pub fn run_main<'a: 'p, 'p>(
     let mut program = Program::new(vars, pool);
     let mut interp = Compile::new(pool, &mut program);
     // damn turns out defer would maybe be a good idea
-    let result = interp.add_declarations(&SharedConstants::default(), global);
+    let c = interp.interp.program.empty_consts();
+    let result = interp.add_declarations(c, global);
     fn log_err<'p>(codemap: CodeMap, interp: &mut Compile<'_, 'p>, e: CompileError<'p>) {
         let diagnostic = vec![Diagnostic {
             level: Level::Error,
@@ -141,7 +142,7 @@ pub fn run_main<'a: 'p, 'p>(
                 outln!("FN {name:?} = 'MAIN' NOT FOUND");
             }
             Some(f) => {
-                match interp.compile(Some(&constants), f, ExecTime::Runtime) {
+                match interp.compile(Some(constants), f, ExecTime::Runtime) {
                     Err(e) => {
                         log_err(codemap, &mut interp, e);
                         return None;

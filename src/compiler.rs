@@ -117,7 +117,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return out;
         }
         writeln!(out, "=== TRACE ===").unwrap();
-        writeln!(out, "{}", Location::caller()).unwrap();
+        // writeln!(out, "{}", Location::caller()).unwrap();  // Always called from the same place now so this is useless
 
         for (i, s) in self.debug_trace.iter().enumerate() {
             writeln!(out, "{i} {};", s.log(self.pool, self.interp.program)).unwrap();
@@ -136,11 +136,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
-    pub fn add_declarations(
-        &mut self,
-        constants: &SharedConstants<'p>,
-        ast: Func<'p>,
-    ) -> Res<'p, ()> {
+    pub fn add_declarations(&mut self, constants: ConstId, ast: Func<'p>) -> Res<'p, ()> {
         let f = self.interp.program.add_func(ast);
         self.ensure_compiled(constants, f, ExecTime::Comptime)?;
         Ok(())
@@ -157,16 +153,19 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn compile(
         &mut self,
-        constants: Option<&SharedConstants<'p>>,
+        constants: Option<ConstId>,
         f: FuncId,
         when: ExecTime,
     ) -> Res<'p, ()> {
         let state = DebugState::Compile(f);
         self.push_state(&state);
         let init_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
-        let constants =
-            constants.map_or_else(|| Rc::new(SharedConstants::default()), |c| c.clone().bake());
-        let result = self.ensure_compiled(&constants, f, when);
+        let constants = if let Some(c) = constants {
+            self.interp.program.consts_child(c)
+        } else {
+            self.interp.program.empty_consts()
+        };
+        let result = self.ensure_compiled(constants, f, when);
         if result.is_ok() {
             let end_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
             assert!(init_heights == end_heights, "bad stack size");
@@ -187,7 +186,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn compile_and_run(
         &mut self,
-        constants: Option<&SharedConstants<'p>>,
+        constants: Option<ConstId>,
         f: FuncId,
         arg: Value,
         when: ExecTime,
@@ -208,7 +207,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn empty_fn(&self, when: ExecTime, func: FuncId, loc: Span) -> FnBody<'p> {
+    pub fn empty_fn(
+        &self,
+        when: ExecTime,
+        func: FuncId,
+        loc: Span,
+        constants: ConstId,
+    ) -> FnBody<'p> {
         FnBody {
             insts: vec![],
             stack_slots: 0,
@@ -219,35 +224,39 @@ impl<'a, 'p> Compile<'a, 'p> {
             why: self.log_trace(),
             debug: vec![],
             last_loc: loc,
-            constants: Default::default(),
+            constants,
         }
     }
 
-    fn eval_local_constants(
-        &mut self,
-        constants: &mut SharedConstants<'p>,
-        f: FuncId,
-    ) -> Res<'p, ()> {
+    fn eval_local_constants(&mut self, constants: ConstId, f: FuncId) -> Res<'p, ConstId> {
         let state = DebugState::EvalConstants(f);
         self.push_state(&state);
+
+        // @constants
+        let constants = self.interp.program.consts_child(constants);
         let func = &self.interp.program.funcs[f.0];
 
         // TODO: pass in comptime known args
         // TODO: do i even need to pass an index? probably just for debugging
-        let mut result = self.empty_fn(ExecTime::Comptime, FuncId(f.0 + 10000000), func.loc);
-        result.constants.parents.push(constants.clone().bake());
+        let mut result = self.empty_fn(
+            ExecTime::Comptime,
+            FuncId(f.0 + 10000000),
+            func.loc,
+            constants,
+        );
+
         let new_constants = func.local_constants.clone();
         for stmt in new_constants {
             self.compile_stmt(&mut result, &stmt)?;
         }
         self.pop_state(state);
-        constants.parents.push(result.constants.bake());
-        Ok(())
+        // TODO: hard to think about how i want constants to work.
+        Ok(constants)
     }
 
     fn ensure_compiled(
         &mut self,
-        constants: &SharedConstants<'p>,
+        mut constants: ConstId,
         FuncId(index): FuncId,
         when: ExecTime,
     ) -> Res<'p, ()> {
@@ -257,9 +266,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::JitToBc(FuncId(index), when);
         self.push_state(&state);
         let func = &self.interp.program.funcs[index];
-        let mut constants = constants.clone();
         if !func.local_constants.is_empty() {
-            self.eval_local_constants(&mut constants, FuncId(index))?;
+            // @constants
+            constants = self.eval_local_constants(constants, FuncId(index))?;
         }
         while self.interp.ready.len() <= index {
             self.interp.ready.push(None);
@@ -269,10 +278,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             FuncId(index),
             self.interp.program.funcs[index].log(self.pool)
         );
-        self.infer_types(&constants, FuncId(index))?;
+        self.infer_types(constants, FuncId(index))?;
         let func = &self.interp.program.funcs[index];
         let (arg, _) = func.ty.unwrap();
-        let mut result = self.empty_fn(when, FuncId(index), func.loc);
+        let mut result = self.empty_fn(when, FuncId(index), func.loc, constants);
         result.constants = constants;
         let arg_range = result.reserve_slots(self.interp.program, arg);
         let return_value = self.emit_body(&mut result, arg_range, FuncId(index))?;
@@ -386,7 +395,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     ) -> Res<'p, StackRange> {
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:capturing_call", name));
-        self.infer_types(&result.constants, f)?;
+        self.infer_types(result.constants, f)?;
         assert!(
             !self.currently_inlining.contains(&f),
             "Tried to inline recursive function."
@@ -409,7 +418,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "Tried to inline recursive function."
         );
         self.currently_inlining.push(f);
-        self.ensure_compiled(&result.constants, f, result.when)?;
+        self.ensure_compiled(result.constants, f, result.when)?;
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:inline_call", name));
         // This move ensures they end up at the base of the renumbered stack.
@@ -477,13 +486,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 LazyType::Infer => todo!(),
                 LazyType::PendingEval(arg_e) => {
                     let arg_ty =
-                        self.immediate_eval_expr(&result.constants, arg_e.clone(), TypeId::ty())?;
+                        self.immediate_eval_expr(result.constants, arg_e.clone(), TypeId::ty())?;
                     self.to_type(arg_ty)?
                 }
                 &LazyType::Finished(arg) => arg,
             },
         };
-        let arg_value = self.immediate_eval_expr(&result.constants, arg_expr.clone(), arg_ty)?;
+        let arg_value = self.immediate_eval_expr(result.constants, arg_expr.clone(), arg_ty)?;
 
         let func = &self.interp.program.funcs[f.0];
         if func.body.is_none() {
@@ -511,19 +520,29 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: factor out from normal functions?
         let arguments = self.interp.program.funcs[f.0].arg_vars.as_ref().unwrap();
         if arguments.len() == 1 {
-            let prev = result.constants.insert(arguments[0], (arg_value, arg_ty));
+            let prev = self.interp.program.const_insert(
+                result.constants,
+                arguments[0],
+                (arg_value, arg_ty),
+            );
             // TODO: remove at the end so can do again.
-            assert!(prev.is_none(), "overwrite comptime arg?");
+            // assert!(prev.is_none(), "overwrite comptime arg?");
         } else {
-            let types = unwrap!(self.interp.program.tuple_types(arg_ty), "");
+            let types: Vec<_> = unwrap!(self.interp.program.tuple_types(arg_ty), "")
+                .into_iter()
+                .cloned()
+                .collect();
             if arguments.len() == types.len() {
                 let arg_values = to_flat_seq(arg_value);
                 // if they match, each element has its own name.
-                for (i, var) in arguments.iter().enumerate() {
-                    let prev = result
-                        .constants
-                        .insert(*var, (arg_values[i].clone(), types[i]));
-                    assert!(prev.is_none(), "overwrite arg?");
+                let args: Vec<_> = arguments.iter().copied().enumerate().collect();
+                for (i, var) in args {
+                    let prev = self.interp.program.const_insert(
+                        result.constants,
+                        var,
+                        (arg_values[i].clone(), types[i]),
+                    );
+                    // assert!(prev.is_none(), "overwrite arg?");
                 }
             } else {
                 todo!()
@@ -540,7 +559,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(arg) => {
                         let arg =
-                            self.immediate_eval_expr(&result.constants, arg.clone(), TypeId::ty())?;
+                            self.immediate_eval_expr(result.constants, arg.clone(), TypeId::ty())?;
                         let arg = self.to_type(arg)?;
                         self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
                     }
@@ -552,7 +571,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(ret) => {
                         let ret =
-                            self.immediate_eval_expr(&result.constants, ret.clone(), TypeId::ty())?;
+                            self.immediate_eval_expr(result.constants, ret.clone(), TypeId::ty())?;
                         self.to_type(ret)?
                     }
                     &LazyType::Finished(ret) => ret,
@@ -560,11 +579,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         };
 
-        // TODO: this has side effects on the result which is bad.
-        self.eval_local_constants(&mut result.constants, f)?;
+        // TODO: @constants mut
+        self.eval_local_constants(result.constants, f)?;
 
         let result = if let Some(body) = func.body {
-            self.immediate_eval_expr(&result.constants, body, ret)?
+            self.immediate_eval_expr(result.constants, body, ret)?
         } else {
             unreachable!("builtin")
         };
@@ -596,14 +615,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             } => {
                 let expected_ty = invert(
                     ty.clone()
-                        .map(|ty| self.immediate_eval_expr(&result.constants, ty, TypeId::ty())),
+                        .map(|ty| self.immediate_eval_expr(result.constants, ty, TypeId::ty())),
                 )?
                 .map(|ty| self.to_type(ty).unwrap());
                 match kind {
                     VarType::Const => {
                         let mut value = match value {
                             Some(value) => self.immediate_eval_expr(
-                                &result.constants,
+                                result.constants,
                                 value.clone(),
                                 expected_ty.unwrap_or(TypeId::any()),
                             )?,
@@ -627,7 +646,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.type_check_eq(found_ty, expected_ty, "var decl")?;
                         }
                         let found_ty = self.interp.program.type_of(&value);
-                        result.constants.insert(*name, (value, found_ty));
+                        self.interp.program.const_insert(
+                            result.constants,
+                            *name,
+                            (value, found_ty),
+                        );
                     }
                     VarType::Let | VarType::Var => {
                         let value = invert(
@@ -676,7 +699,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let Expr::Call(f, arg) = arg.deref() {
                         if let &Expr::GetNamed(name) = f.deref().deref() {
                             let f = self.resolve_function(result, name, arg)?;
-                            self.infer_types(&result.constants, f)?;
+                            self.infer_types(result.constants, f)?;
                             let _res = self.emit_comptime_call(result, f, arg)?;
                             return Ok(());
                         }
@@ -715,7 +738,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(match expr.deref() {
             Expr::Closure(func) => {
                 let id = self.interp.program.add_func(*func.clone());
-                self.ensure_compiled(&result.constants, id, result.when)?;
+                self.ensure_compiled(result.constants, id, result.when)?;
                 result.load_constant(self.interp.program, Value::GetFn(id))
             }
             Expr::Call(f, arg) => {
@@ -740,7 +763,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     // Note: f will be compiled differently depending on the calling convention.
                     // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-                    self.infer_types(&result.constants, f)?;
+                    self.infer_types(result.constants, f)?;
                     let func = &self.interp.program.funcs[f.0];
                     let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
                     self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
@@ -767,7 +790,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.emit_inline_call(result, arg, f)?
                     } else {
                         let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
-                        self.ensure_compiled(&result.constants, f, result.when)?;
+                        self.ensure_compiled(result.constants, f, result.when)?;
                         result.push(Bc::CallDirect { f, ret, arg });
                         ret
                     };
@@ -855,7 +878,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                         result.push(Bc::CloneRange { from, to });
                     }
                     (to, ty)
-                } else if let Some((value, _)) = result.constants.get(var) {
+                } else if let Some((value, _)) =
+                    self.interp.program.const_get(result.constants, var)
+                {
                     result.load_constant(self.interp.program, value)
                 } else {
                     println!("VARS: {:?}", result.vars);
@@ -872,7 +897,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(func) = self.interp.program.declarations.get(i) {
                     assert_eq!(func.len(), 1, "ambigous function reference");
                     let func = func[0];
-                    self.ensure_compiled(&result.constants, func, ExecTime::Comptime)?;
+                    self.ensure_compiled(result.constants, func, ExecTime::Comptime)?;
                     result.load_constant(self.interp.program, Value::GetFn(func))
                 } else {
                     ice!(
@@ -916,11 +941,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     "comptime_print" => {
                         outln!("EXPR : {}", arg.log(self.pool));
-                        let value = self.immediate_eval_expr(
-                            &result.constants,
-                            *arg.clone(),
-                            TypeId::any(),
-                        );
+                        let value =
+                            self.immediate_eval_expr(result.constants, *arg.clone(), TypeId::any());
                         outln!("VALUE: {:?}", value);
                         result.load_constant(self.interp.program, Value::Unit)
                     }
@@ -1120,12 +1142,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::GenericArgs(f, args) => {
                 let name = unwrap!(f.as_ident(), "");
+                let arg_ty = unwrap!(self.type_of(result, args)?, "::(...unknown types)");
+                let arg = self.immediate_eval_expr(result.constants, *args.clone(), arg_ty)?;
+
+                if let Some((v, _ty)) = self
+                    .interp
+                    .program
+                    .const_get_overload(result.constants, &(name, arg))
+                {
+                    return Ok(result.load_constant(self.interp.program, v));
+                }
+
                 if let Some(impls) = self.interp.program.impls.get(&name) {
                     for f in impls.clone() {
                         // TODO: handle this better. its just for side effects on constants. need to manage constants in general better.
                         let _res = self.emit_comptime_call(result, f, args)?;
                     }
-                    if let Some((v, _ty)) = result.constants.get_named(name) {
+                    if let Some((v, _ty)) =
+                        self.interp.program.const_get_named(result.constants, name)
+                    {
                         result.load_constant(self.interp.program, v)
                     } else {
                         err!(CErr::UndeclaredIdent(name))
@@ -1152,7 +1187,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         to: addr_slot.first,
                     });
                     Ok((addr_slot, ptr_ty))
-                } else if result.constants.get(var).is_some() {
+                } else if self
+                    .interp
+                    .program
+                    .const_get(result.constants, var)
+                    .is_some()
+                {
                     err!("Took address of constant {}", var.log(self.pool))
                 } else {
                     ice!("Missing var {} (in !addr)", var.log(self.pool))
@@ -1188,7 +1228,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: better error messages
     fn resolve_function(
         &mut self,
-        result: &FnBody<'p>,
+        result: &mut FnBody<'p>,
         name: Ident<'p>,
         arg: &FatExpr<'p>,
     ) -> Res<'p, FuncId> {
@@ -1199,25 +1239,39 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // Check overloads
         if let Ok(Some(arg_ty)) = self.type_of(result, arg) {
-            let found = self.interp.program.func_lookup.get(&(name, arg_ty));
-            if let Some(f) = found {
-                return Ok(*f);
+            let found = self
+                .interp
+                .program
+                .const_get_overload(result.constants, &(name, Value::Type(arg_ty)));
+            if let Some((f, _ty)) = found {
+                let f = unwrap!(f.to_func(), "want func");
+                return Ok(f);
             }
 
             // Compute overloads
+            // TODO: any time you miss, it does all of them with that name. what happens if more have been added since then? does that ever happen?
             if let Some(decls) = self.interp.program.declarations.get(&name) {
                 let mut found = None;
+                println!("====");
                 for f in decls.clone() {
-                    if let Ok(f_ty) = self.infer_types(&result.constants, f) {
+                    if let Ok(f_ty) = self.infer_types(result.constants, f) {
+                        let t = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
+                        println!("{:?}", self.interp.program.log_type(t));
                         if arg_ty == f_ty.arg {
                             assert!(found.is_none(), "AmbiguousCall");
-                            found = Some(f);
+                            found = Some((f, f_ty));
                         }
                     }
                 }
                 match found {
-                    Some(f) => {
-                        self.interp.program.func_lookup.insert((name, arg_ty), f);
+                    Some((f, f_ty)) => {
+                        let ty = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
+                        // TODO: use ret ty in key also?
+                        self.interp.program.const_insert_overload(
+                            result.constants,
+                            (name, Value::Type(arg_ty)),
+                            (Value::GetFn(f), ty),
+                        );
                         Ok(f)
                     }
                     None => err!(CErr::AmbiguousCall),
@@ -1231,7 +1285,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
-    fn type_of(&mut self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+    fn type_of(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if let Some(ty) = expr.ty {
             return Ok(Some(ty));
         }
@@ -1240,7 +1294,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Call(f, arg) => {
                 if let Expr::GetNamed(i) = f.deref().deref() {
                     if let Ok(fid) = self.resolve_function(result, *i, arg) {
-                        if self.infer_types(&result.constants, fid).is_ok() {
+                        if self.infer_types(result.constants, fid).is_ok() {
                             let (_, ret) = self.interp.program.funcs[fid.0].ty.unwrap();
                             return Ok(Some(ret));
                         }
@@ -1249,11 +1303,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(None);
             }
             Expr::Block { result: e, .. } => return self.type_of(result, e),
+            Expr::Tuple(values) => {
+                let types: Res<'p, Vec<_>> =
+                    values.iter().map(|v| self.type_of(result, v)).collect();
+                let types = types?;
+                let before = types.len();
+                let types: Vec<_> = types.into_iter().flatten().collect();
+                assert_eq!(before, types.len());
+                let ty = self.interp.program.intern_type(TypeInfo::Tuple(types));
+                ty
+            }
             Expr::GetNamed(_)
             | Expr::FieldAccess(_, _)
             | Expr::StructLiteralP(_)
             | Expr::ArrayLiteral(_)
-            | Expr::Tuple(_)
             | Expr::RefType(_)
             | Expr::EnumLiteral(_)
             | Expr::GenericArgs(_, _)
@@ -1294,7 +1357,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some((_, ty)) = result.vars.get(var).cloned() {
                     ty
-                } else if let Some((_, ty)) = result.constants.get(var) {
+                } else if let Some((_, ty)) = self.interp.program.const_get(result.constants, var) {
                     ty
                 } else {
                     ice!("type check missing var {var:?}")
@@ -1338,7 +1401,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Resolve the lazy types for Arg and Ret
-    fn infer_types(&mut self, constants: &SharedConstants<'p>, func: FuncId) -> Res<'p, FnType> {
+    fn infer_types(&mut self, constants: ConstId, func: FuncId) -> Res<'p, FnType> {
         let f = &self.interp.program.funcs[func.0];
         self.last_loc = Some(f.loc);
         match f.ty.clone() {
@@ -1381,7 +1444,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn immediate_eval_expr(
         &mut self,
-        constants: &SharedConstants<'p>,
+        constants: ConstId,
         e: FatExpr<'p>,
         ret_ty: TypeId,
     ) -> Res<'p, Value> {
@@ -1389,7 +1452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Value(value) => return Ok(value.clone()),
             Expr::GetVar(var) => {
                 // fast path for builtin type identifiers
-                if let Some((value, _)) = constants.get(var) {
+                if let Some((value, _)) = self.interp.program.const_get(constants, var) {
                     debug_assert_ne!(value, Value::Poison);
                     return Ok(value);
                 }
@@ -1482,11 +1545,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             ice!("if args must be tuple");
         };
 
-        let true_ty = self.infer_types(&result.constants, if_true)?;
+        let true_ty = self.infer_types(result.constants, if_true)?;
         let unit = self.interp.program.intern_type(TypeInfo::Unit);
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
         self.type_check_eq(true_ty.arg, unit, sig)?;
-        let false_ty = self.infer_types(&result.constants, if_false)?;
+        let false_ty = self.infer_types(result.constants, if_false)?;
         self.type_check_eq(false_ty.arg, unit, sig)?;
         self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
 
@@ -1583,9 +1646,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let types: Res<'p, Vec<_>> = pattern
             .types
             .iter()
-            .map(|ty| {
-                self.immediate_eval_expr(&result.constants, ty.clone().unwrap(), TypeId::ty())
-            })
+            .map(|ty| self.immediate_eval_expr(result.constants, ty.clone().unwrap(), TypeId::ty()))
             .collect();
         let types: Res<'p, Vec<_>> = types?.into_iter().map(|ty| self.to_type(ty)).collect();
         let types = types?;
@@ -1687,11 +1748,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 }
 
-pub fn insert_multi<K: Hash + Eq, V>(map: &mut HashMap<K, Vec<V>>, key: K, value: V) {
-    if let Some(prev) = map.get_mut(&key) {
-        prev.push(value);
+pub fn insert_multi<K: Hash + Eq, V: Eq>(set: &mut HashMap<K, Vec<V>>, key: K, value: V) {
+    if let Some(prev) = set.get_mut(&key) {
+        if !prev.contains(&value) {
+            prev.push(value);
+        }
     } else {
-        map.insert(key, vec![value]);
+        set.insert(key, vec![value]);
     }
 }
 

@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::Value,
+    bc::{ConstId, SharedConstants, Value},
     compiler::insert_multi,
     pool::{Ident, StringPool},
 };
@@ -344,14 +344,13 @@ pub struct Program<'p> {
     // At the call site, you know the name but not the type.
     // So you need to look at everybody that might be declaring the function you're trying to call.
     pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
-    // If you already know the arg type at a callsite, you can just grab the function directly. TODO: do it by ret too so key is a FnType instead?
-    pub func_lookup: HashMap<(Ident<'p>, TypeId), FuncId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     pub generics_memo: HashMap<(FuncId, Value), Value>,
     // If you're looking for a function/type name that doesn't exist, these are places you can try instantiating them.
     pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
+    pub constants: Vec<SharedConstants<'p>>,
 }
 
 impl<'p> Stmt<'p> {
@@ -407,12 +406,12 @@ impl<'p> Program<'p> {
                 TypeInfo::F64,
             ],
             declarations: Default::default(),
-            func_lookup: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
             impls: Default::default(),
             vars,
             pool,
+            constants: vec![],
         }
     }
 
@@ -422,6 +421,25 @@ impl<'p> Program<'p> {
         } else {
             None
         }
+    }
+
+    pub fn empty_consts(&mut self) -> ConstId {
+        let i = self.constants.len();
+        self.constants.push(SharedConstants {
+            id: ConstId(i),
+            parents: Default::default(),
+            local: Default::default(),
+            overloads: Default::default(),
+            references: 1,
+        });
+        ConstId(i)
+    }
+
+    pub fn consts_child(&mut self, c: ConstId) -> ConstId {
+        self.constants[c.0].references += 1;
+        let new = self.empty_consts();
+        self.constants[new.0].parents.push(c);
+        new
     }
 }
 
@@ -587,6 +605,69 @@ impl<'p> Program<'p> {
     pub fn named_tuple(&mut self, _todo_name: &str, types: Vec<TypeId>) -> TypeId {
         self.intern_type(TypeInfo::Tuple(types))
     }
+
+    pub fn const_get(&self, scope: ConstId, var: &Var<'p>) -> Option<(Value, TypeId)> {
+        let c = &self.constants[scope.0];
+        c.local.get(var).cloned().or_else(|| {
+            for p in &c.parents {
+                if let Some(v) = self.const_get(*p, var) {
+                    return Some(v);
+                }
+            }
+            None
+        })
+    }
+
+    pub fn const_get_overload(
+        &self,
+        scope: ConstId,
+        key: &(Ident<'p>, Value),
+    ) -> Option<(Value, TypeId)> {
+        let c = &self.constants[scope.0];
+        c.overloads.get(key).cloned().or_else(|| {
+            for p in &c.parents {
+                if let Some(v) = self.const_get_overload(*p, key) {
+                    return Some(v);
+                }
+            }
+            None
+        })
+    }
+
+    pub fn const_get_named(&self, scope: ConstId, name: Ident<'_>) -> Option<(Value, TypeId)> {
+        let c = &self.constants[scope.0];
+        if let Some((_, t)) = c.local.iter().find(|(k, _)| k.0 == name) {
+            return Some(t.clone());
+        }
+        for p in &c.parents {
+            if let Some(v) = self.const_get_named(*p, name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    pub fn const_insert(
+        &mut self,
+        scope: ConstId,
+        k: Var<'p>,
+        v: (Value, TypeId),
+    ) -> Option<(Value, TypeId)> {
+        let c = &mut self.constants[scope.0];
+        // debug_assert!(c.references == 1);
+        c.local.insert(k, v)
+    }
+
+    pub fn const_insert_overload(
+        &mut self,
+        scope: ConstId,
+        k: (Ident<'p>, Value),
+        v: (Value, TypeId),
+    ) -> Option<(Value, TypeId)> {
+        let c = &mut self.constants[scope.0];
+        // debug_assert!(c.references == 1);
+        c.overloads.insert(k, v)
+    }
 }
 
 impl<'p> Deref for FatExpr<'p> {
@@ -644,7 +725,7 @@ impl<'p> FatStmt<'p> {
         }
     }
 
-    pub(crate) fn has_tag(&self, pool: &StringPool<'_>, name: &str) -> bool {
+    pub(crate) fn _has_tag(&self, pool: &StringPool<'_>, name: &str) -> bool {
         let name = pool.intern(name);
         self.annotations.iter().any(|a| a.name == name)
     }

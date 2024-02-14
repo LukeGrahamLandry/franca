@@ -1,11 +1,11 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
-    ast::{FuncId, TypeId, Var},
+    ast::{FuncId, Program, TypeId, Var},
     compiler::{DebugInfo, ExecTime},
     pool::Ident,
 };
 use codemap::Span;
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, ops::Deref, rc::Rc, sync::atomic::AtomicUsize};
 
 #[derive(Clone)]
 pub enum Bc<'p> {
@@ -106,7 +106,7 @@ pub struct FnBody<'p> {
     pub func: FuncId,
     pub why: String,
     pub last_loc: Span,
-    pub constants: SharedConstants<'p>,
+    pub constants: ConstId,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
@@ -177,52 +177,33 @@ pub struct InterpBox {
     pub values: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ConstId(pub usize);
+
 // TODO: This must be super fucking slow
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SharedConstants<'p> {
-    pub parents: Vec<Rc<SharedConstants<'p>>>,
+    pub id: ConstId,
+    pub parents: Vec<ConstId>,
     pub local: HashMap<Var<'p>, (Value, TypeId)>,
-}
-
-impl<'p> SharedConstants<'p> {
-    pub fn get(&self, var: &Var<'p>) -> Option<(Value, TypeId)> {
-        self.local.get(var).cloned().or_else(|| {
-            for p in &self.parents {
-                if let Some(v) = p.get(var) {
-                    return Some(v);
-                }
-            }
-            None
-        })
-    }
-
-    pub fn get_named(&self, name: Ident<'_>) -> Option<(Value, TypeId)> {
-        if let Some((v, t)) = self.local.iter().find(|(k, v)| k.0 == name) {
-            return Some(t.clone());
-        }
-        for p in &self.parents {
-            for p in &self.parents {
-                if let Some(v) = p.get_named(name) {
-                    return Some(v);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
-        self.local.insert(k, v)
-    }
-
-    pub fn bake(self) -> Rc<Self> {
-        Rc::new(self)
-    }
+    // Constant names can be overloaded. Functions in general and anything in a generic impl use this.
+    // The value in the key is arg of function or arg of generic + arg of function.
+    pub overloads: HashMap<(Ident<'p>, Value), (Value, TypeId)>,
+    pub references: usize,
 }
 
 impl Value {
     pub fn to_tuple(self) -> Option<Vec<Value>> {
         if let Value::Tuple { values, .. } = self {
             Some(values)
+        } else {
+            None
+        }
+    }
+
+    pub fn to_func(self) -> Option<FuncId> {
+        if let Value::GetFn(f) = self {
+            Some(f)
         } else {
             None
         }
