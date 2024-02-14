@@ -179,6 +179,12 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>) -> Res<FatExpr<'p>> {
         loop {
             prefix = match self.peek() {
+                DoubleColon => {
+                    self.start_subexpr();
+                    self.eat(DoubleColon)?;
+                    let arg = self.parse_tuple()?;
+                    self.expr(Expr::GenericArgs(Box::new(prefix), Box::new(arg)))
+                }
                 LeftParen => {
                     self.start_subexpr();
                     let arg = self.parse_tuple()?;
@@ -502,9 +508,13 @@ impl<'a, 'p> Parser<'a, 'p> {
     #[track_caller]
     fn stmt(&mut self, annotations: Vec<Annotation<'p>>, stmt: Stmt<'p>) -> FatStmt<'p> {
         logln!(
-            "{}({}) STMT {}",
+            "{}({}) STMT {:?} {}",
             "=".repeat(self.spans.len() * 2),
             self.spans.len(),
+            annotations
+                .iter()
+                .map(|a| self.pool.get(a.name))
+                .collect::<Vec<_>>(),
             stmt.log(self.pool)
         );
         FatStmt {

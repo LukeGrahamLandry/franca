@@ -101,6 +101,14 @@ macro_rules! outln {
 
 pub(crate) use outln;
 
+macro_rules! push_state {
+    ($self:expr, $($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        $self.push_state(&DebugState::Msg(msg));
+    }};
+}
+pub(crate) use push_state;
+
 pub enum LogTag {
     Parsing,
     InstLoop,
@@ -131,6 +139,7 @@ pub(crate) use assert_eq;
 pub(crate) use bin_int;
 pub(crate) use err;
 
+use crate::ast::FatStmt;
 use crate::bc::*;
 use crate::{
     ast::{
@@ -571,6 +580,7 @@ impl<'p> DebugState<'p> {
             )
         };
         match self {
+            DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f) => {
                 format!("| Prep Interp | {}", show_f(*f))
             }
@@ -606,5 +616,11 @@ impl<'p> CErr<'p> {
             CErr::Msg(s) => s.clone(),
             _ => format!("{:?}", self),
         }
+    }
+}
+
+impl<'p> FatStmt<'p> {
+    pub fn log_annotations(&self, pool: &StringPool<'p>) -> String {
+        self.annotations.iter().map(|a| pool.get(a.name)).collect()
     }
 }

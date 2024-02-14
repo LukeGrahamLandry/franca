@@ -4,7 +4,9 @@
 
 #![allow(clippy::wrong_self_convention)]
 use codemap::Span;
+use std::collections::HashMap;
 use std::fmt::Write;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
@@ -14,7 +16,7 @@ use crate::ast::{Annotation, FatStmt, Field, Var, VarType};
 use crate::bc::*;
 use crate::ffi::InterpSend;
 use crate::interp::{to_flat_seq, CallFrame, Interp};
-use crate::logging::{outln, PoolLog};
+use crate::logging::{outln, push_state, PoolLog};
 use crate::{
     ast::{
         Expr, FatExpr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo,
@@ -85,6 +87,7 @@ pub enum DebugState<'p> {
     ComputeCached(FatExpr<'p>),
     ResolveFnType(FuncId, LazyType<'p>, LazyType<'p>),
     EvalConstants(FuncId),
+    Msg(String),
 }
 
 #[derive(Clone)]
@@ -220,6 +223,28 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    fn eval_local_constants(
+        &mut self,
+        constants: &mut SharedConstants<'p>,
+        f: FuncId,
+    ) -> Res<'p, ()> {
+        let state = DebugState::EvalConstants(f);
+        self.push_state(&state);
+        let func = &self.interp.program.funcs[f.0];
+
+        // TODO: pass in comptime known args
+        // TODO: do i even need to pass an index? probably just for debugging
+        let mut result = self.empty_fn(ExecTime::Comptime, FuncId(f.0 + 10000000), func.loc);
+        result.constants.parents.push(constants.clone().bake());
+        let new_constants = func.local_constants.clone();
+        for stmt in new_constants {
+            self.compile_stmt(&mut result, &stmt)?;
+        }
+        self.pop_state(state);
+        constants.parents.push(result.constants.bake());
+        Ok(())
+    }
+
     fn ensure_compiled(
         &mut self,
         constants: &SharedConstants<'p>,
@@ -234,20 +259,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.interp.program.funcs[index];
         let mut constants = constants.clone();
         if !func.local_constants.is_empty() {
-            let state = DebugState::EvalConstants(FuncId(index));
-            self.push_state(&state);
-            let func = &self.interp.program.funcs[index];
-
-            // TODO: pass in comptime known args
-            // TODO: do i even need to pass an index? probably just for debugging
-            let mut result = self.empty_fn(when, FuncId(index + 10000000), func.loc);
-            result.constants.parents.push(constants.clone().bake());
-            let new_constants = func.local_constants.clone();
-            for stmt in new_constants {
-                self.compile_stmt(&mut result, &stmt)?;
-            }
-            self.pop_state(state);
-            constants.parents.push(result.constants.bake())
+            self.eval_local_constants(&mut constants, FuncId(index))?;
         }
         while self.interp.ready.len() <= index {
             self.interp.ready.push(None);
@@ -488,6 +500,36 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let arg_ty = self.interp.program.type_of(&arg_value);
+        println!(
+            "{:?} {:?}",
+            func.synth_name(self.pool),
+            self.interp.program.log_type(arg_ty)
+        );
+
+        // Bind the arg into my own result so the ret calculation can use it.
+        // also the body constants for generics need this. much cleanup pls.
+        // TODO: factor out from normal functions?
+        let arguments = self.interp.program.funcs[f.0].arg_vars.as_ref().unwrap();
+        if arguments.len() == 1 {
+            let prev = result.constants.insert(arguments[0], (arg_value, arg_ty));
+            // TODO: remove at the end so can do again.
+            assert!(prev.is_none(), "overwrite comptime arg?");
+        } else {
+            let types = unwrap!(self.interp.program.tuple_types(arg_ty), "");
+            if arguments.len() == types.len() {
+                let arg_values = to_flat_seq(arg_value);
+                // if they match, each element has its own name.
+                for (i, var) in arguments.iter().enumerate() {
+                    let prev = result
+                        .constants
+                        .insert(*var, (arg_values[i].clone(), types[i]));
+                    assert!(prev.is_none(), "overwrite arg?");
+                }
+            } else {
+                todo!()
+            }
+        }
+
         let ret = match &func.ty {
             &LazyFnType::Finished(arg, ret) => {
                 self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
@@ -509,29 +551,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match ret {
                     LazyType::Infer => todo!(),
                     LazyType::PendingEval(ret) => {
-                        // Bind the arg into my own result so the ret calculation can use it.
-                        // TODO: factor out from normal functions?
-                        let arguments = self.interp.program.funcs[f.0].arg_vars.as_ref().unwrap();
-                        if arguments.len() == 1 {
-                            let prev = result.constants.insert(arguments[0], (arg_value, arg_ty));
-                            // TODO: remove at the end so can do again.
-                            assert!(prev.is_none(), "overwrite comptime arg?");
-                        } else {
-                            let types = self.interp.program.tuple_types(arg_ty).unwrap();
-                            if arguments.len() == types.len() {
-                                let arg_values = to_flat_seq(arg_value);
-                                // if they match, each element has its own name.
-                                for (i, var) in arguments.iter().enumerate() {
-                                    let prev = result
-                                        .constants
-                                        .insert(*var, (arg_values[i].clone(), types[i]));
-                                    assert!(prev.is_none(), "overwrite arg?");
-                                }
-                            } else {
-                                todo!()
-                            }
-                        }
-
                         let ret =
                             self.immediate_eval_expr(&result.constants, ret.clone(), TypeId::ty())?;
                         self.to_type(ret)?
@@ -540,6 +559,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         };
+
+        // TODO: this has side effects on the result which is bad.
+        self.eval_local_constants(&mut result.constants, f)?;
 
         let result = if let Some(body) = func.body {
             self.immediate_eval_expr(&result.constants, body, ret)?
@@ -648,9 +670,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
             }
-            Stmt::Noop => {}
+            Stmt::Noop => {
+                if let Some(arg) = stmt.get_tag_arg(self.pool, "expand_constants") {
+                    push_state!(self, "expand_constants {}", arg.log(self.pool));
+                    if let Expr::Call(f, arg) = arg.deref() {
+                        if let &Expr::GetNamed(name) = f.deref().deref() {
+                            let f = self.resolve_function(result, name, arg)?;
+                            self.infer_types(&result.constants, f)?;
+                            let _res = self.emit_comptime_call(result, f, arg)?;
+                            return Ok(());
+                        }
+                    }
+                    todo!()
+                }
+            }
             Stmt::DeclFunc(func) => {
-                self.interp.program.add_func(func.clone());
+                let id = self.interp.program.add_func(func.clone());
+                if func.has_tag(self.pool, "impl") {
+                    self.generic_impl(id)?;
+                }
             }
         }
         Ok(())
@@ -927,8 +965,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         (ret, ty)
                     }
                     "symbol" => {
+                        // TODO: use match
                         if let Expr::GetNamed(i) = arg.deref().deref() {
                             result.load_constant(self.interp.program, Value::Symbol(i.0))
+                        } else if let Expr::GetVar(v) = arg.deref().deref() {
+                            result.load_constant(self.interp.program, Value::Symbol(v.0 .0))
                         } else {
                             ice!("Expected identifier found {arg:?}")
                         }
@@ -1077,6 +1118,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .collect();
                 result.load_constant(self.interp.program, Value::new_box(bytes))
             }
+            Expr::GenericArgs(f, args) => {
+                let name = unwrap!(f.as_ident(), "");
+                if let Some(impls) = self.interp.program.impls.get(&name) {
+                    for f in impls.clone() {
+                        // TODO: handle this better. its just for side effects on constants. need to manage constants in general better.
+                        let _res = self.emit_comptime_call(result, f, args)?;
+                    }
+                    if let Some((v, _ty)) = result.constants.get_named(name) {
+                        result.load_constant(self.interp.program, v)
+                    } else {
+                        err!(CErr::UndeclaredIdent(name))
+                    }
+                } else {
+                    err!(CErr::UndeclaredIdent(name))
+                }
+            }
         })
     }
 
@@ -1199,6 +1256,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             | Expr::Tuple(_)
             | Expr::RefType(_)
             | Expr::EnumLiteral(_)
+            | Expr::GenericArgs(_, _)
             | Expr::Closure(_) => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -1605,6 +1663,35 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             _ => ice!("TODO: other `place=e;`"),
         }
+    }
+
+    fn generic_impl(&mut self, id: FuncId) -> Res<'p, ()> {
+        let consts = self.interp.program.funcs[id.0]
+            .local_constants
+            .iter()
+            .flat_map(|c| match c.deref() {
+                Stmt::Noop => None,
+                Stmt::Eval(_) => todo!(),
+                Stmt::DeclFunc(func) => func.name,
+                &Stmt::DeclVar { name, kind, .. } => {
+                    debug_assert_eq!(kind, VarType::Const);
+                    Some(name.0)
+                }
+                Stmt::DeclNamed { .. } => unreachable!(),
+                Stmt::Set { .. } => todo!(),
+            });
+        for name in consts {
+            insert_multi(&mut self.interp.program.impls, name, id);
+        }
+        Ok(())
+    }
+}
+
+pub fn insert_multi<K: Hash + Eq, V>(map: &mut HashMap<K, Vec<V>>, key: K, value: V) {
+    if let Some(prev) = map.get_mut(&key) {
+        prev.push(value);
+    } else {
+        map.insert(key, vec![value]);
     }
 }
 

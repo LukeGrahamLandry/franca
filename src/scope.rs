@@ -79,6 +79,12 @@ impl<'p> ResolveScope<'p> {
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
         let loc = stmt.loc;
+        for a in &mut stmt.annotations {
+            if let Some(args) = &mut a.args {
+                self.resolve_expr(args)
+            }
+        }
+
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
             Stmt::DeclNamed {
@@ -138,7 +144,7 @@ impl<'p> ResolveScope<'p> {
 
     fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
         match expr.deref_mut() {
-            Expr::Call(f, arg) => {
+            Expr::GenericArgs(f, arg) | Expr::Call(f, arg) => {
                 self.resolve_expr(f);
                 self.resolve_expr(arg);
             }

@@ -49,6 +49,7 @@ pub enum TokenType<'p> {
     DoubleSquigle,
     PlusEq,
     MinusEq,
+    DoubleColon,
     Error(LexErr),
 }
 
@@ -107,7 +108,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '(' => self.one(LeftParen),
             ')' => self.one(RightParen),
             ',' => self.one(Comma),
-            ':' => self.one(Colon),
+            ':' => self.pair(':', Colon, DoubleColon),
             '@' => self.one(At),
             '.' => self.pair('{', Dot, DotLeftSquiggle),
             '!' => self.one(Bang),

@@ -1,6 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::Value,
+    compiler::insert_multi,
     pool::{Ident, StringPool},
 };
 use codemap::Span;
@@ -125,6 +126,7 @@ pub enum Expr<'p> {
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
+    GenericArgs(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
 
     // Backend only
     GetVar(Var<'p>),
@@ -304,7 +306,8 @@ impl<'p> Func<'p> {
 
     /// Find annotation ignoring arguments
     pub fn has_tag(&self, pool: &StringPool<'p>, name: &str) -> bool {
-        self.annotations.iter().any(|a| a.name == pool.intern(name))
+        let name = pool.intern(name);
+        self.annotations.iter().any(|a| a.name == name)
     }
 }
 
@@ -341,11 +344,13 @@ pub struct Program<'p> {
     // At the call site, you know the name but not the type.
     // So you need to look at everybody that might be declaring the function you're trying to call.
     pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
-    // If you already know the arg/ret type at a callsite, you can just grab the function directly.
+    // If you already know the arg type at a callsite, you can just grab the function directly. TODO: do it by ret too so key is a FnType instead?
     pub func_lookup: HashMap<(Ident<'p>, TypeId), FuncId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     pub generics_memo: HashMap<(FuncId, Value), Value>,
+    // If you're looking for a function/type name that doesn't exist, these are places you can try instantiating them.
+    pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
 }
 
@@ -405,6 +410,7 @@ impl<'p> Program<'p> {
             func_lookup: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
+            impls: Default::default(),
             vars,
             pool,
         }
@@ -451,11 +457,7 @@ impl<'p> Program<'p> {
         let name = func.name;
         self.funcs.push(func);
         if let Some(name) = name {
-            if let Some(prev) = self.declarations.get_mut(&name) {
-                prev.push(id);
-            } else {
-                self.declarations.insert(name, vec![id]);
-            }
+            insert_multi(&mut self.declarations, name, id);
         }
         id
     }
@@ -477,7 +479,11 @@ impl<'p> Program<'p> {
             Value::I64(_) => self.intern_type(TypeInfo::I64),
             Value::Bool(_) => self.intern_type(TypeInfo::Bool),
             Value::Enum { container_type, .. } => *container_type,
-            Value::Tuple { container_type, .. } => *container_type,
+            Value::Tuple { values, .. } => {
+                // TODO: actually use container_type
+                let types = values.iter().map(|v| self.type_of(v)).collect();
+                self.intern_type(TypeInfo::Tuple(types))
+            }
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
             Value::GetFn(f) => self.func_type(*f),
@@ -635,6 +641,29 @@ impl<'p> FatStmt<'p> {
             stmt: Stmt::null(loc),
             annotations: vec![],
             loc,
+        }
+    }
+
+    pub(crate) fn has_tag(&self, pool: &StringPool<'_>, name: &str) -> bool {
+        let name = pool.intern(name);
+        self.annotations.iter().any(|a| a.name == name)
+    }
+
+    pub(crate) fn get_tag_arg(&self, pool: &StringPool<'p>, name: &str) -> Option<&FatExpr<'p>> {
+        let name = pool.intern(name);
+        self.annotations
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.args.as_ref())
+    }
+}
+
+impl<'p> Expr<'p> {
+    pub fn as_ident(&self) -> Option<Ident<'p>> {
+        match self {
+            Expr::GetVar(v) => Some(v.0),
+            &Expr::GetNamed(i) => Some(i),
+            _ => None,
         }
     }
 }

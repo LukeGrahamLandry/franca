@@ -189,11 +189,25 @@ impl<'p> SharedConstants<'p> {
         self.local.get(var).cloned().or_else(|| {
             for p in &self.parents {
                 if let Some(v) = p.get(var) {
-                    return Some(v.clone());
+                    return Some(v);
                 }
             }
             None
         })
+    }
+
+    pub fn get_named(&self, name: Ident<'_>) -> Option<(Value, TypeId)> {
+        if let Some((v, t)) = self.local.iter().find(|(k, v)| k.0 == name) {
+            return Some(t.clone());
+        }
+        for p in &self.parents {
+            for p in &self.parents {
+                if let Some(v) = p.get_named(name) {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 
     pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
