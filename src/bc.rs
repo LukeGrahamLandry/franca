@@ -89,6 +89,10 @@ pub enum Bc<'p> {
         from: StackOffset,
         to: StackRange,
     },
+    TagCheck {
+        enum_ptr: StackOffset,
+        value: i64,
+    },
 }
 
 #[derive(Clone)]

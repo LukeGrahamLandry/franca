@@ -30,6 +30,14 @@ impl<'pool> StringPool<'pool> {
         unsafe { &*(v.get(i.0).expect("Valid Ident").0) }
     }
 
+    pub fn upcast(&self, i: i64) -> Option<Ident<'pool>> {
+        if i > 0 && (i as usize) < self.values.read().unwrap().len() {
+            Some(Ident(i as usize, PhantomData::default()))
+        } else {
+            None
+        }
+    }
+
     pub fn intern(&self, s: &str) -> Ident<'pool> {
         let temp: *const str = s;
         let temp = temp as *mut str;

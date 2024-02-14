@@ -118,6 +118,7 @@ pub fn run_main<'a: 'p, 'p>(
             }],
         }];
         emit_diagnostic(&codemap, &diagnostic);
+        outln!("Internal: {}", e.internal_loc);
         outln!("{}", e.trace);
     }
 

@@ -1,11 +1,12 @@
 #![allow(clippy::wrong_self_convention)]
+use std::marker::PhantomData;
 use std::{mem::replace, panic::Location};
 
 use codemap::Span;
 
 use crate::bc::*;
 use crate::compiler::{CErr, ExecTime, Res};
-use crate::logging::{outln, PoolLog};
+use crate::logging::{outln, unwrap, PoolLog};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
     pool::{Ident, StringPool},
@@ -284,6 +285,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                 }
                 Bc::DebugLine(_) | Bc::DebugMarker(_, _) => self.bump_ip(),
+                &Bc::TagCheck { enum_ptr, value } => {
+                    let arg = self.clone_slot(enum_ptr);
+                    let tag = self.slice_ptr(arg, 0, 1)?;
+                    let tag = self.deref_ptr(tag)?;
+                    println!("Tag: {tag:?}");
+                    assert_eq!(tag, Value::I64(value));
+                    self.bump_ip();
+                }
             }
         }
         Ok(())
@@ -616,7 +625,15 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // println!(" => {:?}", self.program.log_type(ty));
                 Value::Type(ty)
             }
-
+            "tag_value" => {
+                let (enum_ty, name) = self.to_pair(arg)?;
+                let (enum_ty, name) = (self.to_type(enum_ty)?, self.to_int(name)?);
+                let name = unwrap!(self.pool.upcast(name), "bad symbol");
+                let cases = unwrap!(self.program.get_enum(enum_ty), "not enum");
+                let index = cases.iter().position(|f| f.0 == name);
+                let index = unwrap!(index, "bad case name");
+                Value::I64(index as i64)
+            }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
         Ok(value)
@@ -859,6 +876,9 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn to_int(&self, value: Value) -> Res<'p, i64> {
         if let Value::I64(r) = value {
             Ok(r)
+        } else if let Value::Symbol(r) = value {
+            // TODO: have a special unwrap method for this
+            Ok(r as i64)
         } else {
             err!(CErr::TypeError("i64", value))
         }
@@ -918,7 +938,7 @@ fn expand_value(value: Value) -> Vec<Value> {
     }
 }
 
-fn to_flat_seq(value: Value) -> Vec<Value> {
+pub fn to_flat_seq(value: Value) -> Vec<Value> {
     match value {
         Value::Tuple { values, .. } => values.into_iter().flat_map(to_flat_seq).collect(),
         e => vec![e],

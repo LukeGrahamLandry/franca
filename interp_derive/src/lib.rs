@@ -1,7 +1,8 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::{
-    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, GenericParam, Generics,
+    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed,
+    FieldsUnnamed, GenericParam, Generics,
 };
 
 #[proc_macro_derive(InterpSend)]
@@ -54,7 +55,20 @@ fn get_type(name: &Ident, data: &Data) -> TokenStream {
                     program.struct_type(#name_str, &fields)
                 }
             }
-            syn::Fields::Unnamed(_) => todo!(),
+            syn::Fields::Unnamed(ref fields) => {
+                let recurse = fields.unnamed.iter().map(|f| {
+                    let ty = &f.ty;
+                    quote_spanned! {f.span()=>
+                        #ty::get_type(program)
+                    }
+                });
+                let name_str = name.to_string();
+                quote! {
+                    let mut fields = vec![];
+                    #(fields.push(#recurse);)*
+                    program.named_tuple(#name_str, fields)
+                }
+            }
             syn::Fields::Unit => todo!(),
         },
         syn::Data::Enum(_) => todo!(),
@@ -65,8 +79,10 @@ fn get_type(name: &Ident, data: &Data) -> TokenStream {
 fn deserialize(name: &Ident, data: &Data) -> TokenStream {
     match data {
         syn::Data::Struct(data) => match data.fields {
-            syn::Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
+            syn::Fields::Named(FieldsNamed {
+                named: ref fields, ..
+            }) => {
+                let recurse = fields.iter().map(|f| {
                     let ty = &f.ty;
                     let name = &f.ident;
                     quote_spanned! {f.span()=>
@@ -80,7 +96,24 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                     })
                 }
             }
-            syn::Fields::Unnamed(_) => todo!(),
+            syn::Fields::Unnamed(FieldsUnnamed {
+                unnamed: ref fields,
+                ..
+            }) => {
+                let recurse = fields.iter().map(|f| {
+                    let ty = &f.ty;
+                    quote_spanned! {f.span()=>
+                        #ty::deserialize(fields.next()?)?,
+                    }
+                });
+                quote! {
+                    let mut fields = value.to_tuple()?.into_iter();
+                    Some(#name(
+                        #(#recurse)*
+                    ))
+                }
+            }
+
             syn::Fields::Unit => todo!(),
         },
         syn::Data::Enum(_) => todo!(),
@@ -105,7 +138,20 @@ fn serialize(_name: &Ident, data: &Data) -> TokenStream {
                     Value::Tuple { values, container_type: TypeId::any() }  // TODO
                 }
             }
-            syn::Fields::Unnamed(_) => todo!(),
+            syn::Fields::Unnamed(ref fields) => {
+                let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                    let ty = &f.ty;
+                    let i = syn::Index::from(i);
+                    quote_spanned! {f.span()=>
+                        #ty::serialize(self.#i)
+                    }
+                });
+                quote! {
+                    let mut values = vec![];
+                    #(values.push(#recurse);)*
+                    Value::Tuple { values, container_type: TypeId::any() }  // TODO
+                }
+            }
             syn::Fields::Unit => todo!(),
         },
         syn::Data::Enum(_) => todo!(),

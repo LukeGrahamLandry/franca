@@ -39,6 +39,11 @@ impl TypeId {
     pub fn ty() -> TypeId {
         TypeId(2)
     }
+
+    // Be careful that this is in the pool correctly!
+    pub fn i64() -> TypeId {
+        TypeId(3)
+    }
 }
 
 pub struct FuncFlags {
@@ -74,6 +79,10 @@ pub enum TypeInfo<'p> {
         fields: Vec<Field<'p>>,
         size: usize,
         as_tuple: TypeId,
+    },
+    Enum {
+        cases: Vec<(Ident<'p>, TypeId)>,
+        size: usize,
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(Ident<'p>, TypeId),
@@ -179,20 +188,8 @@ impl<'p> Pattern<'p> {
                 }
             }
             _ => {
-                let any_type_expr = FatExpr {
-                    expr: Expr::Value(Value::Type(TypeId::any())),
-                    loc: self.loc,
-                    id: 3456789,
-                    ty: None,
-                    known: Known::Foldable,
-                };
                 let e = FatExpr {
-                    expr: Expr::Tuple(
-                        self.types
-                            .into_iter()
-                            .map(|ty| ty.unwrap_or_else(|| any_type_expr.clone()))
-                            .collect(),
-                    ),
+                    expr: Expr::Tuple(self.types.into_iter().map(|ty| ty.unwrap()).collect()),
                     loc: self.loc,
                     id: 3456789,
                     ty: None,
@@ -408,6 +405,14 @@ impl<'p> Program<'p> {
             pool,
         }
     }
+
+    pub fn get_enum(&self, enum_ty: TypeId) -> Option<&[(Ident<'p>, TypeId)]> {
+        if let TypeInfo::Enum { cases, .. } = &self.types[enum_ty.0] {
+            Some(cases)
+        } else {
+            None
+        }
+    }
 }
 
 impl<'p> Program<'p> {
@@ -418,6 +423,7 @@ impl<'p> Program<'p> {
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
             &TypeInfo::Struct { size, .. } => size,
+            &TypeInfo::Enum { size, .. } => size,
             _ => 1,
         }
     }
@@ -478,7 +484,7 @@ impl<'p> Program<'p> {
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Slice(_) => todo!(),
             Value::Map(_, _) => todo!(),
-            Value::Symbol(_) => todo!(),
+            Value::Symbol(_) => TypeId::i64(),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
             Value::Heap { .. } => TypeId::any(),
         }
@@ -553,6 +559,23 @@ impl<'p> Program<'p> {
             as_tuple,
         };
         self.intern_type(ty)
+    }
+
+    pub fn to_enum(&mut self, ty: TypeInfo<'p>) -> TypeId {
+        if let TypeInfo::Struct { fields, .. } = ty {
+            let size = fields.iter().map(|f| self.slot_count(f.ty)).max().unwrap();
+            let ty = TypeInfo::Enum {
+                cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
+                size: size + 1, // for tag.
+            };
+            self.intern_type(ty)
+        } else {
+            panic!()
+        }
+    }
+
+    pub fn named_tuple(&mut self, _todo_name: &str, types: Vec<TypeId>) -> TypeId {
+        self.intern_type(TypeInfo::Tuple(types))
     }
 }
 

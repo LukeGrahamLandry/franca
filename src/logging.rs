@@ -164,6 +164,14 @@ impl<'p> Program<'p> {
                     .collect();
                 format!("{{ {}}}!struct", v.join(", "))
             }
+            TypeInfo::Enum { cases, .. } => {
+                // TODO: factor out iter().join(str), how does that not already exist
+                let v: Vec<_> = cases
+                    .iter()
+                    .map(|(name, ty)| format!("{}: {}", self.pool.get(*name), self.log_type(*ty)))
+                    .collect();
+                format!("{{ {}}}!enum", v.join(", "))
+            }
             TypeInfo::Unique(n, inner) => format!("{:?} is {}", n, self.log_type(*inner)),
             TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
             TypeInfo::Tuple(v) => {
@@ -453,6 +461,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
             Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
             Bc::DebugLine(loc) => write!(f, "debug({:?});", loc),
+            Bc::TagCheck { enum_ptr, value } => write!(f, "@assert(Tag({enum_ptr:?}) == {value});"),
         };
         f
     }
@@ -549,6 +558,7 @@ impl<'p> Debug for CompileError<'p> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "COMPILATION ERROR:")?;
         writeln!(f, "{:?}", self.reason)?;
+        writeln!(f, "Internal: {}", self.internal_loc)?;
         write!(f, "{}", self.trace)
     }
 }
