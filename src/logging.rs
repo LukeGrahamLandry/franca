@@ -155,7 +155,8 @@ impl<'p> Program<'p> {
             TypeInfo::I64 => "i64".to_owned(),
             TypeInfo::Bool => "bool".to_owned(),
             // TODO: be careful of recursion
-            TypeInfo::Ptr(e) => format!("Ptr({})", self.log_type(*e)),
+            TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
+            TypeInfo::Slice(e) => format!("([]{})", self.log_type(*e)),
             TypeInfo::Struct { fields, .. } => {
                 // TODO: factor out iter().join(str), how does that not already exist
                 let v: Vec<_> = fields
@@ -415,9 +416,6 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             } => write!(f, "{ret:?} = call({func_slot:?}, {arg:?});"),
             Bc::CallDirect { f: func, ret, arg } => {
                 write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)
-            }
-            Bc::CallDirectMaybeCached { f: func, ret, arg } => {
-                write!(f, "{ret:?} = cached_call(f({:?}), {arg:?});", func.0)
             }
             Bc::CallBuiltin { name, ret, arg } => {
                 write!(f, "{ret:?} = builtin(S{}, {arg:?});", name.0)

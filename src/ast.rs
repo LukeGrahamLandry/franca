@@ -73,7 +73,8 @@ pub enum TypeInfo<'p> {
     Bool,
     Fn(FnType),
     Tuple(Vec<TypeId>),
-    Ptr(TypeId),
+    Ptr(TypeId),   // One element
+    Slice(TypeId), // A pointer and a length
     Struct {
         // You probably always have few enough that this is faster than a hash map.
         fields: Vec<Field<'p>>,
@@ -509,9 +510,14 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }
 
+    pub fn slice_type(&mut self, value_ty: TypeId) -> TypeId {
+        self.intern_type(TypeInfo::Slice(value_ty))
+    }
+
     pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
-        if let TypeInfo::Ptr(ty) = self.types[ptr_ty.0] {
-            Some(ty)
+        let ptr_ty = &self.types[ptr_ty.0];
+        if let TypeInfo::Slice(ty) | TypeInfo::Ptr(ty) = ptr_ty {
+            Some(*ty)
         } else {
             None
         }

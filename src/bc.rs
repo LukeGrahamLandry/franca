@@ -15,12 +15,6 @@ pub enum Bc<'p> {
         ret: StackRange,
         arg: StackRange,
     },
-    CallDirectMaybeCached {
-        // this will go away because comptime is fancier now
-        f: FuncId,
-        ret: StackRange,
-        arg: StackRange,
-    },
     CallDirect {
         f: FuncId,
         ret: StackRange,

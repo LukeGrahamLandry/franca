@@ -686,32 +686,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             "{f:?} is both @inline and @noinline"
                         );
                         let will_inline = force_inline;
-                        let returns_type =
-                            self.interp.program.is_type(ret_ty_expected, TypeInfo::Type); // TODO: even if only one val is a type
-
-                        let cache_arg = if returns_type {
-                            assert_eq!(
-                                result.when,
-                                ExecTime::Comptime,
-                                "Cannot call function returning type at runtime."
-                            );
-                            let cache_arg =
-                                result.reserve_slots(self.interp.program, TypeId::any());
-                            result.push(Bc::CloneCreateTuple {
-                                values: arg,
-                                target: cache_arg.single(),
-                            });
-                            Some(cache_arg)
-                        } else {
-                            None
-                        };
                         let func = &self.interp.program.funcs[f.0];
-                        let ret = if returns_type {
-                            self.ensure_compiled(&result.constants, f, result.when)?;
-                            let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
-                            result.push(Bc::CallDirectMaybeCached { f, ret, arg });
-                            ret
-                        } else if !func.capture_vars.is_empty() {
+                        let ret = if !func.capture_vars.is_empty() {
                             // TODO: check that you're calling from the same place as the definition.
                             assert!(!deny_inline, "capturing calls are always inlined.");
                             self.emit_capturing_call(result, arg, f)?
@@ -726,36 +702,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         assert_eq!(self.return_stack_slots(f), ret.count);
                         assert_eq!(self.interp.program.slot_count(ret_ty_expected), ret.count);
-                        if let Some(cache_arg) = cache_arg {
-                            let ty = self.interp.program.intern_type(TypeInfo::Tuple(vec![
-                                TypeId::any(),
-                                TypeId::any(),
-                                TypeId::any(),
-                            ]));
-                            let f_arg_ret = result.reserve_slots(self.interp.program, ty);
-                            debug_assert_eq!(f_arg_ret.count, 3);
-                            result.push(Bc::LoadConstant {
-                                slot: f_arg_ret.offset(0),
-                                value: Value::GetFn(f),
-                            });
-                            result.push(Bc::Move {
-                                from: cache_arg.single(),
-                                to: f_arg_ret.offset(1),
-                            });
-                            result.push(Bc::CloneCreateTuple {
-                                values: ret,
-                                target: f_arg_ret.offset(2),
-                            });
-                            let nothing =
-                                result.reserve_slots_raw(self.interp.program, 1, TypeId::unit());
-                            // TODO: put next to for call.
-                            result.push(Bc::CallBuiltin {
-                                name: self.pool.intern("comptime_cache_insert"),
-                                ret: nothing,
-                                arg: f_arg_ret,
-                            });
-                            result.push(Bc::Drop(nothing));
-                        }
                         return Ok((ret, ret_ty_expected));
                     } else if "if" == self.pool.get(*i) {
                         // TODO: treat this as a normal builtin but need to support general closures?
@@ -1734,7 +1680,7 @@ impl<'p> Bc<'p> {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }
-            Bc::CallDirectMaybeCached { f: _, ret, arg } | Bc::CallDirect { f: _, ret, arg } => {
+            Bc::CallDirect { f: _, ret, arg } => {
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;
             }

@@ -116,22 +116,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
-                &Bc::CallDirectMaybeCached { f, ret, arg } => {
-                    // preincrement our ip because ret doesn't do it.
-                    // this would be different if i was trying to do tail calls?
-                    self.bump_ip();
-                    let arg = self.take_slots(arg);
-                    let key = (f, arg);
-                    if let Some(prev) = self.program.generics_memo.get(&key).cloned() {
-                        let ret = self.range_to_index(ret);
-                        self.expand_maybe_tuple(prev.clone(), ret)?;
-                    } else {
-                        let when = self.call_stack.last().unwrap().when;
-                        self.push_callframe(f, ret, key.1, when)?;
-                        logln!("{}", self.log_callstack());
-                        // don't bump ip here, we're in a new call frame.
-                    }
-                }
                 Bc::LoadConstant { slot, value } => {
                     let slot = *slot;
                     let value = value.clone();
@@ -445,14 +429,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                 _ => panic!("Wanted ptr found {:?}", arg),
             },
             "Ptr" => {
-                // TODO: pointers shouldn't have a length
                 let inner_ty = self.to_type(arg)?;
-                let ty = self.program.intern_type(TypeInfo::Ptr(inner_ty));
-                Value::Type(ty)
+                Value::Type(self.program.ptr_type(inner_ty))
             }
             "Slice" => {
-                let ty = self.to_type(arg)?;
-                Value::Type(self.program.intern_type(TypeInfo::Ptr(ty)))
+                let inner_ty = self.to_type(arg)?;
+                Value::Type(self.program.slice_type(inner_ty))
             }
             "is_oob_stack" => {
                 let addr = self.to_stack_addr(arg)?;
