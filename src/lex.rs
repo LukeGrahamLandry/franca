@@ -227,7 +227,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     fn eat_comment(&mut self) {
-        debug_assert_eq!(self.pop(), '/');
+        let c = self.pop(); // NOT IN THE debug_assert_eq DUMBASS (me)
+        debug_assert_eq!(c, '/');
         match self.pop() {
             '/' => loop {
                 match self.pop() {

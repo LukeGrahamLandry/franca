@@ -279,7 +279,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.clone_slot(enum_ptr);
                     let tag = self.slice_ptr(arg, 0, 1)?;
                     let tag = self.deref_ptr(tag)?;
-                    println!("Tag: {tag:?}");
                     assert_eq!(tag, Value::I64(value));
                     self.bump_ip();
                 }
@@ -381,7 +380,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
+    pub fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "assert_eq" => {
