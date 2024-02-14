@@ -7,39 +7,28 @@
                 background-color: #1a202b;
                 color: white;
             }
+            button,
+            select {
+                width: 100%;
+            }
+
+            #sidebar {
+                position: absolute;
+                top: 0;
+                left: 0;
+                bottom: 0;
+                width: 10%;
+            }
 
             #editor {
                 position: absolute;
                 top: 0;
-                left: 0;
-                height: 70%;
-                width: 60%;
-            }
-            #bc {
-                position: absolute;
-                top: 0;
                 right: 0;
-                height: 70%;
-                width: 40%;
-                overflow: scroll;
-            }
-            #output {
-                position: absolute;
-                right: 0;
-                left: 0;
                 bottom: 0;
-                height: 30%;
-                padding: 0;
-                margin: 0;
-            }
-            #log {
-                padding: 0;
-                margin: 0;
                 height: 100%;
-                width: 100%;
-                outline: none;
-                overflow: auto;
+                width: 90%;
             }
+
             #menu {
                 font-size: 2rem;
                 right: 20px;
@@ -56,7 +45,8 @@
             #bc::-webkit-scrollbar-track,
             .ace_scrollbar::-webkit-scrollbar-track {
                 box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.3);
-                background-color: #272822; /* Matches ace monokai */
+                background-color: #272822;
+                /* Matches ace monokai */
                 border-radius: 10px;
             }
 
@@ -72,22 +62,34 @@
             integrity="sha256-q5o58HQ9mUZnWt31g9RRHsCGhG8ViDoyxa0kn4b4qLg="
             crossorigin="anonymous"
         ></script>
+        <script
+            type="module"
+            src="https://cdn.jsdelivr.net/gh/vanillawc/wc-monaco-editor@1/index.js"
+        ></script>
     </head>
 
     <body>
-        <div id="menu">
-            <button id="run">Run</button>
+        <div id="editor"></div>
+        <div id="sidebar">
             <select id="examples">
-                <option selected disabled>Choose an Example</option>
+                <option selected disabled>Examples</option>
             </select>
+
+            <br />
+            <br />
+            <br />
+            <button id="code" disabled>Code</button> <br />
+            <button id="output">Output</button> <br />
+            <button id="bytecode">Bytecode</button> <br />
+
+            <br />
+            <br />
+            <br />
+            <button id="run">Run</button>
         </div>
 
-        <div id="editor">fn main() Unit = { print(1234); }</div>
-        <div id="bc"></div>
-        <div id="output">
-            <pre id="log"></pre>
-        </div>
         <script type="module">
+            // TODO: keep undo history between tabs.
             const examples = document.getElementById("examples");
             for (const e of ["basic", "structs", "generics"]) {
                 let file = "tests/" + e + ".txt";
@@ -95,20 +97,48 @@
             }
             const log = document.getElementById("log");
             const save_key = "last_run_src";
-            window.editor = ace.edit("editor");
-            editor.setTheme("ace/theme/monokai");
-            editor.setShowPrintMargin(false);
-            editor.resize();
+
+            const panes = ["code", "output", "bytecode"];
+            const values = {};
+            let current = "code";
+            for (const p of panes) {
+                values[p] = { text: "", btn: document.getElementById(p) };
+                values[p].btn.addEventListener("click", (e) =>
+                    select_pane(e.target.id),
+                );
+            }
+            function select_pane(id) {
+                values[current].text = editor.getValue();
+                values[current].btn.disabled = false;
+
+                current = id;
+                values[current].btn.disabled = true;
+                editor.setValue(values[current].text);
+            }
+
+            values["code"].text = "fn main() Unit = { print(1234); }";
             const saved = localStorage.getItem(save_key);
             if (saved != null) {
-                editor.setValue(saved, -1);
+                values["code"].text = saved;
             }
+
+            const editor = monaco.editor.create(
+                document.getElementById("editor"),
+                {
+                    value: values["code"].text,
+                    language: "rust",
+                    automaticLayout: true,
+                    theme: "vs-dark",
+                },
+            );
+            select_pane("code");
+
             const callbacks = {
                 env: {
                     console_log: (ptr, len) => {
                         let s = get_wasm_string(ptr, len);
                         console.log(s);
-                        log.innerText += s + "\n";
+                        values["output"].text += s + "\n";
                     },
                     timestamp: () => performance.now(),
                     show_bc: show_bc,
@@ -140,15 +170,23 @@
 
             examples.addEventListener("change", async (e) => {
                 let src = await fetch(examples.value);
-                editor.setValue(await src.text(), -1);
-                run();
+                values["code"].text = await src.text();
+                editor.setValue(values["code"].text); // Not redundant!
+                values["output"].text = "";
+                values["bytecode"].text = "";
+                select_pane("code");
             });
 
             function run() {
-                let str = put_wasm_string(editor.getValue());
-                localStorage.setItem(save_key, editor.getValue());
-                log.innerText = "";
+                if (current == "code") {
+                    values["code"].text = editor.getValue();
+                }
+                let str = put_wasm_string(values["code"].text);
+                localStorage.setItem(save_key, values["code"].text);
+                values["output"].text = "";
+                values["bytecode"].text = "";
                 Rust.run(str.ptr, str.len);
+                select_pane("output");
             }
 
             function show_bc(ptr, len) {
@@ -161,20 +199,20 @@
                     let parts = one_func.split("===");
                     if (parts.length == 10 && parts[2].includes("0.")) {
                         functions.push({
-                            name: name,
-                            info: parts[1],
-                            code: parts[2],
+                            name: name.trim(),
+                            info: parts[1].trim(),
+                            code: parts[2].trim(),
                         });
                     }
                 }
+                functions = functions.sort(
+                    (a, b) => b.code.length - a.code.length,
+                );
                 let out = "";
                 for (const f of functions) {
-                    out += `<details>
-                    <summary>${f.name} </summary>
-                    <p> <pre>${f.info}${f.code}</pre></p>
-                  </details>`;
+                    out += `${f.name} \n${f.info}\n${f.code}\n#################################################\n`;
                 }
-                document.getElementById("bc").innerHTML = out;
+                values["bytecode"].text = out;
             }
 
             const de = new TextDecoder();
