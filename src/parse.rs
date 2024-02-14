@@ -166,7 +166,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.pop();
                 Ok(self.expr(Expr::GetNamed(i)))
             }
-            Quoted(_) => Err(self.todo("quoted string")),
+            Quoted(i) => {
+                self.start_subexpr();
+                self.pop();
+                // TODO: maybe its wrong to both putting everything in the pool
+                Ok(self.expr(Expr::String(i)))
+            }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or Num or Ident...")),
         }
     }
@@ -191,9 +196,18 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let name = self.ident()?;
                     self.expr(Expr::FieldAccess(Box::new(prefix), name))
                 }
+                DoubleSquare => {
+                    self.start_subexpr();
+                    self.eat(DoubleSquare)?;
+                    self.expr(Expr::SuffixMacro(
+                        self.pool.intern("deref"),
+                        Box::new(prefix),
+                    ))
+                }
                 LeftSquare => {
                     self.eat(LeftSquare)?;
-                    // a[b] or a[b] = c
+                    // TODO: a[b] or a[b] = c
+                    //       new plan is treat those the same and have the `=` statement cope with all place expr stuff.
                     return Err(self.todo("index expr"));
                 }
                 _ => return Ok(prefix),
@@ -290,20 +304,17 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
             _ => {
                 let e = self.parse_expr()?;
-                if self.maybe(Equals) {
-                    if let Expr::GetNamed(name) = e.deref() {
-                        let value = self.parse_expr()?;
-                        Stmt::SetNamed(*name, value)
-                    } else {
-                        return Err(self.todo("left of assign not plain ident"));
-                    }
+                let s = if self.maybe(Equals) {
+                    let value = self.parse_expr()?;
+                    Stmt::Set { place: e, value }
                 } else {
-                    if !matches!(self.peek(), Semicolon | RightSquiggle) {
-                        return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
-                    }
                     // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
                     Stmt::Eval(e)
+                };
+                if !matches!(self.peek(), Semicolon | RightSquiggle) {
+                    return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
                 }
+                s
             }
         };
         Ok(self.stmt(annotations, stmt))

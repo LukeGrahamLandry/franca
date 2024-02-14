@@ -1,6 +1,6 @@
 use crate::{
     ast::{Program, TypeId, TypeInfo},
-    bc::{InterpBox, Value},
+    bc::Value,
 };
 
 // TODO
@@ -64,17 +64,8 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     }
 
     fn serialize(self) -> Value {
-        let count = self.len();
-        let values: Vec<_> = self.into_iter().map(|e| e.serialize()).collect();
-        let value = Box::new(InterpBox {
-            references: 1,
-            values,
-        });
-        Value::Heap {
-            first: 0,
-            count,
-            value: Box::into_raw(value),
-        }
+        let values = self.into_iter().map(|e| e.serialize()).collect();
+        Value::new_box(values)
     }
 
     fn deserialize(value: Value) -> Option<Self> {

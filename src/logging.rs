@@ -272,7 +272,6 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
                     .unwrap_or_else(|| String::from("uninit()"))
             ),
             Stmt::Eval(e) => e.log(pool),
-            Stmt::SetNamed(i, e) => format!("{} = {}", pool.get(*i), e.log(pool)),
             Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
             Stmt::Noop => "".to_owned(),
             _ => format!("{:?}", self),
@@ -446,7 +445,8 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
-            Bc::DerefPtr { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
+            Bc::Load { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
+            Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
             Bc::Drop(i) => write!(f, "drop({:?});", i),
             Bc::SlicePtr {
                 base,
@@ -495,10 +495,9 @@ impl Stmt<'_> {
             Stmt::Noop => None,
             Stmt::Eval(e) => Some(e.loc),
             Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
-            Stmt::SetVar(_, e) => Some(e.loc),
             Stmt::DeclVar { ty, value, .. } => value.as_ref().or(ty.as_ref()).map(|e| e.loc),
             Stmt::DeclNamed { .. } => todo!(),
-            Stmt::SetNamed(_, _) => todo!(),
+            Stmt::Set { place, .. } => Some(place.loc),
         }
     }
 }

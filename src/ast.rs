@@ -130,6 +130,7 @@ pub enum Expr<'p> {
 
     // Frontend only
     GetNamed(Ident<'p>),
+    String(Ident<'p>),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -249,7 +250,6 @@ pub enum Stmt<'p> {
     DeclFunc(Func<'p>),
 
     // Backend Only
-    SetVar(Var<'p>, FatExpr<'p>),
     DeclVar {
         name: Var<'p>,
         ty: Option<FatExpr<'p>>,
@@ -265,7 +265,10 @@ pub enum Stmt<'p> {
         value: Option<FatExpr<'p>>,
         kind: VarType,
     },
-    SetNamed(Ident<'p>, FatExpr<'p>),
+    Set {
+        place: FatExpr<'p>,
+        value: FatExpr<'p>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -473,17 +476,12 @@ impl<'p> Program<'p> {
             Value::I64(_) => self.intern_type(TypeInfo::I64),
             Value::Bool(_) => self.intern_type(TypeInfo::Bool),
             Value::Enum { container_type, .. } => *container_type,
-            Value::Tuple { container_type, .. } | Value::Array { container_type, .. } => {
-                *container_type
-            }
-            Value::Ptr { container_type, .. } => *container_type,
+            Value::Tuple { container_type, .. } => *container_type,
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
             Value::GetFn(f) => self.func_type(*f),
             Value::Unit => self.intern_type(TypeInfo::Unit),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
-            Value::Slice(_) => todo!(),
-            Value::Map(_, _) => todo!(),
             Value::Symbol(_) => TypeId::i64(),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
             Value::Heap { .. } => TypeId::any(),

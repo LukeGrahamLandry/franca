@@ -235,7 +235,30 @@ impl<'a, 'p> Lexer<'a, 'p> {
                     _ => {}
                 }
             },
-            '*' => todo!("multiline comment"),
+            '*' => {
+                let mut depth = 1;
+                while depth > 0 {
+                    match self.pop() {
+                        '\0' => {
+                            self.peeked.push_back(self.err(LexErr::Unexpected('\0')));
+                            break;
+                        }
+                        '*' => {
+                            if self.peek_c() == '/' {
+                                self.pop();
+                                depth -= 1;
+                            }
+                        }
+                        '/' => {
+                            if self.peek_c() == '*' {
+                                self.pop();
+                                depth += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             c => self.peeked.push_back(self.err(LexErr::Unexpected(c))),
         }
     }

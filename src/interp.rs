@@ -277,11 +277,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                     *self.get_slot_mut(ret) = res;
                     self.bump_ip();
                 }
-                &Bc::DerefPtr { from, to } => {
+                &Bc::Load { from, to } => {
                     let arg = self.take_slot(from);
                     let value = self.deref_ptr(arg)?;
                     let ret = self.range_to_index(to);
                     self.expand_maybe_tuple(value, ret)?;
+                    self.bump_ip();
+                }
+                &Bc::Store { from, to } => {
+                    let value = self.take_slots(from);
+                    let addr = self.take_slot(to);
+                    self.set_ptr(addr, value)?;
                     self.bump_ip();
                 }
                 Bc::DebugLine(_) | Bc::DebugMarker(_, _) => self.bump_ip(),
@@ -408,46 +414,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "get" => self.deref_ptr(arg)?,
             "set" => {
                 let (addr, value) = self.to_pair(arg)?;
-                match addr {
-                    Value::InterpAbsStackAddr(addr) => {
-                        // TODO: call drop if not poison
-                        // Note: the slots you're setting to are allowed to contain poison
-                        if addr.count == 1 {
-                            self.value_stack[addr.first.0] = value;
-                        } else {
-                            let values = self.to_seq(value)?;
-                            assert_eq!(values.len(), addr.count);
-                            for (i, entry) in values.into_iter().enumerate() {
-                                self.value_stack[addr.first.0 + i] = entry;
-                            }
-                        }
-                        Value::Unit
-                    }
-                    Value::Heap {
-                        value: ptr_value,
-                        first,
-                        count,
-                    } => {
-                        // Slicing operations are bounds checked.
-                        let ptr = unsafe { &mut *ptr_value };
-                        assert!(
-                            ptr.references > 0
-                                && first < ptr.values.len()
-                                && count < ptr.values.len()
-                        );
-                        if count == 1 {
-                            ptr.values[first] = value;
-                        } else {
-                            let values = self.to_seq(value)?;
-                            assert_eq!(values.len(), count);
-                            for (i, entry) in values.into_iter().enumerate() {
-                                ptr.values[first + i] = entry;
-                            }
-                        }
-                        Value::Unit
-                    }
-                    _ => panic!("Wanted ptr found {:?}", addr),
-                }
+                self.set_ptr(addr, value)?
             }
             "is_uninit" => {
                 let range = match arg {
@@ -753,7 +720,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         body.insts.get(frame.current_ip).unwrap()
     }
 
-    // TOOD: @track_caller
+    // TOOD: @track_caller so you don't just get an error report on the forward declare of assert_eq all the time
     fn update_debug(&mut self) {
         let frame = self.call_stack.last().unwrap();
         let body = self
@@ -809,8 +776,8 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_seq(&self, value: Value) -> Res<'p, Vec<Value>> {
         match value {
-            Value::Tuple { values, .. } | Value::Array { values, .. } => Ok(values),
-            Value::Slice(_) => todo!(),
+            Value::Tuple { values, .. } => Ok(values),
+
             _ => err!(CErr::TypeError("AnyTuple | AnyArray", value)),
         }
     }
@@ -915,6 +882,45 @@ impl<'a, 'p> Interp<'a, 'p> {
             Value::I64(i) => Ok(i),
             v => err!("load_int {:?}", v),
         }
+    }
+
+    fn set_ptr(&mut self, addr: Value, value: Value) -> Res<'p, Value> {
+        Ok(match addr {
+            Value::InterpAbsStackAddr(addr) => {
+                // TODO: call drop if not poison
+                // Note: the slots you're setting to are allowed to contain poison
+                if addr.count == 1 {
+                    self.value_stack[addr.first.0] = value;
+                } else {
+                    let values = self.to_seq(value)?;
+                    assert_eq!(values.len(), addr.count);
+                    for (i, entry) in values.into_iter().enumerate() {
+                        self.value_stack[addr.first.0 + i] = entry;
+                    }
+                }
+                Value::Unit
+            }
+            Value::Heap {
+                value: ptr_value,
+                first,
+                count,
+            } => {
+                // Slicing operations are bounds checked.
+                let ptr = unsafe { &mut *ptr_value };
+                assert!(ptr.references > 0 && first < ptr.values.len() && count < ptr.values.len());
+                if count == 1 {
+                    ptr.values[first] = value;
+                } else {
+                    let values = self.to_seq(value)?;
+                    assert_eq!(values.len(), count);
+                    for (i, entry) in values.into_iter().enumerate() {
+                        ptr.values[first + i] = entry;
+                    }
+                }
+                Value::Unit
+            }
+            _ => panic!("Wanted ptr found {:?}", addr),
+        })
     }
 }
 

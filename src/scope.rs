@@ -116,11 +116,9 @@ impl<'p> ResolveScope<'p> {
                     stmt.stmt = decl;
                 }
             }
-            Stmt::SetNamed(name, e) => {
-                self.resolve_expr(e);
-                let var = self.find_var(name).expect("undeclared var");
-                let value = mem::replace(e, FatExpr::null(loc));
-                stmt.stmt = Stmt::SetVar(var, value);
+            Stmt::Set { place, value } => {
+                self.resolve_expr(place);
+                self.resolve_expr(value);
             }
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
@@ -132,7 +130,7 @@ impl<'p> ResolveScope<'p> {
                     .unwrap()
                     .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
             }
-            Stmt::DeclVar { .. } | Stmt::SetVar(_, _) => {
+            Stmt::DeclVar { .. } => {
                 unreachable!("added by this pass {stmt:?}")
             }
         }
@@ -180,6 +178,7 @@ impl<'p> ResolveScope<'p> {
                     self.resolve_expr(e);
                 }
             }
+            Expr::String(_) => {}
         }
     }
 

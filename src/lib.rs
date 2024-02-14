@@ -4,7 +4,6 @@ use bc::Value;
 use codemap::CodeMap;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use pool::StringPool;
-use std::fmt::Write;
 
 pub mod ast;
 pub mod bc;
@@ -153,6 +152,8 @@ pub fn run_main<'a: 'p, 'p>(
                             .split('\n')
                             .filter(|s| !s.split("//").next().unwrap().is_empty())
                             .count();
+
+                        outln!("===============");
                         outln!(
                             "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
                             lines as f64 / seconds
@@ -247,6 +248,7 @@ pub mod web {
     use std::alloc::{alloc, Layout};
     use std::ffi::{c_char, CStr, CString};
     use std::ptr::slice_from_raw_parts;
+
     static mut POOL: Option<StringPool> = None;
 
     /// len does NOT include null terminator.

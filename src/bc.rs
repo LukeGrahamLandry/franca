@@ -9,12 +9,14 @@ use std::{collections::HashMap, rc::Rc};
 
 #[derive(Clone)]
 pub enum Bc<'p> {
+    // Call through a runtime known function pointer.
     CallDynamic {
         f: StackOffset,
         ret: StackRange,
         arg: StackRange,
     },
     CallDirectMaybeCached {
+        // this will go away because comptime is fancier now
         f: FuncId,
         ret: StackRange,
         arg: StackRange,
@@ -85,13 +87,17 @@ pub enum Bc<'p> {
         count: usize,
         ret: StackOffset,
     },
-    DerefPtr {
+    Load {
         from: StackOffset,
         to: StackRange,
     },
     TagCheck {
         enum_ptr: StackOffset,
         value: i64,
+    },
+    Store {
+        to: StackOffset,
+        from: StackRange,
     },
 }
 
@@ -123,14 +129,6 @@ pub enum Value {
         container_type: TypeId,
         values: Vec<Self>,
     },
-    Array {
-        container_type: TypeId,
-        values: Vec<Self>,
-    },
-    Ptr {
-        container_type: TypeId,
-        value: *mut Self,
-    },
     // Both closures and types don't have values at runtime, all uses must be inlined.
     Type(TypeId),
     GetFn(FuncId),
@@ -145,11 +143,7 @@ pub enum Value {
         first: usize,
         count: usize,
     },
-
-    // These are needed because they're using for bootstrapping the comptime types.
-    Slice(TypeId),       // for `[]T`
-    Map(TypeId, TypeId), // for `{}(K, V)`
-    Symbol(usize),       // TODO: this is an Ident<'p> but i really dont want the lifetime
+    Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -223,6 +217,19 @@ impl Value {
             Some(values)
         } else {
             None
+        }
+    }
+
+    pub fn new_box(values: Vec<Value>) -> Value {
+        let count = values.len();
+        let value = Box::into_raw(Box::new(InterpBox {
+            references: 1,
+            values,
+        }));
+        Value::Heap {
+            value,
+            first: 0,
+            count,
         }
     }
 }

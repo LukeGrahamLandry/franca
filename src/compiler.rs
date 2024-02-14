@@ -10,11 +10,11 @@ use std::mem;
 use std::rc::Rc;
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{Annotation, FatStmt, Field, VarType};
+use crate::ast::{Annotation, FatStmt, Field, Var, VarType};
 use crate::bc::*;
 use crate::ffi::InterpSend;
 use crate::interp::{to_flat_seq, CallFrame, Interp};
-use crate::logging::PoolLog;
+use crate::logging::{outln, PoolLog};
 use crate::{
     ast::{
         Expr, FatExpr, FnType, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo,
@@ -161,18 +161,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         let constants =
             constants.map_or_else(|| Rc::new(SharedConstants::default()), |c| c.clone().bake());
         let result = self.ensure_compiled(&constants, f, when);
-        let end_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
-        assert!(init_heights == end_heights, "bad stack size");
+        if result.is_ok() {
+            let end_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
+            assert!(init_heights == end_heights, "bad stack size");
+        }
+        let result = self.tag_err(result);
         self.pop_state(state);
-        self.tag_err(result)
+        result
     }
 
     pub fn run(&mut self, f: FuncId, arg: Value, when: ExecTime) -> Res<'p, Value> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
         let result = self.interp.run(f, arg, when);
+        let result = self.tag_err(result);
         self.pop_state(state2);
-        self.tag_err(result)
+        result
     }
 
     fn compile_and_run(
@@ -611,30 +615,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
-            Stmt::SetVar(var, expr) => {
-                let var_info = self.interp.program.vars[var.1]; // TODO: the type here isn't set.
-                assert_eq!(
-                    var_info.kind,
-                    VarType::Var,
-                    "Only 'var' can be reassigned (not let/const). {:?}",
-                    stmt
-                );
-                let slot = result.vars.get(var);
-                let (slot, oldty) =
-                    *unwrap!(slot, "SetVar: var must be declared: {}", var.log(self.pool));
-
-                let (value, new_ty) = self.compile_expr(result, expr, Some(oldty))?;
-                self.type_check_arg(new_ty, oldty, "reassign var")?;
-                result.push(Bc::Drop(slot));
-                assert_eq!(value.count, slot.count);
-                for i in 0..value.count {
-                    result.push(Bc::Move {
-                        from: value.offset(i),
-                        to: slot.offset(i),
-                    });
-                }
-            }
-            Stmt::SetNamed(name, _) => err!(CErr::UndeclaredIdent(*name)),
+            Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
             }
@@ -899,7 +880,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let (from, ptr_ty) = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.interp.program.unptr_ty(ptr_ty), "not ptr");
                         let to = result.reserve_slots(self.interp.program, ty);
-                        result.push(Bc::DerefPtr {
+                        result.push(Bc::Load {
                             from: from.single(),
                             to,
                         });
@@ -921,10 +902,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                         result.load_constant(self.interp.program, Value::Unit)
                     }
                     "comptime_print" => {
-                        println!("EXPR : {}", arg.log(self.pool));
+                        outln!("EXPR : {}", arg.log(self.pool));
                         let value =
                             self.cached_eval_expr(&result.constants, *arg.clone(), TypeId::any());
-                        println!("VALUE: {:?}", value);
+                        outln!("VALUE: {:?}", value);
                         result.load_constant(self.interp.program, Value::Unit)
                     }
                     "struct" => {
@@ -987,7 +968,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         container_ptr_ty =
                             unwrap!(self.interp.program.unptr_ty(container_ptr_ty), "");
                         let ret = result.reserve_slots(self.interp.program, container_ptr_ty);
-                        result.push(Bc::DerefPtr {
+                        result.push(Bc::Load {
                             from: container_ptr.single(),
                             to: ret,
                         });
@@ -1108,6 +1089,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     err!("struct literal but expected {:?}", requested);
                 }
+            }
+            &Expr::String(i) => {
+                let bytes = self.pool.get(i);
+                let bytes = bytes
+                    .as_bytes()
+                    .iter()
+                    .map(|b| Value::I64(*b as i64))
+                    .collect();
+                result.load_constant(self.interp.program, Value::new_box(bytes))
             }
         })
     }
@@ -1230,6 +1220,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetNamed(_) => todo!(),
             Expr::FieldAccess(_, _) => todo!(),
             Expr::StructLiteralP(_) => todo!(),
+            Expr::String(_) => self
+                .interp
+                .program
+                .intern_type(TypeInfo::Ptr(TypeId::i64())),
         })
     }
 
@@ -1535,6 +1529,65 @@ impl<'a, 'p> Compile<'a, 'p> {
             as_tuple,
         })
     }
+
+    fn set_deref(
+        &mut self,
+        result: &mut FnBody<'p>,
+        place: &FatExpr<'p>,
+        value: &FatExpr<'p>,
+    ) -> Res<'p, ()> {
+        match place.deref().deref() {
+            Expr::GetVar(var) => {
+                let var_info = self.interp.program.vars[var.1]; // TODO: the type here isn't set.
+                assert_eq!(
+                    var_info.kind,
+                    VarType::Var,
+                    "Only 'var' can be reassigned (not let/const). {:?}",
+                    place
+                );
+                let slot = result.vars.get(var);
+                let (slot, oldty) =
+                    *unwrap!(slot, "SetVar: var must be declared: {}", var.log(self.pool));
+
+                let (value, new_ty) = self.compile_expr(result, value, Some(oldty))?;
+                self.type_check_arg(new_ty, oldty, "reassign var")?;
+                result.push(Bc::Drop(slot));
+                assert_eq!(value.count, slot.count);
+                for i in 0..value.count {
+                    result.push(Bc::Move {
+                        from: value.offset(i),
+                        to: slot.offset(i),
+                    });
+                }
+                Ok(())
+            }
+            Expr::SuffixMacro(macro_name, arg) => {
+                // TODO: type checking
+                // TODO: general place expressions.
+                let macro_name = self.pool.get(*macro_name);
+                if macro_name == "deref" {
+                    let (ptr, ptr_ty) = self.compile_expr(result, arg, None)?;
+                    let expected_ty = unwrap!(self.interp.program.unptr_ty(ptr_ty), "not ptr");
+                    let (value, new_ty) = self.compile_expr(result, value, Some(expected_ty))?;
+                    self.type_check_arg(new_ty, expected_ty, "set ptr")?;
+                    result.push(Bc::Store {
+                        to: ptr.single(),
+                        from: value,
+                    });
+
+                    return Ok(());
+                }
+                todo!()
+            }
+            _ => ice!("TODO: other `place=e;`"),
+        }
+    }
+}
+
+// TODO
+pub enum Place<'p> {
+    Var(Var<'p>),
+    Ptr(StackRange),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1715,12 +1768,16 @@ impl<'p> Bc<'p> {
                 from.first.0 += stack_offset;
                 to.first.0 += stack_offset;
             }
-            Bc::ExpandTuple { from, to } | Bc::DerefPtr { from, to } => {
+            Bc::ExpandTuple { from, to } | Bc::Load { from, to } => {
                 from.0 += stack_offset;
                 to.first.0 += stack_offset;
             }
             Bc::AbsoluteStackAddr { of, to } => {
                 of.first.0 += stack_offset;
+                to.0 += stack_offset;
+            }
+            Bc::Store { from, to } => {
+                from.first.0 += stack_offset;
                 to.0 += stack_offset;
             }
             Bc::SlicePtr {
