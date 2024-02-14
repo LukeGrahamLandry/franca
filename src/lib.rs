@@ -51,6 +51,7 @@ macro_rules! test_file {
 test_file!(basic);
 test_file!(structs);
 test_file!(generics);
+test_file!(overloading);
 
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,

@@ -46,6 +46,7 @@ pub enum CErr<'p> {
     TypeError(&'static str, Value),
     TypeCheck(TypeId, TypeId, &'static str),
     Msg(String),
+    AmbiguousCall,
 }
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
@@ -143,10 +144,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
-        self.interp.program.declarations.get(&name).map(|decls| {
-            debug_assert_eq!(decls.len(), 1);
-            decls[0]
-        })
+        if let Some(decls) = self.interp.program.declarations.get(&name) {
+            if decls.len() == 1 {
+                return Some(decls[0]);
+            }
+        }
+        None
     }
 
     pub fn compile(
@@ -297,6 +300,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         f: FuncId,
     ) -> Res<'p, StackRange> {
         let func = self.interp.program.funcs[f.0].clone();
+        debug_assert!(!func.has_tag(self.pool, "comptime"));
         let (arg, ret) = func.ty.unwrap();
         let mut to_drop = vec![];
         let arguments = func.arg_vars.as_ref().unwrap();
@@ -677,62 +681,62 @@ impl<'a, 'p> Compile<'a, 'p> {
                 result.load_constant(self.interp.program, Value::GetFn(id))
             }
             Expr::Call(f, arg) => {
-                if let Expr::GetNamed(i) = f.as_ref().deref() {
-                    if let Some(f) = self.resolve_function(result, f) {
-                        let func = &self.interp.program.funcs[f.0];
-                        let is_comptime = func.has_tag(self.pool, "comptime");
-                        if is_comptime {
-                            let ret = self.emit_comptime_call(result, f, arg)?;
-                            return Ok(result.load_constant(self.interp.program, ret));
-                        }
-
-                        let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
-                        // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
-                        if arg.count == 0 {
-                            arg = result.load_constant(self.interp.program, Value::Unit).0;
-                        }
-                        // Note: f will be compiled differently depending on the calling convention.
-                        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-                        self.infer_types(&result.constants, f)?;
-                        let func = &self.interp.program.funcs[f.0];
-                        let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
-                        self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
-                        self.type_check_arg(arg_ty_found, arg_ty_expected, "bad arg")?;
-                        debug_assert_eq!(
-                            self.interp.program.slot_count(arg_ty_found),
-                            self.interp.program.slot_count(arg_ty_expected)
-                        );
-                        // TODO: some huristic based on how many times called and how big the body is.
-                        // TODO: pre-intern all these constants so its not a hash lookup everytime
-                        let force_inline = func.has_tag(self.pool, "inline");
-                        let deny_inline = func.has_tag(self.pool, "noinline");
-                        assert!(
-                            !(force_inline && deny_inline),
-                            "{f:?} is both @inline and @noinline"
-                        );
-                        let will_inline = force_inline;
-                        let func = &self.interp.program.funcs[f.0];
-                        let ret = if !func.capture_vars.is_empty() {
-                            // TODO: check that you're calling from the same place as the definition.
-                            assert!(!deny_inline, "capturing calls are always inlined.");
-                            self.emit_capturing_call(result, arg, f)?
-                        } else if will_inline {
-                            self.emit_inline_call(result, arg, f)?
-                        } else {
-                            let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
-                            self.ensure_compiled(&result.constants, f, result.when)?;
-                            result.push(Bc::CallDirect { f, ret, arg });
-                            ret
-                        };
-
-                        assert_eq!(self.return_stack_slots(f), ret.count);
-                        assert_eq!(self.interp.program.slot_count(ret_ty_expected), ret.count);
-                        return Ok((ret, ret_ty_expected));
-                    } else if "if" == self.pool.get(*i) {
-                        // TODO: treat this as a normal builtin but need to support general closures?
+                if let &Expr::GetNamed(i) = f.as_ref().deref() {
+                    if "if" == self.pool.get(i) {
+                        // TODO: treat this as a normal builtin (or macro?)
                         return self.emit_call_if(result, arg);
                     }
-                    // else: fallthrough
+
+                    let f = self.resolve_function(result, i, arg)?;
+                    let func = &self.interp.program.funcs[f.0];
+                    let is_comptime = func.has_tag(self.pool, "comptime");
+                    if is_comptime {
+                        let ret = self.emit_comptime_call(result, f, arg)?;
+                        return Ok(result.load_constant(self.interp.program, ret));
+                    }
+
+                    let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
+                    // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
+                    if arg.count == 0 {
+                        arg = result.load_constant(self.interp.program, Value::Unit).0;
+                    }
+                    // Note: f will be compiled differently depending on the calling convention.
+                    // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
+                    self.infer_types(&result.constants, f)?;
+                    let func = &self.interp.program.funcs[f.0];
+                    let (arg_ty_expected, ret_ty_expected) = func.ty.unwrap();
+                    self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
+                    self.type_check_arg(arg_ty_found, arg_ty_expected, "bad arg")?;
+                    debug_assert_eq!(
+                        self.interp.program.slot_count(arg_ty_found),
+                        self.interp.program.slot_count(arg_ty_expected)
+                    );
+                    // TODO: some huristic based on how many times called and how big the body is.
+                    // TODO: pre-intern all these constants so its not a hash lookup everytime
+                    let force_inline = func.has_tag(self.pool, "inline");
+                    let deny_inline = func.has_tag(self.pool, "noinline");
+                    assert!(
+                        !(force_inline && deny_inline),
+                        "{f:?} is both @inline and @noinline"
+                    );
+                    let will_inline = force_inline;
+                    let func = &self.interp.program.funcs[f.0];
+                    let ret = if !func.capture_vars.is_empty() {
+                        // TODO: check that you're calling from the same place as the definition.
+                        assert!(!deny_inline, "capturing calls are always inlined.");
+                        self.emit_capturing_call(result, arg, f)?
+                    } else if will_inline {
+                        self.emit_inline_call(result, arg, f)?
+                    } else {
+                        let ret = result.reserve_slots(self.interp.program, ret_ty_expected);
+                        self.ensure_compiled(&result.constants, f, result.when)?;
+                        result.push(Bc::CallDirect { f, ret, arg });
+                        ret
+                    };
+
+                    assert_eq!(self.return_stack_slots(f), ret.count);
+                    assert_eq!(self.interp.program.slot_count(ret_ty_expected), ret.count);
+                    return Ok((ret, ret_ty_expected));
                 }
 
                 let (arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
@@ -860,7 +864,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "type" => {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
-                        let ty = self.type_of(result, arg)?;
+                        let ty = unwrap!(self.type_of(result, arg)?, "could not infer yet");
                         result.load_constant(self.interp.program, Value::Type(ty))
                     }
                     "assert_compile_error" => {
@@ -1124,35 +1128,78 @@ impl<'a, 'p> Compile<'a, 'p> {
         state.result
     }
 
-    fn resolve_function(&self, _result: &FnBody<'p>, expr: &FatExpr<'p>) -> Option<FuncId> {
-        match expr.deref() {
-            Expr::GetNamed(i) => self.lookup_unique_func(*i),
-            _ => None,
+    // TODO: better error messages
+    fn resolve_function(
+        &mut self,
+        result: &FnBody<'p>,
+        name: Ident<'p>,
+        arg: &FatExpr<'p>,
+    ) -> Res<'p, FuncId> {
+        // If there's only one option, we don't care what type it is.
+        if let Some(f) = self.lookup_unique_func(name) {
+            return Ok(f);
+        }
+
+        // Check overloads
+        if let Ok(Some(arg_ty)) = self.type_of(result, arg) {
+            let found = self.interp.program.func_lookup.get(&(name, arg_ty));
+            if let Some(f) = found {
+                return Ok(*f);
+            }
+
+            // Compute overloads
+            if let Some(decls) = self.interp.program.declarations.get(&name) {
+                let mut found = None;
+                for f in decls.clone() {
+                    if let Ok(f_ty) = self.infer_types(&result.constants, f) {
+                        if arg_ty == f_ty.arg {
+                            assert!(found.is_none(), "AmbiguousCall");
+                            found = Some(f);
+                        }
+                    }
+                }
+                match found {
+                    Some(f) => {
+                        self.interp.program.func_lookup.insert((name, arg_ty), f);
+                        Ok(f)
+                    }
+                    None => err!(CErr::AmbiguousCall),
+                }
+            } else {
+                err!(CErr::UndeclaredIdent(name))
+            }
+        } else {
+            err!(CErr::AmbiguousCall)
         }
     }
 
-    fn type_of(&mut self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, TypeId> {
+    // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
+    fn type_of(&mut self, result: &FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if let Some(ty) = expr.ty {
-            return Ok(ty);
+            return Ok(Some(ty));
         }
-        Ok(match expr.deref() {
+        Ok(Some(match expr.deref() {
             Expr::Value(v) => self.interp.program.type_of(v),
-            Expr::Call(f, _) => {
-                let fid = if let Some(f) = self.resolve_function(result, f) {
-                    f
-                } else {
-                    ice!("typecheck failed to resolve function expr {f:?}")
-                };
-                self.ensure_compiled(&result.constants, fid, ExecTime::Comptime)?;
-                let (_, ret) = self.interp.program.funcs[fid.0].ty.unwrap();
-                ret
+            Expr::Call(f, arg) => {
+                if let Expr::GetNamed(i) = f.deref().deref() {
+                    if let Ok(fid) = self.resolve_function(result, *i, arg) {
+                        if self.infer_types(&result.constants, fid).is_ok() {
+                            let (_, ret) = self.interp.program.funcs[fid.0].ty.unwrap();
+                            return Ok(Some(ret));
+                        }
+                    }
+                }
+                return Ok(None);
             }
-            Expr::Block { result: e, .. } => self.type_of(result, e)?,
-            Expr::ArrayLiteral(_) => todo!(),
-            Expr::Tuple(_) => todo!(),
-            Expr::RefType(_) => todo!(),
-            Expr::EnumLiteral(_) => todo!(),
-            Expr::Closure(_) => todo!(),
+            Expr::Block { result: e, .. } => return self.type_of(result, e),
+            Expr::GetNamed(_)
+            | Expr::FieldAccess(_, _)
+            | Expr::StructLiteralP(_)
+            | Expr::ArrayLiteral(_)
+            | Expr::Tuple(_)
+            | Expr::RefType(_)
+            | Expr::EnumLiteral(_)
+            | Expr::Closure(_) => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1177,9 +1224,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "type" => self.interp.program.intern_type(TypeInfo::Type),
                     "deref" => {
                         let ptr_ty = self.type_of(result, arg)?;
-                        unwrap!(self.interp.program.unptr_ty(ptr_ty), "")
+                        if let Some(ptr_ty) = ptr_ty {
+                            return Ok(self.interp.program.unptr_ty(ptr_ty));
+                        } else {
+                            return Ok(None);
+                        }
                     }
-                    _ => err!(CErr::UndeclaredIdent(*macro_name)),
+                    _ => return Ok(None),
                 }
             }
             Expr::GetVar(var) => {
@@ -1191,14 +1242,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("type check missing var {var:?}")
                 }
             }
-            Expr::GetNamed(_) => todo!(),
-            Expr::FieldAccess(_, _) => todo!(),
-            Expr::StructLiteralP(_) => todo!(),
             Expr::String(_) => self
                 .interp
                 .program
                 .intern_type(TypeInfo::Ptr(TypeId::i64())),
-        })
+        }))
     }
 
     fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {

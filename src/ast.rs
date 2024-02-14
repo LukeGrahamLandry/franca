@@ -450,12 +450,12 @@ impl<'p> Program<'p> {
         let id = FuncId(self.funcs.len());
         let name = func.name;
         self.funcs.push(func);
-        // TODO: add to func_lookup
-
-        // TODODODODO: wrong! need comptiem intern. need resolve. just testing.
-        // assert!(self.declarations.get(&name).is_none(), "TODO");
         if let Some(name) = name {
-            self.declarations.insert(name, vec![id]);
+            if let Some(prev) = self.declarations.get_mut(&name) {
+                prev.push(id);
+            } else {
+                self.declarations.insert(name, vec![id]);
+            }
         }
         id
     }
