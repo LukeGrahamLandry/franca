@@ -1,5 +1,4 @@
 #![allow(clippy::wrong_self_convention)]
-use std::marker::PhantomData;
 use std::{mem::replace, panic::Location};
 
 use codemap::Span;
@@ -104,6 +103,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             self.update_debug();
             let i = self.next_inst();
             self.log_stack();
+
             logln!("I: {:?}", i.log(self.pool));
             match i {
                 &Bc::CallDirect { f, ret, arg } => {

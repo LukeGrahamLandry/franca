@@ -32,7 +32,7 @@ impl<'pool> StringPool<'pool> {
 
     pub fn upcast(&self, i: i64) -> Option<Ident<'pool>> {
         if i > 0 && (i as usize) < self.values.read().unwrap().len() {
-            Some(Ident(i as usize, PhantomData::default()))
+            Some(Ident(i as usize, PhantomData))
         } else {
             None
         }

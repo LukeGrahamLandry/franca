@@ -4,6 +4,7 @@ use bc::Value;
 use codemap::CodeMap;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use pool::StringPool;
+use std::fmt::Write;
 
 pub mod ast;
 pub mod bc;
@@ -42,7 +43,8 @@ macro_rules! test_file {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&stringify!($case)),
-            ));
+            )
+            .is_some());
         }
     };
 }
@@ -57,7 +59,7 @@ pub fn run_main<'a: 'p, 'p>(
     arg: Value,
     expect: Value,
     save: Option<&str>,
-) -> bool {
+) -> Option<String> {
     let start = timestamp();
     let mut codemap = CodeMap::new();
     let lib = codemap.add_file("lib/interp_builtins.txt".into(), LIB.to_string());
@@ -78,7 +80,7 @@ pub fn run_main<'a: 'p, 'p>(
     };
 
     if !parse(lib.clone()) || !parse(code) {
-        return false;
+        return None;
     }
 
     let mut global = Func {
@@ -124,7 +126,7 @@ pub fn run_main<'a: 'p, 'p>(
 
     if let Err(e) = result {
         log_err(codemap, &mut interp, e);
-        return false;
+        return None;
     } else {
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
         let id = toplevel.unwrap();
@@ -142,7 +144,7 @@ pub fn run_main<'a: 'p, 'p>(
                 match interp.compile(Some(&constants), f, ExecTime::Runtime) {
                     Err(e) => {
                         log_err(codemap, &mut interp, e);
-                        return false;
+                        return None;
                     }
                     Ok(_) => {
                         let end = timestamp();
@@ -172,7 +174,7 @@ pub fn run_main<'a: 'p, 'p>(
                         match interp.run(f, arg.clone(), ExecTime::Runtime) {
                             Err(e) => {
                                 log_err(codemap, &mut interp, e);
-                                return false;
+                                return None;
                             }
                             Ok(result) => {
                                 let end = timestamp();
@@ -214,7 +216,7 @@ pub fn run_main<'a: 'p, 'p>(
         }
     }
     outln!("===============");
-    true
+    Some(interp.interp.log(pool))
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
@@ -263,8 +265,11 @@ pub mod web {
                 return;
             }
         };
-        run_main(pool, src, Value::Unit, Value::Unit, None);
+        let res = run_main(pool, src, Value::Unit, Value::Unit, None);
         flush_console();
+        if let Some(s) = res {
+            show_bc(s.as_ptr(), s.len());
+        }
     }
 
     /// len DOES include null terminator
@@ -316,6 +321,7 @@ pub mod web {
     extern "C" {
         pub fn console_log(ptr: *const u8, len: usize);
         pub fn timestamp() -> f64;
+        pub fn show_bc(ptr: *const u8, len: usize);
     }
 }
 

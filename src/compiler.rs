@@ -128,7 +128,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn pop_state(&mut self, _s: DebugState<'p>) {
-        let found = self.debug_trace.pop().expect("state stack");
+        let _found = self.debug_trace.pop().expect("state stack");
         // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
@@ -494,8 +494,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // TODO: remove at the end so can do again.
                             assert!(prev.is_none(), "overwrite comptime arg?");
                         } else {
-                            println!("{}", self.interp.program.log_type(arg_ty));
-                            println!("{}", self.interp.program.funcs[f.0].synth_name(self.pool));
                             let types = self.interp.program.tuple_types(arg_ty).unwrap();
                             if arguments.len() == types.len() {
                                 let arg_values = to_flat_seq(arg_value);
@@ -955,7 +953,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     "tag" => {
                         // TODO: auto deref and typecheking
-                        let (addr, addr_ty) = self.addr_macro(result, arg)?;
+                        let (addr, _addr_ty) = self.addr_macro(result, arg)?;
                         let ty = self
                             .interp
                             .program

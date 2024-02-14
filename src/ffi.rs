@@ -1,9 +1,6 @@
-use interp_derive::InterpSend;
-
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::{InterpBox, Value},
-    pool::StringPool,
 };
 
 // TODO
@@ -123,6 +120,8 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
 
 #[test]
 fn interp_send() {
+    use crate::pool::StringPool;
+    use interp_derive::InterpSend;
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
     struct HelloWorld {
         a: i64,
