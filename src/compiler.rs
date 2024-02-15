@@ -221,6 +221,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let loc = self.interp.program.funcs[f.0].loc;
         // TODO: do i even need to pass an index? probably just for debugging
         let constants = self.interp.program.funcs[f.0].closed_constants.clone();
+
         let mut result = self.empty_fn(
             ExecTime::Comptime,
             FuncId(f.0 + 10000000),
@@ -479,8 +480,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
         // BUT... the *arguments* to the call need to be evaluated in the caller's scope.
 
+        let mut func = self.interp.program.funcs[f.0].clone();
+        func.closed_constants.add_all(caller_constants);
+        let f = self.interp.program.add_func_no_decl(func);
         let func = &self.interp.program.funcs[f.0];
-        let mut constants = func.closed_constants.clone();
+        let constants = func.closed_constants.clone(); // TODO: aaaa
+
         logln!(
             "emit_comptime_call of {} with consts: {}",
             func.synth_name(self.pool),
@@ -498,7 +503,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 &LazyType::Finished(arg) => arg,
             },
         };
-        let arg_value = self.immediate_eval_expr(caller_constants, arg_expr.clone(), arg_ty)?;
+        let arg_value = self.immediate_eval_expr(&constants, arg_expr.clone(), arg_ty)?;
 
         let func = &self.interp.program.funcs[f.0];
         if func.body.is_none() {
@@ -520,9 +525,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         // also the body constants for generics need this. much cleanup pls.
         // TODO: factor out from normal functions?
 
-        let arguments = self.interp.program.funcs[f.0].arg_vars.as_ref().unwrap();
+        let arguments = self.interp.program.funcs[f.0]
+            .arg_vars
+            .as_ref()
+            .unwrap()
+            .clone();
         if arguments.len() == 1 {
-            let prev = constants.insert(arguments[0], (arg_value, arg_ty));
+            let prev = self.interp.program.funcs[f.0]
+                .closed_constants
+                .insert(arguments[0], (arg_value, arg_ty));
             assert!(prev.is_none(), "overwrite comptime arg?");
         } else {
             let types: Vec<_> = unwrap!(self.interp.program.tuple_types(arg_ty), "").to_vec();
@@ -531,7 +542,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // if they match, each element has its own name.
                 let args: Vec<_> = arguments.iter().copied().enumerate().collect();
                 for (i, var) in args {
-                    let prev = constants.insert(var, (arg_values[i].clone(), types[i]));
+                    let prev = self.interp.program.funcs[f.0]
+                        .closed_constants
+                        .insert(var, (arg_values[i].clone(), types[i]));
                     assert!(prev.is_none(), "overwrite arg?");
                 }
             } else {
@@ -539,6 +552,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
+        let constants = self.interp.program.funcs[f.0].closed_constants.clone(); // TODO: aaaa
         let ret = match &func.ty {
             &LazyFnType::Finished(arg, ret) => {
                 self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
@@ -569,10 +583,21 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         };
 
+        self.interp.program.funcs[f.0].ty = LazyFnType::Finished(arg_ty, ret);
+
+        logln!(
+            "eval_and_close_local_constants emit_comptime_call of {} with consts: {}",
+            func.synth_name(self.pool),
+            self.interp
+                .program
+                .log_consts(&self.interp.program.funcs[f.0].closed_constants)
+        );
         self.eval_and_close_local_constants(f)?;
 
+        let constants = &self.interp.program.funcs[f.0].closed_constants.clone(); // TODO: aaaa
+
         let result = if let Some(body) = func.body {
-            self.immediate_eval_expr(&constants, body, ret)?
+            self.immediate_eval_expr(constants, body, ret)?
         } else {
             unreachable!("builtin")
         };
@@ -1214,7 +1239,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                             for f in decls.clone() {
                                 if let Ok(f_ty) = self.infer_types(f) {
                                     if arg_ty == f_ty.arg {
-                                        assert!(found.is_none(), "AmbiguousCall");
+                                        assert!(
+                                            found.is_none(),
+                                            "AmbiguousCall {:?} vs {:?}",
+                                            found,
+                                            (f, f_ty)
+                                        );
                                         found = Some((f, f_ty));
                                     }
                                 }
@@ -1246,7 +1276,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 err!(CErr::VarNotFound(name))
             }
         } else {
-            err!(CErr::AmbiguousCall)
+            err!(
+                "AmbiguousCall. Unknown type for argument {}",
+                arg.log(self.pool)
+            )
         }
     }
 
@@ -1504,6 +1537,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
         debug_assert!(func.closed_constants.local.is_empty());
         func.closed_constants = constants.close(&func.capture_vars_const)?;
+        // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
+        for capture in &func.capture_vars {
+            if let Some(val) = constants.get(*capture) {
+                func.closed_constants.insert(*capture, val);
+            }
+        }
         let id = self.interp.program.add_func(func);
         Ok(id)
     }

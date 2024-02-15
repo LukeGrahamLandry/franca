@@ -474,10 +474,15 @@ impl<'p> Program<'p> {
         let id = FuncId(self.funcs.len());
         let name = func.name;
         self.funcs.push(func);
-
         if let Some(name) = name {
             insert_multi(&mut self.declarations, name, id);
         }
+        id
+    }
+
+    pub fn add_func_no_decl(&mut self, func: Func<'p>) -> FuncId {
+        let id = FuncId(self.funcs.len());
+        self.funcs.push(func);
         id
     }
 
