@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::mem;
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{Annotation, FatStmt, Field, OverloadOption, Var, VarType};
+use crate::ast::{Annotation, FatStmt, Field, OverloadOption, OverloadSet, Var, VarType};
 use crate::bc::*;
 use crate::ffi::InterpSend;
 use crate::interp::{to_flat_seq, CallFrame, Interp};
@@ -228,7 +228,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Some(constants),
         );
         let name = self.interp.program.funcs[f.0].synth_name(self.pool).clone();
-        let msg = format!("locals {}", name);
+        let _msg = format!("locals {}", name);
         let func = &self.interp.program.funcs[f.0];
 
         let new_constants = func.local_constants.clone();
@@ -355,7 +355,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Functions without a body are always builtins.
                 // It's convient to give them a FuncId so you can put them in a variable,
                 // but just force inline call.
-                println!(
+                logln!(
                     "builtin shim for {} has constants {}",
                     self.interp.program.funcs[f.0].synth_name(self.pool),
                     self.interp
@@ -481,7 +481,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let func = &self.interp.program.funcs[f.0];
         let mut constants = func.closed_constants.clone();
-        println!(
+        logln!(
             "emit_comptime_call of {} with consts: {}",
             func.synth_name(self.pool),
             self.interp.program.log_consts(&constants)
@@ -498,7 +498,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 &LazyType::Finished(arg) => arg,
             },
         };
-        let arg_value = self.immediate_eval_expr(&caller_constants, arg_expr.clone(), arg_ty)?;
+        let arg_value = self.immediate_eval_expr(caller_constants, arg_expr.clone(), arg_ty)?;
 
         let func = &self.interp.program.funcs[f.0];
         if func.body.is_none() {
@@ -681,9 +681,20 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
                 let func = func.clone();
-                let name = func.name;
-                let f_id = self.add_func(func, &result.constants);
-                // I think i dont have to add to constants here because we'll find it on the first call when resolving overloads.
+                let var = func.var_name;
+                self.add_func(func, &result.constants)?;
+
+                // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
+                // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
+                if let Some(var) = var {
+                    if result.constants.get(var).is_none() {
+                        let index = self.interp.program.overload_sets.len();
+                        self.interp.program.overload_sets.push(OverloadSet(vec![]));
+                        result
+                            .constants
+                            .insert(var, (Value::OverloadSet(index), TypeId::any()));
+                    }
+                }
             }
         }
         Ok(())
@@ -715,16 +726,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Call(f, arg) => {
                 if let &Expr::GetVar(i) = f.as_ref().deref() {
-                    if "if" == self.pool.get(i.0) {
-                        // TODO: treat this as a normal builtin (or macro?)
-                        return self.emit_call_if(result, arg);
-                    }
-
                     let f = self.resolve_function(result, i, arg)?;
                     let func = &self.interp.program.funcs[f.0];
                     let is_comptime = func.has_tag(self.pool, "comptime");
                     if is_comptime {
-                        println!(
+                        logln!(
                             "Expr::call comptime. RES consts:\n{} F consts: \n{}====",
                             self.interp.program.log_consts(&result.constants),
                             self.interp
@@ -878,7 +884,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     )
                 }
             }
-            Expr::GetNamed(i) => {
+            Expr::GetNamed(_i) => {
                 ice!(
                     "Scope resolution failed {} (in Expr::GetNamed)",
                     expr.log(self.pool)
@@ -891,6 +897,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
+                    "if" => self.emit_call_if(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
                     "deref" => {
                         let (from, ptr_ty) = self.compile_expr(result, arg, requested)?;
@@ -1121,7 +1128,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .collect();
                 result.load_constant(self.interp.program, Value::new_box(bytes))
             }
-            Expr::GenericArgs(f, args) => {
+            Expr::GenericArgs(_, _) => {
                 todo!()
             }
         })
@@ -1189,40 +1196,51 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // Check overloads
         if let Ok(Some(arg_ty)) = self.type_of(result, arg) {
-            if let Some((overloads, _)) = result.constants.get(name) {
-                let i = unwrap!(overloads.to_overloads(), "");
-                let overloads = &self.interp.program.overload_sets[i];
+            if let Some((value, _)) = result.constants.get(name) {
+                match value {
+                    Value::GetFn(f) => Ok(f),
+                    Value::OverloadSet(i) => {
+                        let overloads = &self.interp.program.overload_sets[i];
 
-                for check in &overloads.0 {
-                    if check.ty.arg == arg_ty {
-                        return Ok(check.func);
-                    }
-                }
-
-                // Compute overloads.
-                if let Some(decls) = self.interp.program.declarations.get(&name.0) {
-                    let mut found = None;
-                    for f in decls.clone() {
-                        if let Ok(f_ty) = self.infer_types(f) {
-                            if arg_ty == f_ty.arg {
-                                assert!(found.is_none(), "AmbiguousCall");
-                                found = Some((f, f_ty));
+                        for check in &overloads.0 {
+                            if check.ty.arg == arg_ty {
+                                return Ok(check.func);
                             }
                         }
-                    }
-                    match found {
-                        Some((func, ty)) => {
-                            self.interp.program.overload_sets[i].0.push(OverloadOption {
-                                name: name.0,
-                                ty,
-                                func,
-                            });
-                            Ok(func)
+
+                        // Compute overloads.
+                        if let Some(decls) = self.interp.program.declarations.get(&name.0) {
+                            let mut found = None;
+                            for f in decls.clone() {
+                                if let Ok(f_ty) = self.infer_types(f) {
+                                    if arg_ty == f_ty.arg {
+                                        assert!(found.is_none(), "AmbiguousCall");
+                                        found = Some((f, f_ty));
+                                    }
+                                }
+                            }
+                            match found {
+                                Some((func, ty)) => {
+                                    self.interp.program.overload_sets[i].0.push(OverloadOption {
+                                        name: name.0,
+                                        ty,
+                                        func,
+                                    });
+                                    Ok(func)
+                                }
+                                None => err!(CErr::AmbiguousCall),
+                            }
+                        } else {
+                            err!(CErr::VarNotFound(name))
                         }
-                        None => err!(CErr::AmbiguousCall),
                     }
-                } else {
-                    err!(CErr::VarNotFound(name))
+                    _ => {
+                        err!(
+                            "Expected function for {} but found {:?}",
+                            name.log(self.pool),
+                            value
+                        )
+                    }
                 }
             } else {
                 err!(CErr::VarNotFound(name))
@@ -1438,6 +1456,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             arg_loc: vec![],
             closed_constants: constants.clone(),
             capture_vars_const: vec![],
+            var_name: None,
         };
         self.anon_fn_counter += 1;
         let func_id = self.interp.program.add_func(fake_func);
@@ -1485,7 +1504,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
         debug_assert!(func.closed_constants.local.is_empty());
         func.closed_constants = constants.close(&func.capture_vars_const)?;
-        Ok(self.interp.program.add_func(func))
+        let id = self.interp.program.add_func(func);
+        Ok(id)
     }
 
     // TODO: make this not a special case.
@@ -1499,16 +1519,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             let if_true = if let Expr::Closure(func) = parts[1].deref() {
                 self.add_func(*func.clone(), &result.constants)?
             } else {
-                ice!("if args must be tuple");
+                ice!("if second arg must be func not {:?}", parts[1]);
             };
             let if_false = if let Expr::Closure(func) = parts[2].deref() {
                 self.add_func(*func.clone(), &result.constants)?
             } else {
-                ice!("if args must be tuple");
+                ice!("if third arg must be func not {:?}", parts[2]);
             };
             (cond, if_true, if_false)
         } else {
-            ice!("if args must be tuple");
+            ice!("if args must be tuple not {:?}", arg);
         };
 
         let true_ty = self.infer_types(if_true)?;

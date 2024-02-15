@@ -4,7 +4,7 @@ use crate::{
     ast::{
         Expr, FatExpr, FatStmt, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType,
     },
-    logging::{log, logln, PoolLog},
+    logging::{logln, PoolLog},
     pool::{Ident, StringPool},
 };
 
@@ -113,7 +113,7 @@ impl<'p> ResolveScope<'p> {
 
         logln!("- Const locals:");
         for d in &func.local_constants {
-            logln!("    - {:?}", d.log(self.pool).replace("\n", " "));
+            logln!("    - {:?}", d.log(self.pool).replace('\n', " "));
         }
     }
 
@@ -170,7 +170,8 @@ impl<'p> ResolveScope<'p> {
             Stmt::Eval(e) => self.resolve_expr(e),
             Stmt::DeclFunc(func) => {
                 if let Some(name) = func.name {
-                    let v = self.decl_var(&name);
+                    let (_shadow, v) = self.decl_var(&name);
+                    func.var_name = Some(v);
                     self.info.push(VarInfo {
                         ty: TypeId::any(),
                         kind: VarType::Const,

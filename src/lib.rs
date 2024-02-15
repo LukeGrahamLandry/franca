@@ -110,6 +110,7 @@ pub fn run_main<'a: 'p, 'p>(
         arg_loc: vec![],
         capture_vars_const: vec![],
         closed_constants: Default::default(),
+        var_name: None,
     };
 
     let vars = ResolveScope::of(&mut global, pool);
@@ -166,11 +167,21 @@ pub fn run_main<'a: 'p, 'p>(
         return None;
     } else {
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
-        let id = toplevel.unwrap();
+        let _id = toplevel.unwrap();
         let name = pool.intern("main");
         match interp.lookup_unique_func(name) {
             None => {
                 outln!("FN {name:?} = 'MAIN' NOT FOUND");
+                let decls = interp
+                    .interp
+                    .program
+                    .declarations
+                    .keys()
+                    .map(|n| pool.get(*n).to_string())
+                    .collect::<Vec<String>>();
+                outln!("Decls: {decls:?}");
+                log_dbg(&interp, save);
+                return None;
             }
             Some(f) => {
                 match interp.compile(f, ExecTime::Runtime) {

@@ -116,6 +116,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     loc,
                     capture_vars_const: vec![],
                     closed_constants: Default::default(),
+                    var_name: None,
                 }))))
             }
             LeftSquiggle => {
@@ -287,6 +288,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     loc,
                     closed_constants: Default::default(),
                     capture_vars_const: vec![],
+                    var_name: None,
                 })
             }
             Qualifier(kind) => {

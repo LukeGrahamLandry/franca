@@ -8,7 +8,6 @@ use crate::{
 use codemap::Span;
 use std::{
     collections::HashMap,
-    fmt::format,
     hash::Hash,
     ops::{Deref, DerefMut},
 };
@@ -287,6 +286,7 @@ pub struct FatStmt<'p> {
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Option<Ident<'p>>,   // it might be an annonomus closure
+    pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
     pub ty: LazyFnType<'p>,        // We might not have typechecked yet.
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_names: Vec<Option<Ident<'p>>>,
@@ -306,7 +306,7 @@ impl<'p> Func<'p> {
 
     pub fn get_name(&self, pool: &StringPool<'p>) -> Ident<'p> {
         self.name.unwrap_or_else(|| {
-            let code = self.body.as_ref().unwrap().log(pool).replace("\n", "");
+            let code = self.body.as_ref().unwrap().log(pool).replace('\n', "");
             let name = format!("$anon${code}$");
             pool.intern(&name)
         })
@@ -474,6 +474,7 @@ impl<'p> Program<'p> {
         let id = FuncId(self.funcs.len());
         let name = func.name;
         self.funcs.push(func);
+
         if let Some(name) = name {
             insert_multi(&mut self.declarations, name, id);
         }
@@ -668,7 +669,7 @@ impl<'p> FatStmt<'p> {
         self.annotations.iter().any(|a| a.name == name)
     }
 
-    pub(crate) fn get_tag_arg(&self, pool: &StringPool<'p>, name: &str) -> Option<&FatExpr<'p>> {
+    pub(crate) fn _get_tag_arg(&self, pool: &StringPool<'p>, name: &str) -> Option<&FatExpr<'p>> {
         let name = pool.intern(name);
         self.annotations
             .iter()

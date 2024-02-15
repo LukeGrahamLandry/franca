@@ -101,13 +101,13 @@ macro_rules! outln {
 
 pub(crate) use outln;
 
-macro_rules! push_state {
+macro_rules! _push_state {
     ($self:expr, $($arg:tt)*) => {{
         let msg = format!($($arg)*);
         $self.push_state(&DebugState::Msg(msg));
     }};
 }
-pub(crate) use push_state;
+// pub(crate) use push_state;
 
 pub enum LogTag {
     Parsing,
@@ -642,6 +642,10 @@ impl<'p> CErr<'p> {
                 program.log_type(*found)
             ),
             CErr::Msg(s) => s.clone(),
+            CErr::VarNotFound(var) => format!(
+                "Resolved var not found {:?}. (forgot to make something const? ice?)",
+                var.log(pool)
+            ),
             _ => format!("{:?}", self),
         }
     }

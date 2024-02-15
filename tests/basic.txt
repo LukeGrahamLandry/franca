@@ -9,13 +9,13 @@ fn call_comptime_cached(func_arg_addr: Ptr(FnArg)) Any = {
     let prev = comptime_cache_get(f, a);
     let found = get_i(prev!addr, 0);
     let value = get_i(prev!addr, 1);
-    if(found, fn() Any = { value }, fn() Any = {
+    (found, fn() Any = { value }, fn() Any = {
         let func = get_i(func_arg_addr, 0);
         let arg = get_i(func_arg_addr, 1);
         let ret = func(arg);
         comptime_cache_insert(func, arg, ret);
         ret
-    })
+    })!if
 }
 
 fn main(unused: i64) i64 = {
@@ -34,7 +34,7 @@ fn main(unused: i64) i64 = {
 {   };  // empty block treated as expression TODO: allow without ;
 
 assert_eq(1, 1);  // assert_eq exists
-let fff = fn(u: Unit) i64 = { 15 };
+const fff = fn(u: Unit) i64 = { 15 };
 assert_eq(15, fff(unit));  // closure in a variable. 
 
 assert_eq(1, /* hello */ 1);
@@ -62,7 +62,7 @@ assert_eq(one, 1);
 /// simple if /// 
 
 assert_eq(5, (fn(n: i64) i64 = {
-    if(eq(n, 1), fn() i64 = { 5 }, fn() i64 = { 10 })
+    (eq(n, 1), fn() i64 = { 5 }, fn() i64 = { 10 })!if
 })(1));
 
 /// call_in_type_annotation ///
@@ -230,7 +230,7 @@ assert_eq(x, 5);
 // Same in functions. 
 
 let aaaa = 20;
-let ttt = fn(n: i64) i64 = {
+const ttt = fn(n: i64) i64 = {
     let aaaa = 25;
     assert_eq(aaaa, 25);
     
@@ -279,7 +279,7 @@ assert_eq(important_value, 42);  // Trivial
 
 // Branches of a call to if can access variables from the outer scope. 
 var a = 10;
-if(true, fn() Unit = { a = 1; }, fn() Unit = { a = 2; });
+(true, fn() Unit = { a = 1; }, fn() Unit = { a = 2; })!if;
 assert_eq(a, 1);
 
 var b = 1;
@@ -305,7 +305,9 @@ fn call_it(n: i64, f: Fn(i64, i64)) i64 = {
     add(f(n), 1)
 }
 // TODO: its an ice if you dont have brackets around the block (even before i was calling callstack() )
-assert_eq(9, call_it(4, fn(m: i64) i64 = { print_callstack(); mul(2, m) }));
+// TODO: hoist inline constant arguments
+const temp = fn(m: i64) i64 = { print_callstack(); mul(2, m) };
+assert_eq(9, call_it(4, temp));
 
 // var a = 77;
 // assert_ eq(3, call_it(0, fn temp(m: i64) i64 = { print_callstack(); a = 88; add(2, m) }));
