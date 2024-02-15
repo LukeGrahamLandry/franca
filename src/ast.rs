@@ -447,6 +447,13 @@ impl<'p> Program<'p> {
         prev.references += 1;
         let msg = format!("C{}", prev.why);
         let new = self.empty_consts(msg);
+        if self.constants[c.0].is_local_empty() {
+            let a_par = self.constants[c.0].parents.clone();
+            for c in a_par {
+                self.consts_inherit(new, c); // TODO: wrong order?
+            }
+            return new;
+        }
         self.constants[new.0].parents.push(c);
         new
     }
@@ -454,6 +461,12 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn consts_inherit(&mut self, me: ConstId, parent: ConstId) {
         let p = &mut self.constants[parent.0];
+        if p.is_local_empty() {
+            for c in p.parents.clone() {
+                self.consts_inherit(me, c);
+            }
+            return;
+        }
         let msg = format!("I{}]", p.why);
         debug_assert!(p.references > 0);
         p.references += 1;
@@ -465,6 +478,31 @@ impl<'p> Program<'p> {
 
     #[track_caller]
     pub fn consts_of(&mut self, first: ConstId, high_priority: ConstId) -> ConstId {
+        let a_ref = self.constants[first.0].references;
+        let b_ref = self.constants[high_priority.0].references;
+
+        if self.constants[high_priority.0].is_empty() {
+            return first;
+        }
+        if self.constants[first.0].is_empty() {
+            return high_priority;
+        }
+
+        if self.constants[first.0].is_local_empty() {
+            let new = self.consts_child(high_priority);
+            let a_par = self.constants[first.0].parents.clone();
+            for c in a_par {
+                self.consts_inherit(new, c); // TODO: wrong order?
+            }
+            return new;
+        }
+
+        // println!(
+        //     "FIRST {} HIGH {} ===",
+        //     self.log_consts(first),
+        //     self.log_consts(high_priority)
+        // );
+
         let new = self.consts_child(first);
         self.consts_inherit(new, high_priority);
         new
@@ -481,6 +519,11 @@ impl<'p> Program<'p> {
             debug_assert_eq!(write.references, 1);
             let read_refs = self.constants[read_constants.0].references;
             debug_assert!(read_refs > 0);
+            if write.local.is_empty() && write.overloads.is_empty() {
+                *write_constants = Some(w);
+                return;
+            }
+
             // if read_refs == 1 {
             //     println!("reuse| {:?} <- {:?}", read_constants, w);
             //     let write = &mut self.constants[w.0];

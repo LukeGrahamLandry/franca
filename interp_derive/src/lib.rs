@@ -168,3 +168,5 @@ fn add_trait_bounds(mut generics: Generics) -> Generics {
     }
     generics
 }
+
+// TODO: derive debug printing with my string pool

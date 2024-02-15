@@ -24,10 +24,16 @@ use crate::{
     scope::ResolveScope,
 };
 
-static LIB: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/lib/interp_builtins.txt"
-));
+macro_rules! stdlib {
+    ($name:expr) => {
+        (
+            $name,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/", $name, ".txt")),
+        )
+    };
+}
+
+static LIB: &[(&str, &str)] = &[stdlib!("interp_builtins")];
 
 macro_rules! test_file {
     ($case:ident) => {
@@ -61,25 +67,27 @@ pub fn run_main<'a: 'p, 'p>(
 ) -> Option<String> {
     let start = timestamp();
     let mut codemap = CodeMap::new();
-    let lib = codemap.add_file("lib/interp_builtins.txt".into(), LIB.to_string());
-    let code = codemap.add_file("main_file".into(), src.clone());
     let mut stmts = Vec::<FatStmt<'p>>::new();
 
-    let mut parse = |file| match Parser::parse(file, pool) {
-        Ok(new) => {
-            stmts.extend(new);
-            true
-        }
-        Err(e) => {
-            outln!("Parse error (Internal: {})", e.loc);
+    // TODO: this will get less dumb when I have first class modules.
+    let mut libs: Vec<_> = LIB
+        .iter()
+        .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
+        .collect();
+    libs.push(codemap.add_file("main_file".into(), src.clone()));
+    let user_span = libs.last().unwrap().span;
+    for file in &libs {
+        match Parser::parse(file.clone(), pool) {
+            Ok(new) => {
+                stmts.extend(new);
+            }
+            Err(e) => {
+                outln!("Parse error (Internal: {})", e.loc);
 
-            emit_diagnostic(&codemap, &e.diagnostic);
-            false
+                emit_diagnostic(&codemap, &e.diagnostic);
+                return None;
+            }
         }
-    };
-
-    if !parse(lib.clone()) || !parse(code) {
-        return None;
     }
 
     let mut global = Func {
@@ -89,16 +97,16 @@ pub fn run_main<'a: 'p, 'p>(
         body: Some(FatExpr::synthetic(
             Expr::Block {
                 body: stmts,
-                result: Box::new(FatExpr::synthetic(Expr::Value(Value::Unit), lib.span)),
+                result: Box::new(FatExpr::synthetic(Expr::Value(Value::Unit), user_span)),
                 locals: None,
             },
-            lib.span,
+            user_span,
         )),
         arg_names: vec![],
         arg_vars: None,
         capture_vars: vec![],
         local_constants: vec![],
-        loc: lib.span,
+        loc: user_span,
         arg_loc: vec![],
         closed_consts: None,
     };
@@ -123,6 +131,7 @@ pub fn run_main<'a: 'p, 'p>(
                 outln!("Wrote log to {:?}", path);
             }
         }
+        outln!("===============================");
     }
 
     fn log_err<'p>(
@@ -173,7 +182,8 @@ pub fn run_main<'a: 'p, 'p>(
                     Ok(_) => {
                         let end = timestamp();
                         let seconds = end - start;
-                        let lines = format!("{}\n{}", LIB, src)
+                        let lib: String = LIB.iter().map(|(_, code)| *code).collect();
+                        let lines = format!("{}\n{}", lib, src)
                             .split('\n')
                             .filter(|s| !s.split("//").next().unwrap().is_empty())
                             .count();

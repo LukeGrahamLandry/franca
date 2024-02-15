@@ -201,6 +201,16 @@ pub struct SharedConstants<'p> {
     pub why: String,
 }
 
+impl<'p> SharedConstants<'p> {
+    pub fn is_empty(&self) -> bool {
+        self.parents.is_empty() && self.is_local_empty()
+    }
+
+    pub fn is_local_empty(&self) -> bool {
+        self.local.is_empty() && self.overloads.is_empty()
+    }
+}
+
 impl Value {
     pub fn to_tuple(self) -> Option<Vec<Value>> {
         if let Value::Tuple { values, .. } = self {

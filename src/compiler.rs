@@ -264,6 +264,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let constants = unwrap!(result.write_constants.take(), "unreachable");
+
+        // println!("WROTE {} ===", self.interp.program.log_consts(constants),);
         self.pop_state(state);
         // println!("Locals of {} are {:?}", name, constants);
         Ok(constants)
@@ -774,6 +776,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let id = self.interp.program.add_func(func);
                 let func = &self.interp.program.funcs[id.0];
                 if let Some(name) = func.name {
+                    // TODO: instead of doing this here, need to do it on demand in resolve_func
+                    //       the problem is where do you save the resulting value?
+                    //       in the caller's constants? but you don't want to recompute redundantly.
+                    //       do i really have to go back to a global thing?
+                    //       maybe @pub means put it there?
+                    //       actually producing the function is fine with my closure stuff.
                     if !func.has_tag(self.pool, "comptime") && func.capture_vars.is_empty() {
                         let f_ty = self.infer_types(result.read_constants, id)?;
                         let ty = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
@@ -1326,10 +1334,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 .const_get_overload(result.read_constants, &(name, Value::Type(arg_ty)));
             if let Some((f, _ty)) = found {
                 let f = unwrap!(f.to_func(), "want func");
-                return Ok(f);
+                Ok(f)
+            } else {
+                err!(CErr::UndeclaredIdent(name))
             }
+        } else {
+            err!(CErr::AmbiguousCall)
         }
-        err!(CErr::AmbiguousCall)
     }
 
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
@@ -1793,7 +1804,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn generic_impl(&mut self, id: FuncId) -> Res<'p, ()> {
+    fn _generic_impl(&mut self, id: FuncId) -> Res<'p, ()> {
         let consts = self.interp.program.funcs[id.0]
             .local_constants
             .iter()
@@ -2041,3 +2052,6 @@ fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
         vec.pop();
     }
 }
+
+// i like when my code is rocks not rice
+// its a lot more challenging to eat but at least you can Find it

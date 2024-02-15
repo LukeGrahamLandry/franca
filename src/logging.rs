@@ -235,31 +235,41 @@ impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
             writeln!(s, "===");
         }
         writeln!(s, "=== {} CONST GROUPS ===", self.program.constants.len());
-        for c in &self.program.constants {
+        for c in 0..self.program.constants.len() {
+            let msg = self.program.log_consts(ConstId(c));
+            writeln!(s, "{}", msg);
+        }
+        s
+    }
+}
+
+impl<'p> Program<'p> {
+    pub fn log_consts(&self, c: ConstId) -> String {
+        let c = &self.constants[c.0];
+        let mut s = String::new();
+        writeln!(
+            s,
+            "{:?}. ({}) {:?} at {} for {}",
+            c.id, c.references, c.parents, c.created, c.why
+        );
+        for (k, (v, ty)) in &c.local {
             writeln!(
                 s,
-                "{:?}. ({}) {:?} at {} for {}",
-                c.id, c.references, c.parents, c.created, c.why
+                "   - {} = {:?} is {}",
+                k.log(self.pool),
+                v,
+                self.log_type(*ty)
             );
-            for (k, (v, ty)) in &c.local {
-                writeln!(
-                    s,
-                    "   - {} = {:?} is {}",
-                    k.log(pool),
-                    v,
-                    self.program.log_type(*ty)
-                );
-            }
-            for ((name, arg), (v, ty)) in &c.overloads {
-                writeln!(
-                    s,
-                    "   - {} {:?} = {:?} is {}",
-                    pool.get(*name),
-                    arg,
-                    v,
-                    self.program.log_type(*ty)
-                );
-            }
+        }
+        for ((name, arg), (v, ty)) in &c.overloads {
+            writeln!(
+                s,
+                "   - {} {:?} = {:?} is {}",
+                self.pool.get(*name),
+                arg,
+                v,
+                self.log_type(*ty)
+            );
         }
         s
     }

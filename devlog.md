@@ -3,7 +3,8 @@
 
 - each compiled Func needs to track which consts it closed.
  those were the state when you saw its declaration so you can use them when you go to compile its body which might be later. 
-
+- i knew it would be slower but its like a bit unacceptable. 
+ 
 ##
 
 Trying to ensure_compiled preemptivly instead of jitting so it can be more like real compilation,
