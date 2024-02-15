@@ -234,6 +234,33 @@ impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
             }
             writeln!(s, "===");
         }
+        writeln!(s, "=== {} CONST GROUPS ===", self.program.constants.len());
+        for c in &self.program.constants {
+            writeln!(
+                s,
+                "{:?}. ({}) {:?} at {} for {}",
+                c.id, c.references, c.parents, c.created, c.why
+            );
+            for (k, (v, ty)) in &c.local {
+                writeln!(
+                    s,
+                    "   - {} = {:?} is {}",
+                    k.log(pool),
+                    v,
+                    self.program.log_type(*ty)
+                );
+            }
+            for ((name, arg), (v, ty)) in &c.overloads {
+                writeln!(
+                    s,
+                    "   - {} {:?} = {:?} is {}",
+                    pool.get(*name),
+                    arg,
+                    v,
+                    self.program.log_type(*ty)
+                );
+            }
+        }
         s
     }
 }
@@ -390,7 +417,11 @@ impl<'p> PoolLog<'p> for DebugInfo<'p> {
 impl<'p> PoolLog<'p> for FnBody<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut f = String::new();
-        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when);
+        writeln!(
+            f,
+            "=== Bytecode for {:?} at {:?} === closed consts is {:?} ===",
+            self.func, self.when, self.read_constants,
+        );
         writeln!(f, "TYPES: ");
         for (i, ty) in self.slot_types.iter().enumerate() {
             write!(f, "${i}:{ty:?}, ");

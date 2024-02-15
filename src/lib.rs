@@ -18,7 +18,6 @@ pub mod scope;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, LazyFnType, Program, TypeId},
-    bc::SharedConstants,
     compiler::{Compile, CompileError, ExecTime},
     logging::{outln, PoolLog},
     parse::Parser,
@@ -107,35 +106,58 @@ pub fn run_main<'a: 'p, 'p>(
     let mut program = Program::new(vars, pool);
     let mut interp = Compile::new(pool, &mut program);
     // damn turns out defer would maybe be a good idea
-    let c = interp.interp.program.empty_consts();
+    let c = interp.interp.program.empty_consts("toplevel".into());
     let result = interp.add_declarations(c, global);
-    fn log_err<'p>(codemap: CodeMap, interp: &mut Compile<'_, 'p>, e: CompileError<'p>) {
-        let diagnostic = vec![Diagnostic {
-            level: Level::Error,
-            message: e.reason.log(interp.interp.program, interp.pool),
-            code: None,
-            spans: vec![SpanLabel {
-                span: e.loc.unwrap(),
-                label: None,
-                style: SpanStyle::Primary,
-            }],
-        }];
-        emit_diagnostic(&codemap, &diagnostic);
+
+    fn log_dbg(interp: &Compile, save: Option<&str>) {
+        if cfg!(feature = "some_log") {
+            if let Some(path) = save {
+                let path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(
+                    &path,
+                    format!("{}\nAt {:?}", interp.interp.log(interp.pool), timestamp()),
+                )
+                .unwrap();
+                outln!("Wrote log to {:?}", path);
+            }
+        }
+    }
+
+    fn log_err<'p>(
+        codemap: CodeMap,
+        interp: &mut Compile<'_, 'p>,
+        e: CompileError<'p>,
+        save: Option<&str>,
+    ) {
+        if let Some(loc) = e.loc {
+            let diagnostic = vec![Diagnostic {
+                level: Level::Error,
+                message: e.reason.log(interp.interp.program, interp.pool),
+                code: None,
+                spans: vec![SpanLabel {
+                    span: loc,
+                    label: None,
+                    style: SpanStyle::Primary,
+                }],
+            }];
+            emit_diagnostic(&codemap, &diagnostic);
+        } else {
+            outln!("{}", e.reason.log(interp.interp.program, interp.pool));
+        }
+
         outln!("Internal: {}", e.internal_loc);
         outln!("{}", e.trace);
+        log_dbg(interp, save);
     }
 
     if let Err(e) = result {
-        log_err(codemap, &mut interp, e);
+        log_err(codemap, &mut interp, e, save);
         return None;
     } else {
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
         let id = toplevel.unwrap();
-        let constants = interp.interp.ready[id.0]
-            .as_ref()
-            .unwrap()
-            .constants
-            .clone();
+        let constants = interp.interp.ready[id.0].as_ref().unwrap().read_constants;
         let name = pool.intern("main");
         match interp.lookup_unique_func(name) {
             None => {
@@ -144,7 +166,7 @@ pub fn run_main<'a: 'p, 'p>(
             Some(f) => {
                 match interp.compile(Some(constants), f, ExecTime::Runtime) {
                     Err(e) => {
-                        log_err(codemap, &mut interp, e);
+                        log_err(codemap, &mut interp, e, save);
                         return None;
                     }
                     Ok(_) => {
@@ -176,7 +198,7 @@ pub fn run_main<'a: 'p, 'p>(
                         let start = timestamp();
                         match interp.run(f, arg.clone(), ExecTime::Runtime) {
                             Err(e) => {
-                                log_err(codemap, &mut interp, e);
+                                log_err(codemap, &mut interp, e, save);
                                 return None;
                             }
                             Ok(result) => {
@@ -206,19 +228,8 @@ pub fn run_main<'a: 'p, 'p>(
         }
     }
 
-    if cfg!(feature = "some_log") {
-        if let Some(path) = save {
-            let path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(
-                &path,
-                format!("{}\nAt {:?}", interp.interp.log(pool), timestamp()),
-            )
-            .unwrap();
-            outln!("Wrote log to {:?}", path);
-        }
-    }
     outln!("===============");
+    log_dbg(&interp, save);
     Some(interp.interp.log(pool))
 }
 

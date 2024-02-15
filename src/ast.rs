@@ -8,7 +8,10 @@ use codemap::Span;
 use std::{
     collections::HashMap,
     hash::Hash,
+    mem,
     ops::{Deref, DerefMut},
+    os::macos::raw,
+    panic::Location,
 };
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq)]
@@ -423,7 +426,8 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub fn empty_consts(&mut self) -> ConstId {
+    #[track_caller]
+    pub fn empty_consts(&mut self, why: String) -> ConstId {
         let i = self.constants.len();
         self.constants.push(SharedConstants {
             id: ConstId(i),
@@ -431,15 +435,80 @@ impl<'p> Program<'p> {
             local: Default::default(),
             overloads: Default::default(),
             references: 1,
+            created: Location::caller(),
+            why,
         });
         ConstId(i)
     }
 
+    #[track_caller]
     pub fn consts_child(&mut self, c: ConstId) -> ConstId {
-        self.constants[c.0].references += 1;
-        let new = self.empty_consts();
+        let prev = &mut self.constants[c.0];
+        debug_assert!(prev.references > 0);
+        prev.references += 1;
+        let msg = format!("C{}", prev.why);
+        let new = self.empty_consts(msg);
         self.constants[new.0].parents.push(c);
         new
+    }
+
+    #[track_caller]
+    pub fn consts_inherit(&mut self, me: ConstId, parent: ConstId) {
+        let p = &mut self.constants[parent.0];
+        let msg = format!("I{}]", p.why);
+        debug_assert!(p.references > 0);
+        p.references += 1;
+        let me = &mut self.constants[me.0];
+        debug_assert_eq!(me.references, 1);
+        me.parents.push(parent);
+        me.why += &msg;
+    }
+
+    #[track_caller]
+    pub fn consts_of(&mut self, first: ConstId, high_priority: ConstId) -> ConstId {
+        let new = self.consts_child(first);
+        self.consts_inherit(new, high_priority);
+        new
+    }
+
+    #[track_caller]
+    pub fn consts_bind(
+        &mut self,
+        read_constants: &mut ConstId,
+        write_constants: &mut Option<ConstId>,
+    ) {
+        if let Some(w) = write_constants.take() {
+            let write = &self.constants[w.0];
+            debug_assert_eq!(write.references, 1);
+            let read_refs = self.constants[read_constants.0].references;
+            debug_assert!(read_refs > 0);
+            // if read_refs == 1 {
+            //     println!("reuse| {:?} <- {:?}", read_constants, w);
+            //     let write = &mut self.constants[w.0];
+            //     let a = mem::take(&mut write.local);
+            //     let b = mem::take(&mut write.overloads);
+            //     let c = mem::take(&mut write.parents);
+            //     let read = &mut self.constants[read_constants.0];
+            //     read.local.extend(a);
+            //     read.overloads.extend(b);
+            //     read.parents.extend(c);
+            //     *write_constants = Some(w);
+            // } else {
+            println!("newof| {:?} <- {:?}", read_constants, w);
+            let both = self.consts_of(*read_constants, w);
+            let msg = format!("B{}", self.constants[w.0].why);
+            // TODO: tis is relly nbad
+            let new_write = self.consts_child(w);
+            self.constants[new_write.0].why = msg;
+
+            *read_constants = both;
+            *write_constants = Some(new_write);
+            // }
+        }
+    }
+
+    pub fn consts_forget(&mut self, c: ConstId) {
+        self.constants[c.0].references -= 1;
     }
 }
 
@@ -609,7 +678,7 @@ impl<'p> Program<'p> {
     pub fn const_get(&self, scope: ConstId, var: &Var<'p>) -> Option<(Value, TypeId)> {
         let c = &self.constants[scope.0];
         c.local.get(var).cloned().or_else(|| {
-            for p in &c.parents {
+            for p in c.parents.iter().rev() {
                 if let Some(v) = self.const_get(*p, var) {
                     return Some(v);
                 }
@@ -625,7 +694,7 @@ impl<'p> Program<'p> {
     ) -> Option<(Value, TypeId)> {
         let c = &self.constants[scope.0];
         c.overloads.get(key).cloned().or_else(|| {
-            for p in &c.parents {
+            for p in c.parents.iter().rev() {
                 if let Some(v) = self.const_get_overload(*p, key) {
                     return Some(v);
                 }
@@ -639,7 +708,7 @@ impl<'p> Program<'p> {
         if let Some((_, t)) = c.local.iter().find(|(k, _)| k.0 == name) {
             return Some(t.clone());
         }
-        for p in &c.parents {
+        for p in c.parents.iter().rev() {
             if let Some(v) = self.const_get_named(*p, name) {
                 return Some(v);
             }
@@ -647,6 +716,7 @@ impl<'p> Program<'p> {
         None
     }
 
+    #[track_caller]
     pub fn const_insert(
         &mut self,
         scope: ConstId,
@@ -654,10 +724,11 @@ impl<'p> Program<'p> {
         v: (Value, TypeId),
     ) -> Option<(Value, TypeId)> {
         let c = &mut self.constants[scope.0];
-        // debug_assert!(c.references == 1);
+        debug_assert!(c.references == 1);
         c.local.insert(k, v)
     }
 
+    #[track_caller]
     pub fn const_insert_overload(
         &mut self,
         scope: ConstId,
@@ -665,7 +736,7 @@ impl<'p> Program<'p> {
         v: (Value, TypeId),
     ) -> Option<(Value, TypeId)> {
         let c = &mut self.constants[scope.0];
-        // debug_assert!(c.references == 1);
+        debug_assert!(c.references == 1);
         c.overloads.insert(k, v)
     }
 }

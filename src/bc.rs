@@ -1,11 +1,11 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
-    ast::{FuncId, Program, TypeId, Var},
+    ast::{FuncId, TypeId, Var},
     compiler::{DebugInfo, ExecTime},
     pool::Ident,
 };
 use codemap::Span;
-use std::{collections::HashMap, ops::Deref, rc::Rc, sync::atomic::AtomicUsize};
+use std::{collections::HashMap, panic::Location};
 
 #[derive(Clone)]
 pub enum Bc<'p> {
@@ -106,7 +106,8 @@ pub struct FnBody<'p> {
     pub func: FuncId,
     pub why: String,
     pub last_loc: Span,
-    pub constants: ConstId,
+    pub read_constants: ConstId,
+    pub write_constants: Option<ConstId>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
@@ -177,8 +178,14 @@ pub struct InterpBox {
     pub values: Vec<Value>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ConstId(pub usize);
+
+impl std::fmt::Debug for ConstId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "C{}", self.0)
+    }
+}
 
 // TODO: This must be super fucking slow
 #[derive(Debug, Clone)]
@@ -189,7 +196,9 @@ pub struct SharedConstants<'p> {
     // Constant names can be overloaded. Functions in general and anything in a generic impl use this.
     // The value in the key is arg of function or arg of generic + arg of function.
     pub overloads: HashMap<(Ident<'p>, Value), (Value, TypeId)>,
-    pub references: usize,
+    pub references: isize,
+    pub created: &'static Location<'static>,
+    pub why: String,
 }
 
 impl Value {
