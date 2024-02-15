@@ -108,15 +108,15 @@ pub fn run_main<'a: 'p, 'p>(
         local_constants: vec![],
         loc: user_span,
         arg_loc: vec![],
-        closed_consts: None,
+        capture_vars_const: vec![],
+        closed_constants: Default::default(),
     };
 
-    let vars = ResolveScope::of(&mut global);
+    let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool);
     let mut interp = Compile::new(pool, &mut program);
     // damn turns out defer would maybe be a good idea
-    let c = interp.interp.program.empty_consts("toplevel".into());
-    let result = interp.add_declarations(c, global);
+    let result = interp.add_declarations(global);
 
     fn log_dbg(interp: &Compile, save: Option<&str>) {
         if cfg!(feature = "some_log") {
@@ -167,14 +167,13 @@ pub fn run_main<'a: 'p, 'p>(
     } else {
         let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
         let id = toplevel.unwrap();
-        let constants = interp.interp.ready[id.0].as_ref().unwrap().read_constants;
         let name = pool.intern("main");
         match interp.lookup_unique_func(name) {
             None => {
                 outln!("FN {name:?} = 'MAIN' NOT FOUND");
             }
             Some(f) => {
-                match interp.compile(Some(constants), f, ExecTime::Runtime) {
+                match interp.compile(f, ExecTime::Runtime) {
                     Err(e) => {
                         log_err(codemap, &mut interp, e, save);
                         return None;

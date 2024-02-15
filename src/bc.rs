@@ -1,7 +1,8 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
     ast::{FuncId, TypeId, Var},
-    compiler::{DebugInfo, ExecTime},
+    compiler::{CErr, DebugInfo, ExecTime},
+    logging::err,
     pool::Ident,
 };
 use codemap::Span;
@@ -106,11 +107,10 @@ pub struct FnBody<'p> {
     pub func: FuncId,
     pub why: String,
     pub last_loc: Span,
-    pub read_constants: ConstId,
-    pub write_constants: Option<ConstId>,
+    pub constants: Constants<'p>,
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Value {
     F64(u64), // TODO: hash
     I64(i64),
@@ -139,6 +139,7 @@ pub enum Value {
         count: usize,
     },
     Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
+    OverloadSet(usize),
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -187,27 +188,30 @@ impl std::fmt::Debug for ConstId {
     }
 }
 
-// TODO: This must be super fucking slow
-#[derive(Debug, Clone)]
-pub struct SharedConstants<'p> {
-    pub id: ConstId,
-    pub parents: Vec<ConstId>,
+#[derive(Debug, Clone, Default)]
+pub struct Constants<'p> {
     pub local: HashMap<Var<'p>, (Value, TypeId)>,
-    // Constant names can be overloaded. Functions in general and anything in a generic impl use this.
-    // The value in the key is arg of function or arg of generic + arg of function.
-    pub overloads: HashMap<(Ident<'p>, Value), (Value, TypeId)>,
-    pub references: isize,
-    pub created: &'static Location<'static>,
-    pub why: String,
 }
 
-impl<'p> SharedConstants<'p> {
-    pub fn is_empty(&self) -> bool {
-        self.parents.is_empty() && self.is_local_empty()
+impl<'p> Constants<'p> {
+    pub fn close(&self, vars: &[Var<'p>]) -> crate::compiler::Res<'p, Self> {
+        let mut new = Self::default();
+        for k in vars {
+            if let Some(val) = self.local.get(k) {
+                new.local.insert(*k, val.clone());
+            } else {
+                err!(CErr::VarNotFound(*k))
+            }
+        }
+        Ok(new)
     }
 
-    pub fn is_local_empty(&self) -> bool {
-        self.local.is_empty() && self.overloads.is_empty()
+    pub fn get(&self, k: Var<'p>) -> Option<(Value, TypeId)> {
+        self.local.get(&k).cloned()
+    }
+
+    pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
+        self.local.insert(k, v)
     }
 }
 
@@ -238,6 +242,14 @@ impl Value {
             value,
             first: 0,
             count,
+        }
+    }
+
+    pub fn to_overloads(&self) -> Option<usize> {
+        if let &Value::OverloadSet(f) = self {
+            Some(f)
+        } else {
+            None
         }
     }
 }

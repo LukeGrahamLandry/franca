@@ -1,15 +1,16 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{ConstId, SharedConstants, Value},
+    bc::{Constants, Value},
     compiler::insert_multi,
+    logging::PoolLog,
     pool::{Ident, StringPool},
 };
 use codemap::Span;
 use std::{
     collections::HashMap,
+    fmt::format,
     hash::Hash,
     ops::{Deref, DerefMut},
-    panic::Location,
 };
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq)]
@@ -294,7 +295,8 @@ pub struct Func<'p> {
     pub capture_vars: Vec<Var<'p>>,
     pub local_constants: Vec<FatStmt<'p>>,
     pub loc: Span,
-    pub closed_consts: Option<ConstId>,
+    pub capture_vars_const: Vec<Var<'p>>,
+    pub closed_constants: Constants<'p>,
 }
 
 impl<'p> Func<'p> {
@@ -303,7 +305,11 @@ impl<'p> Func<'p> {
     }
 
     pub fn get_name(&self, pool: &StringPool<'p>) -> Ident<'p> {
-        self.name.unwrap_or_else(|| pool.intern("@anon@"))
+        self.name.unwrap_or_else(|| {
+            let code = self.body.as_ref().unwrap().log(pool).replace("\n", "");
+            let name = format!("$anon${code}$");
+            pool.intern(&name)
+        })
     }
 
     /// Find annotation ignoring arguments
@@ -352,7 +358,17 @@ pub struct Program<'p> {
     // If you're looking for a function/type name that doesn't exist, these are places you can try instantiating them.
     pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
-    pub constants: Vec<SharedConstants<'p>>,
+    pub overload_sets: Vec<OverloadSet<'p>>,
+}
+
+#[derive(Clone)]
+pub struct OverloadSet<'p>(pub Vec<OverloadOption<'p>>);
+
+#[derive(Clone)]
+pub struct OverloadOption<'p> {
+    pub name: Ident<'p>,
+    pub ty: FnType,
+    pub func: FuncId,
 }
 
 impl<'p> Stmt<'p> {
@@ -413,7 +429,7 @@ impl<'p> Program<'p> {
             impls: Default::default(),
             vars,
             pool,
-            constants: vec![],
+            overload_sets: Default::default(),
         }
     }
 
@@ -423,134 +439,6 @@ impl<'p> Program<'p> {
         } else {
             None
         }
-    }
-
-    #[track_caller]
-    pub fn empty_consts(&mut self, why: String) -> ConstId {
-        let i = self.constants.len();
-        self.constants.push(SharedConstants {
-            id: ConstId(i),
-            parents: Default::default(),
-            local: Default::default(),
-            overloads: Default::default(),
-            references: 1,
-            created: Location::caller(),
-            why,
-        });
-        ConstId(i)
-    }
-
-    #[track_caller]
-    pub fn consts_child(&mut self, c: ConstId) -> ConstId {
-        let prev = &mut self.constants[c.0];
-        debug_assert!(prev.references > 0);
-        prev.references += 1;
-        let msg = format!("C{}", prev.why);
-        let new = self.empty_consts(msg);
-        if self.constants[c.0].is_local_empty() {
-            let a_par = self.constants[c.0].parents.clone();
-            for c in a_par {
-                self.consts_inherit(new, c); // TODO: wrong order?
-            }
-            return new;
-        }
-        self.constants[new.0].parents.push(c);
-        new
-    }
-
-    #[track_caller]
-    pub fn consts_inherit(&mut self, me: ConstId, parent: ConstId) {
-        let p = &mut self.constants[parent.0];
-        if p.is_local_empty() {
-            for c in p.parents.clone() {
-                self.consts_inherit(me, c);
-            }
-            return;
-        }
-        let msg = format!("I{}]", p.why);
-        debug_assert!(p.references > 0);
-        p.references += 1;
-        let me = &mut self.constants[me.0];
-        debug_assert_eq!(me.references, 1);
-        me.parents.push(parent);
-        me.why += &msg;
-    }
-
-    #[track_caller]
-    pub fn consts_of(&mut self, first: ConstId, high_priority: ConstId) -> ConstId {
-        let a_ref = self.constants[first.0].references;
-        let b_ref = self.constants[high_priority.0].references;
-
-        if self.constants[high_priority.0].is_empty() {
-            return first;
-        }
-        if self.constants[first.0].is_empty() {
-            return high_priority;
-        }
-
-        if self.constants[first.0].is_local_empty() {
-            let new = self.consts_child(high_priority);
-            let a_par = self.constants[first.0].parents.clone();
-            for c in a_par {
-                self.consts_inherit(new, c); // TODO: wrong order?
-            }
-            return new;
-        }
-
-        // println!(
-        //     "FIRST {} HIGH {} ===",
-        //     self.log_consts(first),
-        //     self.log_consts(high_priority)
-        // );
-
-        let new = self.consts_child(first);
-        self.consts_inherit(new, high_priority);
-        new
-    }
-
-    #[track_caller]
-    pub fn consts_bind(
-        &mut self,
-        read_constants: &mut ConstId,
-        write_constants: &mut Option<ConstId>,
-    ) {
-        if let Some(w) = write_constants.take() {
-            let write = &self.constants[w.0];
-            debug_assert_eq!(write.references, 1);
-            let read_refs = self.constants[read_constants.0].references;
-            debug_assert!(read_refs > 0);
-            if write.local.is_empty() && write.overloads.is_empty() {
-                *write_constants = Some(w);
-                return;
-            }
-
-            // if read_refs == 1 {
-            //     println!("reuse| {:?} <- {:?}", read_constants, w);
-            //     let write = &mut self.constants[w.0];
-            //     let a = mem::take(&mut write.local);
-            //     let b = mem::take(&mut write.overloads);
-            //     let c = mem::take(&mut write.parents);
-            //     let read = &mut self.constants[read_constants.0];
-            //     read.local.extend(a);
-            //     read.overloads.extend(b);
-            //     read.parents.extend(c);
-            //     *write_constants = Some(w);
-            // } else {
-            // println!("newof| {:?} <- {:?}", read_constants, w);
-            let both = self.consts_of(*read_constants, w);
-            let msg = format!("B{}", self.constants[w.0].why);
-            // TODO: tis is relly nbad
-            let new_write = self.consts_child(w);
-            self.constants[new_write.0].why = msg;
-
-            *read_constants = both;
-            *write_constants = Some(new_write);
-            // }
-        }
-    }
-
-    pub fn consts_forget(&mut self, c: ConstId) {
-        self.constants[c.0].references -= 1;
     }
 }
 
@@ -581,6 +469,7 @@ impl<'p> Program<'p> {
         TypeId(id)
     }
 
+    // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         let id = FuncId(self.funcs.len());
         let name = func.name;
@@ -621,6 +510,7 @@ impl<'p> Program<'p> {
             Value::Symbol(_) => TypeId::i64(),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
             Value::Heap { .. } => TypeId::any(),
+            Value::OverloadSet(_) => TypeId::any(),
         }
     }
 
@@ -715,71 +605,6 @@ impl<'p> Program<'p> {
 
     pub fn named_tuple(&mut self, _todo_name: &str, types: Vec<TypeId>) -> TypeId {
         self.intern_type(TypeInfo::Tuple(types))
-    }
-
-    pub fn const_get(&self, scope: ConstId, var: &Var<'p>) -> Option<(Value, TypeId)> {
-        let c = &self.constants[scope.0];
-        c.local.get(var).cloned().or_else(|| {
-            for p in c.parents.iter().rev() {
-                if let Some(v) = self.const_get(*p, var) {
-                    return Some(v);
-                }
-            }
-            None
-        })
-    }
-
-    pub fn const_get_overload(
-        &self,
-        scope: ConstId,
-        key: &(Ident<'p>, Value),
-    ) -> Option<(Value, TypeId)> {
-        let c = &self.constants[scope.0];
-        c.overloads.get(key).cloned().or_else(|| {
-            for p in c.parents.iter().rev() {
-                if let Some(v) = self.const_get_overload(*p, key) {
-                    return Some(v);
-                }
-            }
-            None
-        })
-    }
-
-    pub fn const_get_named(&self, scope: ConstId, name: Ident<'_>) -> Option<(Value, TypeId)> {
-        let c = &self.constants[scope.0];
-        if let Some((_, t)) = c.local.iter().find(|(k, _)| k.0 == name) {
-            return Some(t.clone());
-        }
-        for p in c.parents.iter().rev() {
-            if let Some(v) = self.const_get_named(*p, name) {
-                return Some(v);
-            }
-        }
-        None
-    }
-
-    #[track_caller]
-    pub fn const_insert(
-        &mut self,
-        scope: ConstId,
-        k: Var<'p>,
-        v: (Value, TypeId),
-    ) -> Option<(Value, TypeId)> {
-        let c = &mut self.constants[scope.0];
-        debug_assert!(c.references == 1);
-        c.local.insert(k, v)
-    }
-
-    #[track_caller]
-    pub fn const_insert_overload(
-        &mut self,
-        scope: ConstId,
-        k: (Ident<'p>, Value),
-        v: (Value, TypeId),
-    ) -> Option<(Value, TypeId)> {
-        let c = &mut self.constants[scope.0];
-        debug_assert!(c.references == 1);
-        c.overloads.insert(k, v)
     }
 }
 

@@ -234,43 +234,23 @@ impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
             }
             writeln!(s, "===");
         }
-        writeln!(s, "=== {} CONST GROUPS ===", self.program.constants.len());
-        for c in 0..self.program.constants.len() {
-            let msg = self.program.log_consts(ConstId(c));
-            writeln!(s, "{}", msg);
-        }
         s
     }
 }
 
 impl<'p> Program<'p> {
-    pub fn log_consts(&self, c: ConstId) -> String {
-        let c = &self.constants[c.0];
+    pub fn log_consts(&self, c: &Constants<'p>) -> String {
         let mut s = String::new();
-        writeln!(
-            s,
-            "{:?}. ({}) {:?} at {} for {}",
-            c.id, c.references, c.parents, c.created, c.why
-        );
-        for (k, (v, ty)) in &c.local {
+        for (name, (v, ty)) in &c.local {
             writeln!(
                 s,
                 "   - {} = {:?} is {}",
-                k.log(self.pool),
+                name.log(self.pool),
                 v,
                 self.log_type(*ty)
             );
         }
-        for ((name, arg), (v, ty)) in &c.overloads {
-            writeln!(
-                s,
-                "   - {} {:?} = {:?} is {}",
-                self.pool.get(*name),
-                arg,
-                v,
-                self.log_type(*ty)
-            );
-        }
+
         s
     }
 }
@@ -389,11 +369,10 @@ impl<'p> PoolLog<'p> for Var<'p> {
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         format!(
-            "[fn {} {:?} {} = \nCONSTANTS: (closed={:?})\n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n",
+            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n{}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ty.log(pool),
-            self.closed_consts,
             self.local_constants
                 .iter()
                 .map(|e| e.log(pool))
@@ -414,6 +393,17 @@ impl<'p> PoolLog<'p> for Func<'p> {
                         .map(|v| v.log(pool))
                         .collect::<Vec<_>>()
                 )
+            },
+            if self.capture_vars_const.is_empty() {
+                String::from("No const captures.")
+            } else {
+                format!(
+                    "Const capturing: {:?}.",
+                    self.capture_vars_const
+                        .iter()
+                        .map(|v| v.log(pool))
+                        .collect::<Vec<_>>()
+                )
             }
         )
     }
@@ -428,11 +418,7 @@ impl<'p> PoolLog<'p> for DebugInfo<'p> {
 impl<'p> PoolLog<'p> for FnBody<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut f = String::new();
-        writeln!(
-            f,
-            "=== Bytecode for {:?} at {:?} === closed consts is {:?} ===",
-            self.func, self.when, self.read_constants,
-        );
+        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when,);
         writeln!(f, "TYPES: ");
         for (i, ty) in self.slot_types.iter().enumerate() {
             write!(f, "${i}:{ty:?}, ");

@@ -4,10 +4,10 @@ use crate::{
     ast::{
         Expr, FatExpr, FatStmt, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType,
     },
-    pool::Ident,
+    logging::{log, logln, PoolLog},
+    pool::{Ident, StringPool},
 };
 
-#[derive(Default, Debug)]
 pub struct ResolveScope<'p> {
     next_var: usize,
     scopes: Vec<Vec<Var<'p>>>,
@@ -15,6 +15,7 @@ pub struct ResolveScope<'p> {
     captures: Vec<Var<'p>>,
     info: Vec<VarInfo>,
     local_constants: Vec<Vec<FatStmt<'p>>>,
+    pool: &'p StringPool<'p>,
 }
 
 impl<'p> ResolveScope<'p> {
@@ -22,14 +23,23 @@ impl<'p> ResolveScope<'p> {
     //       then functions could be delt with here too.
     // TODO: will need to keep some state about this for macros that want to add vars?
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut Func<'p>) -> Vec<VarInfo> {
-        let mut resolver = ResolveScope::default();
+    pub fn of(stmts: &mut Func<'p>, pool: &'p StringPool<'p>) -> Vec<VarInfo> {
+        let mut resolver = ResolveScope {
+            next_var: Default::default(),
+            scopes: Default::default(),
+            track_captures_before_scope: Default::default(),
+            captures: Default::default(),
+            info: Default::default(),
+            local_constants: Default::default(),
+            pool,
+        };
 
         resolver.push_scope(true);
         resolver.resolve_func(stmts);
-        let (_globals, _) = resolver.pop_scope();
+        let (_globals, outer_captures) = resolver.pop_scope();
 
         assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
+        assert!(outer_captures.unwrap().is_empty(), "unreachable?");
         resolver.info
     }
 
@@ -73,8 +83,38 @@ impl<'p> ResolveScope<'p> {
         for c in &capures {
             self.find_var(&c.0); // This adds it back to self.captures if needed
         }
-        func.capture_vars = capures;
+
+        for v in capures {
+            if self.info[v.1].kind == VarType::Const {
+                func.capture_vars_const.push(v);
+            } else {
+                func.capture_vars.push(v);
+            }
+        }
+
         func.local_constants = self.local_constants.pop().unwrap();
+
+        logln!();
+        logln!("Scope for Func {:?}", func.synth_name(self.pool));
+        logln!(
+            "- Runtime captures: {:?}",
+            func.capture_vars
+                .iter()
+                .map(|v| v.log(self.pool))
+                .collect::<Vec<String>>()
+        );
+        logln!(
+            "- Const captures: {:?}",
+            func.capture_vars_const
+                .iter()
+                .map(|v| v.log(self.pool))
+                .collect::<Vec<String>>()
+        );
+
+        logln!("- Const locals:");
+        for d in &func.local_constants {
+            logln!("    - {:?}", d.log(self.pool).replace("\n", " "));
+        }
     }
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
@@ -129,6 +169,14 @@ impl<'p> ResolveScope<'p> {
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
             Stmt::DeclFunc(func) => {
+                if let Some(name) = func.name {
+                    let v = self.decl_var(&name);
+                    self.info.push(VarInfo {
+                        ty: TypeId::any(),
+                        kind: VarType::Const,
+                        loc: func.loc,
+                    });
+                }
                 func.annotations = aaa;
                 self.resolve_func(func);
                 self.local_constants
@@ -193,10 +241,7 @@ impl<'p> ResolveScope<'p> {
         for (i, scope) in self.scopes.iter().enumerate().rev() {
             if let Some(found) = scope.iter().position(|v| v.0 == *name) {
                 let v = scope[found];
-                if i < boundery
-                    && !self.captures.contains(&v)
-                    && self.info[v.1].kind != VarType::Const
-                {
+                if i < boundery && !self.captures.contains(&v) {
                     // We got it from our parent function.
                     self.captures.push(v);
                 }
