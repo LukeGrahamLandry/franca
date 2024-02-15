@@ -100,6 +100,7 @@ pub fn run_main<'a: 'p, 'p>(
         local_constants: vec![],
         loc: lib.span,
         arg_loc: vec![],
+        closed_consts: None,
     };
 
     let vars = ResolveScope::of(&mut global);

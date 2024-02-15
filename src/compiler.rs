@@ -248,6 +248,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         let name = self.interp.program.funcs[f.0].synth_name(self.pool).clone();
         let msg = format!("locals {}", name);
         result.write_constants = Some(self.interp.program.empty_consts(msg));
+
+        result.read_constants =
+            if let Some(closed_consts) = self.interp.program.funcs[f.0].closed_consts {
+                self.interp.program.consts_of(read_constants, closed_consts) // TODO: maybe dont even take current? why should it matter when we're compiling
+            } else {
+                result.read_constants
+            };
+
         let func = &self.interp.program.funcs[f.0];
 
         let new_constants = func.local_constants.clone();
@@ -257,7 +265,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let constants = unwrap!(result.write_constants.take(), "unreachable");
         self.pop_state(state);
-        println!("Locals of {} are {:?}", name, constants);
+        // println!("Locals of {} are {:?}", name, constants);
         Ok(constants)
     }
 
@@ -272,6 +280,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         let state = DebugState::JitToBc(f, when);
         self.push_state(&state);
+
         let local_constants = self.eval_local_constants(read_constants, f)?;
 
         while self.interp.ready.len() <= f.0 {
@@ -324,6 +333,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         f: FuncId,
     ) -> Res<'p, StackRange> {
         debug_assert!(result.write_constants.is_none());
+        // println!("PREV: {:?}", result.read_constants);
+        result.read_constants =
+            if let Some(closed_consts) = self.interp.program.funcs[f.0].closed_consts {
+                self.interp
+                    .program
+                    .consts_of(result.read_constants, closed_consts) // TODO: maybe dont even take current? why should it matter when we're compiling
+            } else {
+                result.read_constants
+            };
+
         let func = self.interp.program.funcs[f.0].clone();
         assert!(result.when == ExecTime::Comptime || !func.has_tag(self.pool, "comptime"));
         let (arg, ret) = func.ty.unwrap();
@@ -486,11 +505,20 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.interp
             .program
             .consts_bind(&mut result.read_constants, &mut result.write_constants);
-        println!(
-            "Call {} with {:?}",
-            self.interp.program.funcs[f.0].synth_name(self.pool),
+        let prev_consts = if let Some(closed_consts) = self.interp.program.funcs[f.0].closed_consts
+        {
+            self.interp
+                .program
+                .consts_of(result.read_constants, closed_consts) // TODO: maybe dont even take current? why should it matter when we're compiling
+        } else {
             result.read_constants
-        );
+        };
+
+        // println!(
+        //     "Call {} with {:?}",
+        //     self.interp.program.funcs[f.0].synth_name(self.pool),
+        //     prev_consts
+        // );
 
         let func = &self.interp.program.funcs[f.0];
         let arg_ty = match &func.ty {
@@ -498,18 +526,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             LazyFnType::Pending { arg, ret: _ } => match arg {
                 LazyType::Infer => todo!(),
                 LazyType::PendingEval(arg_e) => {
-                    let arg_ty = self.immediate_eval_expr(
-                        result.read_constants,
-                        arg_e.clone(),
-                        TypeId::ty(),
-                    )?;
+                    let arg_ty =
+                        self.immediate_eval_expr(prev_consts, arg_e.clone(), TypeId::ty())?;
                     self.to_type(arg_ty)?
                 }
                 &LazyType::Finished(arg) => arg,
             },
         };
-        let arg_value =
-            self.immediate_eval_expr(result.read_constants, arg_expr.clone(), arg_ty)?;
+        let arg_value = self.immediate_eval_expr(prev_consts, arg_expr.clone(), arg_ty)?;
 
         let func = &self.interp.program.funcs[f.0];
         if func.body.is_none() {
@@ -526,11 +550,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let arg_ty = self.interp.program.type_of(&arg_value);
-        println!(
-            "Calling {:?} {:?}",
-            func.synth_name(self.pool),
-            self.interp.program.log_type(arg_ty)
-        );
+        // println!(
+        //     "Calling {:?} {:?}",
+        //     func.synth_name(self.pool),
+        //     self.interp.program.log_type(arg_ty)
+        // );
 
         // Bind the arg into my own result so the ret calculation can use it.
         // also the body constants for generics need this. much cleanup pls.
@@ -566,10 +590,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        let prev_and_args = self
-            .interp
-            .program
-            .consts_of(result.read_constants, bound_args);
+        let prev_and_args = self.interp.program.consts_of(prev_consts, bound_args);
 
         let ret = match &func.ty {
             &LazyFnType::Finished(arg, ret) => {
@@ -602,20 +623,20 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
 
         let locals = self.eval_local_constants(prev_and_args, f)?;
-        println!("locals: {locals:?}");
+        // println!("locals: {locals:?}");
         let all_consts = self.interp.program.consts_of(prev_and_args, locals);
 
         let result = if let Some(body) = func.body {
-            println!("Eval with {:?}", all_consts);
+            // println!("Eval with {:?}", all_consts);
             self.immediate_eval_expr(all_consts, body, ret)?
         } else {
             unreachable!("builtin")
         };
-        println!(
-            "Finished {} in {:?}",
-            self.interp.program.funcs[f.0].synth_name(self.pool),
-            all_consts
-        );
+        // println!(
+        //     "Finished {} in {:?}",
+        //     self.interp.program.funcs[f.0].synth_name(self.pool),
+        //     all_consts
+        // );
 
         let ty = self.interp.program.type_of(&result);
         self.type_check_arg(ty, ret, "generic result")?;
@@ -740,18 +761,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Stmt::DeclFunc(func) => {
-                let id = self.interp.program.add_func(func.clone());
-
-                if !func.has_tag(self.pool, "comptime") {
-                    self.interp
-                        .program
-                        .consts_bind(&mut result.read_constants, &mut result.write_constants);
-                    self.ensure_compiled(result.read_constants, id, result.when)?;
-                    // TODO: dont do this, do comptime closures properly
-                }
                 if func.has_tag(self.pool, "impl") {
-                    self.generic_impl(id)?;
+                    // self.generic_impl(id)?;
+                    todo!();
                 }
+
+                let mut func = func.clone();
+                self.interp
+                    .program
+                    .consts_bind(&mut result.read_constants, &mut result.write_constants);
+                func.closed_consts = Some(result.read_constants);
+                let id = self.interp.program.add_func(func);
             }
         }
         Ok(())
@@ -1305,7 +1325,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: this is wrong? you need the constants of the decl?
                     if let Ok(f_ty) = self.infer_types(result.read_constants, f) {
                         let t = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
-                        println!("{:?}", self.interp.program.log_type(t));
+                        // println!("{:?}", self.interp.program.log_type(t));
                         if arg_ty == f_ty.arg {
                             assert!(found.is_none(), "AmbiguousCall");
                             found = Some((f, f_ty));
@@ -1453,7 +1473,15 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Resolve the lazy types for Arg and Ret
     fn infer_types(&mut self, read_constants: ConstId, func: FuncId) -> Res<'p, FnType> {
+        let read_constants =
+            if let Some(closed_consts) = self.interp.program.funcs[func.0].closed_consts {
+                self.interp.program.consts_of(read_constants, closed_consts) // TODO: maybe dont even take current? why should it matter when we're compiling
+            } else {
+                read_constants
+            };
+
         let f = &self.interp.program.funcs[func.0];
+
         self.last_loc = Some(f.loc);
         match f.ty.clone() {
             LazyFnType::Pending { arg, ret } => {
@@ -1530,6 +1558,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             local_constants: Default::default(),
             loc: e.loc,
             arg_loc: vec![],
+            closed_consts: None,
         };
         self.anon_fn_counter += 1;
         let func_id = self.interp.program.add_func(fake_func);

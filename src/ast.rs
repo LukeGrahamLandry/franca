@@ -8,9 +8,7 @@ use codemap::Span;
 use std::{
     collections::HashMap,
     hash::Hash,
-    mem,
     ops::{Deref, DerefMut},
-    os::macos::raw,
     panic::Location,
 };
 
@@ -296,6 +294,7 @@ pub struct Func<'p> {
     pub capture_vars: Vec<Var<'p>>,
     pub local_constants: Vec<FatStmt<'p>>,
     pub loc: Span,
+    pub closed_consts: Option<ConstId>,
 }
 
 impl<'p> Func<'p> {
@@ -494,7 +493,7 @@ impl<'p> Program<'p> {
             //     read.parents.extend(c);
             //     *write_constants = Some(w);
             // } else {
-            println!("newof| {:?} <- {:?}", read_constants, w);
+            // println!("newof| {:?} <- {:?}", read_constants, w);
             let both = self.consts_of(*read_constants, w);
             let msg = format!("B{}", self.constants[w.0].why);
             // TODO: tis is relly nbad

@@ -1,4 +1,10 @@
 
+## reworking constants
+
+- each compiled Func needs to track which consts it closed.
+ those were the state when you saw its declaration so you can use them when you go to compile its body which might be later. 
+
+##
 
 Trying to ensure_compiled preemptivly instead of jitting so it can be more like real compilation,
 but that makes it pass ((a, b)) isntead of (a, b) to assert_eq. But really its just making 

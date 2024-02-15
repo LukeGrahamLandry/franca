@@ -379,10 +379,11 @@ impl<'p> PoolLog<'p> for Var<'p> {
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         format!(
-            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n",
+            "[fn {} {:?} {} = \nCONSTANTS: (closed={:?})\n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ty.log(pool),
+            self.closed_consts,
             self.local_constants
                 .iter()
                 .map(|e| e.log(pool))
