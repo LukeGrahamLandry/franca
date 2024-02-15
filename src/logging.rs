@@ -19,7 +19,7 @@ macro_rules! err {
             trace: String::new(),
             value_stack: vec![],
             call_stack: vec![],
-        });
+        })
     }};
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);

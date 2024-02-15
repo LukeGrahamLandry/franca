@@ -772,6 +772,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .consts_bind(&mut result.read_constants, &mut result.write_constants);
                 func.closed_consts = Some(result.read_constants);
                 let id = self.interp.program.add_func(func);
+                let func = &self.interp.program.funcs[id.0];
+                if let Some(name) = func.name {
+                    if !func.has_tag(self.pool, "comptime") && func.capture_vars.is_empty() {
+                        let f_ty = self.infer_types(result.read_constants, id)?;
+                        let ty = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
+                        // TODO: use ret ty in key also?
+                        self.interp.program.const_insert_overload(
+                            result.write_constants.unwrap(), // why have i decided you have to be done comptime before you're done compiling.
+                            (name, Value::Type(f_ty.arg)),
+                            (Value::GetFn(id), ty),
+                        );
+                    }
+                }
             }
         }
         Ok(())
@@ -1315,42 +1328,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let f = unwrap!(f.to_func(), "want func");
                 return Ok(f);
             }
-
-            // Compute overloads
-            // TODO: any time you miss, it does all of them with that name. what happens if more have been added since then? does that ever happen?
-            if let Some(decls) = self.interp.program.declarations.get(&name) {
-                let mut found = None;
-                println!("====");
-                for f in decls.clone() {
-                    // TODO: this is wrong? you need the constants of the decl?
-                    if let Ok(f_ty) = self.infer_types(result.read_constants, f) {
-                        let t = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
-                        // println!("{:?}", self.interp.program.log_type(t));
-                        if arg_ty == f_ty.arg {
-                            assert!(found.is_none(), "AmbiguousCall");
-                            found = Some((f, f_ty));
-                        }
-                    }
-                }
-                match found {
-                    Some((f, f_ty)) => {
-                        let ty = self.interp.program.intern_type(TypeInfo::Fn(f_ty));
-                        // TODO: use ret ty in key also?
-                        self.interp.program.const_insert_overload(
-                            result.write_constants.unwrap(),
-                            (name, Value::Type(arg_ty)),
-                            (Value::GetFn(f), ty),
-                        );
-                        Ok(f)
-                    }
-                    None => err!(CErr::AmbiguousCall),
-                }
-            } else {
-                err!(CErr::UndeclaredIdent(name))
-            }
-        } else {
-            err!(CErr::AmbiguousCall)
         }
+        err!(CErr::AmbiguousCall)
     }
 
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
