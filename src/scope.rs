@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
-    logging::{logln, PoolLog},
+    logging::logln,
     pool::{Ident, StringPool},
 };
 
@@ -57,8 +57,7 @@ impl<'p> ResolveScope<'p> {
         let (outer_locals, _) = self.pop_scope();
         assert!(outer_locals.is_empty(), "function needs block");
 
-        let (args, captures) = self.pop_scope();
-        func.arg_vars = args;
+        let (_args, captures) = self.pop_scope();
         let capures = captures.unwrap();
         // Now check which things we captured from *our* parent.
         for c in &capures {
@@ -75,27 +74,7 @@ impl<'p> ResolveScope<'p> {
 
         func.local_constants = self.local_constants.pop().unwrap();
 
-        logln!();
-        logln!("Scope for Func {:?}", func.synth_name(self.pool));
-        logln!(
-            "- Runtime captures: {:?}",
-            func.capture_vars
-                .iter()
-                .map(|v| v.log(self.pool))
-                .collect::<Vec<String>>()
-        );
-        logln!(
-            "- Const captures: {:?}",
-            func.capture_vars_const
-                .iter()
-                .map(|v| v.log(self.pool))
-                .collect::<Vec<String>>()
-        );
-
-        logln!("- Const locals:");
-        for d in &func.local_constants {
-            logln!("    - {:?}", d.log(self.pool).replace('\n', " "));
-        }
+        logln!("{}", func.log_captures(self.pool));
     }
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
@@ -209,9 +188,11 @@ impl<'p> ResolveScope<'p> {
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(e, _) => self.resolve_expr(e),
             Expr::StructLiteralP(p) => {
+                self.push_scope(false);
                 for b in &mut p.bindings {
-                    self.resolve_binding(b, false, loc)
+                    self.resolve_binding(b, true, loc)
                 }
+                let _ = self.pop_scope();
             }
             Expr::String(_) => {}
         }
@@ -282,12 +263,13 @@ impl<'p> ResolveScope<'p> {
             Binding::Named(name, e) => {
                 self.resolve_type(e);
                 if declaring {
-                    let _ = self.decl_var(name);
+                    let (_old, var) = self.decl_var(name);
                     self.info.push(VarInfo {
                         ty: TypeId::any(),
                         kind: VarType::Var,
                         loc,
                     });
+                    *binding = Binding::Var(var, mem::replace(e, LazyType::Infer));
                 }
             }
             Binding::Var(_, _) => unreachable!(),

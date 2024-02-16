@@ -635,3 +635,38 @@ impl<'p> FatStmt<'p> {
         self.annotations.iter().map(|a| pool.get(a.name)).collect()
     }
 }
+
+impl<'p> Func<'p> {
+    pub fn log_captures(&self, pool: &StringPool<'p>) -> String {
+        let mut s = String::new();
+        writeln!(s, "Scope for Func {:?}", self.synth_name(pool));
+        if !self.capture_vars.is_empty() {
+            writeln!(
+                s,
+                "- Runtime captures: {:?}",
+                self.capture_vars
+                    .iter()
+                    .map(|v| v.log(pool))
+                    .collect::<Vec<String>>()
+            );
+        }
+        if !self.capture_vars_const.is_empty() {
+            writeln!(
+                s,
+                "- Const captures: {:?}",
+                self.capture_vars_const
+                    .iter()
+                    .map(|v| v.log(pool))
+                    .collect::<Vec<String>>()
+            );
+        }
+
+        if !self.local_constants.is_empty() {
+            writeln!(s, "- Const locals:");
+            for d in &self.local_constants {
+                writeln!(s, "    - {:?}", d.log(pool).replace('\n', " "));
+            }
+        }
+        s
+    }
+}

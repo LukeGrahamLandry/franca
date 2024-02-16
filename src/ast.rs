@@ -321,7 +321,6 @@ pub struct Func<'p> {
     pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_loc: Vec<Option<Span>>,
-    pub arg_vars: Vec<Var<'p>>,
     pub arg: Pattern<'p>,
     pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
@@ -347,7 +346,6 @@ impl<'p> Func<'p> {
             ret,
             body,
             arg_loc: vec![],
-            arg_vars: vec![],
             capture_vars: vec![],
             local_constants: vec![],
             loc,
@@ -483,7 +481,11 @@ impl<'p> Program<'p> {
     }
 
     pub fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
-        self.intern_type(TypeInfo::Tuple(types))
+        match types.len() {
+            0 => TypeId::unit(),
+            1 => types[0],
+            _ => self.intern_type(TypeInfo::Tuple(types)),
+        }
     }
 }
 

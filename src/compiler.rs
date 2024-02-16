@@ -308,7 +308,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_body(
         &mut self,
         result: &mut FnBody<'p>,
-        arg_range: StackRange,
+        full_arg_range: StackRange,
         f: FuncId,
     ) -> Res<'p, StackRange> {
         let func = self.interp.program.funcs[f.0].clone();
@@ -319,16 +319,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         for (name, ty) in arguments {
             let size = self.interp.program.slot_count(ty);
             let range = StackRange {
-                first: arg_range.offset(slot_count),
+                first: full_arg_range.offset(slot_count),
                 count: size,
             };
             if let Some(name) = name {
                 let prev = result.vars.insert(name, (range, ty));
                 assert!(prev.is_none(), "overwrite arg?");
             }
-            args_to_drop.push((name, arg_range));
+            args_to_drop.push((name, range));
             slot_count += size;
         }
+        assert_eq!(full_arg_range.count, slot_count);
 
         let return_value = match func.body.as_ref() {
             Some(body) => {
@@ -340,7 +341,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for (var, range) in args_to_drop {
                     if let Some(var) = var {
                         let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
-
                         assert_eq!(range, slot, "moved arg");
                     }
                     result.push(Bc::Drop(range));
@@ -367,8 +367,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 result.push(Bc::CallBuiltin {
                     name,
                     ret,
-                    arg: arg_range,
+                    arg: full_arg_range,
                 });
+                for (var, range) in args_to_drop {
+                    if let Some(var) = var {
+                        let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
+                        assert_eq!(range, slot, "moved arg");
+                    }
+                    // Don't drop, they were moved to the call.
+                }
                 ret
             }
         };
@@ -591,6 +598,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 dropping,
                 kind,
             } => {
+                let no_type = matches!(ty, LazyType::Infer);
                 let mut ty = ty.clone();
                 self.infer_types_progress(&result.constants, &mut ty)?;
                 let expected_ty = ty.unwrap();
@@ -629,10 +637,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                         )?;
                         self.last_loc = Some(stmt.loc);
                         let value = match value {
-                            None => (
-                                result.reserve_slots(self.interp.program, expected_ty),
-                                expected_ty,
-                            ),
+                            None => {
+                                if no_type {
+                                    err!("uninit vars require type hint {}", name.log(self.pool));
+                                }
+                                (
+                                    result.reserve_slots(self.interp.program, expected_ty),
+                                    expected_ty,
+                                )
+                            }
                             Some((value, ty)) => {
                                 self.type_check_arg(ty, expected_ty, "var decl")?;
                                 (value, ty)
@@ -850,11 +863,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.ensure_compiled(func, ExecTime::Comptime)?;
                     result.load_constant(self.interp.program, Value::GetFn(func))
                 } else {
-                    println!("VARS: {:?}", result.vars);
-                    println!(
+                    outln!("VARS: {:?}", result.vars);
+                    outln!(
                         "CONSTANTS: {:?}",
                         self.interp.program.log_consts(&result.constants)
                     );
+                    let current_func = &self.interp.program.funcs[result.func.0];
+                    outln!("{}", current_func.log_captures(self.pool));
                     ice!(
                         "Missing resolved variable {:?} '{}' at {:?}",
                         var,
@@ -1692,7 +1707,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         for (name, ty) in raw_fields {
             let count = self.interp.program.slot_count(ty);
             fields.push(Field {
-                name: name.unwrap().0,
+                name: unwrap!(name, "field name").0,
                 ty,
                 first: size,
                 count,

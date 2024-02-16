@@ -6,7 +6,7 @@ use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
 use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::Binding;
+use crate::ast::{Binding, TypeId};
 use crate::logging::logln;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
@@ -386,6 +386,11 @@ impl<'a, 'p> Parser<'a, 'p> {
                 // No trailing comma is fine
                 break;
             }
+        }
+
+        if args.bindings.is_empty() {
+            args.bindings
+                .push(Binding::Discard(LazyType::Finished(TypeId::unit())));
         }
 
         Ok(args)
