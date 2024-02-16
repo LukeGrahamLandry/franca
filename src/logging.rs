@@ -292,6 +292,7 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
 impl<'p> PoolLog<'p> for LazyType<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
+            LazyType::EvilUnit => panic!(),
             LazyType::Infer => "Infer".into(),
             LazyType::PendingEval(e) => e.log(pool),
             LazyType::Finished(ty) => format!("{:?}", ty),
@@ -515,8 +516,8 @@ impl Stmt<'_> {
             Stmt::Eval(e) => Some(e.loc),
             Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
             Stmt::DeclVar { value, .. } => value.as_ref().map(|e| e.loc),
-            Stmt::DeclNamed { .. } => todo!(),
             Stmt::Set { place, .. } => Some(place.loc),
+            _ => None,
         }
     }
 }

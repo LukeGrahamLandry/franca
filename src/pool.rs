@@ -3,6 +3,12 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, syn
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
 
+impl<'p> Ident<'p> {
+    pub fn null() -> Ident<'p> {
+        Ident(0, PhantomData)
+    }
+}
+
 impl Debug for Ident<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "S{}", self.0)
@@ -64,8 +70,8 @@ impl<'pool> StringPool<'pool> {
 
 impl Drop for StringPool<'_> {
     fn drop(&mut self) {
-        let v = self.values.read().unwrap();
-        for s in v.iter() {
+        let mut v = self.values.write().unwrap();
+        for s in v.drain(0..) {
             // # Safety
             // Drop can only be called once.
             unsafe {

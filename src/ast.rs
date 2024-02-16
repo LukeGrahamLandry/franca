@@ -2,13 +2,14 @@
 use crate::{
     bc::{Constants, Value},
     compiler::insert_multi,
-    logging::PoolLog,
     pool::{Ident, StringPool},
 };
 use codemap::Span;
 use std::{
     collections::HashMap,
+    default,
     hash::Hash,
+    mem,
     ops::{Deref, DerefMut},
 };
 
@@ -229,12 +230,22 @@ impl<'p> Pattern<'p> {
                 Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e.clone(),
             })
             .map(|t| match t {
+                LazyType::EvilUnit => panic!(),
                 LazyType::Infer => None,
                 LazyType::PendingEval(e) => Some(e),
                 LazyType::Finished(_) => None,
                 LazyType::Different(_) => unreachable!(),
             })
             .collect()
+    }
+
+    pub fn remove_named(&mut self, arg_name: Var<'p>) {
+        let start = self.bindings.len();
+        self.bindings.retain(|b| match b {
+            Binding::Var(name, _) => *name == arg_name,
+            _ => true,
+        });
+        debug_assert_ne!(start, self.bindings.len());
     }
 }
 
@@ -305,6 +316,7 @@ pub enum Stmt<'p> {
         place: FatExpr<'p>,
         value: FatExpr<'p>,
     },
+    DoneDeclFunc(FuncId),
 }
 
 #[derive(Clone, Debug)]
@@ -317,7 +329,7 @@ pub struct FatStmt<'p> {
 #[derive(Clone, Debug)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
-    pub name: Option<Ident<'p>>,   // it might be an annonomus closure
+    pub name: Ident<'p>,           // it might be an annonomus closure
     pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg_loc: Vec<Option<Span>>,
@@ -329,15 +341,18 @@ pub struct Func<'p> {
     pub capture_vars_const: Vec<Var<'p>>,
     pub closed_constants: Constants<'p>,
     pub finished_type: Option<FnType>,
+    pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
+    pub evil_uninit: bool,
 }
 
 impl<'p> Func<'p> {
     pub fn new(
-        name: Option<Ident<'p>>,
+        name: Ident<'p>,
         arg: Pattern<'p>,
         ret: LazyType<'p>,
         body: Option<FatExpr<'p>>,
         loc: Span,
+        has_name: bool,
     ) -> Self {
         Func {
             annotations: vec![],
@@ -353,19 +368,19 @@ impl<'p> Func<'p> {
             capture_vars_const: vec![],
             var_name: None,
             finished_type: None,
+            referencable_name: has_name,
+            evil_uninit: false,
         }
     }
 
+    // TODO: remove
     pub fn synth_name(&self, pool: &StringPool<'p>) -> &'p str {
         pool.get(self.get_name(pool))
     }
 
-    pub fn get_name(&self, pool: &StringPool<'p>) -> Ident<'p> {
-        self.name.unwrap_or_else(|| {
-            let code = self.body.as_ref().unwrap().log(pool).replace('\n', "");
-            let name = format!("$anon${code}$");
-            pool.intern(&name)
-        })
+    // TODO: remove
+    pub fn get_name(&self, _: &StringPool<'p>) -> Ident<'p> {
+        self.name
     }
 
     /// Find annotation ignoring arguments
@@ -388,8 +403,10 @@ impl<'p> Func<'p> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash)]
+#[derive(Clone, PartialEq, Debug, Hash, Default)]
 pub enum LazyType<'p> {
+    #[default]
+    EvilUnit,
     Infer,
     PendingEval(FatExpr<'p>),
     Finished(TypeId),
@@ -517,19 +534,15 @@ impl<'p> Program<'p> {
     }
 
     // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS
+    #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         let id = FuncId(self.funcs.len());
         let name = func.name;
+        let named = func.referencable_name;
         self.funcs.push(func);
-        if let Some(name) = name {
+        if named {
             insert_multi(&mut self.declarations, name, id);
         }
-        id
-    }
-
-    pub fn add_func_no_decl(&mut self, func: Func<'p>) -> FuncId {
-        let id = FuncId(self.funcs.len());
-        self.funcs.push(func);
         id
     }
 
@@ -553,7 +566,7 @@ impl<'p> Program<'p> {
             Value::Tuple { values, .. } => {
                 // TODO: actually use container_type
                 let types = values.iter().map(|v| self.type_of(v)).collect();
-                self.intern_type(TypeInfo::Tuple(types))
+                self.tuple_of(types)
             }
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
@@ -634,7 +647,7 @@ impl<'p> Program<'p> {
             types.push(*ty);
             size += count;
         }
-        let as_tuple = self.intern_type(TypeInfo::Tuple(types));
+        let as_tuple = self.tuple_of(types);
         let ty = TypeInfo::Struct {
             fields,
             size,
@@ -657,7 +670,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn named_tuple(&mut self, _todo_name: &str, types: Vec<TypeId>) -> TypeId {
-        self.intern_type(TypeInfo::Tuple(types))
+        self.tuple_of(types)
     }
 }
 
@@ -738,4 +751,34 @@ impl<'p> Expr<'p> {
             _ => None,
         }
     }
+}
+
+impl<'p> Default for Func<'p> {
+    fn default() -> Self {
+        Self {
+            annotations: vec![],
+            name: Ident::null(),
+            var_name: None,
+            body: None,
+            arg_loc: vec![],
+            arg: Pattern {
+                bindings: vec![],
+                loc: garbage_loc(),
+            },
+            ret: LazyType::Infer,
+            capture_vars: vec![],
+            local_constants: vec![],
+            loc: garbage_loc(),
+            capture_vars_const: vec![],
+            closed_constants: Default::default(),
+            finished_type: None,
+            referencable_name: false,
+            evil_uninit: true,
+        }
+    }
+}
+
+fn garbage_loc() -> Span {
+    // Surely any (u32, u32) is valid
+    unsafe { mem::zeroed() }
 }

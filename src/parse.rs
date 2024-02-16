@@ -101,7 +101,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(Equals)?;
                 let body = self.parse_expr()?;
 
-                let func = Func::new(None, arg, ret, Some(body), loc);
+                let name = self.pool.intern(&body.expr.log(self.pool));
+                let func = Func::new(name, arg, ret, Some(body), loc, false);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
             LeftSquiggle => {
@@ -257,7 +258,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
                 };
 
-                let func = Func::new(Some(name), arg, ret, body, loc);
+                let func = Func::new(name, arg, ret, body, loc, true);
                 Stmt::DeclFunc(func)
             }
             Qualifier(kind) => {

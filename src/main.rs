@@ -12,11 +12,12 @@ fn main() {
             Some(&name),
         );
     } else {
+        let mut passed = true;
         for case in fs::read_dir("tests").unwrap() {
             let pool = Box::leak(Box::<StringPool>::default());
             let case = case.unwrap();
             println!("TEST: {}", case.file_name().to_str().unwrap());
-            run_main(
+            passed &= run_main(
                 pool,
                 fs::read_to_string(case.path()).unwrap(),
                 Value::I64(0),
@@ -28,7 +29,9 @@ fn main() {
                         .strip_suffix(".txt")
                         .unwrap(),
                 ),
-            );
+            )
+            .is_some();
         }
+        assert!(passed);
     }
 }

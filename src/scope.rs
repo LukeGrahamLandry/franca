@@ -87,6 +87,7 @@ impl<'p> ResolveScope<'p> {
 
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
+            Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::DeclNamed {
                 name,
                 ty,
@@ -127,8 +128,8 @@ impl<'p> ResolveScope<'p> {
             Stmt::Noop => {}
             Stmt::Eval(e) => self.resolve_expr(e),
             Stmt::DeclFunc(func) => {
-                if let Some(name) = func.name {
-                    let (_shadow, v) = self.decl_var(&name);
+                if func.referencable_name {
+                    let (_shadow, v) = self.decl_var(&func.name);
                     func.var_name = Some(v);
                     self.info.push(VarInfo {
                         ty: TypeId::any(),
@@ -251,6 +252,7 @@ impl<'p> ResolveScope<'p> {
 
     fn resolve_type(&mut self, ty: &mut LazyType<'p>) {
         match ty {
+            LazyType::EvilUnit => panic!(),
             LazyType::Infer => {}
             LazyType::PendingEval(e) => self.resolve_expr(e),
             LazyType::Finished(_) => {}

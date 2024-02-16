@@ -5,6 +5,16 @@ use codemap::CodeMap;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use pool::StringPool;
 
+macro_rules! mut_replace {
+    ($value:expr, $f:expr) => {{
+        let temp = mem::take(&mut $value);
+        let (temp, out) = $f(temp)?;
+        $value = temp;
+        out
+    }};
+}
+pub(crate) use mut_replace;
+
 pub mod ast;
 pub mod bc;
 pub mod compiler;
@@ -91,7 +101,7 @@ pub fn run_main<'a: 'p, 'p>(
         }
     }
 
-    let name = Some(pool.intern("@toplevel@"));
+    let name = pool.intern("@toplevel@");
     let body = Some(FatExpr::synthetic(
         Expr::Block {
             body: stmts,
@@ -102,7 +112,7 @@ pub fn run_main<'a: 'p, 'p>(
     ));
 
     let (g_arg, g_ret) = Func::known_args(TypeId::unit(), TypeId::unit(), user_span);
-    let mut global = Func::new(name, g_arg, g_ret, body, user_span);
+    let mut global = Func::new(name, g_arg, g_ret, body, user_span, true);
 
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool);

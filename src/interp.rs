@@ -724,19 +724,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         if let Value::Type(id) = value {
             Ok(id)
         } else if let Value::Tuple { values, .. } = value {
-            // TODO: fix horible special case. This causes infinite pain for tuple types because you need to put them in a const with a type annotation,
-            //       or they're passed as multiple arguments.
-            let ty = match values.len() {
-                0 => TypeId::unit(),
-                1 => self.to_type(values.into_iter().next().unwrap())?,
-                _ => {
-                    // println!("Type Tuple: {:?}", values);
-                    let values: Res<'_, Vec<_>> =
-                        values.into_iter().map(|v| self.to_type(v)).collect();
-                    self.program.intern_type(TypeInfo::Tuple(values?))
-                }
-            };
-            Ok(ty)
+            let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v)).collect();
+            Ok(self.program.tuple_of(values?))
         } else if let Value::Unit = value {
             // This lets you use the literal `()` as a type (i dont parse it as a tuple because reasons). TODO: check if that still true with new parser
             Ok(self.program.intern_type(TypeInfo::Unit))
