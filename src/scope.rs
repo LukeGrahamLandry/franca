@@ -1,9 +1,9 @@
 use std::{mem, ops::DerefMut};
 
+use codemap::Span;
+
 use crate::{
-    ast::{
-        Expr, FatExpr, FatStmt, Func, LazyFnType, LazyType, Stmt, TypeId, Var, VarInfo, VarType,
-    },
+    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
     logging::{logln, PoolLog},
     pool::{Ident, StringPool},
 };
@@ -46,29 +46,10 @@ impl<'p> ResolveScope<'p> {
     fn resolve_func(&mut self, func: &mut Func<'p>) {
         self.local_constants.push(Default::default());
         self.push_scope(true);
-        for name in func.arg_names.iter().flatten() {
-            let _ = self.decl_var(name);
-            self.info.push(VarInfo {
-                ty: TypeId::any(),
-                kind: VarType::Var,
-                loc: func.loc,
-            });
+        for b in &mut func.arg.bindings {
+            self.resolve_binding(b, true, func.loc);
         }
-        match &mut func.ty {
-            LazyFnType::Finished(_, _) => {}
-            LazyFnType::Pending { arg, ret } => {
-                match arg {
-                    LazyType::Infer => {}
-                    LazyType::PendingEval(ty) => self.resolve_expr(ty),
-                    LazyType::Finished(_) => {}
-                }
-                match ret {
-                    LazyType::Infer => {}
-                    LazyType::PendingEval(ty) => self.resolve_expr(ty),
-                    LazyType::Finished(_) => {}
-                }
-            }
-        }
+        self.resolve_type(&mut func.ret);
         self.push_scope(false);
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)
@@ -77,7 +58,7 @@ impl<'p> ResolveScope<'p> {
         assert!(outer_locals.is_empty(), "function needs block");
 
         let (args, captures) = self.pop_scope();
-        func.arg_vars = Some(args);
+        func.arg_vars = args;
         let capures = captures.unwrap();
         // Now check which things we captured from *our* parent.
         for c in &capures {
@@ -133,9 +114,7 @@ impl<'p> ResolveScope<'p> {
                 value,
                 kind,
             } => {
-                if let Some(ty) = ty {
-                    self.resolve_expr(ty);
-                }
+                self.resolve_type(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value);
                 }
@@ -147,7 +126,7 @@ impl<'p> ResolveScope<'p> {
                 });
                 let decl = Stmt::DeclVar {
                     name: new,
-                    ty: mem::replace(ty, Some(FatExpr::null(loc))),
+                    ty: mem::replace(ty, LazyType::Infer),
                     value: mem::replace(value, Some(FatExpr::null(loc))),
                     dropping: old,
                     kind: *kind,
@@ -192,6 +171,7 @@ impl<'p> ResolveScope<'p> {
     }
 
     fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
+        let loc = expr.loc;
         match expr.deref_mut() {
             Expr::GenericArgs(f, arg) | Expr::Call(f, arg) => {
                 self.resolve_expr(f);
@@ -229,8 +209,8 @@ impl<'p> ResolveScope<'p> {
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(e, _) => self.resolve_expr(e),
             Expr::StructLiteralP(p) => {
-                for e in p.types.iter_mut().flatten() {
-                    self.resolve_expr(e);
+                for b in &mut p.bindings {
+                    self.resolve_binding(b, false, loc)
                 }
             }
             Expr::String(_) => {}
@@ -286,5 +266,32 @@ impl<'p> ResolveScope<'p> {
             None
         };
         (vars, captures)
+    }
+
+    fn resolve_type(&mut self, ty: &mut LazyType<'p>) {
+        match ty {
+            LazyType::Infer => {}
+            LazyType::PendingEval(e) => self.resolve_expr(e),
+            LazyType::Finished(_) => {}
+            LazyType::Different(parts) => parts.iter_mut().for_each(|t| self.resolve_type(t)),
+        }
+    }
+
+    fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) {
+        match binding {
+            Binding::Named(name, e) => {
+                self.resolve_type(e);
+                if declaring {
+                    let _ = self.decl_var(name);
+                    self.info.push(VarInfo {
+                        ty: TypeId::any(),
+                        kind: VarType::Var,
+                        loc,
+                    });
+                }
+            }
+            Binding::Var(_, _) => unreachable!(),
+            Binding::Discard(e) => self.resolve_type(e),
+        }
     }
 }

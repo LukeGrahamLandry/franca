@@ -6,9 +6,10 @@ use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
 use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
+use crate::ast::Binding;
 use crate::logging::logln;
 use crate::{
-    ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyFnType, LazyType, Pattern, Stmt},
+    ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
     lex::{Lexer, Token, TokenType},
     logging::PoolLog,
@@ -100,24 +101,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(Equals)?;
                 let body = self.parse_expr()?;
 
-                Ok(self.expr(Expr::Closure(Box::new(Func {
-                    annotations: vec![],
-                    name: None,
-                    ty: LazyFnType::Pending {
-                        arg: arg.clone().make_ty(),
-                        ret,
-                    },
-                    body: Some(body),
-                    arg_names: arg.names,
-                    arg_loc: vec![],
-                    arg_vars: None,
-                    capture_vars: vec![],
-                    local_constants: vec![],
-                    loc,
-                    capture_vars_const: vec![],
-                    closed_constants: Default::default(),
-                    var_name: None,
-                }))))
+                let func = Func::new(None, arg, ret, Some(body), loc);
+                Ok(self.expr(Expr::Closure(Box::new(func))))
             }
             LeftSquiggle => {
                 self.start_subexpr();
@@ -272,24 +257,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                     _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
                 };
 
-                Stmt::DeclFunc(Func {
-                    annotations: vec![],
-                    name: Some(name),
-                    ty: LazyFnType::Pending {
-                        arg: arg.clone().make_ty(),
-                        ret,
-                    },
-                    body,
-                    arg_names: arg.names,
-                    arg_loc: vec![],
-                    arg_vars: None,
-                    capture_vars: vec![],
-                    local_constants: vec![],
-                    loc,
-                    closed_constants: Default::default(),
-                    capture_vars_const: vec![],
-                    var_name: None,
-                })
+                let func = Func::new(Some(name), arg, ret, body, loc);
+                Stmt::DeclFunc(func)
             }
             Qualifier(kind) => {
                 self.pop();
@@ -300,12 +269,18 @@ impl<'a, 'p> Parser<'a, 'p> {
                 } else {
                     None
                 };
-                assert!(binding.names.len() == 1 && binding.types.len() <= 1);
+                // TODO: allow multiple bindings
+                let (name, ty) = match binding {
+                    Binding::Named(i, e) => (i, e),
+                    Binding::Var(_, _) => unreachable!(),
+                    Binding::Discard(e) => panic!("var decl needs name. {:?}", e),
+                };
+
                 self.eat(Semicolon)?;
                 // TODO: this could just carry the pattern forward.
                 Stmt::DeclNamed {
-                    name: binding.names[0].unwrap(),
-                    ty: binding.types.first().unwrap().clone(),
+                    name,
+                    ty,
                     value,
                     kind,
                 }
@@ -390,7 +365,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 RightParen | RightSquiggle => break,
                 Comma => return Err(self.expected("Expr")),
                 _ => {
-                    args.then(self.parse_type_binding()?);
+                    args.bindings.push(self.parse_type_binding()?);
                     if Comma == self.peek() {
                         // inner and optional trailing
                         self.eat(Comma)?;
@@ -403,7 +378,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
 
         while RightParen != self.peek() && RightSquiggle != self.peek() {
-            args.then(self.parse_type_binding()?);
+            args.bindings.push(self.parse_type_binding()?);
             if Comma == self.peek() {
                 // inner and optional trailing
                 self.eat(Comma)?;
@@ -418,20 +393,15 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     // TODO: rn just one ident but support tuple for pattern matching
     /// `Names ':' ?Expr`
-    fn parse_type_binding(&mut self) -> Res<Pattern<'p>> {
-        let loc = self.lexer.nth(0).span;
+    fn parse_type_binding(&mut self) -> Res<Binding<'p>> {
         let name = self.ident()?;
         let types = if Colon == self.peek() {
             self.pop();
-            vec![Some(self.parse_expr()?)]
+            LazyType::PendingEval(self.parse_expr()?)
         } else {
-            vec![None]
+            LazyType::Infer
         };
-        Ok(Pattern {
-            names: vec![Some(name)],
-            types,
-            loc,
-        })
+        Ok(Binding::Named(name, types))
     }
 
     #[track_caller]

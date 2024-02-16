@@ -17,7 +17,7 @@ pub mod pool;
 pub mod scope;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Func, LazyFnType, Program, TypeId},
+    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
     compiler::{Compile, CompileError, ExecTime},
     logging::{outln, PoolLog},
     parse::Parser,
@@ -57,6 +57,7 @@ test_file!(basic);
 test_file!(structs);
 test_file!(generics);
 test_file!(overloading);
+test_file!(closures);
 
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
@@ -90,28 +91,18 @@ pub fn run_main<'a: 'p, 'p>(
         }
     }
 
-    let mut global = Func {
-        annotations: vec![],
-        name: Some(pool.intern("@toplevel@")),
-        ty: LazyFnType::Finished(TypeId::any(), TypeId::any()),
-        body: Some(FatExpr::synthetic(
-            Expr::Block {
-                body: stmts,
-                result: Box::new(FatExpr::synthetic(Expr::Value(Value::Unit), user_span)),
-                locals: None,
-            },
-            user_span,
-        )),
-        arg_names: vec![],
-        arg_vars: None,
-        capture_vars: vec![],
-        local_constants: vec![],
-        loc: user_span,
-        arg_loc: vec![],
-        capture_vars_const: vec![],
-        closed_constants: Default::default(),
-        var_name: None,
-    };
+    let name = Some(pool.intern("@toplevel@"));
+    let body = Some(FatExpr::synthetic(
+        Expr::Block {
+            body: stmts,
+            result: Box::new(FatExpr::synthetic(Expr::Value(Value::Unit), user_span)),
+            locals: None,
+        },
+        user_span,
+    ));
+
+    let (g_arg, g_ret) = Func::known_args(TypeId::unit(), TypeId::unit(), user_span);
+    let mut global = Func::new(name, g_arg, g_ret, body, user_span);
 
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool);

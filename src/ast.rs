@@ -48,17 +48,6 @@ impl TypeId {
     }
 }
 
-pub struct FuncFlags {
-    // Calls must complete and produce a value at compile time.
-    pub comptime: bool,
-    // I don't support escaping captures. Calls must be inlined.
-    pub has_captures: bool,
-    // Used for imported c functions.
-    pub no_overloads: bool,
-    // This is a special one the compiler might have a better implementation for.
-    pub intrinsic: bool,
-}
-
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub enum VarType {
     Let,
@@ -158,51 +147,94 @@ pub struct FatExpr<'p> {
     pub known: Known,
 }
 
-// argument of a function and left of variable declaration.
 #[derive(Clone, Debug)]
 pub struct Pattern<'p> {
-    pub names: Vec<Option<Ident<'p>>>,
-    pub types: Vec<Option<FatExpr<'p>>>,
+    pub bindings: Vec<Binding<'p>>,
     pub loc: Span,
+}
+
+// arguments of a function and left of variable declaration.
+#[derive(Clone, Debug)]
+pub enum Binding<'p> {
+    Named(Ident<'p>, LazyType<'p>),
+    Var(Var<'p>, LazyType<'p>),
+    Discard(LazyType<'p>),
+}
+
+impl<'p> Binding<'p> {
+    pub fn type_for_name(&self, name: Var) -> Option<&LazyType> {
+        match self {
+            Binding::Named(_, _) => unreachable!(),
+            Binding::Var(v, ty) => {
+                if *v == name {
+                    return Some(ty);
+                }
+                None
+            }
+            Binding::Discard(_) => None,
+        }
+    }
+
+    pub fn unwrap(&self) -> TypeId {
+        match self {
+            Binding::Named(_, ty) => ty.unwrap(),
+            Binding::Var(_, ty) => ty.unwrap(),
+            Binding::Discard(ty) => ty.unwrap(),
+        }
+    }
 }
 
 impl<'p> Pattern<'p> {
     pub fn empty(loc: Span) -> Self {
         Self {
-            names: vec![],
-            types: vec![],
             loc,
+            bindings: vec![],
         }
     }
 
     // Useful for function args.
     pub fn then(&mut self, other: Self) {
-        self.names.extend(other.names);
-        self.types.extend(other.types);
+        self.bindings.extend(other.bindings);
     }
 
-    pub fn make_ty(self) -> LazyType<'p> {
-        match self.types.len() {
-            // Note: this is the *type* `Unit`, NOT the *value* `unit`
-            0 => LazyType::Finished(TypeId::unit()),
-            1 => {
-                let ty = self.types.into_iter().next().unwrap();
-                match ty {
-                    Some(e) => LazyType::PendingEval(e),
-                    None => LazyType::Infer,
-                }
-            }
-            _ => {
-                let e = FatExpr {
-                    expr: Expr::Tuple(self.types.into_iter().map(|ty| ty.unwrap()).collect()),
-                    loc: self.loc,
-                    id: 3456789,
-                    ty: None,
-                    known: Known::Foldable,
+    pub fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId)> {
+        self.bindings
+            .iter()
+            .map(|b| {
+                let name = match b {
+                    Binding::Named(_, _) => None,
+                    Binding::Var(v, _) => Some(*v),
+                    Binding::Discard(_) => None,
                 };
-                LazyType::PendingEval(e)
-            }
-        }
+                (name, b.unwrap())
+            })
+            .collect()
+    }
+
+    pub fn flatten_names(&self) -> Vec<Ident<'p>> {
+        self.bindings
+            .iter()
+            .map(|b| match b {
+                Binding::Named(i, _) => *i,
+                Binding::Var(v, _) => v.0,
+                Binding::Discard(e) => todo!("struct no name? {e:?}"),
+            })
+            .collect()
+    }
+
+    pub fn flatten_exprs(&self) -> Option<Vec<FatExpr<'p>>> {
+        self.bindings
+            .iter()
+            .map(|b| match b {
+                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e.clone(),
+            })
+            .map(|t| match t {
+                LazyType::Infer => None,
+                LazyType::PendingEval(e) => Some(e),
+                LazyType::Finished(_) => None,
+                LazyType::Different(_) => unreachable!(),
+            })
+            .collect()
     }
 }
 
@@ -256,7 +288,7 @@ pub enum Stmt<'p> {
     // Backend Only
     DeclVar {
         name: Var<'p>,
-        ty: Option<FatExpr<'p>>,
+        ty: LazyType<'p>,
         value: Option<FatExpr<'p>>,
         dropping: Option<Var<'p>>, // if this is a redeclaration, immediatly call the drop handler on the old one
         kind: VarType,
@@ -265,7 +297,7 @@ pub enum Stmt<'p> {
     // Frontend only
     DeclNamed {
         name: Ident<'p>,
-        ty: Option<FatExpr<'p>>,
+        ty: LazyType<'p>,
         value: Option<FatExpr<'p>>,
         kind: VarType,
     },
@@ -287,19 +319,45 @@ pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Option<Ident<'p>>,   // it might be an annonomus closure
     pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
-    pub ty: LazyFnType<'p>,        // We might not have typechecked yet.
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
-    pub arg_names: Vec<Option<Ident<'p>>>,
     pub arg_loc: Vec<Option<Span>>,
-    pub arg_vars: Option<Vec<Var<'p>>>,
+    pub arg_vars: Vec<Var<'p>>,
+    pub arg: Pattern<'p>,
+    pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
     pub local_constants: Vec<FatStmt<'p>>,
     pub loc: Span,
     pub capture_vars_const: Vec<Var<'p>>,
     pub closed_constants: Constants<'p>,
+    pub finished_type: Option<FnType>,
 }
 
 impl<'p> Func<'p> {
+    pub fn new(
+        name: Option<Ident<'p>>,
+        arg: Pattern<'p>,
+        ret: LazyType<'p>,
+        body: Option<FatExpr<'p>>,
+        loc: Span,
+    ) -> Self {
+        Func {
+            annotations: vec![],
+            name,
+            arg,
+            ret,
+            body,
+            arg_loc: vec![],
+            arg_vars: vec![],
+            capture_vars: vec![],
+            local_constants: vec![],
+            loc,
+            closed_constants: Default::default(),
+            capture_vars_const: vec![],
+            var_name: None,
+            finished_type: None,
+        }
+    }
+
     pub fn synth_name(&self, pool: &StringPool<'p>) -> &'p str {
         pool.get(self.get_name(pool))
     }
@@ -317,15 +375,19 @@ impl<'p> Func<'p> {
         let name = pool.intern(name);
         self.annotations.iter().any(|a| a.name == name)
     }
-}
 
-#[derive(Clone, PartialEq, Debug, Hash)]
-pub enum LazyFnType<'p> {
-    Finished(TypeId, TypeId),
-    Pending {
-        arg: LazyType<'p>,
-        ret: LazyType<'p>,
-    },
+    pub fn unwrap_ty(&self) -> FnType {
+        self.finished_type.unwrap()
+    }
+
+    pub fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {
+        let arg = Pattern {
+            bindings: vec![Binding::Discard(LazyType::Finished(arg))],
+            loc,
+        };
+        let ret = LazyType::Finished(ret);
+        (arg, ret)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Hash)]
@@ -333,6 +395,7 @@ pub enum LazyType<'p> {
     Infer,
     PendingEval(FatExpr<'p>),
     Finished(TypeId),
+    Different(Vec<Self>),
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
@@ -378,28 +441,6 @@ impl<'p> Stmt<'p> {
     }
 }
 
-impl<'p> LazyFnType<'p> {
-    pub fn of(arg_type: Option<FatExpr<'p>>, return_type: Option<FatExpr<'p>>) -> LazyFnType<'p> {
-        let arg = match &arg_type {
-            Some(arg) => LazyType::PendingEval(arg.clone()),
-            None => LazyType::Infer,
-        };
-
-        let ret = match &return_type {
-            Some(ret) => LazyType::PendingEval(ret.clone()),
-            None => LazyType::Infer,
-        };
-        LazyFnType::Pending { arg, ret }
-    }
-
-    pub fn unwrap(&self) -> (TypeId, TypeId) {
-        match self {
-            LazyFnType::Finished(arg, ret) => (*arg, *ret),
-            LazyFnType::Pending { arg, ret } => panic!("Not ready {:?} {:?}", arg, ret),
-        }
-    }
-}
-
 // TODO: print actual type info
 impl<'p> LazyType<'p> {
     pub fn unwrap(&self) -> TypeId {
@@ -439,6 +480,10 @@ impl<'p> Program<'p> {
         } else {
             None
         }
+    }
+
+    pub fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
+        self.intern_type(TypeInfo::Tuple(types))
     }
 }
 
@@ -488,7 +533,7 @@ impl<'p> Program<'p> {
 
     pub fn returns_type(&self, f: FuncId) -> bool {
         let func = &self.funcs[f.0];
-        let (_, ret) = func.ty.unwrap();
+        let ret = func.ret.unwrap();
         let ty = &self.types[ret.0];
         ty == &TypeInfo::Type
     }
@@ -533,8 +578,8 @@ impl<'p> Program<'p> {
     }
 
     pub fn func_type(&mut self, id: FuncId) -> TypeId {
-        let (arg, ret) = self.funcs[id.0].ty.unwrap();
-        self.intern_type(TypeInfo::Fn(FnType { arg, ret }))
+        let ty = self.funcs[id.0].unwrap_ty();
+        self.intern_type(TypeInfo::Fn(ty))
     }
 
     pub fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {

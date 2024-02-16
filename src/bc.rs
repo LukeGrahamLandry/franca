@@ -207,7 +207,7 @@ impl<'p> Constants<'p> {
     }
 
     pub fn add_all(&mut self, other: &Self) {
-        self.local.extend(other.local.clone().into_iter())
+        self.local.extend(other.local.clone())
     }
 
     pub fn get(&self, k: Var<'p>) -> Option<(Value, TypeId)> {

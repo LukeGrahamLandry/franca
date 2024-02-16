@@ -142,9 +142,7 @@ pub(crate) use err;
 use crate::ast::FatStmt;
 use crate::bc::*;
 use crate::{
-    ast::{
-        Expr, FatExpr, Func, FuncId, LazyFnType, LazyType, Program, Stmt, TypeId, TypeInfo, Var,
-    },
+    ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugInfo, DebugState},
     interp::Interp,
     pool::StringPool,
@@ -255,17 +253,6 @@ impl<'p> Program<'p> {
     }
 }
 
-impl<'p> PoolLog<'p> for LazyFnType<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
-        match self {
-            LazyFnType::Finished(arg, ret) => format!("(fn({:?}) {:?})", arg, ret),
-            LazyFnType::Pending { arg, ret } => {
-                format!("(fn({}) {})", arg.log(pool), ret.log(pool))
-            }
-        }
-    }
-}
-
 impl<'p> PoolLog<'p> for Stmt<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
@@ -277,9 +264,7 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
             } => format!(
                 "{kind:?} {}: {} = {};",
                 pool.get(*name),
-                ty.as_ref()
-                    .map(|v| v.log(pool))
-                    .unwrap_or_else(|| String::from("_")),
+                ty.log(pool),
                 value
                     .as_ref()
                     .map(|v| v.log(pool))
@@ -290,9 +275,7 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
             } => format!(
                 "let {}: {} = {};",
                 name.log(pool),
-                ty.as_ref()
-                    .map(|v| v.log(pool))
-                    .unwrap_or_else(|| String::from("_")),
+                ty.log(pool),
                 value
                     .as_ref()
                     .map(|v| v.log(pool))
@@ -312,6 +295,7 @@ impl<'p> PoolLog<'p> for LazyType<'p> {
             LazyType::Infer => "Infer".into(),
             LazyType::PendingEval(e) => e.log(pool),
             LazyType::Finished(ty) => format!("{:?}", ty),
+            LazyType::Different(parts) => parts.iter().map(|p| p.log(pool)).collect(),
         }
     }
 }
@@ -372,7 +356,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
             "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n{}\n",
             self.synth_name(pool),
             self.get_name(pool),
-            self.ty.log(pool),
+            self.ret.log(pool), // TODO: arg
             self.local_constants
                 .iter()
                 .map(|e| e.log(pool))
@@ -530,7 +514,7 @@ impl Stmt<'_> {
             Stmt::Noop => None,
             Stmt::Eval(e) => Some(e.loc),
             Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
-            Stmt::DeclVar { ty, value, .. } => value.as_ref().or(ty.as_ref()).map(|e| e.loc),
+            Stmt::DeclVar { value, .. } => value.as_ref().map(|e| e.loc),
             Stmt::DeclNamed { .. } => todo!(),
             Stmt::Set { place, .. } => Some(place.loc),
         }
@@ -620,13 +604,8 @@ impl<'p> DebugState<'p> {
             }
             DebugState::RunInstLoop(f) => format!("| Loop Insts  | {}", show_f(*f)),
             DebugState::ComputeCached(e) => format!("| Cache Eval  | {}", e.log(pool)),
-            DebugState::ResolveFnType(f, arg, ret) => {
-                format!(
-                    "| Resolve Type| {} is fn({}) {}",
-                    show_f(*f),
-                    arg.log(pool),
-                    ret.log(pool)
-                )
+            DebugState::ResolveFnType(f) => {
+                format!("| Resolve Type| {}", show_f(*f),)
             }
         }
     }
