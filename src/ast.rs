@@ -78,6 +78,7 @@ pub enum TypeInfo<'p> {
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(TypeId, usize),
+    Named(TypeId, Ident<'p>),
     Type,
     Unit, // TODO: same as empty tuple but easier to type
 }
@@ -640,7 +641,8 @@ impl<'p> Program<'p> {
         d
     }
 
-    pub fn struct_type(&mut self, _todo_name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
+    pub fn struct_type(&mut self, name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
+        let name = self.pool.intern(name);
         let mut types = vec![];
         let mut fields = vec![];
         let mut size = 0;
@@ -661,7 +663,20 @@ impl<'p> Program<'p> {
             size,
             as_tuple,
         };
-        self.intern_type(ty)
+        let ty = self.intern_type(ty);
+        self.intern_type(TypeInfo::Named(ty, name))
+    }
+
+    pub fn enum_type(&mut self, _name: &str, varients: &[TypeId]) -> TypeId {
+        let as_tuple = self.tuple_of(varients.to_vec());
+        self.to_enum(self.types[as_tuple.0].clone())
+    }
+
+    pub fn synth_name(&mut self, ty: TypeId) -> Ident<'p> {
+        match self.types[ty.0] {
+            TypeInfo::Named(_, name) => name,
+            _ => self.pool.intern(&format!("__anon_ty{}", ty.0)),
+        }
     }
 
     pub fn to_enum(&mut self, ty: TypeInfo<'p>) -> TypeId {
@@ -669,6 +684,16 @@ impl<'p> Program<'p> {
             let size = fields.iter().map(|f| self.slot_count(f.ty)).max().unwrap();
             let ty = TypeInfo::Enum {
                 cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
+                size: size + 1, // for tag.
+            };
+            self.intern_type(ty)
+        } else if let TypeInfo::Tuple(fields) = ty {
+            let size = fields.iter().map(|ty| self.slot_count(*ty)).max().unwrap();
+            let ty = TypeInfo::Enum {
+                cases: fields
+                    .into_iter()
+                    .map(|ty| (self.synth_name(ty), ty))
+                    .collect(),
                 size: size + 1, // for tag.
             };
             self.intern_type(ty)

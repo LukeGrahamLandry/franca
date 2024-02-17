@@ -181,6 +181,7 @@ impl<'p> Program<'p> {
                 format!("{{ {}}}!enum", v.join(", "))
             }
             TypeInfo::Unique(inner, n) => format!("{}#{}", self.log_type(*inner), n),
+            TypeInfo::Named(inner, n) => format!("{}#{}", self.log_type(*inner), self.pool.get(*n)),
             TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
             TypeInfo::Tuple(v) => {
                 let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();

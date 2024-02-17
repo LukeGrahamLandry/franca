@@ -121,10 +121,19 @@ fn interp_send() {
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
     struct HelloTuple(u8, i64);
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
+    enum HelloEnum {
+        // A,
+        B(i64),
+        E { _f: i64, _d: bool },
+    }
+
+    #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
     struct Nested {
         c: i64,
         d: HelloWorld,
         e: HelloTuple,
+        f: HelloEnum,
+        g: HelloEnum,
     }
 
     let pool = Box::leak(Box::<StringPool>::default());
@@ -143,6 +152,8 @@ fn interp_send() {
         c: 314,
         d: one,
         e: HelloTuple(1, 2),
+        f: HelloEnum::E { _f: 15, _d: true },
+        g: HelloEnum::B(25),
     };
     let eight = seven.serialize();
     let nine = Nested::deserialize(eight).unwrap();

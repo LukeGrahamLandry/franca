@@ -27,6 +27,7 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             fn serialize(self) -> Value {
                 #serialize
             }
+            #[allow(unused_braces)]
             fn deserialize(value: Value) -> Option<Self> {
                 #deserialize
             }
@@ -39,123 +40,234 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
 fn get_type(name: &Ident, data: &Data) -> TokenStream {
     match data {
-        syn::Data::Struct(data) => match data.fields {
-            syn::Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let ty = &f.ty;
-                    let name_str = f.ident.as_ref().unwrap().to_string();
-                    quote_spanned! {f.span()=>
-                        (#name_str, #ty::get_type(program))
-                    }
-                });
-                let name_str = name.to_string();
-                quote! {
-                    let mut fields = vec![];
-                    #(fields.push(#recurse);)*
-                    program.struct_type(#name_str, &fields)
-                }
+        syn::Data::Struct(data) => get_type_fields(name, &data.fields),
+        syn::Data::Enum(data) => {
+            let recurse = data
+                .variants
+                .iter()
+                .map(|f| get_type_fields(&f.ident, &f.fields));
+            let name_str = name.to_string();
+            quote! {
+                let mut fields = vec![];
+                #(fields.push({#recurse});)*
+                program.enum_type(#name_str, &fields)
             }
-            syn::Fields::Unnamed(ref fields) => {
-                let recurse = fields.unnamed.iter().map(|f| {
-                    let ty = &f.ty;
-                    quote_spanned! {f.span()=>
-                        #ty::get_type(program)
-                    }
-                });
-                let name_str = name.to_string();
-                quote! {
-                    let mut fields = vec![];
-                    #(fields.push(#recurse);)*
-                    program.named_tuple(#name_str, fields)
-                }
-            }
-            syn::Fields::Unit => todo!(),
-        },
-        syn::Data::Enum(_) => todo!(),
+        }
         syn::Data::Union(_) => todo!(),
+    }
+}
+
+fn get_type_fields(name: &Ident, fields: &syn::Fields) -> TokenStream {
+    match fields {
+        syn::Fields::Named(ref fields) => {
+            let recurse = fields.named.iter().map(|f| {
+                let ty = &f.ty;
+                let name_str = f.ident.as_ref().unwrap().to_string();
+                quote_spanned! {f.span()=>
+                    (#name_str, #ty::get_type(program))
+                }
+            });
+            let name_str = name.to_string();
+            quote! {
+                let mut fields = vec![];
+                #(fields.push(#recurse);)*
+                program.struct_type(#name_str, &fields)
+            }
+        }
+        syn::Fields::Unnamed(ref fields) => {
+            let recurse = fields.unnamed.iter().map(|f| {
+                let ty = &f.ty;
+                quote_spanned! {f.span()=>
+                    #ty::get_type(program)
+                }
+            });
+            let name_str = name.to_string();
+            quote! {
+                let mut fields = vec![];
+                #(fields.push(#recurse);)*
+                program.named_tuple(#name_str, fields)
+            }
+        }
+        syn::Fields::Unit => todo!(),
     }
 }
 
 fn deserialize(name: &Ident, data: &Data) -> TokenStream {
     match data {
-        syn::Data::Struct(data) => match data.fields {
-            syn::Fields::Named(FieldsNamed {
-                named: ref fields, ..
-            }) => {
-                let recurse = fields.iter().map(|f| {
-                    let ty = &f.ty;
-                    let name = &f.ident;
-                    quote_spanned! {f.span()=>
-                        #name: #ty::deserialize(fields.next()?)?,
-                    }
-                });
-                quote! {
-                    let mut fields = value.to_tuple()?.into_iter();
-                    Some(#name {
-                        #(#recurse)*
-                    })
+        syn::Data::Struct(data) => {
+            let rest = deserialize_fields(quote!(#name), &data.fields);
+            quote!(
+                let mut fields = value.to_tuple()?.into_iter();
+                #rest
+            )
+        }
+        syn::Data::Enum(data) => {
+            let recurse = data.variants.iter().enumerate().map(|(i, f)| {
+                let varient = &f.ident;
+                let fields = deserialize_fields(quote!(#name :: #varient), &f.fields);
+                quote_spanned! {f.span()=>
+                    #i => { { #fields } },
                 }
-            }
-            syn::Fields::Unnamed(FieldsUnnamed {
-                unnamed: ref fields,
-                ..
-            }) => {
-                let recurse = fields.iter().map(|f| {
-                    let ty = &f.ty;
-                    quote_spanned! {f.span()=>
-                        #ty::deserialize(fields.next()?)?,
-                    }
-                });
-                quote! {
-                    let mut fields = value.to_tuple()?.into_iter();
-                    Some(#name(
-                        #(#recurse)*
-                    ))
-                }
-            }
+            });
 
-            syn::Fields::Unit => todo!(),
-        },
-        syn::Data::Enum(_) => todo!(),
+            quote! {
+                let mut fields = value.to_tuple()?.into_iter();
+                let tag = usize::deserialize(fields.next()?)?;
+                match tag {
+                    #(#recurse)*
+                    _ => None
+                }
+            }
+        }
         syn::Data::Union(_) => todo!(),
     }
 }
 
-fn serialize(_name: &Ident, data: &Data) -> TokenStream {
+fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream {
+    match fields {
+        syn::Fields::Named(FieldsNamed {
+            named: ref fields, ..
+        }) => {
+            let recurse = fields.iter().map(|f| {
+                let ty = &f.ty;
+                let name = &f.ident;
+                quote_spanned! {f.span()=>
+                    #name: #ty::deserialize(fields.next()?)?,
+                }
+            });
+            quote! {
+                Some(#prefix {
+                    #(#recurse)*
+                })
+            }
+        }
+        syn::Fields::Unnamed(FieldsUnnamed {
+            unnamed: ref fields,
+            ..
+        }) => {
+            let recurse = fields.iter().map(|f| {
+                let ty = &f.ty;
+                quote_spanned! {f.span()=>
+                    #ty::deserialize(fields.next()?)?,
+                }
+            });
+            quote! {
+                Some(#prefix(
+                    #(#recurse)*
+                ))
+            }
+        }
+        syn::Fields::Unit => todo!(),
+    }
+}
+
+fn serialize(name: &Ident, data: &Data) -> TokenStream {
     match data {
-        syn::Data::Struct(data) => match data.fields {
-            syn::Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let ty = &f.ty;
-                    let name = &f.ident;
-                    quote_spanned! {f.span()=>
-                        #ty::serialize(self.#name)
-                    }
-                });
-                quote! {
-                    let mut values = vec![];
-                    #(values.push(#recurse);)*
-                    Value::Tuple { values, container_type: TypeId::any() }  // TODO
-                }
+        syn::Data::Struct(data) => {
+            let rest = serialize_fields(name, &data.fields, quote!(self.));
+            quote! {
+                let mut values = vec![];
+                #rest
+                Value::Tuple { values, container_type: TypeId::any() }  // TODO
             }
-            syn::Fields::Unnamed(ref fields) => {
-                let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                    let ty = &f.ty;
-                    let i = syn::Index::from(i);
-                    quote_spanned! {f.span()=>
-                        #ty::serialize(self.#i)
-                    }
-                });
-                quote! {
-                    let mut values = vec![];
-                    #(values.push(#recurse);)*
-                    Value::Tuple { values, container_type: TypeId::any() }  // TODO
+        }
+        syn::Data::Enum(data) => {
+            let recurse_tag = data.variants.iter().enumerate().map(|(i, f)| {
+                let left = enum_match_left(&f.ident, &f.fields);
+                quote_spanned! {f.span()=>
+                    #left => usize::serialize(#i),
                 }
+            });
+            let recurse = data.variants.iter().map(|f| {
+                let left = enum_match_left(&f.ident, &f.fields);
+                let (extra, prefix) = if let syn::Fields::Unnamed(unnamed) = &f.fields {
+                    let recurse = unnamed.unnamed.iter().enumerate().map(|(i, f)| {
+                        let ident = Ident::new(&format!("_{i}"), f.span());
+                        quote_spanned! {f.span()=>
+                            #ident,
+                        }
+                    });
+                    (
+                        quote! {
+                            let fields = ( #(#recurse)* );
+                        },
+                        quote!(fields.),
+                    )
+                } else {
+                    (quote!(), quote!())
+                };
+                let fields = serialize_fields(name, &f.fields, prefix);
+                quote_spanned! {f.span()=>
+                    #left => { #extra #fields },
+                }
+            });
+            quote! {
+                let mut values = vec![];
+                values.push(match self {  #(#recurse_tag)* });
+                match self {  #(#recurse)* }
+                Value::Tuple { values, container_type: TypeId::any() }  // TODO
             }
-            syn::Fields::Unit => todo!(),
-        },
-        syn::Data::Enum(_) => todo!(),
+        }
         syn::Data::Union(_) => todo!(),
+    }
+}
+
+fn enum_match_left(ident: &Ident, fields: &syn::Fields) -> TokenStream {
+    let payload = match fields {
+        syn::Fields::Named(ref fields) => {
+            let recurse = fields.named.iter().map(|f| {
+                let name = &f.ident;
+                quote_spanned! {f.span()=>
+                    #name
+                }
+            });
+            quote! {
+                { #(#recurse ,)* }
+            }
+        }
+        syn::Fields::Unnamed(ref fields) => {
+            let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                let ident = Ident::new(&format!("_{i}"), f.span());
+                quote_spanned! {f.span()=>
+                    #ident
+                }
+            });
+            quote! {
+               ( #(#recurse ,)* )
+            }
+        }
+        syn::Fields::Unit => quote!(),
+    };
+    quote!(Self::#ident #payload)
+}
+
+fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream) -> TokenStream {
+    match fields {
+        syn::Fields::Named(ref fields) => {
+            let recurse = fields.named.iter().map(|f| {
+                let ty = &f.ty;
+                let name = &f.ident;
+                quote_spanned! {f.span()=>
+                    #ty::serialize(#prefix #name)
+                }
+            });
+            quote! {
+                #(values.push(#recurse);)*
+            }
+        }
+        syn::Fields::Unnamed(ref fields) => {
+            let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
+                let ty = &f.ty;
+                let i = syn::Index::from(i);
+                quote_spanned! {f.span()=>
+                    #ty::serialize(#prefix #i)
+                }
+            });
+            quote! {
+                #(values.push(#recurse);)*
+            }
+        }
+        syn::Fields::Unit => todo!(),
     }
 }
 
