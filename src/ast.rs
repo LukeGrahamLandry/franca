@@ -7,7 +7,6 @@ use crate::{
 use codemap::Span;
 use std::{
     collections::HashMap,
-    default,
     hash::Hash,
     mem,
     ops::{Deref, DerefMut},
@@ -78,7 +77,7 @@ pub enum TypeInfo<'p> {
         size: usize,
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
-    Unique(Ident<'p>, TypeId),
+    Unique(TypeId, usize),
     Type,
     Unit, // TODO: same as empty tuple but easier to type
 }
@@ -364,7 +363,7 @@ impl<'p> Func<'p> {
             capture_vars: vec![],
             local_constants: vec![],
             loc,
-            closed_constants: Default::default(),
+            closed_constants: Constants::empty(),
             capture_vars_const: vec![],
             var_name: None,
             finished_type: None,
@@ -489,7 +488,15 @@ impl<'p> Program<'p> {
         }
     }
 
+    pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
+        while let &TypeInfo::Unique(inner, _) = &self.types[ty.0] {
+            ty = inner
+        }
+        ty
+    }
+
     pub fn get_enum(&self, enum_ty: TypeId) -> Option<&[(Ident<'p>, TypeId)]> {
+        let enum_ty = self.raw_type(enum_ty);
         if let TypeInfo::Enum { cases, .. } = &self.types[enum_ty.0] {
             Some(cases)
         } else {
@@ -515,6 +522,7 @@ impl<'p> Program<'p> {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
             &TypeInfo::Struct { size, .. } => size,
             &TypeInfo::Enum { size, .. } => size,
+            &TypeInfo::Unique(ty, _) => self.slot_count(ty),
             _ => 1,
         }
     }
@@ -618,7 +626,7 @@ impl<'p> Program<'p> {
         match &self.types[ty.0] {
             TypeInfo::Tuple(types) => Some(types),
             &TypeInfo::Struct { as_tuple, .. } => self.tuple_types(as_tuple),
-            TypeInfo::Unique(_, _) => todo!(),
+            &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
             _ => None,
         }
     }

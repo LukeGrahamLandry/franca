@@ -137,10 +137,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
-    pub fn add_declarations(&mut self, ast: Func<'p>) -> Res<'p, ()> {
-        let f = self.add_func(ast, &Default::default())?;
+    pub fn add_declarations(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
+        let f = self.add_func(ast, &Constants::empty())?;
         self.ensure_compiled(f, ExecTime::Comptime)?;
-        Ok(())
+        Ok(f)
     }
 
     pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
@@ -218,30 +218,35 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn eval_and_close_local_constants(&mut self, f: FuncId) -> Res<'p, ()> {
         let state = DebugState::EvalConstants(f);
         self.push_state(&state);
-
         let loc = self.interp.program.funcs[f.0].loc;
-        // TODO: do i even need to pass an index? probably just for debugging
-        let constants = self.interp.program.funcs[f.0].closed_constants.clone();
+        debug_assert!(!self.interp.program.funcs[f.0].evil_uninit);
+        debug_assert!(self.interp.program.funcs[f.0].closed_constants.is_valid);
 
-        let mut result = self.empty_fn(
-            ExecTime::Comptime,
-            FuncId(f.0 + 10000000),
-            loc,
-            Some(constants),
+        mut_replace!(
+            self.interp.program.funcs[f.0].closed_constants,
+            |constants| {
+                let mut result = self.empty_fn(
+                    ExecTime::Comptime,
+                    FuncId(f.0 + 10000000), // TODO: do i even need to pass an index? probably just for debugging
+                    loc,
+                    Some(constants),
+                );
+                let name = self.interp.program.funcs[f.0].synth_name(self.pool).clone();
+                let _msg = format!("locals {}", name);
+                let func = &self.interp.program.funcs[f.0];
+
+                let new_constants = func.local_constants.clone();
+                for mut stmt in new_constants {
+                    self.compile_stmt(&mut result, &mut stmt)?;
+                }
+
+                self.pop_state(state);
+
+                // Now this includes stuff inherited from the parent, plus any constants pulled up from the function body.
+                Ok((result.constants, ()))
+            }
         );
-        let name = self.interp.program.funcs[f.0].synth_name(self.pool).clone();
-        let _msg = format!("locals {}", name);
-        let func = &self.interp.program.funcs[f.0];
 
-        let new_constants = func.local_constants.clone();
-        for mut stmt in new_constants {
-            self.compile_stmt(&mut result, &mut stmt)?;
-        }
-
-        self.pop_state(state);
-
-        // Now this includes stuff inherited from the parent, plus any constants pulled up from the function body.
-        self.interp.program.funcs[f.0].closed_constants = result.constants;
         Ok(())
     }
 
@@ -250,6 +255,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(Some(_)) = self.interp.ready.get(f.0) {
             return Ok(());
         }
+        let func = &self.interp.program.funcs[f.0];
+        debug_assert!(!func.evil_uninit);
+        debug_assert!(func.closed_constants.is_valid);
+
         let state = DebugState::JitToBc(f, when);
         self.push_state(&state);
 
@@ -279,7 +288,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             func.synth_name(self.pool),
             self.interp.program.log_consts(&result.constants)
         );
-        let arg_range = result.reserve_slots(self.interp.program, f_ty.arg);
+        let arg_range = result.reserve_slots(self.interp.program, f_ty.arg)?;
         let return_value = self.emit_body(&mut result, arg_range, f)?;
         let func = &self.interp.program.funcs[f.0];
 
@@ -352,7 +361,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     name: self.pool.intern("inline"),
                     args: None,
                 });
-                let ret = result.reserve_slots(self.interp.program, func.ret.unwrap());
+                let ret = result.reserve_slots(self.interp.program, func.ret.unwrap())?;
                 assert!(func.referencable_name, "fn no body needs name");
                 result.push(Bc::CallBuiltin {
                     name: func.name,
@@ -443,7 +452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             result.stack_slots - arg.count
         } else {
             let stack_offset = result.stack_slots;
-            let arg_slots = result.reserve_slots(self.interp.program, f_ty.arg); // These are included in the new function's stack
+            let arg_slots = result.reserve_slots(self.interp.program, f_ty.arg)?; // These are included in the new function's stack
             debug_assert_eq!(arg_slots.count, arg.count);
             result.push(Bc::MoveRange {
                 from: arg,
@@ -483,7 +492,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Curry a function from fn(a: A, @comptime b: B) to fn(a: A)
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
-    fn bind_const_arg(
+    fn _bind_const_arg(
         &mut self,
         caller_constants: &Constants<'p>,
         f: FuncId,
@@ -493,7 +502,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut new_func = self.interp.program.funcs[f.0].clone();
         new_func.referencable_name = false;
         let arg_ty =
-            self.get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
+            self._get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
         let arg_value = self.immediate_eval_expr(caller_constants, arg_expr, arg_ty)?;
         new_func
             .closed_constants
@@ -512,7 +521,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     /// It's fine to call this if the type isn't fully resolved yet.
     /// We just need to be able to finish infering for the referenced argument.
-    fn get_type_for_arg(
+    fn _get_type_for_arg(
         &mut self,
         constants: &Constants<'p>,
         arg: &mut Pattern<'p>,
@@ -545,8 +554,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
         // BUT... the *arguments* to the call need to be evaluated in the caller's scope.
 
+        // This one does need the be a clone because we're about to bake constant arguments into it.
+        // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.interp.program.funcs[f.0].clone();
         debug_assert!(!func.evil_uninit);
+        debug_assert!(func.closed_constants.is_valid);
         func.referencable_name = false;
         func.closed_constants.add_all(caller_constants);
         let constants = func.closed_constants.clone(); // TODO: aaaa
@@ -635,6 +647,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
+        debug_assert!(result.constants.is_valid);
         self.last_loc = Some(stmt.loc);
         match stmt.deref_mut() {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
@@ -692,7 +705,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                     err!("uninit vars require type hint {}", name.log(self.pool));
                                 }
                                 (
-                                    result.reserve_slots(self.interp.program, expected_ty),
+                                    result.reserve_slots(self.interp.program, expected_ty)?,
                                     expected_ty,
                                 )
                             }
@@ -766,7 +779,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let id = self.add_func(mem::take(func), &result.constants)?;
                 *expr.deref_mut() = Expr::Value(Value::GetFn(id));
                 self.infer_types(id)?;
-                result.load_constant(self.interp.program, Value::GetFn(id))
+                result.load_constant(self.interp.program, Value::GetFn(id))?
             }
             Expr::Call(f, arg) => {
                 // TODO: more general system for checking if its a constant known expr instead of all these cases.
@@ -807,7 +820,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     TypeId::any() // TODO
                 };
                 assert_eq!(f_slot.count, 1);
-                let ret = result.reserve_slots(self.interp.program, ret_ty);
+                let ret = result.reserve_slots(self.interp.program, ret_ty)?;
                 result.push(Bc::CallDynamic {
                     f: f_slot.first,
                     ret,
@@ -855,7 +868,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
                 if let Some((from, ty)) = result.vars.get(var).cloned() {
-                    let to = result.reserve_slots(self.interp.program, ty);
+                    let to = result.reserve_slots(self.interp.program, ty)?;
                     debug_assert_eq!(from.count, to.count);
                     if from.count == 1 {
                         result.push(Bc::Clone {
@@ -867,12 +880,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     (to, ty)
                 } else if let Some((value, _)) = result.constants.get(*var) {
-                    result.load_constant(self.interp.program, value)
+                    result.load_constant(self.interp.program, value)?
                 } else if let Some(func) = self.interp.program.declarations.get(&var.0) {
                     assert_eq!(func.len(), 1, "ambigous function reference");
                     let func = func[0];
                     self.ensure_compiled(func, ExecTime::Comptime)?;
-                    result.load_constant(self.interp.program, Value::GetFn(func))
+                    result.load_constant(self.interp.program, Value::GetFn(func))?
                 } else {
                     outln!("VARS: {:?}", result.vars);
                     outln!(
@@ -895,7 +908,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 );
             }
             Expr::EnumLiteral(_) => todo!(),
-            Expr::Value(value) => result.load_constant(self.interp.program, value.clone()),
+            Expr::Value(value) => result.load_constant(self.interp.program, value.clone())?,
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -906,7 +919,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "deref" => {
                         let (from, ptr_ty) = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.interp.program.unptr_ty(ptr_ty), "not ptr");
-                        let to = result.reserve_slots(self.interp.program, ty);
+                        let to = result.reserve_slots(self.interp.program, ty)?;
                         result.push(Bc::Load {
                             from: from.single(),
                             to,
@@ -917,7 +930,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
                         let ty = unwrap!(self.type_of(result, arg)?, "could not infer yet");
-                        result.load_constant(self.interp.program, Value::Type(ty))
+                        result.load_constant(self.interp.program, Value::Type(ty))?
                     }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
@@ -926,7 +939,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
-                        result.load_constant(self.interp.program, Value::Unit)
+                        result.load_constant(self.interp.program, Value::Unit)?
                     }
                     "comptime_print" => {
                         outln!("EXPR : {}", arg.log(self.pool));
@@ -936,13 +949,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                             TypeId::any(),
                         );
                         outln!("VALUE: {:?}", value);
-                        result.load_constant(self.interp.program, Value::Unit)
+                        result.load_constant(self.interp.program, Value::Unit)?
                     }
                     "struct" => {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(result, pattern)?;
                             let ty = Value::Type(self.interp.program.intern_type(ty));
-                            result.load_constant(self.interp.program, ty)
+                            result.load_constant(self.interp.program, ty)?
                         } else {
                             err!(
                                 "expected map literal: .{{ name: Type, ... }} but found {:?}",
@@ -954,7 +967,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(result, pattern)?;
                             let ty = Value::Type(self.interp.program.to_enum(ty));
-                            result.load_constant(self.interp.program, ty)
+                            result.load_constant(self.interp.program, ty)?
                         } else {
                             err!(
                                 "expected map literal: .{{ name: Type, ... }} but found {:?}",
@@ -969,7 +982,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             .interp
                             .program
                             .intern_type(TypeInfo::Ptr(TypeId::i64()));
-                        let ret = result.reserve_slots(self.interp.program, ty);
+                        let ret = result.reserve_slots(self.interp.program, ty)?;
                         result.push(Bc::SlicePtr {
                             base: addr.single(),
                             offset: 0,
@@ -981,9 +994,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "symbol" => {
                         // TODO: use match
                         if let Expr::GetNamed(i) = arg.deref_mut().deref_mut() {
-                            result.load_constant(self.interp.program, Value::Symbol(i.0))
+                            result.load_constant(self.interp.program, Value::Symbol(i.0))?
                         } else if let Expr::GetVar(v) = arg.deref_mut().deref_mut() {
-                            result.load_constant(self.interp.program, Value::Symbol(v.0 .0))
+                            result.load_constant(self.interp.program, Value::Symbol(v.0 .0))?
                         } else {
                             ice!("Expected identifier found {arg:?}")
                         }
@@ -992,135 +1005,66 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::FieldAccess(e, name) => {
-                let (mut container_ptr, mut container_ptr_ty) = self.addr_macro(result, e)?;
-                // Auto deref for nested place expressions.
-                // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
-                let depth = self.interp.program.ptr_depth(container_ptr_ty);
-                if depth > 1 {
-                    for _ in 0..(depth - 1) {
-                        container_ptr_ty =
-                            unwrap!(self.interp.program.unptr_ty(container_ptr_ty), "");
-                        let ret = result.reserve_slots(self.interp.program, container_ptr_ty);
-                        result.push(Bc::Load {
-                            from: container_ptr.single(),
-                            to: ret,
-                        });
-                        container_ptr = ret;
-                    }
-                }
-                let container_ty = unwrap!(
-                    self.interp.program.unptr_ty(container_ptr_ty),
-                    "unreachable"
-                );
-                if let TypeInfo::Struct { fields, .. } = &self.interp.program.types[container_ty.0]
-                {
-                    for f in fields {
-                        if f.name == *name {
-                            let f = *f;
-                            let ty = self.interp.program.ptr_type(f.ty);
-                            let ret = result.reserve_slots(self.interp.program, ty);
-
-                            result.push(Bc::SlicePtr {
-                                base: container_ptr.single(),
-                                offset: f.first,
-                                count: f.count,
-                                ret: ret.single(),
-                            });
-                            return Ok((ret, ty));
-                        }
-                    }
-                    err!(
-                        "unknown name {} on {:?}",
-                        self.pool.get(*name),
-                        self.interp.program.log_type(container_ty)
-                    );
-                }
-                if let TypeInfo::Enum { cases, .. } = &self.interp.program.types[container_ty.0] {
-                    for (i, (f_name, f_ty)) in cases.iter().enumerate() {
-                        if f_name == name {
-                            let f_ty = *f_ty;
-                            let ty = self.interp.program.ptr_type(f_ty);
-                            let ret = result.reserve_slots(self.interp.program, ty);
-                            let count = self.interp.program.slot_count(f_ty);
-                            result.push(Bc::TagCheck {
-                                enum_ptr: container_ptr.single(),
-                                value: i as i64,
-                            });
-                            result.push(Bc::SlicePtr {
-                                base: container_ptr.single(),
-                                offset: 1,
-                                count,
-                                ret: ret.single(),
-                            });
-                            return Ok((ret, ty));
-                        }
-                    }
-                    err!(
-                        "unknown name {} on {:?}",
-                        self.pool.get(*name),
-                        self.interp.program.log_type(container_ty)
-                    );
-                } else {
-                    err!(
-                        "only structs support field access but found {:?} which is {}",
-                        e.log(self.pool),
-                        self.interp.program.log_type(container_ty)
-                    );
-                }
+                let (container_ptr, container_ptr_ty) = self.addr_macro(result, e)?;
+                self.field_access_expr(result, container_ptr, container_ptr_ty, *name)?
             }
             Expr::StructLiteralP(pattern) => {
-                assert!(requested.is_some());
+                let requested = unwrap!(requested, "struct literal needs type hint");
                 let names: Vec<_> = pattern.flatten_names();
                 // TODO: why must this suck so bad
                 let values: Option<_> = pattern.flatten_exprs();
                 let mut values: Vec<FatExpr<'_>> = values.unwrap();
                 assert_eq!(names.len(), values.len());
-                let container_ty = requested.unwrap();
-                if let TypeInfo::Struct {
-                    fields, as_tuple, ..
-                } = self.interp.program.types[container_ty.0].clone()
-                {
-                    assert_eq!(fields.len(), values.len());
-                    let all = names.into_iter().zip(values).zip(fields);
-                    let mut values = vec![];
-                    for ((name, mut value), field) in all {
-                        assert_eq!(name, field.name);
+                let mut raw_container_ty = requested;
+                while let TypeInfo::Unique(ty, _) = self.interp.program.types[raw_container_ty.0] {
+                    raw_container_ty = ty;
+                }
+
+                match self.interp.program.types[raw_container_ty.0].clone() {
+                    TypeInfo::Struct {
+                        fields, as_tuple, ..
+                    } => {
+                        assert_eq!(fields.len(), values.len());
+                        let all = names.into_iter().zip(values).zip(fields);
+                        let mut values = vec![];
+                        for ((name, mut value), field) in all {
+                            assert_eq!(name, field.name);
+                            let (value, found_ty) =
+                                self.compile_expr(result, &mut value, Some(field.ty))?;
+                            self.type_check_arg(found_ty, field.ty, "struct field")?;
+                            values.push((value, field.ty));
+                        }
+
+                        let (ret, _) =
+                            result.produce_tuple(self.interp.program, values, as_tuple)?;
+                        (ret, requested)
+                    }
+                    TypeInfo::Enum { cases, size } => {
+                        assert_eq!(1, values.len());
+                        let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
+                        let type_hint = cases[i].1;
                         let (value, found_ty) =
-                            self.compile_expr(result, &mut value, Some(field.ty))?;
-                        self.type_check_arg(found_ty, field.ty, "struct field")?;
-                        values.push((value, field.ty));
-                    }
+                            self.compile_expr(result, &mut values[0], Some(type_hint))?;
+                        self.type_check_arg(found_ty, type_hint, "enum case")?;
+                        if value.count >= size {
+                            ice!("Enum value won't fit.")
+                        }
+                        let ret = result.reserve_slots(self.interp.program, raw_container_ty)?;
+                        result.push(Bc::LoadConstant {
+                            slot: ret.first,
+                            value: Value::I64(i as i64),
+                        });
+                        result.push(Bc::MoveRange {
+                            from: value,
+                            to: StackRange {
+                                first: ret.offset(1),
+                                count: value.count,
+                            },
+                        });
 
-                    let (ret, _) = result.produce_tuple(self.interp.program, values, as_tuple)?;
-                    (ret, container_ty)
-                } else if let TypeInfo::Enum { cases, size } =
-                    self.interp.program.types[requested.unwrap().0].clone()
-                {
-                    assert_eq!(1, values.len());
-                    let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
-                    let type_hint = cases[i].1;
-                    let (value, found_ty) =
-                        self.compile_expr(result, &mut values[0], Some(type_hint))?;
-                    self.type_check_arg(found_ty, type_hint, "enum case")?;
-                    if value.count >= size {
-                        ice!("Enum value won't fit.")
+                        (ret, requested)
                     }
-                    let ret = result.reserve_slots(self.interp.program, container_ty);
-                    result.push(Bc::LoadConstant {
-                        slot: ret.first,
-                        value: Value::I64(i as i64),
-                    });
-                    result.push(Bc::MoveRange {
-                        from: value,
-                        to: StackRange {
-                            first: ret.offset(1),
-                            count: value.count,
-                        },
-                    });
-
-                    (ret, container_ty)
-                } else {
-                    err!("struct literal but expected {:?}", requested);
+                    _ => err!("struct literal but expected {:?}", requested),
                 }
             }
             &mut Expr::String(i) => {
@@ -1130,7 +1074,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .iter()
                     .map(|b| Value::I64(*b as i64))
                     .collect();
-                result.load_constant(self.interp.program, Value::new_box(bytes))
+                result.load_constant(self.interp.program, Value::new_box(bytes))?
             }
             Expr::GenericArgs(_, _) => {
                 todo!()
@@ -1147,7 +1091,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
                     let ptr_ty = self.interp.program.ptr_type(value_ty);
-                    let addr_slot = result.reserve_slots(self.interp.program, ptr_ty);
+                    let addr_slot = result.reserve_slots(self.interp.program, ptr_ty)?;
                     result.push(Bc::AbsoluteStackAddr {
                         of: stack_slot,
                         to: addr_slot.first,
@@ -1198,67 +1142,74 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(f);
         }
 
-        // Check overloads
-        if let Ok(Some(arg_ty)) = self.type_of(result, arg) {
-            if let Some((value, _)) = result.constants.get(name) {
-                match value {
-                    Value::GetFn(f) => Ok(f),
-                    Value::OverloadSet(i) => {
-                        let overloads = &self.interp.program.overload_sets[i];
+        match self.type_of(result, arg) {
+            Ok(Some(arg_ty)) => {
+                if let Some((value, _)) = result.constants.get(name) {
+                    match value {
+                        Value::GetFn(f) => Ok(f),
+                        Value::OverloadSet(i) => {
+                            let overloads = &self.interp.program.overload_sets[i];
 
-                        for check in &overloads.0 {
-                            if check.ty.arg == arg_ty {
-                                return Ok(check.func);
+                            for check in &overloads.0 {
+                                if check.ty.arg == arg_ty {
+                                    return Ok(check.func);
+                                }
                             }
-                        }
 
-                        // Compute overloads.
-                        if let Some(decls) = self.interp.program.declarations.get(&name.0) {
-                            let mut found = None;
-                            for f in decls.clone() {
-                                if let Ok(f_ty) = self.infer_types(f) {
-                                    if arg_ty == f_ty.arg {
-                                        assert!(
-                                            found.is_none(),
-                                            "AmbiguousCall {:?} vs {:?}",
-                                            found,
-                                            (f, f_ty)
-                                        );
-                                        found = Some((f, f_ty));
+                            // Compute overloads.
+                            if let Some(decls) = self.interp.program.declarations.get(&name.0) {
+                                let mut found = None;
+                                for f in decls.clone() {
+                                    if let Ok(f_ty) = self.infer_types(f) {
+                                        if arg_ty == f_ty.arg {
+                                            assert!(
+                                                found.is_none(),
+                                                "AmbiguousCall {:?} vs {:?}",
+                                                found,
+                                                (f, f_ty)
+                                            );
+                                            found = Some((f, f_ty));
+                                        }
                                     }
                                 }
-                            }
-                            match found {
-                                Some((func, ty)) => {
-                                    self.interp.program.overload_sets[i].0.push(OverloadOption {
-                                        name: name.0,
-                                        ty,
-                                        func,
-                                    });
-                                    Ok(func)
+                                match found {
+                                    Some((func, ty)) => {
+                                        self.interp.program.overload_sets[i].0.push(
+                                            OverloadOption {
+                                                name: name.0,
+                                                ty,
+                                                func,
+                                            },
+                                        );
+                                        Ok(func)
+                                    }
+                                    None => err!(CErr::AmbiguousCall),
                                 }
-                                None => err!(CErr::AmbiguousCall),
+                            } else {
+                                err!(CErr::VarNotFound(name))
                             }
-                        } else {
-                            err!(CErr::VarNotFound(name))
+                        }
+                        _ => {
+                            err!(
+                                "Expected function for {} but found {:?}",
+                                name.log(self.pool),
+                                value
+                            )
                         }
                     }
-                    _ => {
-                        err!(
-                            "Expected function for {} but found {:?}",
-                            name.log(self.pool),
-                            value
-                        )
-                    }
+                } else {
+                    err!(CErr::VarNotFound(name))
                 }
-            } else {
-                err!(CErr::VarNotFound(name))
             }
-        } else {
-            err!(
+            Ok(None) => err!(
                 "AmbiguousCall. Unknown type for argument {}",
                 arg.log(self.pool)
-            )
+            ),
+            Err(e) => err!(
+                "AmbiguousCall. Unknown type for argument {}. {}",
+                arg.log(self.pool),
+                e.reason.log(self.interp.program, self.pool)
+            ),
         }
     }
 
@@ -1290,8 +1241,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert_eq!(before, types.len());
                 self.interp.program.tuple_of(types)
             }
+            Expr::FieldAccess(container, name) => {
+                if let Some(container_ty) = self.type_of(result, container)? {
+                    let container_ptr_ty = self.interp.program.ptr_type(container_ty); // TODO: kinda hacky that you need to do this. should be more consistant
+                    self.get_field_type(container_ptr_ty, *name)?
+                } else {
+                    return Ok(None);
+                }
+            }
             Expr::GetNamed(_)
-            | Expr::FieldAccess(_, _)
             | Expr::StructLiteralP(_)
             | Expr::ArrayLiteral(_)
             | Expr::RefType(_)
@@ -1442,7 +1400,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Resolve the lazy types for Arg and Ret
     fn infer_types(&mut self, func: FuncId) -> Res<'p, FnType> {
-        if let Some(ty) = self.interp.program.funcs[func.0].finished_type {
+        let f = &self.interp.program.funcs[func.0];
+        debug_assert!(!f.evil_uninit);
+        if let Some(ty) = f.finished_type {
             return Ok(ty);
         }
 
@@ -1570,6 +1530,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
         debug_assert!(func.closed_constants.local.is_empty());
+        debug_assert!(func.closed_constants.is_valid);
         func.closed_constants = constants.close(&func.capture_vars_const)?;
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
@@ -1618,9 +1579,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
 
         // TODO: if returning tuples
-        let ret = result.reserve_slots(self.interp.program, true_ty.ret);
+        let ret = result.reserve_slots(self.interp.program, true_ty.ret)?;
 
-        let arg = result.load_constant(self.interp.program, Value::Unit).0; // Note: before you start doing ip stuff!
+        let arg = result.load_constant(self.interp.program, Value::Unit)?.0; // Note: before you start doing ip stuff!
         let name = self.pool.intern("builtin:if");
         let branch_ip = result.push(Bc::DebugMarker("patch", name));
         let true_ip = result.insts.len();
@@ -1799,13 +1760,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .log_consts(&self.interp.program.funcs[f.0].closed_constants),
             );
             let ret = self.emit_comptime_call(&result.constants, f, arg)?;
-            return Ok(result.load_constant(self.interp.program, ret));
+            return result.load_constant(self.interp.program, ret);
         }
 
         let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
         if arg.count == 0 {
-            arg = result.load_constant(self.interp.program, Value::Unit).0;
+            arg = result.load_constant(self.interp.program, Value::Unit)?.0;
         }
         // Note: f will be compiled differently depending on the calling convention.
         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
@@ -1848,7 +1809,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else if will_inline {
             self.emit_inline_call(result, arg, f)?
         } else {
-            let ret = result.reserve_slots(self.interp.program, f_ty.ret);
+            let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
             self.ensure_compiled(f, result.when)?;
             result.push(Bc::CallDirect { f, ret, arg });
             ret
@@ -1856,7 +1817,150 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         assert_eq!(self.return_stack_slots(f), ret.count);
         assert_eq!(self.interp.program.slot_count(f_ty.ret), ret.count);
-        return Ok((ret, f_ty.ret));
+        Ok((ret, f_ty.ret))
+    }
+
+    fn field_access_expr(
+        &mut self,
+        result: &mut FnBody<'p>,
+        mut container_ptr: StackRange,
+        mut container_ptr_ty: TypeId,
+        name: Ident<'p>,
+    ) -> Res<'p, (StackRange, TypeId)> {
+        // Auto deref for nested place expressions.
+        // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
+        let depth = self.interp.program.ptr_depth(container_ptr_ty);
+        if depth > 1 {
+            for _ in 0..(depth - 1) {
+                container_ptr_ty = unwrap!(self.interp.program.unptr_ty(container_ptr_ty), "");
+                let ret = result.reserve_slots(self.interp.program, container_ptr_ty)?;
+                result.push(Bc::Load {
+                    from: container_ptr.single(),
+                    to: ret,
+                });
+                container_ptr = ret;
+            }
+        }
+        let container_ty = unwrap!(
+            self.interp.program.unptr_ty(container_ptr_ty),
+            "unreachable unptr_ty {:?}",
+            self.interp.program.log_type(container_ptr_ty)
+        );
+
+        let mut raw_container_ty = container_ty;
+        while let TypeInfo::Unique(ty, _) = self.interp.program.types[raw_container_ty.0] {
+            raw_container_ty = ty;
+        }
+        match &self.interp.program.types[raw_container_ty.0] {
+            TypeInfo::Struct { fields, .. } => {
+                for f in fields {
+                    if f.name == name {
+                        let f = *f;
+                        let ty = self.interp.program.ptr_type(f.ty);
+                        let ret = result.reserve_slots(self.interp.program, ty)?;
+
+                        result.push(Bc::SlicePtr {
+                            base: container_ptr.single(),
+                            offset: f.first,
+                            count: f.count,
+                            ret: ret.single(),
+                        });
+                        return Ok((ret, ty));
+                    }
+                }
+                err!(
+                    "unknown name {} on {:?}",
+                    self.pool.get(name),
+                    self.interp.program.log_type(container_ty)
+                );
+            }
+            TypeInfo::Enum { cases, .. } => {
+                for (i, (f_name, f_ty)) in cases.iter().enumerate() {
+                    if *f_name == name {
+                        let f_ty = *f_ty;
+                        let ty = self.interp.program.ptr_type(f_ty);
+                        let ret = result.reserve_slots(self.interp.program, ty)?;
+                        let count = self.interp.program.slot_count(f_ty);
+                        result.push(Bc::TagCheck {
+                            enum_ptr: container_ptr.single(),
+                            value: i as i64,
+                        });
+                        result.push(Bc::SlicePtr {
+                            base: container_ptr.single(),
+                            offset: 1,
+                            count,
+                            ret: ret.single(),
+                        });
+                        return Ok((ret, ty));
+                    }
+                }
+                err!(
+                    "unknown name {} on {:?}",
+                    self.pool.get(name),
+                    self.interp.program.log_type(container_ty)
+                );
+            }
+            _ => err!(
+                "only structs support field access but found {}",
+                self.interp.program.log_type(container_ty)
+            ),
+        }
+    }
+
+    // TODO: copy paste from the emit
+    fn get_field_type(&mut self, mut container_ptr_ty: TypeId, name: Ident<'_>) -> Res<'p, TypeId> {
+        // Auto deref for nested place expressions.
+        // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
+        let depth = self.interp.program.ptr_depth(container_ptr_ty);
+        if depth > 1 {
+            for _ in 0..(depth - 1) {
+                container_ptr_ty = unwrap!(self.interp.program.unptr_ty(container_ptr_ty), "");
+            }
+        }
+
+        let container_ty = unwrap!(
+            self.interp.program.unptr_ty(container_ptr_ty),
+            "unreachable unptr_ty {:?}",
+            self.interp.program.log_type(container_ptr_ty)
+        );
+
+        let unknown_name = || {
+            err!(
+                "unknown name {} on {:?}",
+                self.pool.get(name),
+                self.interp.program.log_type(container_ty)
+            )
+        };
+
+        let raw_container_ty = self.interp.program.raw_type(container_ty);
+        match &self.interp.program.types[raw_container_ty.0] {
+            TypeInfo::Struct { fields, .. } => {
+                for f in fields {
+                    if f.name == name {
+                        let f = *f;
+                        let ty = self.interp.program.ptr_type(f.ty);
+                        return Ok(ty);
+                    }
+                }
+                unknown_name()
+            }
+            TypeInfo::Enum { cases, .. } => {
+                for (_, (f_name, f_ty)) in cases.iter().enumerate() {
+                    if *f_name == name {
+                        let f_ty = *f_ty;
+                        let ty = self.interp.program.ptr_type(f_ty);
+
+                        return Ok(ty);
+                    }
+                }
+                unknown_name()
+            }
+            TypeInfo::Unique(_, _) => unreachable!(),
+            _ => err!(
+                "only structs support field access but found {}",
+                self.interp.program.log_type(container_ty)
+            ),
+        }
     }
 }
 
@@ -1877,8 +1981,14 @@ pub enum ExecTime {
 }
 
 impl<'p> FnBody<'p> {
-    fn reserve_slots_raw(&mut self, program: &Program<'p>, count: usize, ty: TypeId) -> StackRange {
+    fn reserve_slots_raw(
+        &mut self,
+        program: &Program<'p>,
+        count: usize,
+        ty: TypeId,
+    ) -> Res<'p, StackRange> {
         let first = StackOffset(self.stack_slots);
+
         if ty.is_any() {
             // debug_assert_eq!(count, 1, "no any tuple");
             for _ in 0..count {
@@ -1889,53 +1999,67 @@ impl<'p> FnBody<'p> {
             self.slot_types.push(ty);
             self.stack_slots += count;
         } else {
-            let types = program.tuple_types(ty).unwrap();
+            let types = unwrap!(
+                program.tuple_types(ty),
+                "expected multiple slots {:?}",
+                program.log_type(ty)
+            );
             let mut found = 0;
             for ty in types {
-                found += self.reserve_slots(program, *ty).count;
+                found += self.reserve_slots(program, *ty)?.count;
             }
             debug_assert_eq!(found, count, "bad tuple size");
             // Note: don't bump self.stack_slots here.
         }
-        StackRange { first, count }
+        Ok(StackRange { first, count })
     }
 
-    fn reserve_slots(&mut self, program: &Program<'p>, ty: TypeId) -> StackRange {
-        if let TypeInfo::Enum { size, .. } = &program.types[ty.0] {
-            let size = *size;
-            let first = StackOffset(self.stack_slots);
-            self.slot_types.push(TypeId::i64());
-            self.stack_slots += size;
-            StackRange { first, count: size }
-        } else {
-            let count = program.slot_count(ty);
-            self.reserve_slots_raw(program, count, ty)
+    fn reserve_slots(&mut self, program: &Program<'p>, mut ty: TypeId) -> Res<'p, StackRange> {
+        while let &TypeInfo::Unique(inner, _) = &program.types[ty.0] {
+            ty = inner
+        }
+        match &program.types[ty.0] {
+            TypeInfo::Enum { size, .. } => {
+                let size = *size;
+                let first = StackOffset(self.stack_slots);
+                self.slot_types.push(TypeId::i64());
+                self.stack_slots += size;
+                Ok(StackRange { first, count: size })
+            }
+            _ => {
+                let count = program.slot_count(ty);
+                self.reserve_slots_raw(program, count, ty)
+            }
         }
     }
 
-    fn load_constant(&mut self, program: &mut Program<'p>, value: Value) -> (StackRange, TypeId) {
+    fn load_constant(
+        &mut self,
+        program: &mut Program<'p>,
+        value: Value,
+    ) -> Res<'p, (StackRange, TypeId)> {
         let ty = program.type_of(&value);
-        let to = self.reserve_slots(program, ty);
+        let to = self.reserve_slots(program, ty)?;
         self.push(Bc::LoadConstant {
             slot: to.first,
             value,
         });
-        (to, ty)
+        Ok((to, ty))
     }
 
     fn _serialize_constant<T: InterpSend<'p>>(
         &mut self,
         program: &mut Program<'p>,
         value: T,
-    ) -> (StackRange, TypeId) {
+    ) -> Res<'p, (StackRange, TypeId)> {
         let ty = T::get_type(program);
         let value = value.serialize();
-        let to = self.reserve_slots(program, ty);
+        let to = self.reserve_slots(program, ty)?;
         self.push(Bc::LoadConstant {
             slot: to.first,
             value,
         });
-        (to, ty)
+        Ok((to, ty))
     }
 
     #[track_caller]
@@ -1979,7 +2103,7 @@ impl<'p> FnBody<'p> {
                 count: program.slot_count(tuple_ty),
             }
         } else {
-            let ret = self.reserve_slots(program, tuple_ty);
+            let ret = self.reserve_slots(program, tuple_ty)?;
             // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
             let base = ret.first.0;
             let mut count = 0;

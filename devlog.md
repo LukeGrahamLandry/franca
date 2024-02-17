@@ -5,6 +5,7 @@ Previously I was cloning a bunch of stuff to deal with all the asts being in the
 As a seperate adventure, I want to work towards baking all the comptime work into the ast so I can write other backends 
 that just have to handle the translation for runtime. So it would be really nice to mutate the ast as I emit code for them.
 
+I suppose I've jsut invented a refcell with extra steps. 
 
 ## reworking constants
 

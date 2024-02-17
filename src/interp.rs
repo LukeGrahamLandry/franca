@@ -554,12 +554,14 @@ impl<'a, 'p> Interp<'a, 'p> {
             "lt" => bin_int!(self, <, arg, Value::Bool),
             "ge" => bin_int!(self, >=, arg, Value::Bool),
             "le" => bin_int!(self, <=, arg, Value::Bool),
+            // TODO: remove
             "tuple" => {
                 // This will become the `(a, b, c)` syntax.
                 // It just gives you a way to express that you want to pass multiple things at once.
                 // TODO: this is really inefficient. it boxes them from the stack and then writes them all back again?
                 arg
             }
+            // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
                 if let Value::Type(ty) = arg {
                     assert!(
@@ -572,6 +574,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ty = self.to_type(arg)?;
                 // println!(" => {:?}", self.program.log_type(ty));
                 Value::Type(ty)
+            }
+            "Unique" => {
+                let ty = TypeInfo::Unique(self.to_type(arg)?, self.program.types.len());
+                Value::Type(self.program.intern_type(ty))
             }
             "tag_value" => {
                 let (enum_ty, name) = self.to_pair(arg)?;

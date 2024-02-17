@@ -13,7 +13,6 @@ macro_rules! mut_replace {
         out
     }};
 }
-pub(crate) use mut_replace;
 
 pub mod ast;
 pub mod bc;
@@ -163,85 +162,86 @@ pub fn run_main<'a: 'p, 'p>(
         log_dbg(interp, save);
     }
 
-    if let Err(e) = result {
-        log_err(codemap, &mut interp, e, save);
-        return None;
-    } else {
-        let toplevel = interp.lookup_unique_func(pool.intern("@toplevel@"));
-        let _id = toplevel.unwrap();
-        let name = pool.intern("main");
-        match interp.lookup_unique_func(name) {
-            None => {
-                outln!("FN {name:?} = 'MAIN' NOT FOUND");
-                let decls = interp
-                    .interp
-                    .program
-                    .declarations
-                    .keys()
-                    .map(|n| pool.get(*n).to_string())
-                    .collect::<Vec<String>>();
-                outln!("Decls: {decls:?}");
-                log_dbg(&interp, save);
-                return None;
-            }
-            Some(f) => {
-                match interp.compile(f, ExecTime::Runtime) {
-                    Err(e) => {
-                        log_err(codemap, &mut interp, e, save);
-                        return None;
-                    }
-                    Ok(_) => {
-                        let end = timestamp();
-                        let seconds = end - start;
-                        let lib: String = LIB.iter().map(|(_, code)| *code).collect();
-                        let lines = format!("{}\n{}", lib, src)
-                            .split('\n')
-                            .filter(|s| !s.split("//").next().unwrap().is_empty())
-                            .count();
+    match result {
+        Err(e) => {
+            log_err(codemap, &mut interp, e, save);
+            return None;
+        }
+        Ok(_toplevel) => {
+            let name = pool.intern("main");
+            match interp.lookup_unique_func(name) {
+                None => {
+                    outln!("FN {name:?} = 'MAIN' NOT FOUND");
+                    let decls = interp
+                        .interp
+                        .program
+                        .declarations
+                        .keys()
+                        .map(|n| pool.get(*n).to_string())
+                        .collect::<Vec<String>>();
+                    outln!("Decls: {decls:?}");
+                    log_dbg(&interp, save);
+                    return None;
+                }
+                Some(f) => {
+                    match interp.compile(f, ExecTime::Runtime) {
+                        Err(e) => {
+                            log_err(codemap, &mut interp, e, save);
+                            return None;
+                        }
+                        Ok(_) => {
+                            let end = timestamp();
+                            let seconds = end - start;
+                            let lib: String = LIB.iter().map(|(_, code)| *code).collect();
+                            let lines = format!("{}\n{}", lib, src)
+                                .split('\n')
+                                .filter(|s| !s.split("//").next().unwrap().is_empty())
+                                .count();
 
-                        outln!("===============");
-                        outln!(
-                            "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                            lines as f64 / seconds
-                        );
-                        let inst_count: usize = interp
-                            .interp
-                            .ready
-                            .iter()
-                            .flatten()
-                            .map(|func| func.insts.len())
-                            .sum();
-                        outln!(
-                            "   - Generated {inst_count} instructions ({:.0} i/sec).",
-                            inst_count as f64 / seconds
-                        );
+                            outln!("===============");
+                            outln!(
+                                "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                                lines as f64 / seconds
+                            );
+                            let inst_count: usize = interp
+                                .interp
+                                .ready
+                                .iter()
+                                .flatten()
+                                .map(|func| func.insts.len())
+                                .sum();
+                            outln!(
+                                "   - Generated {inst_count} instructions ({:.0} i/sec).",
+                                inst_count as f64 / seconds
+                            );
 
-                        outln!("===============");
-                        let start = timestamp();
-                        match interp.run(f, arg.clone(), ExecTime::Runtime) {
-                            Err(e) => {
-                                log_err(codemap, &mut interp, e, save);
-                                return None;
-                            }
-                            Ok(result) => {
-                                let end = timestamp();
-                                let seconds = end - start;
-                                outln!("===============");
-                                outln!(
-                                    "Interpreter finished running main() in {seconds:.5} seconds."
-                                );
-                                debug_assert_eq!(result, expect);
-                                // TODO: change this when i add assert(bool)
-                                let assertion_count = src.split("assert_eq(").count() - 1;
-                                // debug so dont crash in web if not using my system of one run per occurance.
-                                debug_assert_eq!(
-                                    interp.interp.assertion_count, assertion_count,
-                                    "vm missed assertions?"
-                                );
-                                outln!(
-                                    "   - {assertion_count} assertions passed. {} comptime evaluations.",
-                                    interp.anon_fn_counter
-                                );
+                            outln!("===============");
+                            let start = timestamp();
+                            match interp.run(f, arg.clone(), ExecTime::Runtime) {
+                                Err(e) => {
+                                    log_err(codemap, &mut interp, e, save);
+                                    return None;
+                                }
+                                Ok(result) => {
+                                    let end = timestamp();
+                                    let seconds = end - start;
+                                    outln!("===============");
+                                    outln!(
+                                        "Interpreter finished running main() in {seconds:.5} seconds."
+                                    );
+                                    debug_assert_eq!(result, expect);
+                                    // TODO: change this when i add assert(bool)
+                                    let assertion_count = src.split("assert_eq(").count() - 1;
+                                    // debug so dont crash in web if not using my system of one run per occurance.
+                                    debug_assert_eq!(
+                                        interp.interp.assertion_count, assertion_count,
+                                        "vm missed assertions?"
+                                    );
+                                    outln!(
+                                        "   - {assertion_count} assertions passed. {} comptime evaluations.",
+                                        interp.anon_fn_counter
+                                    );
+                                }
                             }
                         }
                     }

@@ -129,13 +129,20 @@ impl<'p> ResolveScope<'p> {
             Stmt::Eval(e) => self.resolve_expr(e),
             Stmt::DeclFunc(func) => {
                 if func.referencable_name {
-                    let (_shadow, v) = self.decl_var(&func.name);
-                    func.var_name = Some(v);
-                    self.info.push(VarInfo {
-                        ty: TypeId::any(),
-                        kind: VarType::Const,
-                        loc: func.loc,
-                    });
+                    // Functions don't shadow, they just add to an overload group.
+                    // TODO: what happens if you're shadowing a normal variable? just err maybe?
+                    // TOOD: @pub vs @private
+                    if let Some(v) = self.find_var(&func.name) {
+                        func.var_name = Some(v);
+                    } else {
+                        let (_, v) = self.decl_var(&func.name);
+                        func.var_name = Some(v);
+                        self.info.push(VarInfo {
+                            ty: TypeId::any(),
+                            kind: VarType::Const,
+                            loc: func.loc,
+                        });
+                    }
                 }
                 func.annotations = aaa;
                 self.resolve_func(func);

@@ -191,11 +191,14 @@ impl std::fmt::Debug for ConstId {
 #[derive(Debug, Clone, Default)]
 pub struct Constants<'p> {
     pub local: HashMap<Var<'p>, (Value, TypeId)>,
+    pub is_valid: bool,
 }
 
 impl<'p> Constants<'p> {
+    #[track_caller]
     pub fn close(&self, vars: &[Var<'p>]) -> crate::compiler::Res<'p, Self> {
-        let mut new = Self::default();
+        debug_assert!(self.is_valid);
+        let mut new = Self::empty();
         for k in vars {
             if let Some(val) = self.local.get(k) {
                 new.local.insert(*k, val.clone());
@@ -207,15 +210,25 @@ impl<'p> Constants<'p> {
     }
 
     pub fn add_all(&mut self, other: &Self) {
+        debug_assert!(self.is_valid && other.is_valid);
         self.local.extend(other.local.clone())
     }
 
     pub fn get(&self, k: Var<'p>) -> Option<(Value, TypeId)> {
+        debug_assert!(self.is_valid);
         self.local.get(&k).cloned()
     }
 
     pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
+        debug_assert!(self.is_valid);
         self.local.insert(k, v)
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            local: Default::default(),
+            is_valid: true,
+        }
     }
 }
 
