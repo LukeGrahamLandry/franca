@@ -83,12 +83,15 @@ pub struct Compile<'a, 'p> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DebugState<'p> {
     Compile(FuncId),
-    JitToBc(FuncId, ExecTime),
+    EnsureCompiled(FuncId, ExecTime),
     RunInstLoop(FuncId),
     ComputeCached(FatExpr<'p>),
     ResolveFnType(FuncId),
     EvalConstants(FuncId),
     Msg(String),
+    EmitBody(FuncId),
+    EmitCapturingCall(FuncId),
+    ResolveFnRef(Var<'p>),
 }
 
 #[derive(Clone)]
@@ -225,6 +228,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         mut_replace!(
             self.interp.program.funcs[f.0].closed_constants,
             |constants| {
+                // println!(
+                //     "BEFORE LOCAL CONSTS {}",
+                //     self.interp.program.log_consts(&constants)
+                // );
                 let mut result = self.empty_fn(
                     ExecTime::Comptime,
                     FuncId(f.0 + 10000000), // TODO: do i even need to pass an index? probably just for debugging
@@ -237,6 +244,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let new_constants = func.local_constants.clone();
                 for mut stmt in new_constants {
+                    // println!("Eval const {}", stmt.log(self.pool));
                     self.compile_stmt(&mut result, &mut stmt)?;
                 }
 
@@ -258,17 +266,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.interp.program.funcs[f.0];
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
-
-        let state = DebugState::JitToBc(f, when);
-        self.push_state(&state);
-
-        self.eval_and_close_local_constants(f)?;
-        let func = &self.interp.program.funcs[f.0];
         logln!(
-            "Closed local consts for {}:\n{}",
+            "BEFORE Closed local consts for {}:\n{}",
             func.synth_name(self.pool),
             self.interp.program.log_consts(&func.closed_constants)
         );
+
+        let state = DebugState::EnsureCompiled(f, when);
+        self.push_state(&state);
+        self.eval_and_close_local_constants(f)?;
 
         while self.interp.ready.len() <= f.0 {
             self.interp.ready.push(None);
@@ -282,12 +288,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.interp.program.funcs[f.0];
         let f_ty = func.unwrap_ty();
         let mut result = self.empty_fn(when, f, func.loc, None);
-        let func = &self.interp.program.funcs[f.0];
-        logln!(
-            "result for {} starts with consts:\n{}",
-            func.synth_name(self.pool),
-            self.interp.program.log_consts(&result.constants)
-        );
         let arg_range = result.reserve_slots(self.interp.program, f_ty.arg)?;
         let return_value = self.emit_body(&mut result, arg_range, f)?;
         let func = &self.interp.program.funcs[f.0];
@@ -320,8 +320,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         full_arg_range: StackRange,
         f: FuncId,
     ) -> Res<'p, StackRange> {
+        let state = DebugState::EmitBody(f);
+        self.push_state(&state);
         let has_body = self.interp.program.funcs[f.0].body.is_some();
         debug_assert!(!self.interp.program.funcs[f.0].evil_uninit);
+
+        // println!(
+        //     "emit_body for {} starts with consts:\n{}",
+        //     self.interp.program.funcs[f.0].synth_name(self.pool),
+        //     self.interp.program.log_consts(&result.constants)
+        // );
 
         let mut args_to_drop = vec![];
         mut_replace!(self.interp.program.funcs[f.0], |func: Func<'p>| {
@@ -378,6 +386,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 Ok((func, ret))
             });
+            self.pop_state(state);
             return Ok(ret);
         }
 
@@ -404,6 +413,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             result.push(Bc::Drop(range));
         }
 
+        self.pop_state(state);
         Ok(ret_val)
     }
 
@@ -413,6 +423,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         arg: StackRange,
         f: FuncId,
     ) -> Res<'p, StackRange> {
+        let state = DebugState::EmitCapturingCall(f);
+        self.push_state(&state);
+        // TODO: constants!
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
         result.push(Bc::DebugMarker("start:capturing_call", name));
         self.infer_types(f)?;
@@ -424,6 +437,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let return_range = self.emit_body(result, arg, f)?;
         result.push(Bc::DebugMarker("end:capturing_call", name));
         self.currently_inlining.retain(|check| *check != f);
+        self.pop_state(state);
         Ok(return_range)
     }
 
@@ -662,6 +676,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 dropping,
                 kind,
             } => {
+                // println!(
+                //     "BEFORE DeclConst {} = {:?}\n{}",
+                //     name.log(self.pool),
+                //     value,
+                //     self.interp.program.log_consts(&result.constants)
+                // );
                 let no_type = matches!(ty, LazyType::Infer);
                 self.infer_types_progress(&result.constants, ty)?;
                 let expected_ty = ty.unwrap();
@@ -690,7 +710,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         let found_ty = self.interp.program.type_of(&value);
                         self.type_check_arg(found_ty, expected_ty, "var decl")?;
+                        // println!("DeclConst {} = {:?}", name.log(self.pool), value);
                         result.constants.insert(*name, (value, found_ty));
+                        // println!("{}", self.interp.program.log_consts(&result.constants));
                     }
                     VarType::Let | VarType::Var => {
                         let value = invert(
@@ -926,6 +948,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                         });
                         (to, ty)
                     }
+                    "reflect_print" => {
+                        let (arg, _) = self.compile_expr(result, arg, None)?;
+                        let ret = result.reserve_slots(self.interp.program, TypeId::unit())?;
+                        result.push(Bc::CallBuiltin {
+                            name: *macro_name,
+                            ret,
+                            arg,
+                        });
+                        (ret, TypeId::unit())
+                    }
                     "type" => {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
@@ -1139,6 +1171,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(f);
         }
 
+        let state = DebugState::ResolveFnRef(name);
+        self.push_state(&state);
+
         match self.type_of(result, arg) {
             Ok(Some(arg_ty)) => {
                 if let Some((value, _)) = result.constants.get(name) {
@@ -1147,10 +1182,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                         Value::OverloadSet(i) => {
                             let overloads = &self.interp.program.overload_sets[i];
 
+                            let mut found = None;
                             for check in &overloads.0 {
                                 if check.ty.arg == arg_ty {
-                                    return Ok(check.func);
+                                    found = Some(check.func);
+                                    break;
                                 }
+                            }
+
+                            if let Some(found) = found {
+                                self.pop_state(state);
+                                return Ok(found);
                             }
 
                             // Compute overloads.
@@ -1178,9 +1220,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                                                 func,
                                             },
                                         );
+                                        self.pop_state(state);
                                         Ok(func)
                                     }
-                                    None => err!(CErr::AmbiguousCall),
+                                    None => {
+                                        println!(
+                                            "not found for arg {}",
+                                            self.interp.program.log_type(arg_ty)
+                                        );
+                                        err!(CErr::AmbiguousCall)
+                                    }
                                 }
                             } else {
                                 err!(CErr::VarNotFound(name))
@@ -1471,11 +1520,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             _ => {} // fallthrough
         }
-        logln!(
-            "immediate_eval_expr {} with consts:\n{}",
-            e.log(self.pool),
-            self.interp.program.log_consts(constants)
-        );
+        // println!(
+        //     "immediate_eval_expr {} with consts:\n{}",
+        //     e.log(self.pool),
+        //     self.interp.program.log_consts(constants)
+        // );
 
         let state = DebugState::ComputeCached(e.clone());
         self.push_state(&state);
@@ -1533,6 +1582,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
         debug_assert!(func.closed_constants.local.is_empty());
         debug_assert!(func.closed_constants.is_valid);
+        // println!("ADD_FUNC {}", func.log_captures(self.pool));
         func.closed_constants = constants.close(&func.capture_vars_const)?;
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
@@ -1540,6 +1590,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 func.closed_constants.insert(*capture, val);
             }
         }
+        // println!(
+        //     "ADD_FUNC CLOSED {}",
+        //     self.interp.program.log_consts(&func.closed_constants)
+        // );
         let id = self.interp.program.add_func(func);
         Ok(id)
     }

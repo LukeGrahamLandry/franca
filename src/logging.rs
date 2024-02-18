@@ -598,11 +598,20 @@ impl<'p> DebugState<'p> {
             DebugState::Compile(f) => {
                 format!("| Prep Interp | {}", show_f(*f))
             }
-            DebugState::JitToBc(f, when) => {
-                format!("|   Comp BC   | {} for {:?}", show_f(*f), when)
+            DebugState::EnsureCompiled(f, when) => {
+                format!("| Ensure Comp | {} for {:?}", show_f(*f), when)
+            }
+            DebugState::EmitBody(f) => {
+                format!("|  Emit Body  | {}", show_f(*f))
             }
             DebugState::EvalConstants(f) => {
                 format!("| Eval Consts | {:?}", show_f(*f))
+            }
+            DebugState::EmitCapturingCall(f) => {
+                format!("| Captur Call | {:?}", show_f(*f))
+            }
+            DebugState::ResolveFnRef(v) => {
+                format!("| Find Fn | {}", v.log(pool))
             }
             DebugState::RunInstLoop(f) => format!("| Loop Insts  | {}", show_f(*f)),
             DebugState::ComputeCached(e) => format!("| Cache Eval  | {}", e.log(pool)),

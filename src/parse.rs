@@ -101,7 +101,9 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(Equals)?;
                 let body = self.parse_expr()?;
 
-                let name = self.pool.intern(&body.expr.log(self.pool));
+                let mut name = body.expr.log(self.pool);
+                name.truncate(25);
+                let name = self.pool.intern(&name);
                 let func = Func::new(name, arg, ret, Some(body), loc, false);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }

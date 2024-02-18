@@ -42,7 +42,7 @@ macro_rules! stdlib {
     };
 }
 
-static LIB: &[(&str, &str)] = &[stdlib!("interp_builtins")];
+static LIB: &[(&str, &str)] = &[stdlib!("interp")];
 
 macro_rules! test_file {
     ($case:ident) => {

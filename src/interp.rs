@@ -368,7 +368,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let data = unsafe { &*value };
                 assert!(data.references > 0);
                 Ok(if count == 1 {
-                    let value = data.values[0].clone();
+                    let value = data.values[first].clone(); // Note: [first] NOT [0]
                     assert_ne!(value, Value::Poison);
                     value
                 } else {
@@ -386,6 +386,10 @@ impl<'a, 'p> Interp<'a, 'p> {
     pub fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
+            "panic" => {
+                // TODO: let comptime panics get caught by !assert_compile_error
+                panic!("{arg:?}");
+            }
             "assert_eq" => {
                 let (a, b) = self.split_to_pair(arg)?;
                 assert_eq!(a, b, "runtime_builtin:assert_eq");
@@ -446,7 +450,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // last is not included
                 let (addr, new_first, new_last) = self.to_triple(arg)?;
                 let (new_first, new_last) = (self.to_int(new_first)?, self.to_int(new_last)?);
-                assert!(new_first >= 0 && new_last >= 0 && new_first < new_last);
+                assert!(new_first >= 0 && new_last >= 0 && new_first <= new_last);
                 match addr {
                     Value::InterpAbsStackAddr(addr) => {
                         assert!(
@@ -465,7 +469,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                         assert!(
                             data.references > 0
                                 && abs_first < data.values.len()
-                                && abs_last <= data.values.len()
+                                && abs_last <= data.values.len(),
+                            "{abs_first}..{abs_last}"
                         );
                         Value::Heap {
                             value,
@@ -507,10 +512,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 outln!("{}", arg);
                 Value::Unit
             }
+            "reflect_print" => {
+                outln!("=== start print ===");
+                self.reflect_print(arg, 0)?;
+                outln!("=== end print ===");
+                Value::Unit
+            }
             "print_callstack" => {
                 outln!("{}", self.log_callstack());
                 Value::Unit
             }
+            // TODO: remove
             "comptime_cache_insert" => {
                 let (f, arg, ret) = self.to_triple(arg)?;
                 let (f, arg, ret) = (
@@ -901,7 +913,11 @@ impl<'a, 'p> Interp<'a, 'p> {
             } => {
                 // Slicing operations are bounds checked.
                 let ptr = unsafe { &mut *ptr_value };
-                assert!(ptr.references > 0 && first < ptr.values.len() && count < ptr.values.len());
+                assert!(
+                    ptr.references > 0
+                        && first < ptr.values.len()
+                        && (first + count) <= ptr.values.len()
+                );
                 if count == 1 {
                     ptr.values[first] = value;
                 } else {
@@ -915,6 +931,62 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             _ => panic!("Wanted ptr found {:?}", addr),
         })
+    }
+
+    fn reflect_print(&mut self, mut arg: Value, mut depth: usize) -> Res<'p, ()> {
+        loop {
+            outln!("{}{}", "=".repeat(depth), arg);
+            match arg {
+                Value::InterpAbsStackAddr(slot) => {
+                    if slot.count == 1 {
+                        arg = self.deref_ptr(arg)?;
+                    } else {
+                        for i in 0..slot.count {
+                            self.reflect_print(
+                                Value::InterpAbsStackAddr(StackAbsoluteRange {
+                                    first: StackAbsolute(slot.first.0 + i),
+                                    count: 1,
+                                }),
+                                depth + 2,
+                            )?;
+                        }
+                        break;
+                    }
+                }
+                Value::Heap {
+                    value,
+                    first,
+                    count,
+                } => {
+                    let values = unsafe { &mut *value };
+                    outln!("{}{:?}", "=".repeat(depth), values.values);
+                    if count == 1 {
+                        arg = self.deref_ptr(arg)?;
+                    } else {
+                        for i in 0..count {
+                            self.reflect_print(
+                                Value::Heap {
+                                    value,
+                                    first: first + i,
+                                    count: 1,
+                                },
+                                depth + 2,
+                            )?;
+                        }
+                        break;
+                    }
+                }
+                Value::Tuple { values, .. } => {
+                    for v in values {
+                        self.reflect_print(v, depth + 2)?;
+                    }
+                    break;
+                }
+                _ => break,
+            }
+            depth += 2;
+        }
+        Ok(())
     }
 }
 
