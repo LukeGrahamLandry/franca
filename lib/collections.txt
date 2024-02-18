@@ -7,15 +7,12 @@ fn items() Unit = {unit};
 fn drop() Unit = {unit};
 fn addr() Unit = {unit};
 fn subslice() Unit = {unit};
+fn push_all() Unit = {unit};
+fn list_clone() Unit = {unit};
+fn slice_eq() Unit = {unit};
 
 // TODO: scope resolution for recursion. 
 fn memcpy() Unit = {unit};
-
-fn max(a: i64, b: i64) i64 = {
-    (lt(a, b), fn()=b, fn()=a)!if
-}
-
-fn assert(cond: bool, msg: Str) Unit = (cond, fn()=(), fn()=panic(msg))!if;
 
 @comptime fn List(T: Type) Type = {
     const Self: Type = .{ maybe_uninit: Ptr(T), len: i64 }!struct;
@@ -38,20 +35,26 @@ fn assert(cond: bool, msg: Str) Unit = (cond, fn()=(), fn()=panic(msg))!if;
         slice(ptr, first, add(first, count))
     }
     
-    // you don't need loops if your computer has infinite memory :)
-    fn memcpy(dest: Ptr(T), src: Ptr(T)) Unit = { 
-        (gt(len(dest), 0), fn()={
-            let v: T = get(src, 0);  // TODO: infer through Ptr(_) for overloading so dont need the type annotation
-            set(dest, 0, v);
-            (gt(len(dest), 1), fn()={  // TODO: it doesnt let you make an empty slice. 
-                memcpy(subslice(dest, 1, sub(1, len(src))), subslice(src, 1, sub(1, len(src))));
-            }, fn()=())!if;
-        }, fn()=())!if
+    // TODO: you don't need loops if your computer has infinite memory :)
+    fn memcpy(dest: Ptr(T), src: Ptr(T)) Unit = {
+        assert(eq(len(dest), len(src)), "OOB");  // Note: not using `asser t_eq` because the vm tracks those for my tests
+        var i = 0;
+        (fn() bool = lt(i, len(src)), fn() Unit = {
+            set(dest, i, get(src, i));
+            i = add(i, 1);
+        })!while;
     }
 
     fn list(cap: i64) Self = {
         let self: Self = .{ maybe_uninit: alloc(T, cap), len: 0 };
         self  // TODO: infer from return type so this can be one expression
+    }
+    
+    // Can't reuse the allocation because drop() will free it. TODO: COW
+    fn list_clone(from: Ptr(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
+        let self: Self = list(len(from));
+        push_all(self!addr, from);
+        self
     }
     
     fn items(self: Ptr(Self)) Ptr(T) = {
@@ -73,7 +76,7 @@ fn assert(cond: bool, msg: Str) Unit = (cond, fn()=(), fn()=panic(msg))!if;
             let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
             var new: Self = list(cap);
             let dest: Ptr(T) = subslice(new.maybe_uninit[], 0, self.len[]);
-            memcpy(dest, self.maybe_uninit[]);
+            memcpy(dest, items(self));
             new.len[] = self.len[];
             drop(self);
             self[] = new;
@@ -87,37 +90,92 @@ fn assert(cond: bool, msg: Str) Unit = (cond, fn()=(), fn()=panic(msg))!if;
         self.len[] = add(self.len[], 1);
     }
     
+    fn push_all(self: Ptr(Self), new: Ptr(T)) = {
+        reserve(self, len(new));
+        let dest: Ptr(T) = subslice(self.maybe_uninit[], self.len[], len(new));
+        memcpy(dest, new);
+        self.len[] = add(self.len[], len(new));
+    }
+    
     fn drop(self: Ptr(Self)) = dealloc(T, self.maybe_uninit[]);
+    
+    // TODO: have eq be generic and do something sane but currently its just in the vm and does addr_eq which should be a seperate thing. 
+    fn slice_eq(lhs: Ptr(T), rhs: Ptr(T)) bool = {
+        (eq(len(lhs), len(rhs)), fn() bool = {
+            var i = 0;
+            var prev = true;  // TODO: this is weird because 'and' doesn't short circuit  
+            (
+                fn() bool = { 
+                    and(lt(i, len(lhs)), prev) 
+                }, 
+                fn() Unit = { 
+                    prev = eq(get(lhs, i), get(rhs, i)); 
+                    i = add(i, 1); 
+                },
+            )!while;
+            and(prev, eq(i, len(lhs)))
+        }, fn() bool = false)!if
+    }
     
     Self
 }
 
+// TODO: this is really inefficient 
 fn concat(a: Str, b: Str) Str = {
-    "TODO:concat"
+    var c: List(u8) = list(add(len(a), len(b)));
+    push_all(c!addr, a);
+    push_all(c!addr, b);
+    let r: Str = items(c!addr);  // TODO: infer type from return type
+    r
 }
 
 fn split(haystack: Str, needle: Str) List(Str) = {
+    assert(gt(len(needle), 0), "OOB");
     var lines: List(Str) = list(1);
-    // TODO
+    var i = 0;
+    let last = sub(len(haystack), len(needle));
+    var start = 0;
+    (fn() bool = lt(i, last), fn() Unit = {
+        (eq(get(haystack, i), get(needle, 0)), fn() Unit = {
+            let check: Str = subslice(haystack, i, len(needle));
+            (slice_eq(check, needle), fn() Unit = {
+                let found: Str = subslice(haystack, start, sub(i, start));
+                push(lines!addr, found);
+                i = add(i, len(needle));
+                start = i;
+            }, fn() Unit = { i = add(i, 1); })!if
+        }, fn() Unit = { i = add(i, 1); })!if
+    })!while;
+    let found: Str = subslice(haystack, start, max(0, sub(len(haystack), start)));
+    push(lines!addr, found);
     lines
 }
 
 // TODO: better error message if you call this on Ptr(Str)
-// TODO: string escapes so this can just call split()
 fn splitlines(s: Str) List(Str) = {
-    var lines: List(Str) = list(1);
-    // TODO
-    lines
+    var newline: Str = (10)!slice;  // TODO: string escapes
+    split(s, newline)
 }
 
 fn endswith(haystack: Str, needle: Str) bool = {
-    // TODO
-    false
+    (lt(len(haystack), len(needle)),
+        fn() bool = false,
+        fn() bool = {
+            let start: Str = subslice(haystack, sub(len(haystack), len(needle)), len(needle));  // TODO: infer type
+            slice_eq(start, needle)
+        }
+    )!if
 }
 
+// TODO: these should just be on Slice(T)
 fn startswith(haystack: Str, needle: Str) bool = {
-    // TODO
-    false
+    (lt(len(haystack), len(needle)),
+        fn() bool = { false },
+        fn() bool = {
+            let start: Str = subslice(haystack, 0, len(needle));  // TODO: infer type
+            slice_eq(start, needle)
+        }
+    )!if
 }
 
 fn hex(s: Str) i64 = {
@@ -125,7 +183,17 @@ fn hex(s: Str) i64 = {
     0
 }
 
+fn str() Unit = { unit };  // TODO: scope.rs support recursion. 
+
 fn str(i: i64) Str = {
-    // TODO
-    "?int?"
+    var s: List(u8) = list(1);
+    (and(ge(i, 0), lt(i, 10)), 
+        fn() Unit = push(s!addr, add(48, i)),
+        fn() Unit = {
+            push_all(s!addr, str(div(i, 10))); // TODO: push to list
+            push(s!addr, add(48, mod(i, 10)));
+        }
+    )!if;
+    
+    items(s!addr)
 }

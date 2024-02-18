@@ -114,6 +114,7 @@ pub struct FnBody<'p> {
     pub why: String,
     pub last_loc: Span,
     pub constants: Constants<'p>,
+    pub to_drop: Vec<(StackRange, TypeId)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

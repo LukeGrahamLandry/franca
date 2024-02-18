@@ -354,6 +354,13 @@ impl<'p> PoolLog<'p> for Var<'p> {
 
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
+        if self.evil_uninit {
+            return format!(
+                "[fn {} {:?} EVIL UNINIT (wip?)]",
+                self.synth_name(pool),
+                self.get_name(pool),
+            );
+        }
         format!(
             "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n{}\n",
             self.synth_name(pool),
@@ -367,7 +374,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
             self.body
                 .as_ref()
                 .map(|e| e.log(pool))
-                .unwrap_or_else(|| "@forward_decl()".to_owned()),
+                .unwrap_or_else(|| "@NO_BODY@".to_owned()),
             self.annotations.iter().map(|i| pool.get(i.name)),
             if self.capture_vars.is_empty() {
                 String::from("Raw function, no captures.")

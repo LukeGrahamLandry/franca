@@ -86,7 +86,11 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         // Call the function
         self.push_callframe(f, ret, arg, when)?;
-        self.run_inst_loop()?;
+
+        if let Err(e) = self.run_inst_loop() {
+            outln!("{}", self.log_callstack());
+            return Err(e);
+        }
 
         // Give the return value to the caller.
         let result = self.take_slots(ret);
@@ -171,8 +175,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                         debug_assert_eq!(
                             value,
                             Value::Poison,
-                            "{:?} was not empty",
-                            StackOffset(size - i - 1)
+                            "{:?} was not empty\n{}",
+                            StackOffset(size - i - 1),
+                            self.log_callstack()
                         )
                     }
                     // We don't increment the caller's ip, they did it on call.
@@ -404,7 +409,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
+                outln!("{}", self.log_callstack());
                 // TODO: let comptime panics get caught by !assert_compile_error
+                if let Some(s) = String::deserialize(arg.clone()) {
+                    panic!("{s}");
+                }
                 panic!("{arg:?}");
             }
             "assert_eq" => {
@@ -467,7 +476,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // last is not included
                 let (addr, new_first, new_last) = self.to_triple(arg)?;
                 let (new_first, new_last) = (self.to_int(new_first)?, self.to_int(new_last)?);
-                assert!(new_first >= 0 && new_last >= 0 && new_first <= new_last);
+                assert!(
+                    new_first >= 0 && new_last >= 0 && new_first <= new_last,
+                    "{new_first}..<{new_last}"
+                );
                 match addr {
                     Value::InterpAbsStackAddr(addr) => {
                         assert!(
@@ -487,7 +499,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             data.references > 0
                                 && abs_first < data.values.len()
                                 && abs_last <= data.values.len(),
-                            "{abs_first}..{abs_last}"
+                            "{abs_first}..<{abs_last}"
                         );
                         Value::Heap {
                             value,
@@ -622,25 +634,36 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "system" => {
                 self.fail_on_wasm("fn system")?;
-                let arg = unwrap!(String::deserialize(arg), "expected string");
-                match Command::new(&arg).output() {
+                let mut arg = unwrap!(
+                    Vec::<String>::deserialize(arg.clone()),
+                    "expected Vec<string> not {arg:?}"
+                )
+                .into_iter();
+                let cmd = unwrap!(arg.next(), "cmd");
+                let mut cmd = Command::new(&cmd);
+                for arg in arg {
+                    cmd.arg(arg);
+                }
+                match cmd.output() {
                     Ok(output) => CmdResult {
                         status: output.status.code().unwrap(),
                         stdout: output.stdout,
                         stderr: output.stderr,
                     }
                     .serialize(),
-                    Err(e) => err!("Error running {arg:?}: {e:?}",),
+                    Err(e) => err!("Error running {cmd:?}: {e:?}",),
                 }
             }
             "puts" => {
-                let arg = unwrap!(String::deserialize(arg), "expect str");
+                let arg = unwrap!(String::deserialize(arg.clone()), "expect str not {arg:?}");
                 outln!("{arg}");
                 Value::Unit
             }
             "cli_args" => {
                 self.fail_on_wasm("fn cli_args")?;
-                let args: Vec<_> = env::args().collect();
+                let mut args = env::args();
+                args.next(); // The interpreter's exe.
+                let args: Vec<_> = args.collect();
                 args.serialize()
             }
             _ => ice!("Known builtin is not implemented. {}", name),

@@ -214,6 +214,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: loc,
             constants: parent
                 .unwrap_or_else(|| self.interp.program.funcs[func.0].closed_constants.clone()),
+            to_drop: vec![],
         }
     }
 
@@ -405,6 +406,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // We're done with our arguments, get rid of them. Same for other vars.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
         result.push(Bc::DebugMarker("drop_args", func.get_name(self.pool)));
+        args_to_drop.extend(result.to_drop.drain(0..).map(|(s, _)| (None, s)));
         for (var, range) in args_to_drop {
             if let Some(var) = var {
                 let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
@@ -940,6 +942,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "if" => self.emit_call_if(result, arg)?,
                     "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
+                    "slice" => {
+                        let (slot, container_ty) = self.compile_expr(result, arg, None)?;
+                        let ty = self.interp.program.tuple_types(container_ty);
+                        let expect = if let Some(types) = ty {
+                            let expect = *unwrap!(types.iter().find(|t| !t.is_any()), "all any");
+                            for t in types {
+                                self.type_check_arg(*t, expect, "match slice types")?;
+                            }
+                            expect
+                        } else {
+                            container_ty
+                        };
+                        let ptr_ty = self.interp.program.ptr_type(expect);
+                        let ptr = result.reserve_slots(self.interp.program, ptr_ty)?;
+                        result.push(Bc::AbsoluteStackAddr {
+                            of: slot,
+                            to: ptr.single(),
+                        });
+                        result.to_drop.push((slot, container_ty));
+                        (ptr, ptr_ty)
+                    }
                     "c_call" => {
                         if let Expr::Call(f, arg) = arg.deref_mut().deref_mut().deref_mut() {
                             if let Expr::GetVar(v) = f.deref_mut().deref_mut() {
@@ -1153,7 +1176,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let addr_slot = result.reserve_slots(self.interp.program, ptr_ty)?;
                     result.push(Bc::AbsoluteStackAddr {
                         of: stack_slot,
-                        to: addr_slot.first,
+                        to: addr_slot.single(),
                     });
                     Ok((addr_slot, ptr_ty))
                 } else if result.constants.get(*var).is_some() {
