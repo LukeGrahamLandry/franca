@@ -601,6 +601,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 .serialize()
             }
+            "puts" => {
+                let arg = unwrap!(String::deserialize(arg), "expect str");
+                print!("{arg}");
+                Value::Unit
+            }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
         Ok(value)

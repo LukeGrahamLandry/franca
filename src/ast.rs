@@ -496,7 +496,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
-        while let &TypeInfo::Unique(inner, _) = &self.types[ty.0] {
+        while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) = &self.types[ty.0] {
             ty = inner
         }
         ty
@@ -525,11 +525,11 @@ impl<'p> Program<'p> {
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub fn slot_count(&self, ty: TypeId) -> usize {
+        let ty = self.raw_type(ty);
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
             &TypeInfo::Struct { size, .. } => size,
             &TypeInfo::Enum { size, .. } => size,
-            &TypeInfo::Unique(ty, _) => self.slot_count(ty),
             _ => 1,
         }
     }

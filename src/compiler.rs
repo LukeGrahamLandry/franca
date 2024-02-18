@@ -1015,10 +1015,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let values: Option<_> = pattern.flatten_exprs();
                 let mut values: Vec<FatExpr<'_>> = values.unwrap();
                 assert_eq!(names.len(), values.len());
-                let mut raw_container_ty = requested;
-                while let TypeInfo::Unique(ty, _) = self.interp.program.types[raw_container_ty.0] {
-                    raw_container_ty = ty;
-                }
+                let raw_container_ty = self.interp.program.raw_type(requested);
 
                 match self.interp.program.types[raw_container_ty.0].clone() {
                     TypeInfo::Struct {
@@ -1852,10 +1849,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.interp.program.log_type(container_ptr_ty)
         );
 
-        let mut raw_container_ty = container_ty;
-        while let TypeInfo::Unique(ty, _) = self.interp.program.types[raw_container_ty.0] {
-            raw_container_ty = ty;
-        }
+        let raw_container_ty = self.interp.program.raw_type(container_ty);
         match &self.interp.program.types[raw_container_ty.0] {
             TypeInfo::Struct { fields, .. } => {
                 for f in fields {
@@ -2019,10 +2013,8 @@ impl<'p> FnBody<'p> {
         Ok(StackRange { first, count })
     }
 
-    fn reserve_slots(&mut self, program: &Program<'p>, mut ty: TypeId) -> Res<'p, StackRange> {
-        while let &TypeInfo::Unique(inner, _) = &program.types[ty.0] {
-            ty = inner
-        }
+    fn reserve_slots(&mut self, program: &Program<'p>, ty: TypeId) -> Res<'p, StackRange> {
+        let ty = program.raw_type(ty);
         match &program.types[ty.0] {
             TypeInfo::Enum { size, .. } => {
                 let size = *size;
