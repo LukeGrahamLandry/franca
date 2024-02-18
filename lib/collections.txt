@@ -75,9 +75,11 @@ fn memcpy() Unit = {unit};
         (lt(old_cap, total), fn() = {
             let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
             var new: Self = list(cap);
-            let dest: Ptr(T) = subslice(new.maybe_uninit[], 0, self.len[]);
-            memcpy(dest, items(self));
-            new.len[] = self.len[];
+            (gt(self.len[], 0), fn() Unit = {  // TODO: it doesnt let you create a zero length slice in items()
+                let dest: Ptr(T) = subslice(new.maybe_uninit[], 0, self.len[]);
+                memcpy(dest, items(self));
+                new.len[] = self.len[];
+            }, fn() Unit = ())!if;
             drop(self);
             self[] = new;
         }, fn()=())!if
@@ -133,7 +135,7 @@ fn split(haystack: Str, needle: Str) List(Str) = {
     assert(gt(len(needle), 0), "OOB");
     var lines: List(Str) = list(1);
     var i = 0;
-    let last = sub(len(haystack), len(needle));
+    let last = min(10000, sub(len(haystack), len(needle))); // TODO: !!!
     var start = 0;
     (fn() bool = lt(i, last), fn() Unit = {
         (eq(get(haystack, i), get(needle, 0)), fn() Unit = {
@@ -153,8 +155,23 @@ fn split(haystack: Str, needle: Str) List(Str) = {
 
 // TODO: better error message if you call this on Ptr(Str)
 fn splitlines(s: Str) List(Str) = {
-    var newline: Str = (10)!slice;  // TODO: string escapes
-    split(s, newline)
+    var lf: Str = (10)!slice;  // TODO: string escapes
+    let lines = split(s, lf);
+    
+    /*  this doesndent wordked :(
+    var cr: Str = (13)!slice;
+    var lines: List(Str) = list(1);
+    let temp = split(s, lf);
+    var i = 0;
+    (fn() bool = lt(i, temp.len[]), fn() Unit = {   // TODO: split needs to take an array of things cause this is stupid 
+        let x = split(get(temp, i), cr);
+        let x: Ptr(Str) = items(x!addr);
+        push_all(lines!addr, x);
+        i = add(i, 1); 
+    })!while;
+    */
+    
+    lines
 }
 
 fn endswith(haystack: Str, needle: Str) bool = {
@@ -178,11 +195,6 @@ fn startswith(haystack: Str, needle: Str) bool = {
     )!if
 }
 
-fn hex(s: Str) i64 = {
-    // TODO
-    0
-}
-
 fn str() Unit = { unit };  // TODO: scope.rs support recursion. 
 
 fn str(i: i64) Str = {
@@ -196,4 +208,36 @@ fn str(i: i64) Str = {
     )!if;
     
     items(s!addr)
+}
+
+// TODO: error checking. 
+fn hex_digit(c: i64) i64 = {
+    (ge(c, 97), 
+        fn() i64 =  { assert(lt(c, 107), "hex OOB"); add(sub(c, 97), 10) }, 
+        fn() i64 = (ge(c, 65), 
+            fn() i64 = { assert(lt(c, 75), "hex OOB"); add(sub(c, 65), 10) }, 
+            fn() i64 = { assert(lt(c, 58), "hex OOB"); sub(c, 48)}
+        )!if
+    )!if
+}
+
+fn hex(s: Str) i64 = {
+    var total = 0;
+    var scale = 1;
+    var i = sub(len(s), 1);
+    var first = 0;
+    (fn() bool = eq(get(s, first), 48),  // This prevents overflow for tracking scale for lots of leading zeros. 
+        fn() Unit = { first = add(first, 1) }
+    )!while;
+    (fn() bool = ge(i, first), fn() Unit = {
+        total = add(total, mul(scale, hex_digit(get(s, i))));
+        scale = mul(scale, 16);
+        i = sub(i, 1);
+    })!while;  // TODO: warning if you forget the !while :(
+    total
+}
+
+fn multi_puts(s: Ptr(Str)) Unit = {
+    var i = 0;
+    (fn() bool = lt(i, len(s)), fn() Unit = { puts(get(s, i)); i = add(i, 1); })!while;
 }

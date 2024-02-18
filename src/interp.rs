@@ -450,7 +450,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         );
                         &data.values[first..first + count]
                     }
-                    _ => panic!("Wanted ptr found {:?}", arg),
+                    _ => err!("Wanted ptr found {:?}", arg),
                 };
                 let result = range.iter().all(|v| v == &Value::Poison);
                 Value::Bool(result)
@@ -458,7 +458,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "len" => match arg {
                 Value::InterpAbsStackAddr(addr) => Value::I64(addr.count as i64),
                 Value::Heap { count, .. } => Value::I64(count as i64),
-                _ => panic!("Wanted ptr found {:?}", arg),
+                _ => err!("Wanted ptr found {:?}", arg),
             },
             "Ptr" => {
                 let inner_ty = self.to_type(arg)?;
@@ -499,7 +499,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                             data.references > 0
                                 && abs_first < data.values.len()
                                 && abs_last <= data.values.len(),
-                            "{abs_first}..<{abs_last}"
+                            "[len={}]{abs_first}..<{abs_last}",
+                            data.values.len()
                         );
                         Value::Heap {
                             value,
@@ -507,7 +508,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                             count: abs_last - abs_first,
                         }
                     }
-                    _ => panic!("Wanted ptr found {:?}", addr),
+                    _ => err!("Wanted ptr found {:?}", addr),
                 }
             }
             "alloc" => {
@@ -528,12 +529,13 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "dealloc" => {
                 let (ty, ptr) = self.to_pair(arg)?;
-                let (ty, (ptr, ptr_first, ptr_count)) = (self.to_type(ty)?, self.to_heap_ptr(ptr)?);
-                let slots = ptr_count * self.program.slot_count(ty);
+                let (_ty, (ptr, ptr_first, ptr_count)) =
+                    (self.to_type(ty)?, self.to_heap_ptr(ptr)?);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
-                assert_eq!(ptr_val.values.len(), slots);
+                // let slots = ptr_count * self.program.slot_count(ty);  // TODO: arrays of tuples should be flattened and then this makes sense for the check below.
+                assert_eq!(ptr_val.values.len(), ptr_count);
                 let _ = unsafe { Box::from_raw(ptr) };
                 Value::Unit
             }
@@ -984,7 +986,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 Value::Unit
             }
-            _ => panic!("Wanted ptr found {:?}", addr),
+            _ => err!("Wanted ptr found {:?}", addr),
         })
     }
 
