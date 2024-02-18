@@ -314,12 +314,14 @@ fn interp_send() {
 
 #[cfg(feature = "interp_c_ffi")]
 pub mod c {
+    use libc::c_void;
     use libffi::middle::Arg;
 
     use crate::{
         ast::{Program, TypeId, TypeInfo},
         bc::Value,
         compiler::Res,
+        interp::to_flat_seq,
         logging::err,
     };
     type CTy = libffi::middle::Type;
@@ -347,29 +349,41 @@ pub mod c {
         match v {
             Value::F64(v) => Arg::new(v),
             Value::I64(v) => Arg::new(v),
-            Value::Bool(_) => todo!(),
-            Value::Enum {
-                container_type,
-                tag,
-                value,
-            } => todo!(),
-            Value::Tuple {
-                container_type,
-                values,
-            } => todo!(),
-            Value::Type(_) => todo!(),
-            Value::GetFn(_) => todo!(),
-            Value::Unit => todo!(),
-            Value::Poison => todo!(),
-            Value::InterpAbsStackAddr(_) => todo!(),
-            Value::Heap {
-                value,
-                first,
-                count,
-            } => todo!(),
-            Value::Symbol(_) => todo!(),
-            Value::OverloadSet(_) => todo!(),
-            Value::CFnPtr { ptr, ty } => todo!(),
+            Value::CFnPtr { ptr: v, .. } => Arg::new(v),
+            _ => todo!("to_void_ptr {v:?}"),
         }
+    }
+
+    pub fn call<'p>(
+        program: &mut Program<'p>,
+        ptr: usize,
+        f_ty: crate::ast::FnType,
+        arg: Value,
+    ) -> Res<'p, Value> {
+        let args = to_flat_seq(arg);
+        use libffi::middle::{Builder, CodePtr};
+        let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
+        let mut b = Builder::new();
+        let args: Vec<_> = if f_ty.arg == TypeId::unit() {
+            vec![]
+        } else {
+            b = b.arg(program.as_c_type(f_ty.arg)?);
+            args.iter().map(crate::ffi::c::to_void_ptr).collect()
+        };
+
+        if f_ty.ret != TypeId::unit() {
+            b = b.res(program.as_c_type(f_ty.ret)?)
+        }
+
+        Ok(if f_ty.ret == TypeId::unit() {
+            unsafe { b.into_cif().call::<c_void>(ptr, &args) };
+            Value::Unit
+        } else if f_ty.ret == TypeId::i64() {
+            // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
+            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
+            Value::I64(result)
+        } else {
+            todo!("unsupported c ret type {}", program.log_type(f_ty.ret))
+        })
     }
 }

@@ -1,0 +1,91 @@
+// This is a direct port of (a python script I wrote to investigate which functions are taking up space in an executable). 
+@import(interp, collections, system);
+
+fn main(_canary: i64) i64 = {
+
+const _todo = List(u8);
+const _todo2 = List(Str);
+
+let args = cli_args();
+assert(ge(len(args), 2), "First arg should be path to executable.");
+print("Running objdump...");
+let output = system(concat("objdump -j", get(args, 1)));
+print("Parsing...");
+
+
+const P: Type = (i64, Str); // TODO: doing this inline it only sees the first one. 
+var results: List(P) = list(0);  // TODO: its unfortunate the that wrong type hint here leads to a missing overload err later
+let lines = splitlines(output.stdout[]);
+var i = 0;
+var total = 0;
+(fn() bool = lt(i, sub(lines.len[], 1)), fn() Unit = {
+    var line: Str = get(lines, i);
+    
+    (not(endswith(line, ">:")), fn() = {
+        i = add(i, 1);
+    }, fn() = {
+        var parts: List(Str) = split(line, " ");
+        let start_addr = hex(get(parts, 0));
+        
+        // objective-c message passing calls have spaces in them.
+        let part: Str = get(parts, 0);  // TODO: trying to do .len on this gives error: AddrRvalue because of how i did field offsets
+        let name_start = add(len(part), 2);
+        var name: Str = subslice(line, name_start, sub(len(line), 2));
+        (startswith(name, "-"), fn() = {
+            name = slice(name, 1, len(name))
+        }, fn()=())!if;
+        
+        var prev_line = "nil";
+        
+        // This gets you to the last line of the function.
+        (fn() bool = and(ne(len(line), 0), lt(i, sub(lines.len[], 1))), fn() Unit = {
+            prev_line = line;
+            i = add(i, 1);
+            line = get(lines, i);
+        })!while;
+        
+        // Want to count to the end of the last instruction, not the start of it.
+        // Instructions are 4 bytes.
+        parts = split(prev_line, ":");
+        var end_addr = add(hex(get(parts, 0)), 4);
+    
+        // If that wasn't the last function, get to first line of next function.
+        // Don't need to do this because I know the instrction length. TODO: remove
+        (lt(i, sub(lines.len[], 1)), fn() = {
+            (fn() bool = or(eq(len(line), 0), startswith(line, "Disassembly")), fn() Unit = {
+                i = add(i, 1);
+                line = get(lines, i);
+            })!while;
+            parts = split(line, " ");
+            let real_end_addr = hex(get(parts, i));
+            (ne(end_addr, real_end_addr), 
+                fn() = print("Guess was wrong. This has never happened to me."), 
+            fn()=())!if;
+            end_addr = real_end_addr;
+    
+            // Next loop iter needs to read that function again.
+            i = sub(i, 1);
+        }, fn()=())!if;
+        
+        let size = sub(end_addr, start_addr);
+        push(results!addr, (size, name));
+        i = add(i, 1);
+        total = add(total, size);
+    })!if;
+})!while;
+
+// TODO: sort_ascending_inplace(results, fn(key, _) = key);
+
+fn print_p(size: i64, name: Str) Unit = print(concat(concat(name, ": "), str(size)));
+
+var i = 0;
+(fn() bool = lt(i, results.len[]), fn() Unit = {
+    let name_size: P = get(results, i);
+    print_p(name_size);
+    i = add(i, 1);
+})!while;
+
+print(concat(concat("TOTAL: ", str(total)), " bytes."));
+
+_canary
+}

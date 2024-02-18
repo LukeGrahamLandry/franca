@@ -562,7 +562,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_comptime_call(
         &mut self,
         caller_constants: &Constants<'p>,
-        f: FuncId,
+        template_f: FuncId,
         arg_expr: &FatExpr<'p>,
     ) -> Res<'p, Value> {
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
@@ -570,7 +570,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
-        let mut func = self.interp.program.funcs[f.0].clone();
+        let mut func = self.interp.program.funcs[template_f.0].clone();
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
         func.referencable_name = false;
@@ -596,7 +596,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             return self.interp.runtime_builtin(name, arg_value);
         }
 
-        let key = (f, arg_value.clone()); // TODO: no clone
+        // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
+        let key = (template_f, arg_value.clone()); // TODO: no clone
         let found = self.interp.program.generics_memo.get(&key);
         if let Some(found) = found {
             return Ok(found.clone());
@@ -655,7 +656,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.interp
             .program
             .generics_memo
-            .insert(key, result.clone());
+            .insert(key.clone(), result.clone());
 
         Ok(result)
     }
@@ -807,7 +808,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: more general system for checking if its a constant known expr instead of all these cases.
                 if let &Expr::GetVar(i) = f.as_ref().deref() {
                     // TODO: only grab here if its a constant, might be a function pointer.
-                    let f = self.resolve_function(result, i, arg)?;
+                    let f = self.resolve_function(result, i, arg, requested)?;
                     return self.emit_any_call(result, f, arg);
                 }
                 if let &Expr::Value(Value::GetFn(f)) = f.deref().deref().deref() {
@@ -937,6 +938,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
                     "if" => self.emit_call_if(result, arg)?,
+                    "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
                     "c_call" => {
                         if let Expr::Call(f, arg) = arg.deref_mut().deref_mut().deref_mut() {
@@ -974,6 +976,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         });
                         (to, ty)
                     }
+                    "first" => self.tuple_access(result, arg, requested, 0),
+                    "second" => self.tuple_access(result, arg, requested, 1),
                     "reflect_print" => {
                         let (arg, _) = self.compile_expr(result, arg, None)?;
                         let ret = result.reserve_slots(self.interp.program, TypeId::unit())?;
@@ -1191,6 +1195,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: &mut FnBody<'p>,
         name: Var<'p>,
         arg: &FatExpr<'p>,
+        requested_ret: Option<TypeId>,
     ) -> Res<'p, FuncId> {
         // If there's only one option, we don't care what type it is.
         if let Some(f) = self.lookup_unique_func(name.0) {
@@ -1208,9 +1213,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                         Value::OverloadSet(i) => {
                             let overloads = &self.interp.program.overload_sets[i];
 
+                            let accept = |f_ty: FnType| {
+                                arg_ty == f_ty.arg
+                                    && (requested_ret.is_none()
+                                        || (requested_ret.unwrap() == f_ty.ret))
+                            };
+
                             let mut found = None;
                             for check in &overloads.0 {
-                                if check.ty.arg == arg_ty {
+                                if accept(check.ty) {
                                     found = Some(check.func);
                                     break;
                                 }
@@ -1221,19 +1232,32 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 return Ok(found);
                             }
 
+                            let log_goal = |s: &mut Self| {
+                                format!(
+                                    "for fn {}({}) {:?};",
+                                    name.log(s.pool),
+                                    s.interp.program.log_type(arg_ty),
+                                    requested_ret
+                                        .map(|t| s.interp.program.log_type(t))
+                                        .unwrap_or_else(|| "??".to_string())
+                                )
+                            };
+
                             // Compute overloads.
                             if let Some(decls) = self.interp.program.declarations.get(&name.0) {
                                 let mut found = None;
-                                for f in decls.clone() {
-                                    if let Ok(f_ty) = self.infer_types(f) {
-                                        if arg_ty == f_ty.arg {
+                                let decls = decls.clone();
+                                for f in &decls {
+                                    if let Ok(f_ty) = self.infer_types(*f) {
+                                        if accept(f_ty) {
                                             assert!(
                                                 found.is_none(),
-                                                "AmbiguousCall {:?} vs {:?}",
+                                                "AmbiguousCall {:?} vs {:?} \n{}",
                                                 found,
-                                                (f, f_ty)
+                                                (f, f_ty),
+                                                log_goal(self)
                                             );
-                                            found = Some((f, f_ty));
+                                            found = Some((*f, f_ty));
                                         }
                                     }
                                 }
@@ -1250,10 +1274,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                                         Ok(func)
                                     }
                                     None => {
-                                        println!(
-                                            "not found for arg {}",
-                                            self.interp.program.log_type(arg_ty)
-                                        );
+                                        // TODO: put the message in the error so !assert_compile_error doesn't print it.
+                                        outln!("not found {}", log_goal(self));
+                                        for f in &decls {
+                                            if let Ok(f_ty) = self.infer_types(*f) {
+                                                outln!(
+                                                    "- found {:?} fn({}) {};",
+                                                    f,
+                                                    self.interp.program.log_type(f_ty.arg),
+                                                    self.interp.program.log_type(f_ty.ret),
+                                                );
+                                            }
+                                        }
+                                        outln!("Maybe you forgot to instantiate a generic?");
+
                                         err!(CErr::AmbiguousCall)
                                     }
                                 }
@@ -1294,7 +1328,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Value(v) => self.interp.program.type_of(v),
             Expr::Call(f, arg) => {
                 if let Expr::GetVar(i) = f.deref().deref() {
-                    if let Ok(fid) = self.resolve_function(result, *i, arg) {
+                    if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
                         if self.infer_types(fid).is_ok() {
                             let f_ty = self.interp.program.funcs[fid.0].unwrap_ty();
                             return Ok(Some(f_ty.ret));
@@ -1681,7 +1715,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
             let if_false = if let Expr::Closure(func) = parts[2].deref_mut() {
                 let f = self.add_func(mem::take(func), &result.constants)?;
-                *parts[1].deref_mut() = Expr::Value(Value::GetFn(f));
+                *parts[2].deref_mut() = Expr::Value(Value::GetFn(f));
                 f
             } else {
                 ice!("if third arg must be func not {:?}", parts[2]);
@@ -1730,6 +1764,62 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
 
         Ok((ret, true_ty.ret))
+    }
+
+    fn emit_call_while(
+        &mut self,
+        result: &mut FnBody<'p>,
+        arg: &mut FatExpr<'p>,
+    ) -> Res<'p, (StackRange, TypeId)> {
+        let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref_mut() {
+            let cond = if let Expr::Closure(func) = parts[0].deref_mut() {
+                let f = self.add_func(mem::take(func), &result.constants)?;
+                *parts[0].deref_mut() = Expr::Value(Value::GetFn(f));
+                f
+            } else {
+                ice!("while first arg must be func not {:?}", parts[0]);
+            };
+            let body = if let Expr::Closure(func) = parts[1].deref_mut() {
+                let f = self.add_func(mem::take(func), &result.constants)?;
+                *parts[1].deref_mut() = Expr::Value(Value::GetFn(f));
+                f
+            } else {
+                ice!("while second arg must be func not {:?}", parts[1]);
+            };
+            (cond, body)
+        } else {
+            ice!("if args must be tuple not {:?}", arg);
+        };
+
+        let cond_ty = self.infer_types(cond_fn)?;
+        let body_ty = self.infer_types(body_fn)?;
+        let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
+        self.type_check_eq(cond_ty.arg, TypeId::unit(), sig)?;
+        self.type_check_eq(cond_ty.ret, TypeId::bool(), sig)?;
+        self.type_check_eq(body_ty.arg, TypeId::unit(), sig)?;
+        self.type_check_eq(body_ty.ret, TypeId::unit(), sig)?;
+
+        let name = self.pool.intern("builtin:while");
+        let cond_ip = result.insts.len();
+        let unit = result.load_constant(self.interp.program, Value::Unit)?.0;
+        let cond_ret = self.emit_capturing_call(result, unit, cond_fn)?;
+        let branch_ip = result.push(Bc::DebugMarker("patch", name));
+
+        let body_ip = result.insts.len();
+        let unit = result.load_constant(self.interp.program, Value::Unit)?.0;
+        let body_ret = self.emit_capturing_call(result, unit, body_fn)?;
+        result.push(Bc::Drop(body_ret));
+        result.push(Bc::Goto { ip: cond_ip });
+        let end_ip = result.insts.len();
+
+        result.insts[branch_ip] = Bc::JumpIf {
+            // TODO: change to conditional so dont have to store the true_ip
+            cond: cond_ret.single(),
+            true_ip: body_ip,
+            false_ip: end_ip,
+        };
+
+        result.load_constant(self.interp.program, Value::Unit)
     }
 
     #[track_caller]
@@ -1860,6 +1950,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 todo!()
             }
+            &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             _ => ice!("TODO: other `place=e;`"),
         }
     }
@@ -2079,6 +2170,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.interp.program.log_type(container_ty)
             ),
         }
+    }
+
+    fn tuple_access(
+        &self,
+        _result: &mut FnBody<'p>,
+        _container: &FatExpr<'p>,
+        _requested: Option<TypeId>,
+        _index: i32,
+    ) -> (StackRange, TypeId) {
+        todo!()
     }
 }
 

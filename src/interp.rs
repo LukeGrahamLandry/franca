@@ -1,12 +1,11 @@
 #![allow(clippy::wrong_self_convention)]
-use std::io::{self, Write};
+use std::env;
 use std::mem::replace;
 use std::process::Command;
 
 use codemap::Span;
 use interp_derive::InterpSend;
 
-use crate::bc::*;
 use crate::compiler::{CErr, ExecTime, Res};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, unwrap, PoolLog};
@@ -14,6 +13,7 @@ use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
+use crate::{bc::*, ffi};
 
 use crate::logging::{assert, assert_eq, bin_int, err, ice, logln};
 
@@ -288,32 +288,18 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 &Bc::CallC { f, ret, arg } => {
                     self.bump_ip();
+
                     #[cfg(not(feature = "interp_c_ffi"))]
                     {
-                        err!("Comptime c ffi is disabled.",)
+                        err!("Interp c ffi is disabled.",)
                     }
                     #[cfg(feature = "interp_c_ffi")]
                     {
                         let f = self.take_slot(f);
                         let (ptr, f_ty) = self.to_c_func(f)?;
-                        let args = to_flat_seq(self.take_slots(arg));
-
-                        use libffi::middle::{Builder, CodePtr};
-                        let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
-                        let mut b = Builder::new();
-                        let args: Vec<_> = if f_ty.arg == TypeId::unit() {
-                            vec![]
-                        } else {
-                            b = b.arg(self.program.as_c_type(f_ty.arg)?);
-                            args.iter().map(crate::ffi::c::to_void_ptr).collect()
-                        };
-                        if f_ty.ret != TypeId::unit() {
-                            b = b.res(self.program.as_c_type(f_ty.ret)?)
-                        }
-
-                        // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
-                        let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
-                        *self.get_slot_mut(ret.single()) = Value::I64(result);
+                        let arg = self.take_slots(arg);
+                        let result = ffi::c::call(self.program, ptr, f_ty, arg)?;
+                        *self.get_slot_mut(ret.single()) = result;
                     }
                 }
             }
@@ -635,20 +621,27 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::I64(index as i64)
             }
             "system" => {
+                self.fail_on_wasm("fn system")?;
                 let arg = unwrap!(String::deserialize(arg), "expected string");
-                let output = unwrap!(Command::new(arg).output().ok(), "err");
-                CmdResult {
-                    status: output.status.code().unwrap(),
-                    stdout: output.stdout,
-                    stderr: output.stderr,
+                match Command::new(&arg).output() {
+                    Ok(output) => CmdResult {
+                        status: output.status.code().unwrap(),
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                    }
+                    .serialize(),
+                    Err(e) => err!("Error running {arg:?}: {e:?}",),
                 }
-                .serialize()
             }
             "puts" => {
                 let arg = unwrap!(String::deserialize(arg), "expect str");
-                print!("{arg}");
-                io::stdout().flush().unwrap();
+                outln!("{arg}");
                 Value::Unit
+            }
+            "cli_args" => {
+                self.fail_on_wasm("fn cli_args")?;
+                let args: Vec<_> = env::args().collect();
+                args.serialize()
             }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
@@ -1024,6 +1017,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 _ => break,
             }
             depth += 2;
+        }
+        Ok(())
+    }
+
+    fn fail_on_wasm(&self, name: &str) -> Res<'p, ()> {
+        if cfg!(target_arch = "wasm32") {
+            err!("Operation {name:?} suported on wasm target.",)
         }
         Ok(())
     }
