@@ -1,6 +1,7 @@
 #![allow(clippy::wrong_self_convention)]
+use std::io::{self, Write};
+use std::mem::replace;
 use std::process::Command;
-use std::{mem::replace, panic::Location};
 
 use codemap::Span;
 use interp_derive::InterpSend;
@@ -284,6 +285,36 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let tag = self.deref_ptr(tag)?;
                     assert_eq!(tag, Value::I64(value));
                     self.bump_ip();
+                }
+                &Bc::CallC { f, ret, arg } => {
+                    self.bump_ip();
+                    #[cfg(not(feature = "interp_c_ffi"))]
+                    {
+                        err!("Comptime c ffi is disabled.",)
+                    }
+                    #[cfg(feature = "interp_c_ffi")]
+                    {
+                        let f = self.take_slot(f);
+                        let (ptr, f_ty) = self.to_c_func(f)?;
+                        let args = to_flat_seq(self.take_slots(arg));
+
+                        use libffi::middle::{Builder, CodePtr};
+                        let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
+                        let mut b = Builder::new();
+                        let args: Vec<_> = if f_ty.arg == TypeId::unit() {
+                            vec![]
+                        } else {
+                            b = b.arg(self.program.as_c_type(f_ty.arg)?);
+                            args.iter().map(crate::ffi::c::to_void_ptr).collect()
+                        };
+                        if f_ty.ret != TypeId::unit() {
+                            b = b.res(self.program.as_c_type(f_ty.ret)?)
+                        }
+
+                        // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
+                        let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
+                        *self.get_slot_mut(ret.single()) = Value::I64(result);
+                    }
                 }
             }
         }
@@ -591,8 +622,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Type(ty)
             }
             "Unique" => {
-                let ty = TypeInfo::Unique(self.to_type(arg)?, self.program.types.len());
-                Value::Type(self.program.intern_type(ty))
+                let ty = self.to_type(arg)?;
+                Value::Type(self.program.unique_ty(ty))
             }
             "tag_value" => {
                 let (enum_ty, name) = self.to_pair(arg)?;
@@ -616,6 +647,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "puts" => {
                 let arg = unwrap!(String::deserialize(arg), "expect str");
                 print!("{arg}");
+                io::stdout().flush().unwrap();
                 Value::Unit
             }
             _ => ice!("Known builtin is not implemented. {}", name),
@@ -887,6 +919,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         match v {
             Value::I64(i) => Ok(i),
             v => err!("load_int {:?}", v),
+        }
+    }
+
+    fn to_c_func(&self, v: Value) -> Res<'p, (usize, FnType)> {
+        match v {
+            Value::CFnPtr { ptr, ty } => Ok((ptr, ty)),
+            v => err!("to_c_func {:?}", v),
         }
     }
 

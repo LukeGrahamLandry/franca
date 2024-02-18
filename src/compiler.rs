@@ -938,6 +938,32 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // Note: arg is not evalutated
                     "if" => self.emit_call_if(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
+                    "c_call" => {
+                        if let Expr::Call(f, arg) = arg.deref_mut().deref_mut().deref_mut() {
+                            if let Expr::GetVar(v) = f.deref_mut().deref_mut() {
+                                let name = self.pool.get(v.0);
+                                let (func, f_ty) = unwrap!(
+                                    self.builtin_constant(name),
+                                    "undeclared ffi func: {name:?}",
+                                );
+                                let f_ty = unwrap!(self.interp.program.fn_ty(f_ty), "fn");
+                                let (arg, _todo_arg_ty) =
+                                    self.compile_expr(result, arg, Some(f_ty.arg))?;
+                                let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
+                                let (f, _) = result.load_constant(self.interp.program, func)?;
+                                result.push(Bc::CallC {
+                                    f: f.single(),
+                                    arg,
+                                    ret,
+                                });
+                                (ret, f_ty.ret)
+                            } else {
+                                err!("c_call expected Expr:Call(Expr::GetVar, ...args)",)
+                            }
+                        } else {
+                            err!("c_call expected Expr:Call",)
+                        }
+                    }
                     "deref" => {
                         let (from, ptr_ty) = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.interp.program.unptr_ty(ptr_ty), "not ptr");
@@ -1367,6 +1393,35 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Some((Value::Type(ty), tyty));
         }
 
+        // It feels like this could trivially be a generic function but somehow no. I dare you to fix it.
+        macro_rules! ffi_type {
+            ($name:ty) => {{
+                let id = unsafe { mem::transmute(std::any::TypeId::of::<$name>()) };
+                let ty = self.interp.program.get_ffi_type::<$name>(id);
+                (Value::Type(ty), TypeId::ty())
+            }};
+        }
+
+        macro_rules! cfn {
+            ($fn:expr, $ty:expr) => {{
+                #[cfg(not(feature = "interp_c_ffi"))]
+                {
+                    outln!("Comptime c ffi is disabled.");
+                    return None;
+                }
+                #[cfg(feature = "interp_c_ffi")]
+                {
+                    (
+                        Value::CFnPtr {
+                            ptr: $fn as usize,
+                            ty: $ty,
+                        },
+                        self.interp.program.intern_type(TypeInfo::Fn($ty)),
+                    )
+                }
+            }};
+        }
+
         Some(match name {
             "true" => (
                 Value::Bool(true),
@@ -1376,12 +1431,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Value::Bool(false),
                 self.interp.program.intern_type(TypeInfo::Bool),
             ),
-
-            "CmdResult" => (
-                Value::Type(CmdResult::get_type(self.interp.program)),
-                TypeId::ty(),
+            "Symbol" => ffi_type!(Ident),
+            "CmdResult" => ffi_type!(CmdResult),
+            "getchar" => cfn!(
+                libc::getchar,
+                FnType {
+                    arg: TypeId::unit(),
+                    ret: TypeId::i64()
+                }
             ),
-
+            "putchar" => cfn!(
+                libc::putchar,
+                FnType {
+                    arg: TypeId::i64(),
+                    ret: TypeId::i64()
+                }
+            ),
             _ => return None,
         })
     }
@@ -2184,7 +2249,7 @@ impl<'p> Bc<'p> {
     // Used for inlining
     fn renumber(&mut self, stack_offset: usize, ip_offset: usize) {
         match self {
-            Bc::CallDynamic { f, ret, arg } => {
+            Bc::CallDynamic { f, ret, arg } | Bc::CallC { f, ret, arg } => {
                 f.0 += stack_offset;
                 ret.first.0 += stack_offset;
                 arg.first.0 += stack_offset;

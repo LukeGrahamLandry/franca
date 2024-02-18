@@ -1,5 +1,5 @@
 cargo test || exit
-cargo build --target wasm32-unknown-unknown --release --lib || exit
+cargo build --target wasm32-unknown-unknown --release --lib --no-default-features --features some_log || exit
 
 TARGET_PATH="target/wasm32-unknown-unknown/release"
 WASM_PATH="$TARGET_PATH/franca.wasm"

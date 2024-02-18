@@ -2,6 +2,7 @@
 use crate::{
     bc::{Constants, Value},
     compiler::insert_multi,
+    ffi::InterpSend,
     pool::{Ident, StringPool},
 };
 use codemap::Span;
@@ -443,6 +444,7 @@ pub struct Program<'p> {
     pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
     pub overload_sets: Vec<OverloadSet<'p>>,
+    pub ffi_types: HashMap<u128, TypeId>,
 }
 
 #[derive(Clone)]
@@ -492,7 +494,17 @@ impl<'p> Program<'p> {
             vars,
             pool,
             overload_sets: Default::default(),
+            ffi_types: Default::default(),
         }
+    }
+
+    /// This allows ffi types to be unique.
+    pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
+        self.ffi_types.get(&id).copied().unwrap_or_else(|| {
+            let ty = T::get_type(self);
+            self.ffi_types.insert(id, ty);
+            ty
+        })
     }
 
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
@@ -517,6 +529,10 @@ impl<'p> Program<'p> {
             1 => types[0],
             _ => self.intern_type(TypeInfo::Tuple(types)),
         }
+    }
+
+    pub fn unique_ty(&mut self, ty: TypeId) -> TypeId {
+        self.intern_type(TypeInfo::Unique(ty, self.types.len()))
     }
 }
 
@@ -588,10 +604,11 @@ impl<'p> Program<'p> {
             Value::GetFn(f) => self.func_type(*f),
             Value::Unit => self.intern_type(TypeInfo::Unit),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
-            Value::Symbol(_) => TypeId::i64(),
+            Value::Symbol(_) => Ident::get_type(self),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
             Value::Heap { .. } => TypeId::any(),
             Value::OverloadSet(_) => TypeId::any(),
+            Value::CFnPtr { ty, .. } => self.intern_type(TypeInfo::Fn(*ty)),
         }
     }
 

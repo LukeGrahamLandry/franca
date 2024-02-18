@@ -1,13 +1,13 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
-    ast::{FuncId, TypeId, Var},
+    ast::{FnType, FuncId, TypeId, Var},
     compiler::{CErr, DebugInfo, ExecTime},
     logging::err,
     pool::Ident,
 };
 use codemap::Span;
 use interp_derive::InterpSend;
-use std::{collections::HashMap, panic::Location};
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub enum Bc<'p> {
@@ -95,6 +95,11 @@ pub enum Bc<'p> {
         to: StackOffset,
         from: StackRange,
     },
+    CallC {
+        f: StackOffset,
+        arg: StackRange,
+        ret: StackRange,
+    },
 }
 
 #[derive(Clone)]
@@ -141,6 +146,10 @@ pub enum Value {
     },
     Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(usize),
+    CFnPtr {
+        ptr: usize,
+        ty: FnType,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq)]

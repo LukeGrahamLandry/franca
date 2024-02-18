@@ -129,7 +129,7 @@ fn string_pool() {
 
 impl<'p> InterpSend<'p> for Ident<'p> {
     fn get_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
-        interp.intern_type(crate::ast::TypeInfo::I64) // TODO: have a Symbol type
+        interp.intern_type(crate::ast::TypeInfo::I64) // TODO: have a unique Symbol type
     }
 
     fn serialize(self) -> crate::bc::Value {

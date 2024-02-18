@@ -13,7 +13,7 @@ macro_rules! bin_int {
 macro_rules! err {
     ($payload:expr) => {{
         return Err($crate::compiler::CompileError {
-            internal_loc: Location::caller(),
+            internal_loc: std::panic::Location::caller(),
             loc: None,
             reason: $payload,
             trace: String::new(),
@@ -433,6 +433,11 @@ impl<'p> PoolLog<'p> for Bc<'p> {
         let mut f = String::new();
         match self {
             Bc::CallDynamic {
+                f: func_slot,
+                ret,
+                arg,
+            }
+            | Bc::CallC {
                 f: func_slot,
                 ret,
                 arg,

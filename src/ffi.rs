@@ -311,3 +311,65 @@ fn interp_send() {
     // let ty = HelloWorld::get_type(&mut p);
     // panic!("{}", p.log_type(ty));
 }
+
+#[cfg(feature = "interp_c_ffi")]
+pub mod c {
+    use libffi::middle::Arg;
+
+    use crate::{
+        ast::{Program, TypeId, TypeInfo},
+        bc::Value,
+        compiler::Res,
+        logging::err,
+    };
+    type CTy = libffi::middle::Type;
+
+    impl<'p> Program<'p> {
+        pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
+            Ok(match &self.types[ty.0] {
+                TypeInfo::F64 => CTy::f64(),
+                TypeInfo::I64 => CTy::i64(),
+                TypeInfo::Bool => CTy::c_int(),
+                TypeInfo::Tuple(_) => todo!(),
+                TypeInfo::Ptr(_) => CTy::pointer(),
+                TypeInfo::Slice(_) => CTy::structure([CTy::pointer(), CTy::i64()]),
+                TypeInfo::Enum { .. } => todo!(),
+                TypeInfo::Unique(ty, _)
+                | TypeInfo::Named(ty, _)
+                | TypeInfo::Struct { as_tuple: ty, .. } => self.as_c_type(*ty)?,
+                TypeInfo::Unit => todo!(),
+                _ => err!("No c abi for {}", self.log_type(ty)),
+            })
+        }
+    }
+
+    pub fn to_void_ptr(v: &Value) -> Arg {
+        match v {
+            Value::F64(v) => Arg::new(v),
+            Value::I64(v) => Arg::new(v),
+            Value::Bool(_) => todo!(),
+            Value::Enum {
+                container_type,
+                tag,
+                value,
+            } => todo!(),
+            Value::Tuple {
+                container_type,
+                values,
+            } => todo!(),
+            Value::Type(_) => todo!(),
+            Value::GetFn(_) => todo!(),
+            Value::Unit => todo!(),
+            Value::Poison => todo!(),
+            Value::InterpAbsStackAddr(_) => todo!(),
+            Value::Heap {
+                value,
+                first,
+                count,
+            } => todo!(),
+            Value::Symbol(_) => todo!(),
+            Value::OverloadSet(_) => todo!(),
+            Value::CFnPtr { ptr, ty } => todo!(),
+        }
+    }
+}
