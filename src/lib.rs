@@ -67,6 +67,7 @@ test_file!(structs);
 test_file!(generics);
 test_file!(overloading);
 test_file!(closures);
+test_file!(ffi);
 
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,

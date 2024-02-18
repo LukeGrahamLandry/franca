@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use codemap::Span;
+
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::Value,
@@ -8,6 +12,13 @@ pub trait InterpSend<'p>: Sized {
     fn get_type(interp: &mut Program<'p>) -> TypeId;
     fn serialize(self) -> Value;
     fn deserialize(value: Value) -> Option<Self>;
+}
+
+impl Value {
+    // This is stupid but macros suck and its somehow really hard to add a turbofish so you can use assosiated functions.
+    pub fn deserialize<'p, T: InterpSend<'p> + Sized>(self) -> Option<T> {
+        T::deserialize(self)
+    }
 }
 
 macro_rules! send_num {
@@ -51,6 +62,34 @@ impl<'p> InterpSend<'p> for bool {
     fn deserialize(value: Value) -> Option<Self> {
         if let Value::Bool(i) = value {
             Some(i)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
+    fn get_type(program: &mut Program<'p>) -> TypeId {
+        let a = A::get_type(program);
+        let b = B::get_type(program);
+        program.tuple_of(vec![a, b])
+    }
+
+    fn serialize(self) -> Value {
+        // TODO
+        Value::Tuple {
+            container_type: TypeId::any(),
+            values: vec![self.0.serialize(), self.1.serialize()],
+        }
+    }
+
+    fn deserialize(vvalue: Value) -> Option<Self> {
+        if let Value::Tuple { values, .. } = vvalue {
+            let mut values = values.into_iter();
+            Some((
+                A::deserialize(values.next()?)?,
+                B::deserialize(values.next()?)?,
+            ))
         } else {
             None
         }
@@ -109,6 +148,106 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     }
 }
 
+impl<'p> InterpSend<'p> for Value {
+    fn get_type(_interp: &mut Program<'p>) -> TypeId {
+        TypeId::any()
+    }
+
+    fn serialize(self) -> Value {
+        self
+    }
+
+    fn deserialize(value: Value) -> Option<Self> {
+        Some(value)
+    }
+}
+
+// TODO: this should be an enum
+impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
+    fn get_type(interp: &mut Program<'p>) -> TypeId {
+        let t = T::get_type(interp);
+        interp.tuple_of(vec![TypeId::bool(), t])
+    }
+
+    fn serialize(self) -> Value {
+        match self {
+            Some(v) => Value::Tuple {
+                container_type: TypeId::any(),
+                values: vec![Value::Bool(false), v.serialize()],
+            },
+            None => Value::Tuple {
+                container_type: TypeId::any(),
+                values: vec![Value::Bool(false), Value::Unit],
+            },
+        }
+    }
+
+    fn deserialize(value: Value) -> Option<Self> {
+        match value {
+            Value::Tuple { values, .. } => {
+                let mut values = values.into_iter();
+                match values.next()? {
+                    Value::Bool(true) => Some(T::deserialize(Value::Tuple {
+                        container_type: TypeId::any(),
+                        values: values.collect(),
+                    })),
+                    Value::Bool(false) => Some(None),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<'p> InterpSend<'p> for Span {
+    fn get_type(_interp: &mut Program<'p>) -> TypeId {
+        todo!()
+    }
+
+    fn serialize(self) -> Value {
+        todo!()
+    }
+
+    fn deserialize(_value: Value) -> Option<Self> {
+        todo!()
+    }
+}
+
+impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p>
+    for HashMap<K, V>
+{
+    fn get_type(interp: &mut Program<'p>) -> TypeId {
+        Vec::<(K, V)>::get_type(interp)
+    }
+
+    fn serialize(self) -> Value {
+        self.into_iter().collect::<Vec<_>>().serialize()
+    }
+
+    fn deserialize(value: Value) -> Option<Self> {
+        Some(
+            Vec::<(K, V)>::deserialize(value)?
+                .into_iter()
+                .collect::<Self>(),
+        )
+    }
+}
+
+impl<'p> InterpSend<'p> for String {
+    fn get_type(interp: &mut Program<'p>) -> TypeId {
+        Vec::<u8>::get_type(interp)
+    }
+
+    fn serialize(self) -> Value {
+        Vec::<u8>::from(self).serialize()
+    }
+
+    fn deserialize(value: Value) -> Option<Self> {
+        Self::from_utf8(Vec::<u8>::deserialize(value)?).ok()
+    }
+}
+
 #[test]
 fn interp_send() {
     use crate::pool::StringPool;
@@ -125,6 +264,8 @@ fn interp_send() {
         // A,
         B(i64),
         E { _f: i64, _d: bool },
+        G,
+        F,
     }
 
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
@@ -134,6 +275,7 @@ fn interp_send() {
         e: HelloTuple,
         f: HelloEnum,
         g: HelloEnum,
+        h: HelloEnum,
     }
 
     let pool = Box::leak(Box::<StringPool>::default());
@@ -154,6 +296,7 @@ fn interp_send() {
         e: HelloTuple(1, 2),
         f: HelloEnum::E { _f: 15, _d: true },
         g: HelloEnum::B(25),
+        h: HelloEnum::G,
     };
     let eight = seven.serialize();
     let nine = Nested::deserialize(eight).unwrap();

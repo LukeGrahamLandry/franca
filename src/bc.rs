@@ -6,6 +6,7 @@ use crate::{
     pool::Ident,
 };
 use codemap::Span;
+use interp_derive::InterpSend;
 use std::{collections::HashMap, panic::Location};
 
 #[derive(Clone)]
@@ -188,7 +189,7 @@ impl std::fmt::Debug for ConstId {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, InterpSend)]
 pub struct Constants<'p> {
     pub local: HashMap<Var<'p>, (Value, TypeId)>,
     pub is_valid: bool,

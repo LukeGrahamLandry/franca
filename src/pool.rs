@@ -1,5 +1,7 @@
 use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock};
 
+use crate::ffi::InterpSend;
+
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
 
@@ -123,4 +125,18 @@ fn string_pool() {
     assert_eq!("hello", pool.get(hello));
     assert_eq!("hello", pool.get(hello2));
     assert_eq!("goodbye", pool.get(goodbye));
+}
+
+impl<'p> InterpSend<'p> for Ident<'p> {
+    fn get_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
+        interp.intern_type(crate::ast::TypeInfo::I64) // TODO: have a Symbol type
+    }
+
+    fn serialize(self) -> crate::bc::Value {
+        self.0.serialize()
+    }
+
+    fn deserialize(value: crate::bc::Value) -> Option<Self> {
+        Some(Ident(usize::deserialize(value)?, PhantomData))
+    }
 }

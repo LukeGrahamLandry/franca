@@ -5,6 +5,7 @@ use crate::{
     pool::{Ident, StringPool},
 };
 use codemap::Span;
+use interp_derive::InterpSend;
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -12,10 +13,10 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend)]
 pub struct TypeId(pub usize);
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub arg: TypeId,
@@ -46,16 +47,21 @@ impl TypeId {
     pub fn i64() -> TypeId {
         TypeId(3)
     }
+
+    // Be careful that this is in the pool correctly!
+    pub fn bool() -> TypeId {
+        TypeId(4)
+    }
 }
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
     Var,
     Const,
 }
 
-#[derive(Clone, PartialEq, Hash, Eq, Debug)]
+#[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum TypeInfo<'p> {
     Any,
     Never,
@@ -83,7 +89,7 @@ pub enum TypeInfo<'p> {
     Unit, // TODO: same as empty tuple but easier to type
 }
 
-#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
@@ -91,16 +97,16 @@ pub struct Field<'p> {
     pub count: usize,
 }
 
-#[derive(Clone, PartialEq, Hash, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug, InterpSend)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
     pub args: Option<FatExpr<'p>>,
 }
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct Var<'p>(pub Ident<'p>, pub usize);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Value(Value),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
@@ -127,7 +133,7 @@ pub enum Expr<'p> {
     String(Ident<'p>),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, InterpSend)]
 pub enum Known {
     // Known at comptime but could be computed at runtime too.
     Foldable,
@@ -139,7 +145,7 @@ pub enum Known {
 
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Span,
@@ -148,14 +154,14 @@ pub struct FatExpr<'p> {
     pub known: Known,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub struct Pattern<'p> {
     pub bindings: Vec<Binding<'p>>,
     pub loc: Span,
 }
 
 // arguments of a function and left of variable declaration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub enum Binding<'p> {
     Named(Ident<'p>, LazyType<'p>),
     Var(Var<'p>, LazyType<'p>),
@@ -290,7 +296,7 @@ impl Hash for FatExpr<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
@@ -319,14 +325,14 @@ pub enum Stmt<'p> {
     DoneDeclFunc(FuncId),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub struct FatStmt<'p> {
     pub stmt: Stmt<'p>,
     pub annotations: Vec<Annotation<'p>>,
     pub loc: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Ident<'p>,           // it might be an annonomus closure
@@ -403,7 +409,7 @@ impl<'p> Func<'p> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Default)]
+#[derive(Clone, PartialEq, Debug, Hash, Default, InterpSend)]
 pub enum LazyType<'p> {
     #[default]
     EvilUnit,
@@ -413,10 +419,10 @@ pub enum LazyType<'p> {
     Different(Vec<Self>),
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct FuncId(pub usize);
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct VarInfo {
     pub ty: TypeId,
     pub kind: VarType,

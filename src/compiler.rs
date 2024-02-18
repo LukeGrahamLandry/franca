@@ -17,7 +17,7 @@ use crate::ast::{
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
-use crate::interp::{to_flat_seq, CallFrame, Interp};
+use crate::interp::{to_flat_seq, CallFrame, CmdResult, Interp};
 use crate::logging::{outln, PoolLog};
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -1329,6 +1329,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             "false" => (
                 Value::Bool(false),
                 self.interp.program.intern_type(TypeInfo::Bool),
+            ),
+
+            "CmdResult" => (
+                Value::Type(CmdResult::get_type(self.interp.program)),
+                TypeId::ty(),
             ),
 
             _ => return None,

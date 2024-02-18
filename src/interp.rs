@@ -1,10 +1,13 @@
 #![allow(clippy::wrong_self_convention)]
+use std::process::Command;
 use std::{mem::replace, panic::Location};
 
 use codemap::Span;
+use interp_derive::InterpSend;
 
 use crate::bc::*;
 use crate::compiler::{CErr, ExecTime, Res};
+use crate::ffi::InterpSend;
 use crate::logging::{outln, unwrap, PoolLog};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
@@ -588,6 +591,16 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let index = unwrap!(index, "bad case name");
                 Value::I64(index as i64)
             }
+            "system" => {
+                let arg = unwrap!(String::deserialize(arg), "expected string");
+                let output = unwrap!(Command::new(arg).output().ok(), "err");
+                CmdResult {
+                    status: output.status.code().unwrap(),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                }
+                .serialize()
+            }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
         Ok(value)
@@ -925,4 +938,11 @@ pub fn to_flat_seq(value: Value) -> Vec<Value> {
         Value::Tuple { values, .. } => values.into_iter().flat_map(to_flat_seq).collect(),
         e => vec![e],
     }
+}
+
+#[derive(Debug, Clone, InterpSend)]
+pub struct CmdResult {
+    status: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
