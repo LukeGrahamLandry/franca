@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
-    logging::logln,
+    logging::{outln, LogTag::Scope},
     pool::{Ident, StringPool},
 };
 
@@ -74,7 +74,7 @@ impl<'p> ResolveScope<'p> {
 
         func.local_constants = self.local_constants.pop().unwrap();
 
-        logln!("{}", func.log_captures(self.pool));
+        outln!(Scope, "{}", func.log_captures(self.pool));
     }
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {

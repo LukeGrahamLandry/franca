@@ -15,7 +15,10 @@ use crate::{
 };
 use crate::{bc::*, ffi};
 
-use crate::logging::{assert, assert_eq, bin_int, err, ice, logln};
+use crate::logging::{
+    assert, assert_eq, bin_int, err, ice, logln,
+    LogTag::{ShowErr, ShowPrint},
+};
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'p> {
@@ -88,7 +91,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         self.push_callframe(f, ret, arg, when)?;
 
         if let Err(e) = self.run_inst_loop() {
-            outln!("{}", self.log_callstack());
+            outln!(ShowErr, "{}", self.log_callstack());
             return Err(e);
         }
 
@@ -409,12 +412,13 @@ impl<'a, 'p> Interp<'a, 'p> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
-                outln!("{}", self.log_callstack());
+                outln!(ShowErr, "{}", self.log_callstack());
                 // TODO: let comptime panics get caught by !assert_compile_error
                 if let Some(s) = String::deserialize(arg.clone()) {
-                    panic!("{s}");
+                    outln!(ShowErr, "{s}");
                 }
-                panic!("{arg:?}");
+                outln!(ShowErr, "{arg:?}");
+                err!("Program panicked: {arg:?}",)
             }
             "assert_eq" => {
                 let (a, b) = self.split_to_pair(arg)?;
@@ -540,17 +544,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::Unit
             }
             "print" => {
-                outln!("{}", arg);
+                outln!(ShowPrint, "{}", arg);
                 Value::Unit
             }
             "reflect_print" => {
-                outln!("=== start print ===");
+                outln!(ShowPrint, "=== start print ===");
                 self.reflect_print(arg, 0)?;
-                outln!("=== end print ===");
+                outln!(ShowPrint, "=== end print ===");
                 Value::Unit
             }
             "print_callstack" => {
-                outln!("{}", self.log_callstack());
+                outln!(ShowPrint, "{}", self.log_callstack());
                 Value::Unit
             }
             // TODO: remove
@@ -651,7 +655,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "puts" => {
                 let arg = unwrap!(String::deserialize(arg.clone()), "expect str not {arg:?}");
-                outln!("{arg}");
+                outln!(ShowPrint, "{arg}");
                 Value::Unit
             }
             "cli_args" => {
@@ -985,7 +989,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     fn reflect_print(&mut self, mut arg: Value, mut depth: usize) -> Res<'p, ()> {
         loop {
-            outln!("{}{}", "=".repeat(depth), arg);
+            outln!(ShowPrint, "{}{}", "=".repeat(depth), arg);
             match arg {
                 Value::InterpAbsStackAddr(slot) => {
                     if slot.count == 1 {
@@ -1009,7 +1013,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     count,
                 } => {
                     let values = unsafe { &mut *value };
-                    outln!("{}{:?}", "=".repeat(depth), values.values);
+                    outln!(ShowPrint, "{}{:?}", "=".repeat(depth), values.values);
                     if count == 1 {
                         arg = self.deref_ptr(arg)?;
                     } else {

@@ -5,7 +5,7 @@ use codemap::Span;
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::Value,
-    logging::outln,
+    logging::{outln, LogTag::ShowErr},
 };
 
 // TODO
@@ -117,7 +117,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         {
             let value = unsafe { &mut *value };
             if value.references <= 0 {
-                outln!("deserialize: references < 1");
+                outln!(ShowErr, "deserialize: references < 1");
                 return None;
             }
             if first == 0 && count == value.values.len() {

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use bc::Value;
 use codemap::CodeMap;
@@ -28,7 +28,7 @@ pub mod scope;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
     compiler::{Compile, CompileError, ExecTime},
-    logging::{outln, PoolLog},
+    logging::{init_logs, outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
     parse::Parser,
     scope::ResolveScope,
 };
@@ -48,6 +48,8 @@ macro_rules! test_file {
     ($case:ident) => {
         #[test]
         fn $case() {
+            init_logs(&[ShowErr]);
+            
             let pool = Box::leak(Box::<StringPool>::default());
 
             assert!(run_main(
@@ -56,8 +58,7 @@ macro_rules! test_file {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&stringify!($case)),
-            )
-            .is_some());
+            ));
         }
     };
 }
@@ -76,7 +77,7 @@ pub fn run_main<'a: 'p, 'p>(
     arg: Value,
     expect: Value,
     save: Option<&str>,
-) -> Option<String> {
+) -> bool {
     let start = timestamp();
     let mut codemap = CodeMap::new();
     let mut stmts = Vec::<FatStmt<'p>>::new();
@@ -94,10 +95,10 @@ pub fn run_main<'a: 'p, 'p>(
                 stmts.extend(new);
             }
             Err(e) => {
-                outln!("Parse error (Internal: {})", e.loc);
+                outln!(ShowErr, "Parse error (Internal: {})", e.loc);
 
                 emit_diagnostic(&codemap, &e.diagnostic);
-                return None;
+                return false;
             }
         }
     }
@@ -122,32 +123,19 @@ pub fn run_main<'a: 'p, 'p>(
     let result = interp.add_declarations(global);
 
     fn log_dbg(interp: &Compile, save: Option<&str>) {
-        if cfg!(feature = "some_log") {
-            if let Some(path) = save {
-                let i_path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
-                fs::create_dir_all(i_path.parent().unwrap()).unwrap();
-                fs::write(
-                    &i_path,
-                    format!("{}\nAt {:?}", interp.interp.log(interp.pool), timestamp()),
-                )
-                .unwrap();
-                outln!("Wrote log to {:?}", i_path);
-                let ast_path = PathBuf::from(format!("target/latest_log/{path}/rt_ast.txt"));
-                let name = interp.pool.intern("main");
-                if let Some(id) = interp.lookup_unique_func(name) {
-                    fs::write(ast_path, interp.interp.program.log_finished_ast(id)).unwrap();
-                }
-            }
+        outln!(Bytecode, "{}", interp.interp.log(interp.pool));
+        let name = interp.pool.intern("main");
+        if let Some(id) = interp.lookup_unique_func(name) {
+            outln!(FinalAst, "{}", interp.interp.program.log_finished_ast(id));
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let name = interp.pool.intern("main");
-            if let Some(id) = interp.lookup_unique_func(name) {
-                let s = interp.interp.program.log_finished_ast(id);
-                unsafe { crate::web::show_rt_ast(s.as_ptr(), s.len()) };
-            }
+        
+        outln!(ShowPrint, "===============================");
+        if let Some(path) = save {
+            let folder = &format!("target/latest_log/{path}");
+            fs::create_dir_all(folder).unwrap();
+            save_logs(folder);
+            println!( "Wrote log to {folder:?}");
         }
-        outln!("===============================");
     }
 
     fn log_err<'p>(
@@ -169,24 +157,28 @@ pub fn run_main<'a: 'p, 'p>(
             }];
             emit_diagnostic(&codemap, &diagnostic);
         } else {
-            outln!("{}", e.reason.log(interp.interp.program, interp.pool));
+            outln!(
+                ShowErr,
+                "{}",
+                e.reason.log(interp.interp.program, interp.pool)
+            );
         }
 
-        outln!("Internal: {}", e.internal_loc);
-        outln!("{}", e.trace);
+        outln!(ShowErr, "Internal: {}", e.internal_loc);
+        outln!(ShowErr, "{}", e.trace);
         log_dbg(interp, save);
     }
 
     match result {
         Err(e) => {
             log_err(codemap, &mut interp, e, save);
-            return None;
+            return false;
         }
         Ok(_toplevel) => {
             let name = pool.intern("main");
             match interp.lookup_unique_func(name) {
                 None => {
-                    outln!("FN {name:?} = 'MAIN' NOT FOUND");
+                    outln!(ShowErr, "FN {name:?} = 'MAIN' NOT FOUND");
                     let decls = interp
                         .interp
                         .program
@@ -194,15 +186,15 @@ pub fn run_main<'a: 'p, 'p>(
                         .keys()
                         .map(|n| pool.get(*n).to_string())
                         .collect::<Vec<String>>();
-                    outln!("Decls: {decls:?}");
+                    outln!(ShowErr, "Decls: {decls:?}");
                     log_dbg(&interp, save);
-                    return None;
+                    return false;
                 }
                 Some(f) => {
                     match interp.compile(f, ExecTime::Runtime) {
                         Err(e) => {
                             log_err(codemap, &mut interp, e, save);
-                            return None;
+                            return false;
                         }
                         Ok(_) => {
                             let end = timestamp();
@@ -213,8 +205,8 @@ pub fn run_main<'a: 'p, 'p>(
                                 .filter(|s| !s.split("//").next().unwrap().is_empty())
                                 .count();
 
-                            outln!("===============");
-                            outln!(
+                            outln!(ShowPrint, "===============");
+                            outln!(ShowPrint, 
                                 "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
                                 lines as f64 / seconds
                             );
@@ -225,23 +217,23 @@ pub fn run_main<'a: 'p, 'p>(
                                 .flatten()
                                 .map(|func| func.insts.len())
                                 .sum();
-                            outln!(
+                            outln!(ShowPrint, 
                                 "   - Generated {inst_count} instructions ({:.0} i/sec).",
                                 inst_count as f64 / seconds
                             );
 
-                            outln!("===============");
+                            outln!(ShowPrint, "===============");
                             let start = timestamp();
                             match interp.run(f, arg.clone(), ExecTime::Runtime) {
                                 Err(e) => {
                                     log_err(codemap, &mut interp, e, save);
-                                    return None;
+                                    return false;
                                 }
                                 Ok(result) => {
                                     let end = timestamp();
                                     let seconds = end - start;
-                                    outln!("===============");
-                                    outln!(
+                                    outln!(ShowPrint, "===============");
+                                    outln!(ShowPrint, 
                                         "Interpreter finished running main() in {seconds:.5} seconds."
                                     );
                                     debug_assert_eq!(result, expect);
@@ -252,7 +244,7 @@ pub fn run_main<'a: 'p, 'p>(
                                         interp.interp.assertion_count, assertion_count,
                                         "vm missed assertions?"
                                     );
-                                    outln!(
+                                    outln!(ShowPrint, 
                                         "   - {assertion_count} assertions passed. {} comptime evaluations.",
                                         interp.anon_fn_counter
                                     );
@@ -265,9 +257,9 @@ pub fn run_main<'a: 'p, 'p>(
         }
     }
 
-    outln!("===============");
+    outln!(ShowPrint, "===============");
     log_dbg(&interp, save);
-    Some(interp.interp.log(pool))
+    true
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
@@ -276,7 +268,7 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
         let mut emitter = Emitter::vec(&mut out, Some(codemap));
         emitter.emit(diagnostic);
         drop(emitter);
-        outln!(
+        outln!(ShowErr,
             "{}",
             String::from_utf8(out).unwrap_or_else(|_| "ICE: diagnostic was not valid utf8".into())
         );
@@ -291,8 +283,10 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
 #[cfg(target_arch = "wasm32")]
 pub mod web {
     #![allow(clippy::missing_safety_doc)]
+    use crate::logging::{init_logs_flag, save_logs};
+
     use crate::bc::Value;
-    use crate::logging::outln;
+    use crate::logging::{outln, LogTag::*};
     use crate::pool::StringPool;
     use crate::run_main;
     use std::alloc::{alloc, Layout};
@@ -303,7 +297,11 @@ pub mod web {
 
     /// len does NOT include null terminator.
     #[no_mangle]
-    pub unsafe extern "C" fn run(input_query: *const u8, len: usize) {
+    pub unsafe extern "C" fn run(log_flag: u64, input_query: *const u8, len: usize) {
+        let s = format!("Running with log={log_flag:?}");
+        unsafe { crate::web::console_log(s.as_ptr(), s.len()) };
+        
+        init_logs_flag(log_flag);
         if POOL.is_none() {
             POOL = Some(StringPool::default());
         }
@@ -313,15 +311,12 @@ pub mod web {
         let src = match String::from_utf8(src.to_vec()) {
             Ok(src) => src,
             Err(e) => {
-                outln!("{:?}", e);
+                outln!(ShowErr, "{:?}", e);
                 return;
             }
         };
-        let res = run_main(pool, src, Value::Unit, Value::Unit, None);
-        flush_console();
-        if let Some(s) = res {
-            show_bc(s.as_ptr(), s.len());
-        }
+        run_main(pool, src, Value::Unit, Value::Unit, None);
+        save_logs("");
     }
 
     /// len DOES include null terminator
@@ -341,40 +336,10 @@ pub mod web {
         CStr::from_ptr(ptr).to_bytes().len()
     }
 
-    // TODO: should just use Write for my logging stuff so this could be less clunky.
-    // TODO: this means you won't get output if I don't catch an error and fully panic but I want that to not happen anyway.
-    //       ice should always tel you waht it was trying to do because i care about debugging the compiler.
-    //       but also infinite loops and you have to wait for the program to finish before you get anything.
-    //       but i dont have loops yet so who cares.
-
-    /// Printing one line is slower than parsing my example so buffering seems important.
-    static mut CONSOLE: Vec<String> = vec![];
-
-    pub fn flush_console() {
-        unsafe {
-            // This is overkill because printing is slow anyway but I want fewer calls between wasm and js.
-            let len = CONSOLE.iter().map(|s| s.len() + 1).sum();
-            let mut out = String::with_capacity(len);
-            for msg in CONSOLE.drain(0..) {
-                out.push_str(&msg);
-                out.push('\n');
-            }
-            console_log(out.as_ptr(), out.len());
-        }
-    }
-
-    pub fn push_console(msg: String) {
-        // Safety: There's only one thread.
-        unsafe {
-            CONSOLE.push(msg);
-        }
-    }
-
     extern "C" {
         pub fn console_log(ptr: *const u8, len: usize);
         pub fn timestamp() -> f64;
-        pub fn show_bc(ptr: *const u8, len: usize);
-        pub fn show_rt_ast(ptr: *const u8, len: usize);
+        pub fn show_log(tag: usize, ptr: *const u8, len: usize);
     }
 }
 

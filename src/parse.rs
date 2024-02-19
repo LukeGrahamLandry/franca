@@ -7,12 +7,11 @@ use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Binding, TypeId};
-use crate::logging::logln;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
     lex::{Lexer, Token, TokenType},
-    logging::PoolLog,
+    logging::{outln, LogTag::Parsing, PoolLog},
     pool::{Ident, StringPool},
 };
 use TokenType::*;
@@ -34,6 +33,8 @@ pub struct ParseErr {
 
 impl<'a, 'p> Parser<'a, 'p> {
     pub fn parse(file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
+        outln!(Parsing, "\n######################################\n### START FILE: {} \n######################################\n", file.name());
+
         let mut p = Parser {
             pool,
             lexer: Lexer::new(file.source(), pool, file.span),
@@ -47,10 +48,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             stmts.push(p.parse_stmt()?);
         }
         let _full = p.end_subexpr();
-
-        for s in &stmts {
-            logln!("finished stmt: {}", s.log(pool))
-        }
 
         Ok(stmts)
     }
@@ -473,7 +470,8 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn expr(&mut self, expr: Expr<'p>) -> FatExpr<'p> {
-        logln!(
+        outln!(
+            Parsing,
             "{}({}) EXPR {}",
             "=".repeat(self.spans.len() * 2),
             self.spans.len(),
@@ -491,7 +489,8 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn stmt(&mut self, annotations: Vec<Annotation<'p>>, stmt: Stmt<'p>) -> FatStmt<'p> {
-        logln!(
+        outln!(
+            Parsing,
             "{}({}) STMT {:?} {}",
             "=".repeat(self.spans.len() * 2),
             self.spans.len(),

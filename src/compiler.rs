@@ -24,7 +24,10 @@ use crate::{
     pool::{Ident, StringPool},
 };
 
-use crate::logging::{assert, assert_eq, err, ice, logln, unwrap};
+use crate::logging::{
+    assert, assert_eq, err, ice, logln, unwrap,
+    LogTag::{ShowErr, ShowPrint},
+};
 
 #[derive(Clone)]
 pub struct CompileError<'p> {
@@ -997,13 +1000,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.ensure_compiled(func, ExecTime::Comptime)?;
                     result.load_constant(self.interp.program, Value::GetFn(func))?
                 } else {
-                    outln!("VARS: {:?}", result.vars);
+                    outln!(ShowErr, "VARS: {:?}", result.vars);
                     outln!(
+                        ShowErr,
                         "CONSTANTS: {:?}",
                         self.interp.program.log_consts(&result.constants)
                     );
                     let current_func = &self.interp.program.funcs[result.func.0];
-                    outln!("{}", current_func.log_captures(self.pool));
+                    outln!(ShowErr, "{}", current_func.log_captures(self.pool));
                     ice!(
                         "Missing resolved variable {:?} '{}'",
                         var,
@@ -1112,13 +1116,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         result.load_constant(self.interp.program, Value::Unit)?
                     }
                     "comptime_print" => {
-                        outln!("EXPR : {}", arg.log(self.pool));
+                        outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
                         let value = self.immediate_eval_expr(
                             &result.constants,
                             *arg.clone(),
                             TypeId::any(),
                         );
-                        outln!("VALUE: {:?}", value);
+                        outln!(ShowPrint, "VALUE: {:?}", value);
                         result.load_constant(self.interp.program, Value::Unit)?
                     }
                     "struct" => {
@@ -1383,10 +1387,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                                     }
                                     None => {
                                         // TODO: put the message in the error so !assert_compile_error doesn't print it.
-                                        outln!("not found {}", log_goal(self));
+                                        outln!(ShowErr, "not found {}", log_goal(self));
                                         for f in &decls {
                                             if let Ok(f_ty) = self.infer_types(*f) {
                                                 outln!(
+                                                    ShowErr,
                                                     "- found {:?} fn({}) {};",
                                                     f,
                                                     self.interp.program.log_type(f_ty.arg),
@@ -1394,7 +1399,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                                                 );
                                             }
                                         }
-                                        outln!("Maybe you forgot to instantiate a generic?");
+                                        outln!(
+                                            ShowErr,
+                                            "Maybe you forgot to instantiate a generic?"
+                                        );
 
                                         err!(CErr::AmbiguousCall)
                                     }
@@ -1548,7 +1556,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             ($fn:expr, $ty:expr) => {{
                 #[cfg(not(feature = "interp_c_ffi"))]
                 {
-                    outln!("Comptime c ffi is disabled.");
+                    outln!(ShowErr, "Comptime c ffi is disabled.");
                     return None;
                 }
                 #[cfg(feature = "interp_c_ffi")]

@@ -1,8 +1,10 @@
 // nobody cares its just logging. TODO: should do it anyway i guess.
 #![allow(unused_must_use)]
 use core::fmt;
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt::{Debug, Write};
+use std::{fs, mem};
 
 macro_rules! bin_int {
     ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
@@ -91,30 +93,78 @@ macro_rules! unwrap {
 
 pub(crate) use unwrap;
 
-macro_rules! outln {
-    ($($arg:tt)*) => {{
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogTag {
+    Parsing = 0,
+    Scope = 1,
+    InitialAst = 2,
+    Bytecode = 3,
+    FinalAst = 4,
+    ShowPrint = 5,
+    ShowErr = 6,
+    _Last = 7,
+}
+
+pub struct LogSettings {
+    pub track: u64,
+    pub logs: Vec<Vec<String>>,
+}
+
+thread_local! {
+    pub static LOG: RefCell<LogSettings> = RefCell::new(LogSettings {
+        track: 0,
+        logs: vec![],
+    });
+}
+
+pub fn init_logs(want: &[LogTag]) {
+    let mut flag = 0;
+    for tag in want {
+        flag |= 1 << (*tag as usize);
+    }
+    init_logs_flag(flag);
+}
+
+pub fn init_logs_flag(want: u64) {
+    LOG.with(|settings| {
+        let mut settings = settings.borrow_mut();
+        settings.track = want;
+        settings.logs = vec![vec![]; LogTag::_Last as usize + 1];
+    });
+}
+
+pub fn get_logs(kind: LogTag) -> String {
+    LOG.with(|settings| settings.borrow().logs[kind as usize].join("\n"))
+}
+
+pub fn save_logs(folder: &str) {
+    for i in 0..(LogTag::_Last as usize) {
+        let tag: LogTag = unsafe { mem::transmute(i as u8) };
+        let s = get_logs(tag);
+
         #[cfg(target_arch = "wasm32")]
-        { $crate::web::push_console(format!($($arg)*)); }
+        {
+            unsafe { crate::web::show_log(i, s.as_ptr(), s.len()) };
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        println!($($arg)*);
+        {
+            fs::write(format!("{folder}/{tag:?}.log"), s).unwrap();
+        }
+    }
+}
+
+macro_rules! outln {
+    ($tag:expr, $($arg:tt)*) => {{
+        let tag: crate::logging::LogTag = $tag;
+        crate::logging::LOG.with(|settings| {
+            if (settings.borrow().track & (1 << tag as usize)) != 0 {
+                settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
+            }
+        })
     }};
 }
 
 pub(crate) use outln;
-
-macro_rules! _push_state {
-    ($self:expr, $($arg:tt)*) => {{
-        let msg = format!($($arg)*);
-        $self.push_state(&DebugState::Msg(msg));
-    }};
-}
-// pub(crate) use push_state;
-
-pub enum LogTag {
-    Parsing,
-    InstLoop,
-    Jitting,
-}
 
 macro_rules! log {
     ($($arg:tt)*) => {{
