@@ -557,35 +557,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 outln!(ShowPrint, "{}", self.log_callstack());
                 Value::Unit
             }
-            // TODO: remove
-            "comptime_cache_insert" => {
-                let (f, arg, ret) = self.to_triple(arg)?;
-                let (f, arg, ret) = (
-                    self.to_func(f)?,
-                    flatten_value(vec![arg]),
-                    flatten_value(vec![ret]),
-                );
-
-                logln!("INSERT_CACHE {f:?}({arg:?}) => {:?}", ret);
-                // debug_assert_eq!(self.current_fn_body().when, ExecTime::Comptime);
-                self.program.generics_memo.insert((f, arg), ret);
-                Value::Unit
-            }
-            "comptime_cache_get" => {
-                let (f, arg) = self.to_pair(arg)?;
-                let key = (self.to_func(f)?, arg);
-                logln!("CHECK_CACHE {:?}({:?})", key.0, key.1);
-                // debug_assert_eq!(self.current_fn_body().when, ExecTime::Comptime);
-                let values = if let Some(prev) = self.program.generics_memo.get(&key) {
-                    vec![Value::Bool(true), prev.clone()]
-                } else {
-                    vec![Value::Bool(false), Value::Unit]
-                };
-                Value::Tuple {
-                    container_type: TypeId::any(),
-                    values,
-                }
-            }
             "Fn" => {
                 // println!("Fn: {:?}", arg);
                 let (arg, ret) = self.to_pair(arg)?;
@@ -1048,26 +1019,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             err!("Operation {name:?} suported on wasm target.",)
         }
         Ok(())
-    }
-}
-
-fn flatten_value(values: Vec<Value>) -> Value {
-    if values.len() == 1 {
-        return values.into_iter().next().unwrap();
-    }
-
-    // TODO: flatten inner tuples
-    Value::Tuple {
-        container_type: TypeId::any(),
-        values: values.into_iter().flat_map(expand_value).collect(),
-    }
-}
-
-fn expand_value(value: Value) -> Vec<Value> {
-    if let Value::Tuple { values, .. } = value {
-        values.into_iter().flat_map(expand_value).collect()
-    } else {
-        vec![value]
     }
 }
 

@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Constants, Value},
+    bc::{Constants, Structured, Value},
     compiler::insert_multi,
     ffi::InterpSend,
     pool::{Ident, StringPool},
@@ -254,6 +254,12 @@ impl<'p> Pattern<'p> {
         });
         debug_assert_ne!(start, self.bindings.len());
     }
+}
+
+#[derive(Debug, Default)]
+pub struct Matched<'e, 'p> {
+    _discard: Vec<(&'e mut FatExpr<'p>, TypeId)>,
+    _bound: Vec<(&'e mut FatExpr<'p>, TypeId, Var<'p>)>,
 }
 
 // Some(
@@ -533,6 +539,14 @@ impl<'p> Program<'p> {
 
     pub fn unique_ty(&mut self, ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Unique(ty, self.types.len()))
+    }
+
+    pub fn load_fn(&mut self, id: FuncId) -> Structured {
+        Structured::Const(self.func_type(id), Value::GetFn(id))
+    }
+
+    pub fn load_value(&mut self, v: Value) -> Structured {
+        Structured::Const(self.type_of(&v), v)
     }
 }
 

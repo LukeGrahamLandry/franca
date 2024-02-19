@@ -93,6 +93,7 @@ macro_rules! unwrap {
 
 pub(crate) use unwrap;
 
+// Note: if you add more, make sure nobody's using 255 to mean 'all'.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogTag {
     Parsing = 0,
@@ -344,7 +345,7 @@ fn collect_func_references_stmt<'p>(
     }
 }
 
-fn collect_func_references_value<'p>(v: &Value, refs: &mut Vec<FuncId>) {
+fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
     let mut vals = vec![v];
     while let Some(v) = vals.pop() {
         match v {
@@ -416,12 +417,11 @@ impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
         s += &self.program.log_cached_types();
         writeln!(s, "=== {} FUNCTIONS ===", self.ready.len());
         for (i, f) in self.ready.iter().enumerate() {
+            write!(s, "FuncId({i}): ");
             s += &self.program.funcs[i].log(pool);
             s += "\n";
             if let Some(bc) = f {
                 writeln!(s, "{}", bc.log(pool));
-            } else {
-                writeln!(s, "NOT JITTED");
             }
             writeln!(s, "===");
         }
@@ -529,7 +529,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             Expr::Value(Value::Unit) => "unit".to_string(),
             Expr::Value(v) => format!("{:?}", v),
             Expr::GetVar(v) => v.log(pool),
-            Expr::Closure(f) => format!("closure(fn {})", f.synth_name(pool)),
+            Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.log(pool), pool.get(*i)),
             _ => format!("{:?}", self),
         }
@@ -552,11 +552,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         if self.evil_uninit {
-            return format!(
-                "[fn {} {:?} EVIL UNINIT (wip?)]",
-                self.synth_name(pool),
-                self.get_name(pool),
-            );
+            return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
             "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n{}\n",
@@ -859,7 +855,7 @@ impl<'p> FatStmt<'p> {
 impl<'p> Func<'p> {
     pub fn log_captures(&self, pool: &StringPool<'p>) -> String {
         let mut s = String::new();
-        writeln!(s, "Scope for Func {:?}", self.synth_name(pool));
+        writeln!(s, "Scope for fn {:?}", self.synth_name(pool));
         if !self.capture_vars.is_empty() {
             writeln!(
                 s,
@@ -884,7 +880,7 @@ impl<'p> Func<'p> {
         if !self.local_constants.is_empty() {
             writeln!(s, "- Const locals:");
             for d in &self.local_constants {
-                writeln!(s, "    - {:?}", d.log(pool).replace('\n', " "));
+                writeln!(s, "    - {}", d.log(pool).replace('\n', " "));
             }
         }
         s

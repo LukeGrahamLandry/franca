@@ -1,7 +1,7 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
-    compiler::{CErr, DebugInfo, ExecTime},
+    compiler::{CErr, DebugInfo, ExecTime, Res},
     logging::err,
     pool::Ident,
 };
@@ -151,6 +151,61 @@ pub enum Value {
         ptr: usize,
         ty: FnType,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum Structured {
+    Emitted(TypeId, StackRange),
+    Const(TypeId, Value),
+    TupleDifferent(TypeId, Vec<Structured>),
+}
+
+impl Structured {
+    pub fn ty(&self) -> TypeId {
+        match self {
+            Structured::Emitted(ty, _)
+            | Structured::Const(ty, _)
+            | Structured::TupleDifferent(ty, _) => *ty,
+        }
+    }
+
+    pub fn get<'p>(self) -> Res<'p, Value> {
+        match self {
+            Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) => {
+                err!("not const {self:?}",)
+            }
+            Structured::Const(_, v) => Ok(v),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Structured::Emitted(_, s) => s.count == 0,
+            Structured::TupleDifferent(_, s) => s.is_empty(),
+            Structured::Const(_, _) => false,
+        }
+    }
+
+    pub fn unchecked_cast(self, ty: TypeId) -> Structured {
+        match self {
+            Structured::Emitted(_, v) => Structured::Emitted(ty, v),
+            Structured::TupleDifferent(_, v) => Structured::TupleDifferent(ty, v),
+            Structured::Const(_, v) => Structured::Const(ty, v),
+        }
+    }
+}
+
+// TOOD: dont switch the order. cri
+impl From<(StackRange, TypeId)> for Structured {
+    fn from((slot, ty): (StackRange, TypeId)) -> Self {
+        Structured::Emitted(ty, slot)
+    }
+}
+
+impl From<(Value, TypeId)> for Structured {
+    fn from((value, ty): (Value, TypeId)) -> Self {
+        Structured::Const(ty, value)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]

@@ -28,7 +28,7 @@ pub mod scope;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
     compiler::{Compile, CompileError, ExecTime},
-    logging::{init_logs, outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
+    logging::{outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
     parse::Parser,
     scope::ResolveScope,
 };
@@ -48,15 +48,15 @@ macro_rules! test_file {
     ($case:ident) => {
         #[test]
         fn $case() {
-            init_logs(&[ShowErr]);
+            crate::logging::init_logs(&[ShowErr]);
             
             let pool = Box::leak(Box::<StringPool>::default());
 
             assert!(run_main(
                 pool,
                 fs::read_to_string(format!("tests/{}.txt", stringify!($case))).unwrap(),
-                Value::I64(0),
-                Value::I64(0),
+                Value::I64(3145192),
+                Value::I64(3145192),
                 Some(&stringify!($case)),
             ));
         }
