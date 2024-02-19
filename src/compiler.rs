@@ -419,6 +419,69 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ret_val)
     }
 
+    fn emit_runtime_call(
+        &mut self,
+        result: &mut FnBody<'p>,
+        f: FuncId,
+        arg: &mut FatExpr<'p>,
+    ) -> Res<'p, (StackRange, TypeId)> {
+        let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
+        // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
+        if arg.count == 0 {
+            arg = result.load_constant(self.interp.program, Value::Unit)?.0;
+        }
+        // Note: f will be compiled differently depending on the calling convention.
+        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
+        self.infer_types(f)?;
+        let func = &self.interp.program.funcs[f.0];
+        let f_ty = self.interp.program.funcs[f.0].unwrap_ty();
+        // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
+        self.type_check_arg(arg_ty_found, f_ty.arg, "bad arg")?;
+        debug_assert_eq!(
+            self.interp.program.slot_count(arg_ty_found),
+            self.interp.program.slot_count(f_ty.arg)
+        );
+        // TODO: some huristic based on how many times called and how big the body is.
+        // TODO: pre-intern all these constants so its not a hash lookup everytime
+        let force_inline = func.has_tag(self.pool, "inline");
+        let deny_inline = func.has_tag(self.pool, "noinline");
+        assert!(
+            !(force_inline && deny_inline),
+            "{f:?} is both @inline and @noinline"
+        );
+
+        for (name, ty) in func.arg.flatten() {
+            let info = &self.interp.program.types[ty.0];
+            if let TypeInfo::Fn(_) = info {
+                logln!(
+                    "Pass function {:?}: {} to {:?}",
+                    name.map(|v| v.log(self.pool)),
+                    self.interp.program.log_type(ty),
+                    func.synth_name(self.pool),
+                );
+            }
+        }
+
+        let will_inline = force_inline;
+        let func = &self.interp.program.funcs[f.0];
+        let ret = if !func.capture_vars.is_empty() {
+            // TODO: check that you're calling from the same place as the definition.
+            assert!(!deny_inline, "capturing calls are always inlined.");
+            self.emit_capturing_call(result, arg, f)?
+        } else if will_inline {
+            self.emit_inline_call(result, arg, f)?
+        } else {
+            let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
+            self.ensure_compiled(f, result.when)?;
+            result.push(Bc::CallDirect { f, ret, arg });
+            ret
+        };
+
+        assert_eq!(self.return_stack_slots(f), ret.count);
+        assert_eq!(self.interp.program.slot_count(f_ty.ret), ret.count);
+        Ok((ret, f_ty.ret))
+    }
+
     fn emit_capturing_call(
         &mut self,
         result: &mut FnBody<'p>,
@@ -506,9 +569,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ret.unwrap())
     }
 
+    // TODO: I should probably implement real runtime closures (even if my version is dumb and slow)
+    //       and use those for comptime stuff cause it can't possibly be worse than cloning everything and recompiling.
+    //       The cloning is only better for runtime functions where we're trying to output a simpler ast that an optimiser can specialize.
     // Curry a function from fn(a: A, @comptime b: B) to fn(a: A)
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
-    fn _bind_const_arg(
+    fn bind_const_arg(
         &mut self,
         caller_constants: &Constants<'p>,
         f: FuncId,
@@ -518,7 +584,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut new_func = self.interp.program.funcs[f.0].clone();
         new_func.referencable_name = false;
         let arg_ty =
-            self._get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
+            self.get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
         let arg_value = self.immediate_eval_expr(caller_constants, arg_expr, arg_ty)?;
         new_func
             .closed_constants
@@ -537,7 +603,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     /// It's fine to call this if the type isn't fully resolved yet.
     /// We just need to be able to finish infering for the referenced argument.
-    fn _get_type_for_arg(
+    fn get_type_for_arg(
         &mut self,
         constants: &Constants<'p>,
         arg: &mut Pattern<'p>,
@@ -558,7 +624,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         err!(CErr::VarNotFound(arg_name))
     }
 
-    // TODO: do the memo stuff here instead of my crazy other thing.
+    // TODO: you only need to call this for generic functions that operate on thier own types.
+    //       If you're just doing comptime manipulations of a TypeInfo to be used elsewhere,
+    //       it can be interpreted as a normal function so you don't have to clone the ast on every call.
+    // TODO: fuse this with bind_const_arg. I have too much of a combinatoric explosion of calling styles going on.
     // TODO: maybe call this @generic instead of @comptime? cause other things can be comptime
     // Return type is allowed to use args.
     fn emit_comptime_call(
@@ -807,19 +876,35 @@ impl<'a, 'p> Compile<'a, 'p> {
                 result.load_constant(self.interp.program, Value::GetFn(id))?
             }
             Expr::Call(f, arg) => {
+                // TODO: make this a function
+                macro_rules! emit_any_call {
+                    ($expr:expr, $result:expr, $f:expr, $arg:expr) => {{
+                        let func = &self.interp.program.funcs[$f.0];
+                        let is_comptime = func.has_tag(self.pool, "comptime");
+                        if is_comptime {
+                            let ret = self.emit_comptime_call(&$result.constants, $f, $arg)?;
+                            expr.expr = Expr::Value(ret.clone());
+                            return result.load_constant(self.interp.program, ret);
+                        }
+
+                        return self.emit_runtime_call($result, $f, $arg);
+                    }};
+                }
+
                 // TODO: more general system for checking if its a constant known expr instead of all these cases.
                 if let &Expr::GetVar(i) = f.as_ref().deref() {
                     // TODO: only grab here if its a constant, might be a function pointer.
-                    let f = self.resolve_function(result, i, arg, requested)?;
-                    return self.emit_any_call(result, f, arg);
+                    let f_id = self.resolve_function(result, i, arg, requested)?;
+                    f.expr = Expr::Value(Value::GetFn(f_id));
+                    emit_any_call!(expr, result, f_id, arg)
                 }
                 if let &Expr::Value(Value::GetFn(f)) = f.deref().deref().deref() {
-                    return self.emit_any_call(result, f, arg);
+                    emit_any_call!(expr, result, f, arg)
                 }
                 if let Expr::Closure(func) = f.deref_mut().deref_mut().deref_mut() {
                     let id = self.add_func(mem::take(func), &result.constants)?;
                     *f.deref_mut().deref_mut() = Expr::Value(Value::GetFn(id));
-                    return self.emit_any_call(result, id, arg);
+                    emit_any_call!(expr, result, id, arg)
                 }
 
                 // TODO: this will be for calling through a function pointer.
@@ -1976,83 +2061,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             _ => ice!("TODO: other `place=e;`"),
         }
-    }
-
-    fn emit_any_call(
-        &mut self,
-        result: &mut FnBody<'p>,
-        f: FuncId,
-        arg: &mut FatExpr<'p>,
-    ) -> Res<'p, (StackRange, TypeId)> {
-        let func = &self.interp.program.funcs[f.0];
-        let is_comptime = func.has_tag(self.pool, "comptime");
-        if is_comptime {
-            logln!(
-                "Expr::call comptime. RES consts:\n{} F consts: \n{}====",
-                self.interp.program.log_consts(&result.constants),
-                self.interp
-                    .program
-                    .log_consts(&self.interp.program.funcs[f.0].closed_constants),
-            );
-            let ret = self.emit_comptime_call(&result.constants, f, arg)?;
-            return result.load_constant(self.interp.program, ret);
-        }
-
-        let (mut arg, arg_ty_found) = self.compile_expr(result, arg, None)?;
-        // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
-        if arg.count == 0 {
-            arg = result.load_constant(self.interp.program, Value::Unit)?.0;
-        }
-        // Note: f will be compiled differently depending on the calling convention.
-        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-        self.infer_types(f)?;
-        let func = &self.interp.program.funcs[f.0];
-        let f_ty = self.interp.program.funcs[f.0].unwrap_ty();
-        // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
-        self.type_check_arg(arg_ty_found, f_ty.arg, "bad arg")?;
-        debug_assert_eq!(
-            self.interp.program.slot_count(arg_ty_found),
-            self.interp.program.slot_count(f_ty.arg)
-        );
-        // TODO: some huristic based on how many times called and how big the body is.
-        // TODO: pre-intern all these constants so its not a hash lookup everytime
-        let force_inline = func.has_tag(self.pool, "inline");
-        let deny_inline = func.has_tag(self.pool, "noinline");
-        assert!(
-            !(force_inline && deny_inline),
-            "{f:?} is both @inline and @noinline"
-        );
-
-        for (name, ty) in func.arg.flatten() {
-            let info = &self.interp.program.types[ty.0];
-            if let TypeInfo::Fn(_) = info {
-                logln!(
-                    "Pass function {:?}: {} to {:?}",
-                    name.map(|v| v.log(self.pool)),
-                    self.interp.program.log_type(ty),
-                    func.synth_name(self.pool),
-                );
-            }
-        }
-
-        let will_inline = force_inline;
-        let func = &self.interp.program.funcs[f.0];
-        let ret = if !func.capture_vars.is_empty() {
-            // TODO: check that you're calling from the same place as the definition.
-            assert!(!deny_inline, "capturing calls are always inlined.");
-            self.emit_capturing_call(result, arg, f)?
-        } else if will_inline {
-            self.emit_inline_call(result, arg, f)?
-        } else {
-            let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
-            self.ensure_compiled(f, result.when)?;
-            result.push(Bc::CallDirect { f, ret, arg });
-            ret
-        };
-
-        assert_eq!(self.return_stack_slots(f), ret.count);
-        assert_eq!(self.interp.program.slot_count(f_ty.ret), ret.count);
-        Ok((ret, f_ty.ret))
     }
 
     fn field_access_expr(

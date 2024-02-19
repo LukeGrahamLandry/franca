@@ -1,6 +1,7 @@
 // nobody cares its just logging. TODO: should do it anyway i guess.
 #![allow(unused_must_use)]
 use core::fmt;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Write};
 
 macro_rules! bin_int {
@@ -208,6 +209,147 @@ impl<'p> Program<'p> {
         writeln!(s, "====================");
         s
     }
+
+    pub fn log_finished_ast(&self, start: FuncId) -> String {
+        let mut done = HashSet::new();
+        let mut pending = vec![start];
+        let mut out = String::from(
+            "This is the Ast of the program after comptime execution but before code generation.\n###################################\n\n",
+        );
+        let mut const_reads = HashSet::new();
+
+        while let Some(next) = pending.pop() {
+            if !done.insert(next) {
+                continue;
+            }
+
+            let func = &self.funcs[next.0];
+            if let Some(body) = &func.body {
+                collect_func_references(body, &mut pending, &mut const_reads);
+                out += &format!(
+                    "{next:?}: [fn {:?}=Name={:?} Arg={} -> Ret={}] = \nBODY: \n{}\nEND\n{}\nCONSTS:\n",
+                    if func.referencable_name {
+                        func.synth_name(self.pool)
+                    } else {
+                        "@anon@"
+                    },
+                    func.get_name(self.pool),
+                    self.log_type(func.unwrap_ty().arg),
+                    self.log_type(func.unwrap_ty().ret),
+                    func.body
+                        .as_ref()
+                        .map(|e| e.log(self.pool))
+                        .unwrap_or_else(|| "@NO_BODY@".to_owned()),
+                    if func.capture_vars.is_empty() {
+                        String::from("Raw function, no captures.")
+                    } else {
+                        format!(
+                            "Closure capturing: {:?}.",
+                            func.capture_vars
+                                .iter()
+                                .map(|v| v.log(self.pool))
+                                .collect::<Vec<_>>()
+                        )
+                    },
+                );
+                for c in const_reads.drain() {
+                    if let Some((val, ty)) = func.closed_constants.get(c) {
+                        collect_func_references_value(&val, &mut pending);
+                        out += &format!(
+                            "const {:?}: {} = {:?};\n",
+                            c.log(self.pool),
+                            self.log_type(ty),
+                            val
+                        );
+                    }
+                }
+                out += "=======================================\n\n\n\n";
+            }
+        }
+
+        out
+    }
+}
+
+fn collect_func_references_stmt<'p>(
+    stmt: &Stmt<'p>,
+    refs: &mut Vec<FuncId>,
+    const_reads: &mut HashSet<Var<'p>>,
+) {
+    match stmt {
+        Stmt::DoneDeclFunc(_) | Stmt::Noop => {}
+        Stmt::Eval(e) => collect_func_references(e, refs, const_reads),
+        Stmt::DeclVar { value, .. } => {
+            if let Some(v) = value {
+                collect_func_references(v, refs, const_reads);
+            }
+        }
+        Stmt::Set { place, value } => {
+            collect_func_references(place, refs, const_reads);
+            collect_func_references(value, refs, const_reads);
+        }
+        Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => {
+            unreachable!("finished ast contained {stmt:?}")
+        }
+    }
+}
+
+fn collect_func_references_value<'p>(v: &Value, refs: &mut Vec<FuncId>) {
+    let mut vals = vec![v];
+    while let Some(v) = vals.pop() {
+        match v {
+            Value::Tuple { values, .. } => vals.extend(values),
+            Value::GetFn(f) => refs.push(*f),
+            Value::Heap { value, .. } => {
+                let value = unsafe { &**value };
+                vals.extend(&value.values);
+            }
+            Value::OverloadSet(_) | Value::Enum { .. } => {
+                // TODO // unreachable!("finished ast contained {v:?}")
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_func_references<'p>(
+    expr: &Expr<'p>,
+    refs: &mut Vec<FuncId>,
+    const_reads: &mut HashSet<Var<'p>>,
+) {
+    match expr {
+        Expr::Value(v) => collect_func_references_value(v, refs),
+        Expr::Call(f, arg) => {
+            collect_func_references(f, refs, const_reads);
+            collect_func_references(arg, refs, const_reads);
+        }
+        Expr::Block { body, result, .. } => {
+            for s in body {
+                collect_func_references_stmt(s, refs, const_reads);
+            }
+            collect_func_references(result, refs, const_reads);
+        }
+        Expr::Tuple(exprs) => {
+            for e in exprs {
+                collect_func_references(e, refs, const_reads);
+            }
+        }
+
+        Expr::FieldAccess(e, _) | Expr::SuffixMacro(_, e) => {
+            collect_func_references(e, refs, const_reads);
+        }
+        Expr::GetVar(v) => {
+            const_reads.insert(*v);
+        }
+        Expr::StructLiteralP(_) => {}
+        Expr::ArrayLiteral(_)
+        | Expr::GetNamed(_)
+        | Expr::RefType(_)
+        | Expr::EnumLiteral(_)
+        | Expr::GenericArgs(_, _)
+        | Expr::String(_)
+        | Expr::Closure(_) => {} // TODO // unreachable!("finished ast contained {expr:?}"),
+    }
 }
 
 impl<'p> PoolLog<'p> for Program<'p> {
@@ -285,6 +427,9 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
             Stmt::Eval(e) => e.log(pool),
             Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
             Stmt::Noop => "".to_owned(),
+            Stmt::Set { place, value } => {
+                format!("{} = {};", place.log(pool), value.log(pool))
+            }
             _ => format!("{:?}", self),
         }
     }
@@ -314,6 +459,8 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                     .iter()
                     .map(|e| e.log(pool))
                     .filter(|s| !s.is_empty())
+                    .enumerate()
+                    .map(|(i, s)| format!("{i}. {s}"))
                     .collect();
                 let es = es.join(";\n");
                 format!("{{ {}; {} }}", es, result.log(pool))
@@ -326,7 +473,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             Expr::Tuple(args) => {
                 let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
                 let args: String = args.join(", ");
-                format!("tuple({})", args)
+                format!("T[{}]", args)
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
             Expr::Value(Value::Unit) => "unit".to_string(),

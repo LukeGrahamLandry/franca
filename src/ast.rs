@@ -590,9 +590,9 @@ impl<'p> Program<'p> {
     //       Tho number types might become something with flags so maybe just Type, Unit, Any should be blessed.
     pub fn type_of(&mut self, v: &Value) -> TypeId {
         match v {
-            Value::F64(_) => todo!(),
-            Value::I64(_) => self.intern_type(TypeInfo::I64),
-            Value::Bool(_) => self.intern_type(TypeInfo::Bool),
+            Value::F64(_) => self.intern_type(TypeInfo::F64),
+            Value::I64(_) => TypeId::i64(),
+            Value::Bool(_) => TypeId::bool(),
             Value::Enum { container_type, .. } => *container_type,
             Value::Tuple { values, .. } => {
                 // TODO: actually use container_type
@@ -602,7 +602,7 @@ impl<'p> Program<'p> {
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
             Value::GetFn(f) => self.func_type(*f),
-            Value::Unit => self.intern_type(TypeInfo::Unit),
+            Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),
             Value::InterpAbsStackAddr(_) => TypeId::any(),

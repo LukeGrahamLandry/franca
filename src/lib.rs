@@ -124,14 +124,27 @@ pub fn run_main<'a: 'p, 'p>(
     fn log_dbg(interp: &Compile, save: Option<&str>) {
         if cfg!(feature = "some_log") {
             if let Some(path) = save {
-                let path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let i_path = PathBuf::from(format!("target/latest_log/{path}/interp.log"));
+                fs::create_dir_all(i_path.parent().unwrap()).unwrap();
                 fs::write(
-                    &path,
+                    &i_path,
                     format!("{}\nAt {:?}", interp.interp.log(interp.pool), timestamp()),
                 )
                 .unwrap();
-                outln!("Wrote log to {:?}", path);
+                outln!("Wrote log to {:?}", i_path);
+                let ast_path = PathBuf::from(format!("target/latest_log/{path}/rt_ast.txt"));
+                let name = interp.pool.intern("main");
+                if let Some(id) = interp.lookup_unique_func(name) {
+                    fs::write(ast_path, interp.interp.program.log_finished_ast(id)).unwrap();
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = interp.pool.intern("main");
+            if let Some(id) = interp.lookup_unique_func(name) {
+                let s = interp.interp.program.log_finished_ast(id);
+                unsafe { crate::web::show_rt_ast(s.as_ptr(), s.len()) };
             }
         }
         outln!("===============================");
@@ -361,6 +374,7 @@ pub mod web {
         pub fn console_log(ptr: *const u8, len: usize);
         pub fn timestamp() -> f64;
         pub fn show_bc(ptr: *const u8, len: usize);
+        pub fn show_rt_ast(ptr: *const u8, len: usize);
     }
 }
 

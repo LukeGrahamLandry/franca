@@ -600,13 +600,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             "lt" => bin_int!(self, <, arg, Value::Bool),
             "ge" => bin_int!(self, >=, arg, Value::Bool),
             "le" => bin_int!(self, <=, arg, Value::Bool),
-            // TODO: remove
-            "tuple" => {
-                // This will become the `(a, b, c)` syntax.
-                // It just gives you a way to express that you want to pass multiple things at once.
-                // TODO: this is really inefficient. it boxes them from the stack and then writes them all back again?
-                arg
-            }
             // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
                 if let Value::Type(ty) = arg {
@@ -638,7 +631,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 self.fail_on_wasm("fn system")?;
                 let mut arg = unwrap!(
                     Vec::<String>::deserialize(arg.clone()),
-                    "expected Vec<string> not {arg:?}"
+                    "expected Vec<string> not {arg:?}. TODO: support stack slices"
                 )
                 .into_iter();
                 let cmd = unwrap!(arg.next(), "cmd");
