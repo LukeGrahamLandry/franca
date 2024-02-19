@@ -825,7 +825,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
-        assert_eq!(values.len(), 2, "arity");
+        assert_eq!(values.len(), 2, "arity {:?}", values);
         Ok((values[0].clone(), values[1].clone()))
     }
 
@@ -838,7 +838,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             return Ok((values[0].clone(), values[1].clone()));
         }
 
-        assert_eq!(values.len() % 2, 0, "arity");
+        assert_eq!(values.len() % 2, 0, "arity {:?}", values);
         let first = (values[0..values.len() / 2]).to_vec();
         let second = (values[values.len() / 2..]).to_vec();
 
@@ -892,7 +892,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn load_int_pair(&self, v: Value) -> Res<'p, (i64, i64)> {
         match v {
             Value::Tuple { mut values, .. } => {
-                assert_eq!(values.len(), 2, "load_int_pair wrong arity");
+                assert_eq!(values.len(), 2, "load_int_pair wrong arity {:?}", values);
                 let a = replace(&mut values[0], Value::Poison);
                 let b = replace(&mut values[1], Value::Poison);
                 Ok((self.load_int(a)?, self.load_int(b)?))

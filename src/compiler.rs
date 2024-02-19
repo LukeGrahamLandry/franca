@@ -810,7 +810,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let found_ty = self.interp.program.type_of(&value);
                         self.type_check_arg(found_ty, expected_ty, "var decl")?;
                         // println!("DeclConst {} = {:?}", name.log(self.pool), value);
-                        result.constants.insert(*name, (value, expected_ty));
+                        let ty = if expected_ty.is_any() {
+                            found_ty
+                        } else {
+                            expected_ty
+                        };
+                        result.constants.insert(*name, (value, ty));
                         // println!("{}", self.interp.program.log_consts(&result.constants));
                     }
                     VarType::Let | VarType::Var => {
@@ -1851,6 +1856,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else {
             ice!("if args must be tuple not {:?}", arg);
         };
+        // TODO: if its constant you don't need the branch...
+        let cond = result.load(self.interp.program, cond)?.0;
 
         let true_ty = self.infer_types(if_true)?;
         let unit = self.interp.program.intern_type(TypeInfo::Unit);
@@ -1882,8 +1889,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             to: ret,
         });
 
-        // TODO: if its constant you don't need the branch...
-        let cond = result.load(self.interp.program, cond)?.0;
         result.insts[branch_ip] = Bc::JumpIf {
             // TODO: change to conditional so dont have to store the true_ip
             cond: cond.first,
@@ -2316,12 +2321,28 @@ impl<'p> FnBody<'p> {
         value: Value,
     ) -> Res<'p, (StackRange, TypeId)> {
         let ty = program.type_of(&value);
-        let to = self.reserve_slots(program, ty)?;
-        self.push(Bc::LoadConstant {
-            slot: to.first,
-            value,
-        });
-        Ok((to, ty))
+        if let Value::Tuple { values, .. } = value {
+            let start = self.stack_slots;
+            let mut count = 0;
+            for value in values {
+                let (slot, _) = self.load_constant(program, value)?;
+                count += slot.count
+            }
+            Ok((
+                StackRange {
+                    first: StackOffset(start),
+                    count,
+                },
+                ty,
+            ))
+        } else {
+            let to = self.reserve_slots(program, ty)?;
+            self.push(Bc::LoadConstant {
+                slot: to.single(),
+                value,
+            });
+            Ok((to, ty))
+        }
     }
 
     fn load(
