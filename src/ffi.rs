@@ -253,17 +253,17 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
 
     fn create_type(interp: &mut Program<'p>) -> TypeId {
         let t = T::get_type(interp);
-        interp.tuple_of(vec![TypeId::bool(), t])
+        interp.tuple_of(vec![TypeId::i64(), t])
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
         match self {
             Some(v) => {
-                values.push(Value::Bool(true));
+                values.push(Value::I64(0));
                 v.serialize(values);
             }
             None => {
-                values.push(Value::Bool(false));
+                values.push(Value::I64(1));
                 for _ in 0..T::size() {
                     values.push(Value::Unit);
                 }
@@ -273,8 +273,8 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         match values.next()? {
-            Value::Bool(true) => Some(T::deserialize(values)),
-            Value::Bool(false) => {
+            Value::I64(0) => Some(T::deserialize(values)),
+            Value::I64(1) => {
                 for _ in 0..T::size() {
                     let unit = values.next()?;
                     debug_assert_eq!(unit, Value::Unit);

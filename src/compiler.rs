@@ -1171,6 +1171,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
                         let ty = unwrap!(self.type_of(result, arg)?, "could not infer yet");
+                        expr.expr = Expr::Value(Value::Type(ty));
                         self.interp.program.load_value(Value::Type(ty))
                     }
                     "assert_compile_error" => {
@@ -1180,6 +1181,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
+                        expr.expr = Expr::Value(Value::Unit);
                         self.interp.program.load_value(Value::Unit)
                     }
                     "comptime_print" => {
@@ -1190,6 +1192,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             TypeId::any(),
                         );
                         outln!(ShowPrint, "VALUE: {:?}", value);
+                        expr.expr = Expr::Value(Value::Unit);
                         self.interp.program.load_value(Value::Unit)
                     }
                     "struct" => {
@@ -1287,7 +1290,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if value.count >= size {
                             ice!("Enum value won't fit.")
                         }
-                        let ret = result.reserve_slots(self.interp.program, raw_container_ty)?;
+                        let mut ret =
+                            result.reserve_slots(self.interp.program, raw_container_ty)?;
                         result.push(Bc::LoadConstant {
                             slot: ret.first,
                             value: Value::I64(i as i64),
@@ -1299,6 +1303,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 count: value.count,
                             },
                         });
+
+                        // If this is a smaller varient, pad out the slot with units instead of poisons.
+                        ret.count = size;
+                        for i in (value.count + 1)..ret.count {
+                            result.push(Bc::LoadConstant {
+                                slot: ret.offset(i),
+                                value: Value::Unit,
+                            });
+                        }
 
                         (ret, requested).into()
                     }
@@ -1315,6 +1328,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.interp.program.load_value(Value::new_box(bytes))
             }
             Expr::PrefixMacro { name, arg, target } => {
+                println!("PrefixMacro: {}", self.pool.get(name.0));
                 let expr_ty = FatExpr::get_type(self.interp.program);
                 let mut values = vec![];
                 let arg: &mut FatExpr = arg.deref_mut();
@@ -1322,15 +1336,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let target: &mut FatExpr = target.deref_mut();
                 mem::take(target).serialize(&mut values);
                 let want = FatExpr::get_type(self.interp.program);
-                for v in &values {
-                    println!("- {v:?}")
-                }
                 let full_arg = Expr::Value(Value::Tuple {
                     container_type: self.interp.program.tuple_of(vec![expr_ty, expr_ty]),
                     values,
                 });
                 let full_arg = FatExpr::synthetic(full_arg, loc);
                 let f = self.resolve_function(result, *name, &full_arg, Some(want))?;
+                assert!(self.interp.program.funcs[f.0].has_tag(self.pool, "annotation"));
                 let get_func = FatExpr::synthetic(Expr::Value(Value::GetFn(f)), loc);
                 let full_call =
                     FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
@@ -2040,6 +2052,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+        // TODO: dont do this. fix ffi types.
+        let found = self.interp.program.raw_type(found);
+        let expected = self.interp.program.raw_type(expected);
+
         if found == expected || found.is_any() || expected.is_any() {
             Ok(())
         } else {
@@ -2244,8 +2260,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 );
             }
             _ => err!(
-                "only structs support field access but found {}",
-                self.interp.program.log_type(container_ty)
+                "only structs support field access but found {} = {}",
+                self.interp.program.log_type(container_ty),
+                self.interp.program.log_type(raw_container_ty)
             ),
         }
     }

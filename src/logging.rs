@@ -594,6 +594,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
             Expr::Value(Value::Unit) => "unit".to_string(),
+            Expr::Value(Value::GetFn(f)) => format!("Fn{}", f.0),
             Expr::Value(v) => format!("{:?}", v),
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
