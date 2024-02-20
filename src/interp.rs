@@ -531,6 +531,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                     count,
                 }
             }
+            "dump_ffi_types" => {
+                let msg = self.program.dump_ffi_types();
+                msg.serialize_one()
+            }
             "dealloc" => {
                 let (ty, ptr) = self.to_pair(arg)?;
                 let (_ty, (ptr, ptr_first, ptr_count)) =

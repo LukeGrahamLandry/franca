@@ -200,6 +200,7 @@ pub(crate) use err;
 
 use crate::ast::FatStmt;
 use crate::bc::*;
+use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugInfo, DebugState},
@@ -215,7 +216,7 @@ pub trait PoolLog<'p> {
 use crate::ast::safe_rec;
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
-        safe_rec!(self, t, format!("{t:?}"), || {
+        safe_rec!(self, t, format!("{t:?}"), {
             match &self.types[t.0] {
                 TypeInfo::Any => "Any".to_owned(),
                 TypeInfo::Never => "Never".to_owned(),
@@ -243,14 +244,12 @@ impl<'p> Program<'p> {
                         .collect();
                     format!("{{ {}}}!enum", v.join(", "))
                 }
-                TypeInfo::Unique(inner, n) => format!("{}#{}", self.log_type(*inner), n),
-                TypeInfo::Named(inner, n) => {
-                    format!("{}#{}", self.log_type(*inner), self.pool.get(*n))
-                }
+                TypeInfo::Unique(inner, _) => self.log_type(*inner),
+                TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
                 TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
                 TypeInfo::Tuple(v) => {
                     let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
-                    format!("Tuple({})", v.join(", "))
+                    format!("({})", v.join(", "))
                 }
                 TypeInfo::Type => "Type".to_owned(),
                 TypeInfo::Unit => "Unit".to_owned(),
@@ -332,6 +331,60 @@ impl<'p> Program<'p> {
             }
         }
 
+        out
+    }
+
+    pub fn find_ffi_type(&self, name: Ident<'p>) -> Option<TypeId> {
+        let mut found = None;
+        for ty in self.ffi_types.values() {
+            if let TypeInfo::Unique(ty, _) = &self.types[ty.0] {
+                if let &TypeInfo::Named(ty, check) = &self.types[ty.0] {
+                    if name == check {
+                        if found.is_some() {
+                            outln!(
+                                LogTag::ShowErr,
+                                "duplicate ffi name {}",
+                                self.pool.get(name)
+                            );
+                            return None;
+                        }
+                        found = Some(ty);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    pub fn dump_ffi_types(&mut self) -> String {
+        let mut out = String::new();
+
+        for info in &self.types {
+            if let TypeInfo::Unique(ty, _) = info {
+                if let &TypeInfo::Named(ty, name) = &self.types[ty.0] {
+                    if let TypeInfo::Enum { cases, .. } = &self.types[ty.0] {
+                        writeln!(out, "const {} = Unique({{", self.pool.get(name),).unwrap();
+                        for (name, mut ty) in cases {
+                            if let &TypeInfo::Named(inner, _) = &self.types[ty.0] {
+                                // Not unique, name is probably just name of the case.
+                                ty = inner;
+                            }
+                            writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty))
+                                .unwrap();
+                        }
+                        out += "}!enum);\n"
+                    } else {
+                        writeln!(
+                            out,
+                            "const {} = Unique({});",
+                            self.pool.get(name),
+                            self.log_type(ty)
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
         out
     }
 }

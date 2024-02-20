@@ -1068,11 +1068,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     )
                 }
             }
-            Expr::GetNamed(_) => {
-                ice!(
-                    "Scope resolution failed {} (in Expr::GetNamed)",
-                    expr.log(self.pool)
-                );
+            Expr::GetNamed(name) => {
+                let name = self.pool.get(*name);
+                if let Some((val, ty)) = self.builtin_constant(name) {
+                    expr.expr = Expr::Value(val.clone());
+                    Structured::Const(ty, val)
+                } else {
+                    ice!(
+                        "Scope resolution failed {} (in Expr::GetNamed)",
+                        expr.log(self.pool)
+                    );
+                }
             }
             Expr::EnumLiteral(_) => todo!(),
             Expr::Value(value) => self.interp.program.load_value(value.clone()),
@@ -1615,6 +1621,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
+    // TODO: this kinda sucks.
     fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
         use TypeInfo::*;
         let ty = match name {
@@ -1678,7 +1685,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ret: TypeId::i64()
                 }
             ),
-            _ => return None,
+            _ => {
+                let name = self.pool.intern(name);
+                if let Some(ty) = self.interp.program.find_ffi_type(name) {
+                    (Value::Type(ty), TypeId::ty())
+                } else {
+                    return None;
+                }
+            }
         })
     }
 

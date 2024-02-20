@@ -481,7 +481,7 @@ macro_rules! safe_rec {
             $default
         } else {
             $self.log_type_rec.borrow_mut().push(ty);
-            let res = $body();
+            let res = $body;
             let i = $self
                 .log_type_rec
                 .borrow()
@@ -758,6 +758,7 @@ impl<'p> Program<'p> {
     pub fn synth_name(&mut self, ty: TypeId) -> Ident<'p> {
         match self.types[ty.0] {
             TypeInfo::Named(_, name) => name,
+            TypeInfo::Unique(ty, _) => self.synth_name(ty),
             _ => self.pool.intern(&format!("__anon_ty{}", ty.0)),
         }
     }
@@ -785,8 +786,10 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub fn named_tuple(&mut self, _todo_name: &str, types: Vec<TypeId>) -> TypeId {
-        self.tuple_of(types)
+    pub fn named_tuple(&mut self, name: &str, types: Vec<TypeId>) -> TypeId {
+        let ty = self.tuple_of(types);
+        let name = self.pool.intern(name);
+        self.intern_type(TypeInfo::Named(ty, name))
     }
 
     pub fn is_comptime_only(&self, value: &Structured) -> bool {
@@ -799,29 +802,34 @@ impl<'p> Program<'p> {
     }
 
     pub fn is_comptime_only_type(&self, ty: TypeId) -> bool {
-        safe_rec!(self, ty, false, || match &self.types[ty.0] {
-            TypeInfo::Unit
-            | TypeInfo::Any
-            | TypeInfo::Never
-            | TypeInfo::F64
-            | TypeInfo::I64
-            | TypeInfo::Bool => false,
-            // TODO: supply "runtime" versions of these for macros to work with
-            TypeInfo::Fn(_) => true,
-            // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
-            TypeInfo::Type => false,
-            TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
-            TypeInfo::Unique(ty, _)
-            | TypeInfo::Named(ty, _)
-            | TypeInfo::Ptr(ty)
-            | TypeInfo::Slice(ty) => self.is_comptime_only_type(*ty),
-            TypeInfo::Struct { fields, .. } => {
-                fields.iter().any(|f| self.is_comptime_only_type(f.ty))
+        safe_rec!(
+            self,
+            ty,
+            false,
+            match &self.types[ty.0] {
+                TypeInfo::Unit
+                | TypeInfo::Any
+                | TypeInfo::Never
+                | TypeInfo::F64
+                | TypeInfo::I64
+                | TypeInfo::Bool => false,
+                // TODO: supply "runtime" versions of these for macros to work with
+                TypeInfo::Fn(_) => true,
+                // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
+                TypeInfo::Type => false,
+                TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
+                TypeInfo::Unique(ty, _)
+                | TypeInfo::Named(ty, _)
+                | TypeInfo::Ptr(ty)
+                | TypeInfo::Slice(ty) => self.is_comptime_only_type(*ty),
+                TypeInfo::Struct { fields, .. } => {
+                    fields.iter().any(|f| self.is_comptime_only_type(f.ty))
+                }
+                TypeInfo::Enum { cases, .. } => {
+                    cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
+                }
             }
-            TypeInfo::Enum { cases, .. } => {
-                cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
-            }
-        })
+        )
     }
 }
 

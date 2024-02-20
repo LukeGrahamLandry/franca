@@ -1,13 +1,11 @@
 use std::{collections::HashMap, mem};
 
-use codemap::{CodeMap, Span};
+use codemap::Span;
 
 use crate::{
-    ast::{garbage_loc, FatStmt, Program, TypeId, TypeInfo},
+    ast::{Program, TypeId, TypeInfo},
     bc::Value,
     logging::{outln, LogTag::ShowErr},
-    parse::Parser,
-    LIB,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
@@ -443,10 +441,7 @@ fn interp_send() {
 
 #[test]
 fn interp_send_empty_ast() {
-    use crate::pool::StringPool;
-    let pool = Box::leak(Box::<StringPool>::default());
-    let mut p = Program::new(vec![], pool);
-
+    use crate::ast::{garbage_loc, FatStmt};
     let empty = FatStmt::null(garbage_loc());
     let prev = format!("{empty:?}");
     let value = empty.serialize_one();
@@ -457,8 +452,10 @@ fn interp_send_empty_ast() {
 #[test]
 fn interp_send_libs_ast() {
     use crate::pool::StringPool;
-    let pool = Box::leak(Box::<StringPool>::default());
+    use crate::{ast::FatStmt, parse::Parser, LIB};
+    use codemap::CodeMap;
 
+    let pool = Box::leak(Box::<StringPool>::default());
     let mut codemap = CodeMap::new();
     let libs: Vec<_> = LIB
         .iter()
