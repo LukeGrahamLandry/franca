@@ -1,9 +1,6 @@
 use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock};
 
-use crate::{
-    ast::{ffi_type, Program, TypeId},
-    ffi::InterpSend,
-};
+use crate::{bc::Value, ffi::InterpSend};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
@@ -135,18 +132,16 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         // i dare you to change the generic to Self
         unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
     }
-    fn get_type(interp: &mut Program<'p>) -> TypeId {
-        ffi_type!(interp, Ident)
-    }
+
     fn create_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
         interp.intern_type(crate::ast::TypeInfo::I64) // TODO: have a unique Symbol type
     }
 
-    fn serialize(self) -> crate::bc::Value {
-        self.0.serialize()
+    fn serialize(self, values: &mut Vec<Value>) {
+        self.0.serialize(values)
     }
 
-    fn deserialize(value: crate::bc::Value) -> Option<Self> {
-        Some(Ident(usize::deserialize(value)?, PhantomData))
+    fn deserialize(values: &mut impl Iterator<Item = crate::bc::Value>) -> Option<Self> {
+        Some(Ident(usize::deserialize(values)?, PhantomData))
     }
 }

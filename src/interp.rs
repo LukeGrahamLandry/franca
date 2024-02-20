@@ -414,7 +414,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "panic" => {
                 outln!(ShowErr, "{}", self.log_callstack());
                 // TODO: let comptime panics get caught by !assert_compile_error
-                if let Some(s) = String::deserialize(arg.clone()) {
+                if let Some(s) = String::deserialize_one(arg.clone()) {
                     outln!(ShowErr, "{s}");
                 }
                 outln!(ShowErr, "{arg:?}");
@@ -605,7 +605,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "system" => {
                 self.fail_on_wasm("fn system")?;
                 let mut arg = unwrap!(
-                    Vec::<String>::deserialize(arg.clone()),
+                    Vec::<String>::deserialize_one(arg.clone()),
                     "expected Vec<string> not {arg:?}. TODO: support stack slices"
                 )
                 .into_iter();
@@ -614,18 +614,26 @@ impl<'a, 'p> Interp<'a, 'p> {
                 for arg in arg {
                     cmd.arg(arg);
                 }
+                let mut values = vec![];
                 match cmd.output() {
                     Ok(output) => CmdResult {
                         status: output.status.code().unwrap(),
                         stdout: output.stdout,
                         stderr: output.stderr,
                     }
-                    .serialize(),
+                    .serialize(&mut values),
                     Err(e) => err!("Error running {cmd:?}: {e:?}",),
+                }
+                Value::Tuple {
+                    container_type: TypeId::any(),
+                    values,
                 }
             }
             "puts" => {
-                let arg = unwrap!(String::deserialize(arg.clone()), "expect str not {arg:?}");
+                let arg = unwrap!(
+                    String::deserialize_one(arg.clone()),
+                    "expect str not {arg:?}"
+                );
                 outln!(ShowPrint, "{arg}");
                 Value::Unit
             }
@@ -634,7 +642,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let mut args = env::args();
                 args.next(); // The interpreter's exe.
                 let args: Vec<_> = args.collect();
-                args.serialize()
+                let mut values = vec![];
+                args.serialize(&mut values);
+                Value::Tuple {
+                    container_type: TypeId::any(),
+                    values,
+                }
             }
             _ => ice!("Known builtin is not implemented. {}", name),
         };

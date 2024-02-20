@@ -2,27 +2,18 @@
 use crate::{
     bc::{Constants, Structured, Value},
     compiler::insert_multi,
-    ffi::InterpSend,
+    ffi::{init_interp_send, InterpSend},
     pool::{Ident, StringPool},
 };
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::{
+    cell::RefCell,
     collections::HashMap,
     hash::Hash,
     mem,
     ops::{Deref, DerefMut},
 };
-
-// It feels like this could trivially be a generic function but somehow no. I dare you to fix it.
-macro_rules! ffi_type {
-    ($program:expr, $name:ty) => {{
-        let ty = $program.get_ffi_type::<$name>(<$name as crate::ffi::InterpSend>::get_type_key());
-        ty
-    }};
-}
-
-pub(crate) use ffi_type;
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
 pub struct TypeId(pub usize);
@@ -135,7 +126,11 @@ pub enum Expr<'p> {
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
-    GenericArgs(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
+    PrefixMacro {
+        name: Var<'p>,
+        arg: Box<FatExpr<'p>>,
+        target: Box<FatExpr<'p>>,
+    },
 
     // Backend only
     GetVar(Var<'p>),
@@ -164,6 +159,12 @@ pub struct FatExpr<'p> {
     pub id: usize,
     pub ty: Option<TypeId>,
     pub known: Known,
+}
+
+impl Default for FatExpr<'_> {
+    fn default() -> Self {
+        FatExpr::null(garbage_loc())
+    }
 }
 
 #[derive(Clone, Debug, InterpSend)]
@@ -266,25 +267,6 @@ impl<'p> Pattern<'p> {
         debug_assert_ne!(start, self.bindings.len());
     }
 }
-
-#[derive(Debug, Default)]
-pub struct Matched<'e, 'p> {
-    _discard: Vec<(&'e mut FatExpr<'p>, TypeId)>,
-    _bound: Vec<(&'e mut FatExpr<'p>, TypeId, Var<'p>)>,
-}
-
-// Some(
-//     self.expr(
-//         Expr::Tuple(
-//             arg_types
-//                 .into_iter()
-//                 .map(|ty| ty.unwrap_or_else(|| any_type_expr.clone()))
-//                 .collect(),
-//         ),
-//         node.start_position(),
-//         Known::Foldable,
-//     ),
-// ),
 
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
@@ -462,6 +444,7 @@ pub struct Program<'p> {
     pub vars: Vec<VarInfo>,
     pub overload_sets: Vec<OverloadSet<'p>>,
     pub ffi_types: HashMap<u128, TypeId>,
+    pub log_type_rec: RefCell<Vec<TypeId>>,
 }
 
 #[derive(Clone)]
@@ -491,9 +474,31 @@ impl<'p> LazyType<'p> {
     }
 }
 
+macro_rules! safe_rec {
+    ($self:expr, $ty:expr, $default:expr, $body:expr) => {{
+        let ty = $ty;
+        if $self.log_type_rec.borrow().contains(&ty) {
+            $default
+        } else {
+            $self.log_type_rec.borrow_mut().push(ty);
+            let res = $body();
+            let i = $self
+                .log_type_rec
+                .borrow()
+                .iter()
+                .position(|check| *check == ty)
+                .unwrap();
+            $self.log_type_rec.borrow_mut().remove(i);
+            res
+        }
+    }};
+}
+
+pub(crate) use safe_rec;
+
 impl<'p> Program<'p> {
     pub fn new(vars: Vec<VarInfo>, pool: &'p StringPool<'p>) -> Self {
-        Self {
+        let mut program = Self {
             // Any needs to be first becuase I use TypeId(0) as a place holder.
             // The rest are just common ones that i want to find faster if i end up iterating the array.
             types: vec![
@@ -503,6 +508,7 @@ impl<'p> Program<'p> {
                 TypeInfo::I64,
                 TypeInfo::Bool,
                 TypeInfo::F64,
+                TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
             ],
             declarations: Default::default(),
             funcs: Default::default(),
@@ -512,7 +518,12 @@ impl<'p> Program<'p> {
             pool,
             overload_sets: Default::default(),
             ffi_types: Default::default(),
-        }
+            log_type_rec: RefCell::new(vec![]),
+        };
+
+        init_interp_send!(&mut program, FatStmt);
+
+        program
     }
 
     /// This allows ffi types to be unique.
@@ -522,8 +533,15 @@ impl<'p> Program<'p> {
             let placeholder = self.types.len();
             self.types.push(TypeInfo::Never);
             self.ffi_types.insert(id, TypeId(placeholder));
-            let ty = T::get_type(self);
-            self.types[placeholder] = self.types[ty.0].clone();
+            let ty = T::create_type(self); // Note: Not get_type!
+            self.types[placeholder] =
+                TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
+
+            // It might not be a new type, like for numbers that all use TypeId::i64().
+            if ty.0 > placeholder {
+                // debug_assert_eq!(self.types.len() - 1, ty.0);
+                // self.types.pop();
+            }
             TypeId(placeholder)
         })
     }
@@ -562,6 +580,11 @@ impl<'p> Program<'p> {
 
     pub fn load_value(&mut self, v: Value) -> Structured {
         Structured::Const(self.type_of(&v), v)
+    }
+
+    pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {
+        let ty = TypeInfo::Named(ty, self.pool.intern(name));
+        self.intern_type(ty)
     }
 }
 
@@ -623,8 +646,14 @@ impl<'p> Program<'p> {
             Value::I64(_) => TypeId::i64(),
             Value::Bool(_) => TypeId::bool(),
             Value::Enum { container_type, .. } => *container_type,
-            Value::Tuple { values, .. } => {
-                // TODO: actually use container_type
+            Value::Tuple {
+                values,
+                container_type,
+            } => {
+                if !container_type.is_any() {
+                    return *container_type;
+                }
+
                 let types = values.iter().map(|v| self.type_of(v)).collect();
                 self.tuple_of(types)
             }
@@ -633,7 +662,7 @@ impl<'p> Program<'p> {
             Value::GetFn(f) => self.func_type(*f),
             Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
-            Value::Symbol(_) => ffi_type!(self, Ident),
+            Value::Symbol(_) => Ident::get_type(self),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
             Value::Heap { .. } => TypeId::any(),
             Value::OverloadSet(_) => TypeId::any(),
@@ -719,9 +748,11 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
-    pub fn enum_type(&mut self, _name: &str, varients: &[TypeId]) -> TypeId {
+    pub fn enum_type(&mut self, name: &str, varients: &[TypeId]) -> TypeId {
         let as_tuple = self.tuple_of(varients.to_vec());
-        self.to_enum(self.types[as_tuple.0].clone())
+        let ty = self.to_enum(self.types[as_tuple.0].clone());
+        let name = self.pool.intern(name);
+        self.intern_type(TypeInfo::Named(ty, name))
     }
 
     pub fn synth_name(&mut self, ty: TypeId) -> Ident<'p> {
@@ -768,7 +799,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn is_comptime_only_type(&self, ty: TypeId) -> bool {
-        match &self.types[ty.0] {
+        safe_rec!(self, ty, false, || match &self.types[ty.0] {
             TypeInfo::Unit
             | TypeInfo::Any
             | TypeInfo::Never
@@ -790,7 +821,7 @@ impl<'p> Program<'p> {
             TypeInfo::Enum { cases, .. } => {
                 cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
             }
-        }
+        })
     }
 }
 
@@ -898,7 +929,7 @@ impl<'p> Default for Func<'p> {
     }
 }
 
-fn garbage_loc() -> Span {
+pub fn garbage_loc() -> Span {
     // Surely any (u32, u32) is valid
     unsafe { mem::zeroed() }
 }

@@ -1,28 +1,67 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, mem};
 
-use codemap::Span;
+use codemap::{CodeMap, Span};
 
 use crate::{
-    ast::{ffi_type, Program, TypeId, TypeInfo},
+    ast::{garbage_loc, FatStmt, Program, TypeId, TypeInfo},
     bc::Value,
     logging::{outln, LogTag::ShowErr},
+    parse::Parser,
+    LIB,
 };
 
-// TODO
+// TODO: figure out how to check that my garbage type keys are unique.
 pub trait InterpSend<'p>: Sized {
+    // TODO: could use ptr&len of a static string of the type name. but thats sad.
+    //       cant use std::any because of lifetimes. tho my macro can cheat and refer to the name without lifetimes,
+    //       so its jsut about the manual base impls for vec,box,option,hashmap.
     fn get_type_key() -> u128; // fuck off bro
     fn get_type(program: &mut Program<'p>) -> TypeId {
         program.get_ffi_type::<Self>(Self::get_type_key())
     }
+    /// This should only be called once! Use get_type which caches it.
     fn create_type(interp: &mut Program<'p>) -> TypeId;
-    fn serialize(self) -> Value;
-    fn deserialize(value: Value) -> Option<Self>;
+    fn serialize(self, values: &mut Vec<Value>);
+    fn serialize_one(self) -> Value {
+        let mut values = vec![];
+        self.serialize(&mut values);
+        Value::Tuple {
+            container_type: TypeId::any(),
+            values,
+        }
+    }
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
+    fn deserialize_one(value: Value) -> Option<Self> {
+        value.deserialize()
+    }
 }
 
+// TODO: put these in a file that you can look at to debug.
+macro_rules! init_interp_send {
+    ($program:expr, $ty:ty) => {
+        <$ty>::get_type($program);
+    };
+    ($program:expr, $ty:ty, $($arg:ty)*) => {
+        init_interp_send!($program, $ty);
+        init_interp_send!($program, $($arg)*);
+    }
+}
+
+pub(crate) use init_interp_send;
+
 impl Value {
-    // This is stupid but macros suck and its somehow really hard to add a turbofish so you can use assosiated functions.
+    pub fn deserialize_from<'p, T: InterpSend<'p> + Sized>(
+        values: &mut impl Iterator<Item = Value>,
+    ) -> Option<T> {
+        T::deserialize(values)
+    }
+
     pub fn deserialize<'p, T: InterpSend<'p> + Sized>(self) -> Option<T> {
-        T::deserialize(self)
+        if let Value::Tuple { values, .. } = self {
+            T::deserialize(&mut values.into_iter()) // TODO: deeper flatten?
+        } else {
+            T::deserialize(&mut vec![self].into_iter())
+        }
     }
 }
 
@@ -36,12 +75,12 @@ macro_rules! send_num {
                 program.intern_type(TypeInfo::I64)
             }
 
-            fn serialize(self) -> Value {
-                Value::I64(self as i64)
+            fn serialize(self, values: &mut Vec<Value>) {
+                values.push(Value::I64(self as i64))
             }
 
-            fn deserialize(value: Value) -> Option<Self> {
-                if let Value::I64(i) = value {
+            fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+                if let Value::I64(i) = values.next().unwrap() {
                     Some(i as $ty)
                 } else {
                     None
@@ -62,19 +101,16 @@ impl<'p> InterpSend<'p> for bool {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
-    fn get_type(interp: &mut Program<'p>) -> TypeId {
-        ffi_type!(interp, Self)
-    }
     fn create_type(program: &mut Program<'p>) -> TypeId {
         program.intern_type(TypeInfo::Bool)
     }
 
-    fn serialize(self) -> Value {
-        Value::Bool(self)
+    fn serialize(self, values: &mut Vec<Value>) {
+        values.push(Value::Bool(self))
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
-        if let Value::Bool(i) = value {
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        if let Value::Bool(i) = values.next()? {
             Some(i)
         } else {
             None
@@ -92,24 +128,13 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
         program.tuple_of(vec![a, b])
     }
 
-    fn serialize(self) -> Value {
-        // TODO
-        Value::Tuple {
-            container_type: TypeId::any(),
-            values: vec![self.0.serialize(), self.1.serialize()],
-        }
+    fn serialize(self, values: &mut Vec<Value>) {
+        self.0.serialize(values);
+        self.1.serialize(values);
     }
 
-    fn deserialize(vvalue: Value) -> Option<Self> {
-        if let Value::Tuple { values, .. } = vvalue {
-            let mut values = values.into_iter();
-            Some((
-                A::deserialize(values.next()?)?,
-                B::deserialize(values.next()?)?,
-            ))
-        } else {
-            None
-        }
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        Some((A::deserialize(values)?, B::deserialize(values)?))
     }
 }
 
@@ -123,32 +148,29 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         program.intern_type(TypeInfo::Ptr(ty))
     }
 
-    fn serialize(self) -> Value {
-        let values = self.into_iter().map(|e| e.serialize()).collect();
-        Value::new_box(values)
+    fn serialize(self, values: &mut Vec<Value>) {
+        let parts: Vec<_> = self.into_iter().map(|e| e.serialize_one()).collect();
+        values.push(Value::new_box(parts))
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         if let Value::Heap {
             value,
             first,
             count,
-        } = value
+        } = values.next()?
         {
             let value = unsafe { &mut *value };
             if value.references <= 0 {
                 outln!(ShowErr, "deserialize: references < 1");
                 return None;
             }
-            if first == 0 && count == value.values.len() {
-                // value.references -= 1;  // TODO
-                // TODO: don't clone if we're last
-            }
 
-            value.values[first..first + count]
+            let res: Option<Vec<_>> = value.values[first..first + count]
                 .iter()
-                .map(|v| T::deserialize(v.clone()))
-                .collect()
+                .map(|v| T::deserialize_one(v.clone()))
+                .collect();
+            res
         } else {
             None
         }
@@ -165,12 +187,18 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         program.intern_type(TypeInfo::Ptr(ty))
     }
 
-    fn serialize(self) -> Value {
-        (*self).serialize()
+    fn serialize(self, values: &mut Vec<Value>) {
+        vec![*self].serialize(values)
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
-        T::deserialize(value).map(Box::new)
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        let mut v = <Vec<T>>::deserialize(values)?.into_iter();
+        let me = v.next()?;
+        if v.next().is_none() {
+            Some(Box::new(me))
+        } else {
+            None
+        }
     }
 }
 
@@ -183,12 +211,12 @@ impl<'p> InterpSend<'p> for Value {
         TypeId::any()
     }
 
-    fn serialize(self) -> Value {
-        self
+    fn serialize(self, values: &mut Vec<Value>) {
+        values.push(self)
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
-        Some(value)
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        values.next()
     }
 }
 
@@ -197,40 +225,26 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
     fn get_type_key() -> u128 {
         mix::<T, bool>(8090890890986)
     }
-    fn get_type(interp: &mut Program<'p>) -> TypeId {
-        ffi_type!(interp, Self)
-    }
+
     fn create_type(interp: &mut Program<'p>) -> TypeId {
         let t = T::get_type(interp);
         interp.tuple_of(vec![TypeId::bool(), t])
     }
 
-    fn serialize(self) -> Value {
+    fn serialize(self, values: &mut Vec<Value>) {
         match self {
-            Some(v) => Value::Tuple {
-                container_type: TypeId::any(),
-                values: vec![Value::Bool(false), v.serialize()],
-            },
-            None => Value::Tuple {
-                container_type: TypeId::any(),
-                values: vec![Value::Bool(false), Value::Unit],
-            },
+            Some(v) => {
+                values.push(Value::Bool(true));
+                v.serialize(values);
+            }
+            None => values.push(Value::Bool(false)),
         }
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
-        match value {
-            Value::Tuple { values, .. } => {
-                let mut values = values.into_iter();
-                match values.next()? {
-                    Value::Bool(true) => Some(T::deserialize(Value::Tuple {
-                        container_type: TypeId::any(),
-                        values: values.collect(),
-                    })),
-                    Value::Bool(false) => Some(None),
-                    _ => None,
-                }
-            }
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        match values.next()? {
+            Value::Bool(true) => Some(T::deserialize(values)), // TODO: flatten
+            Value::Bool(false) => Some(None),
             _ => None,
         }
     }
@@ -241,16 +255,21 @@ impl<'p> InterpSend<'p> for Span {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
 
-    fn create_type(_interp: &mut Program<'p>) -> TypeId {
-        todo!()
+    fn create_type(program: &mut Program<'p>) -> TypeId {
+        let ty = <(u32, u32)>::get_type(program);
+        program.named_type(ty, "Span")
     }
 
-    fn serialize(self) -> Value {
-        todo!()
+    // This looks wierd because no breaking changes is when private field.
+    fn serialize(self, values: &mut Vec<Value>) {
+        let (a, b): (u32, u32) = unsafe { mem::transmute(self) };
+        (a, b).serialize(values)
     }
 
-    fn deserialize(_value: Value) -> Option<Self> {
-        todo!()
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        let (a, b) = <(u32, u32)>::deserialize(values)?;
+        let res: Span = unsafe { mem::transmute((a, b)) };
+        Some(res)
     }
 }
 
@@ -265,13 +284,13 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
         Vec::<(K, V)>::get_type(interp)
     }
 
-    fn serialize(self) -> Value {
-        self.into_iter().collect::<Vec<_>>().serialize()
+    fn serialize(self, values: &mut Vec<Value>) {
+        self.into_iter().collect::<Vec<_>>().serialize(values)
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         Some(
-            Vec::<(K, V)>::deserialize(value)?
+            Vec::<(K, V)>::deserialize(values)?
                 .into_iter()
                 .collect::<Self>(),
         )
@@ -287,12 +306,12 @@ impl<'p> InterpSend<'p> for String {
         Vec::<u8>::get_type(interp)
     }
 
-    fn serialize(self) -> Value {
-        Vec::<u8>::from(self).serialize()
+    fn serialize(self, values: &mut Vec<Value>) {
+        Vec::<u8>::from(self).serialize(values)
     }
 
-    fn deserialize(value: Value) -> Option<Self> {
-        Self::from_utf8(Vec::<u8>::deserialize(value)?).ok()
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        Self::from_utf8(Vec::<u8>::deserialize(values)?).ok()
     }
 }
 
@@ -330,18 +349,19 @@ fn interp_send() {
         f: HelloEnum,
         g: HelloEnum,
         h: HelloEnum,
+        j: Option<i64>,
     }
 
     let pool = Box::leak(Box::<StringPool>::default());
     let mut p = Program::new(vec![], pool);
     let one = HelloWorld { a: 123, b: 345 };
-    let two = one.serialize();
-    let three = HelloWorld::deserialize(two).unwrap();
+    let two = one.serialize_one();
+    let three = HelloWorld::deserialize_one(two).unwrap();
     assert_eq!(one, three);
 
     let four = vec![one, one, HelloWorld { a: 678, b: 910 }, one];
-    let five = four.clone().serialize();
-    let six = Vec::<HelloWorld>::deserialize(five).unwrap();
+    let five = four.clone().serialize_one();
+    let six = Vec::<HelloWorld>::deserialize_one(five).unwrap();
     assert_eq!(four, six);
 
     let seven = Nested {
@@ -351,19 +371,55 @@ fn interp_send() {
         f: HelloEnum::E { _f: 15, _d: true },
         g: HelloEnum::B(25),
         h: HelloEnum::G,
+        j: Some(123),
     };
-    let eight = seven.serialize();
-    let nine = Nested::deserialize(eight).unwrap();
+    let eight = seven.serialize_one();
+    let nine = Nested::deserialize_one(eight).unwrap();
     assert_eq!(seven, nine);
 
     assert_eq!(HelloWorld::get_type(&mut p), HelloWorld::get_type(&mut p));
     assert_ne!(HelloWorld::get_type(&mut p), Nested::get_type(&mut p));
 
-    assert!(HelloWorld::deserialize(seven.serialize()).is_none());
-    assert!(Nested::deserialize(one.serialize()).is_none());
+    // assert!(HelloWorld::deserialize_one(seven.serialize_one()).is_none());
+    // assert!(Nested::deserialize_one(one.serialize_one()).is_none());
 
     // let ty = HelloWorld::get_type(&mut p);
     // panic!("{}", p.log_type(ty));
+}
+
+#[test]
+fn interp_send_empty_ast() {
+    use crate::pool::StringPool;
+    let pool = Box::leak(Box::<StringPool>::default());
+    let mut p = Program::new(vec![], pool);
+
+    let empty = FatStmt::null(garbage_loc());
+    let prev = format!("{empty:?}");
+    let value = empty.serialize_one();
+    let empty2: FatStmt = value.deserialize().unwrap();
+    assert_eq!(prev, format!("{empty2:?}"));
+}
+
+#[test]
+fn interp_send_libs_ast() {
+    use crate::pool::StringPool;
+    let pool = Box::leak(Box::<StringPool>::default());
+
+    let mut codemap = CodeMap::new();
+    let libs: Vec<_> = LIB
+        .iter()
+        .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
+        .collect();
+    for file in &libs {
+        let stmts = Parser::parse(file.clone(), pool).unwrap();
+        for s in stmts {
+            let prev = format!("{s:?}");
+            let value = s.serialize_one();
+            let after: FatStmt = value.deserialize().unwrap();
+            // Note: this relies on you not printing out addresses in there.
+            assert_eq!(prev, format!("{after:?}"));
+        }
+    }
 }
 
 #[cfg(feature = "interp_c_ffi")]

@@ -36,11 +36,11 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             fn create_type(program: &mut crate::ast::Program<'p>) -> TypeId {
                 #get_type
             }
-            fn serialize(self) -> Value {
+            fn serialize(self, values: &mut Vec<Value>) {
                 #serialize
             }
             #[allow(unused_braces)]
-            fn deserialize(value: Value) -> Option<Self> {
+            fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
                 #deserialize
             }
         }
@@ -115,7 +115,6 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
         syn::Data::Struct(data) => {
             let rest = deserialize_fields(quote!(#name), &data.fields);
             quote!(
-                let mut fields = value.to_tuple()?.into_iter();
                 #rest
             )
         }
@@ -129,8 +128,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
             });
 
             quote! {
-                let mut fields = value.to_tuple()?.into_iter();
-                let tag = usize::deserialize(fields.next()?)?;
+                let tag = usize::deserialize(values)?;
                 match tag {
                     #(#recurse)*
                     _ => None
@@ -149,7 +147,7 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
             let recurse = fields.iter().map(|f| {
                 let name = &f.ident;
                 quote_spanned! {f.span()=>
-                    #name: fields.next()?.deserialize()?,
+                    #name: Value::deserialize_from(values)?,
                 }
             });
             quote! {
@@ -164,7 +162,7 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
         }) => {
             let recurse = fields.iter().map(|f| {
                 quote_spanned! {f.span()=>
-                    fields.next()?.deserialize()?,
+                    Value::deserialize_from(values)?,
                 }
             });
             quote! {
@@ -186,16 +184,14 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
         syn::Data::Struct(data) => {
             let rest = serialize_fields(name, &data.fields, quote!(self.));
             quote! {
-                let mut values = vec![];
                 #rest
-                Value::Tuple { values, container_type: TypeId::any() }  // TODO
             }
         }
         syn::Data::Enum(data) => {
             let recurse_tag = data.variants.iter().enumerate().map(|(i, f)| {
                 let left = enum_match_left(&f.ident, &f.fields);
                 quote_spanned! {f.span()=>
-                    #left => usize::serialize(#i),
+                    #left => usize::serialize(#i, values),
                 }
             });
             let recurse = data.variants.iter().map(|f| {
@@ -222,12 +218,10 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                 }
             });
             quote! {
-                let mut values = vec![];
-
                 #[allow(unused_variables)]
-                values.push(match &self {  #(#recurse_tag)* });
+                match &self {  #(#recurse_tag)* };
                 match self {  #(#recurse)* }
-                Value::Tuple { values, container_type: TypeId::any() }  // TODO
+                
             }
         }
         syn::Data::Union(_) => todo!(),
@@ -269,22 +263,22 @@ fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream) ->
             let recurse = fields.named.iter().map(|f| {
                 let name = &f.ident;
                 quote_spanned! {f.span()=>
-                    crate::ffi::InterpSend::serialize(#prefix #name)
+                    crate::ffi::InterpSend::serialize(#prefix #name, values)
                 }
             });
             quote! {
-                #(values.push(#recurse);)*
+                #(#recurse;)*
             }
         }
         syn::Fields::Unnamed(ref fields) => {
             let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let i = syn::Index::from(i);
                 quote_spanned! {f.span()=>
-                    crate::ffi::InterpSend::serialize(#prefix #i)
+                    crate::ffi::InterpSend::serialize(#prefix #i, values)
                 }
             });
             quote! {
-                #(values.push(#recurse);)*
+                #(#recurse;)*
             }
         }
         syn::Fields::Unit => quote! {},

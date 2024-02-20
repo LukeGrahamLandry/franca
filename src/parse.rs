@@ -6,7 +6,7 @@ use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
 use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, TypeId};
+use crate::ast::{Binding, TypeId, Var};
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
@@ -160,6 +160,22 @@ impl<'a, 'p> Parser<'a, 'p> {
                 // TODO: maybe its wrong to both putting everything in the pool
                 Ok(self.expr(Expr::String(i)))
             }
+            // TODO: allow this as a raw statement, currently it will get parsed as an annotation on a noop.
+            // TODO: should i allow the payload to be statement too?
+            // TODO: could make arg optional but then there's wierd stuff like `@no_arg (expected, target)` being seen as one thing.
+            //       i dont want to make parsing depend on how the macro was declared so you could opt out of the arg and allow that.
+            At => {
+                self.start_subexpr();
+                self.eat(At)?;
+                let name = self.ident()?;
+                let arg = Box::new(self.parse_tuple()?);
+                let target = Box::new(self.parse_expr()?);
+                Ok(self.expr(Expr::PrefixMacro {
+                    name: Var(name, 0),
+                    arg,
+                    target,
+                }))
+            }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or Num or Ident...")),
         }
     }
@@ -167,12 +183,6 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>) -> Res<FatExpr<'p>> {
         loop {
             prefix = match self.peek() {
-                DoubleColon => {
-                    self.start_subexpr();
-                    self.eat(DoubleColon)?;
-                    let arg = self.parse_tuple()?;
-                    self.expr(Expr::GenericArgs(Box::new(prefix), Box::new(arg)))
-                }
                 LeftParen => {
                     self.start_subexpr();
                     let arg = self.parse_tuple()?;

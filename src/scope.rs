@@ -160,9 +160,16 @@ impl<'p> ResolveScope<'p> {
     fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
         let loc = expr.loc;
         match expr.deref_mut() {
-            Expr::GenericArgs(f, arg) | Expr::Call(f, arg) => {
+            Expr::Call(f, arg) => {
                 self.resolve_expr(f);
                 self.resolve_expr(arg);
+            }
+            Expr::PrefixMacro { name, arg, target } => {
+                if let Some(var) = self.find_var(&name.0) {
+                    *name = var;
+                }
+                self.resolve_expr(arg);
+                self.resolve_expr(target);
             }
             Expr::Block {
                 body,

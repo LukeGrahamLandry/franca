@@ -1,4 +1,9 @@
 
+## serializing asts
+
+- fix logging of recursive types
+- my InterpSend for option always said None cause im dumb
+
 ## the road to partial evaluation (Web 19)
 
 Need to track which values are const known to make it easier to deal with baking closures passed as arguments to other functions. 

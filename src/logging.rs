@@ -212,43 +212,50 @@ pub trait PoolLog<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String;
 }
 
+use crate::ast::safe_rec;
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
-        match &self.types[t.0] {
-            TypeInfo::Any => "Any".to_owned(),
-            TypeInfo::Never => "Never".to_owned(),
-            TypeInfo::F64 => "f64".to_owned(),
-            TypeInfo::I64 => "i64".to_owned(),
-            TypeInfo::Bool => "bool".to_owned(),
-            // TODO: be careful of recursion
-            TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
-            TypeInfo::Slice(e) => format!("([]{})", self.log_type(*e)),
-            TypeInfo::Struct { fields, .. } => {
-                // TODO: factor out iter().join(str), how does that not already exist
-                let v: Vec<_> = fields
-                    .iter()
-                    .map(|f| format!("{}: {}", self.pool.get(f.name), self.log_type(f.ty)))
-                    .collect();
-                format!("{{ {}}}!struct", v.join(", "))
+        safe_rec!(self, t, format!("{t:?}"), || {
+            match &self.types[t.0] {
+                TypeInfo::Any => "Any".to_owned(),
+                TypeInfo::Never => "Never".to_owned(),
+                TypeInfo::F64 => "f64".to_owned(),
+                TypeInfo::I64 => "i64".to_owned(),
+                TypeInfo::Bool => "bool".to_owned(),
+                // TODO: be careful of recursion
+                TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
+                TypeInfo::Slice(e) => format!("([]{})", self.log_type(*e)),
+                TypeInfo::Struct { fields, .. } => {
+                    // TODO: factor out iter().join(str), how does that not already exist
+                    let v: Vec<_> = fields
+                        .iter()
+                        .map(|f| format!("{}: {}", self.pool.get(f.name), self.log_type(f.ty)))
+                        .collect();
+                    format!("{{ {}}}!struct", v.join(", "))
+                }
+                TypeInfo::Enum { cases, .. } => {
+                    // TODO: factor out iter().join(str), how does that not already exist
+                    let v: Vec<_> = cases
+                        .iter()
+                        .map(|(name, ty)| {
+                            format!("{}: {}", self.pool.get(*name), self.log_type(*ty))
+                        })
+                        .collect();
+                    format!("{{ {}}}!enum", v.join(", "))
+                }
+                TypeInfo::Unique(inner, n) => format!("{}#{}", self.log_type(*inner), n),
+                TypeInfo::Named(inner, n) => {
+                    format!("{}#{}", self.log_type(*inner), self.pool.get(*n))
+                }
+                TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
+                TypeInfo::Tuple(v) => {
+                    let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
+                    format!("Tuple({})", v.join(", "))
+                }
+                TypeInfo::Type => "Type".to_owned(),
+                TypeInfo::Unit => "Unit".to_owned(),
             }
-            TypeInfo::Enum { cases, .. } => {
-                // TODO: factor out iter().join(str), how does that not already exist
-                let v: Vec<_> = cases
-                    .iter()
-                    .map(|(name, ty)| format!("{}: {}", self.pool.get(*name), self.log_type(*ty)))
-                    .collect();
-                format!("{{ {}}}!enum", v.join(", "))
-            }
-            TypeInfo::Unique(inner, n) => format!("{}#{}", self.log_type(*inner), n),
-            TypeInfo::Named(inner, n) => format!("{}#{}", self.log_type(*inner), self.pool.get(*n)),
-            TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
-            TypeInfo::Tuple(v) => {
-                let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
-                format!("Tuple({})", v.join(", "))
-            }
-            TypeInfo::Type => "Type".to_owned(),
-            TypeInfo::Unit => "Unit".to_owned(),
-        }
+        })
     }
 
     // Note: be careful this can't get into a recursive loop trying to pretty print stuff.
@@ -404,7 +411,7 @@ fn collect_func_references<'p>(
         | Expr::GetNamed(_)
         | Expr::RefType(_)
         | Expr::EnumLiteral(_)
-        | Expr::GenericArgs(_, _)
+        | Expr::PrefixMacro { .. }
         | Expr::String(_)
         | Expr::Closure(_) => {} // TODO // unreachable!("finished ast contained {expr:?}"),
     }

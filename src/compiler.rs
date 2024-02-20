@@ -13,8 +13,7 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    ffi_type, Annotation, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var,
-    VarType,
+    Annotation, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var, VarType,
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
@@ -153,6 +152,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         let state = DebugState::Compile(f);
         self.push_state(&state);
+        debug_assert!(!self.interp.program.funcs[f.0].evil_uninit);
         let init_heights = (self.interp.call_stack.len(), self.interp.value_stack.len());
         let result = self.ensure_compiled(f, when);
         if result.is_ok() {
@@ -190,7 +190,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    pub fn empty_fn(
+    fn empty_fn(
         &mut self,
         when: ExecTime,
         func: FuncId,
@@ -230,15 +230,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     loc,
                     Some(constants),
                 );
-                let name = self.interp.program.funcs[f.0].synth_name(self.pool).clone();
-                let _msg = format!("locals {}", name);
-                let func = &self.interp.program.funcs[f.0];
 
-                let new_constants = func.local_constants.clone();
-                for mut stmt in new_constants {
-                    // println!("Eval const {}", stmt.log(self.pool));
-                    self.compile_stmt(&mut result, &mut stmt)?;
-                }
+                mut_replace!(
+                    self.interp.program.funcs[f.0].local_constants,
+                    |mut local_constants| {
+                        for stmt in &mut local_constants {
+                            self.compile_stmt(&mut result, stmt)?;
+                        }
+                        Ok((local_constants, ()))
+                    }
+                );
 
                 self.pop_state(state);
 
@@ -718,21 +719,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(func.closed_constants.is_valid);
         func.referencable_name = false;
         func.closed_constants.add_all(caller_constants);
-        let constants = func.closed_constants.clone(); // TODO: aaaa
 
-        logln!(
-            "emit_comptime_call of {} with consts: {}",
-            func.synth_name(self.pool),
-            self.interp.program.log_consts(&constants)
-        );
-        let types = self.infer_pattern(&constants, &mut func.arg.bindings)?;
-        // TODO: update self.interp.program.funcs[f.0]
-        let arg_ty = self.interp.program.tuple_of(types);
-        let arg_value = self.immediate_eval_expr(&constants, arg_expr.clone(), arg_ty)?;
+        let arg_value = mut_replace!(func.closed_constants, |constants| {
+            let types = self.infer_pattern(&constants, &mut func.arg.bindings)?;
+            // TODO: update self.interp.program.funcs[f.0]
+            let arg_ty = self.interp.program.tuple_of(types);
+            let arg_value = self.immediate_eval_expr(&constants, arg_expr.clone(), arg_ty)?;
+            Ok((constants, arg_value))
+        });
 
-        let f = self.interp.program.add_func(func);
-
-        let func = &self.interp.program.funcs[f.0];
         if func.body.is_none() {
             // TODO: don't re-eval the arg type every time.
             let name = func.synth_name(self.pool);
@@ -752,25 +747,32 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Bind the arg into my new constants so the ret calculation can use it.
         // also the body constants for generics need this. much cleanup pls.
         // TODO: factor out from normal functions?
-
+        let f = self.interp.program.add_func(func);
         let func = &self.interp.program.funcs[f.0];
-        let args = func.arg.flatten().into_iter().enumerate();
+        let args = func.arg.flatten().into_iter();
         let arg_values = to_flat_seq(arg_value);
-        for (i, (name, ty)) in args {
+        for ((name, ty), arg) in args.zip(arg_values) {
             if let Some(var) = name {
                 let prev = self.interp.program.funcs[f.0]
                     .closed_constants
-                    .insert(var, (arg_values[i].clone(), ty));
+                    .insert(var, (arg, ty));
                 assert!(prev.is_none(), "overwrite arg?");
             }
         }
 
-        let constants = self.interp.program.funcs[f.0].closed_constants.clone(); // TODO: aaaa
-
-        let mut func = self.interp.program.funcs[f.0].clone();
-        assert!(self.infer_types_progress(&constants, &mut func.ret)?);
-        let ret = func.ret.unwrap();
-        self.interp.program.funcs[f.0] = func;
+        let ret = mut_replace!(
+            self.interp.program.funcs[f.0].closed_constants,
+            |constants| {
+                let ret = mut_replace!(self.interp.program.funcs[f.0].ret, |mut ret: LazyType<
+                    'p,
+                >| {
+                    assert!(self.infer_types_progress(&constants, &mut ret)?);
+                    let ret_ty = ret.unwrap();
+                    Ok((ret, ret_ty))
+                });
+                Ok((constants, ret))
+            }
+        );
 
         self.interp.program.funcs[f.0].finished_type = Some(FnType { arg: arg_ty, ret });
 
@@ -782,13 +784,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 .program
                 .log_consts(&self.interp.program.funcs[f.0].closed_constants)
         );
+        // TODO: I think this is the only place that relies on it being a whole function.
         self.eval_and_close_local_constants(f)?;
 
-        let constants = &self.interp.program.funcs[f.0].closed_constants.clone(); // TODO: aaaa
-
-        let body = self.interp.program.funcs[f.0].body.clone();
+        // Drop the instantiation of the function specialized to this call's arguments.
+        // We cache the result and will never need to call it again.
+        let mut func = mem::take(&mut self.interp.program.funcs[f.0]);
+        let body = func.body.take();
         let result = if let Some(body) = body {
-            self.immediate_eval_expr(constants, body, ret)?
+            self.immediate_eval_expr(&func.closed_constants, body, ret)?
         } else {
             unreachable!("builtin")
         };
@@ -799,11 +803,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.interp
             .program
             .generics_memo
-            .insert(key.clone(), result.clone());
-
-        // Drop the instantiation of the function specialized to this call's arguments.
-        // We cached the result and will never need to call it again.
-        let _ = mem::take(&mut self.interp.program.funcs[f.0]);
+            .insert(key, result.clone());
 
         Ok(result)
     }
@@ -975,6 +975,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     ) -> Res<'p, Structured> {
         result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
+        let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
             Expr::Closure(func) => {
@@ -1051,11 +1052,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Structured::Emitted(ty, to)
                 } else if let Some((value, _)) = result.constants.get(*var) {
                     self.interp.program.load_value(value)
-                } else if let Some(func) = self.interp.program.declarations.get(&var.0) {
-                    assert_eq!(func.len(), 1, "ambigous function reference");
-                    let func = func[0];
-                    self.ensure_compiled(func, ExecTime::Comptime)?;
-                    self.interp.program.load_fn(func)
                 } else {
                     outln!(ShowErr, "VARS: {:?}", result.vars);
                     outln!(
@@ -1312,8 +1308,35 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .collect();
                 self.interp.program.load_value(Value::new_box(bytes))
             }
-            Expr::GenericArgs(_, _) => {
-                todo!()
+            Expr::PrefixMacro { name, arg, target } => {
+                let expr_ty = FatExpr::get_type(self.interp.program);
+                let mut values = vec![];
+                let arg: &mut FatExpr = arg.deref_mut();
+                mem::take(arg).serialize(&mut values);
+                let target: &mut FatExpr = target.deref_mut();
+                mem::take(target).serialize(&mut values);
+                let want = FatExpr::get_type(self.interp.program);
+                for v in &values {
+                    println!("- {v:?}")
+                }
+                let full_arg = Expr::Value(Value::Tuple {
+                    container_type: self.interp.program.tuple_of(vec![expr_ty, expr_ty]),
+                    values,
+                });
+                let full_arg = FatExpr::synthetic(full_arg, loc);
+                let f = self.resolve_function(result, *name, &full_arg, Some(want))?;
+                let get_func = FatExpr::synthetic(Expr::Value(Value::GetFn(f)), loc);
+                let full_call =
+                    FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
+                let new_expr = self.immediate_eval_expr(&result.constants, full_call, want)?;
+                // TODO: deserialize should return a meaningful error message
+                *expr = unwrap!(
+                    FatExpr::deserialize_one(new_expr.clone()),
+                    "macro failed. returned {new_expr:?}"
+                );
+                println!("RES: {}", expr.log(self.pool));
+                // Now evaluate whatever the macro gave us.
+                self.compile_expr(result, expr, requested)?
             }
         })
     }
@@ -1541,7 +1564,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             | Expr::ArrayLiteral(_)
             | Expr::RefType(_)
             | Expr::EnumLiteral(_)
-            | Expr::GenericArgs(_, _)
+            | Expr::PrefixMacro { .. }
             | Expr::Closure(_) => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -1628,25 +1651,19 @@ impl<'a, 'p> Compile<'a, 'p> {
             }};
         }
 
-        macro_rules! ffi__type {
+        macro_rules! ffi_type {
             ($ty:ty) => {{
-                let ty = ffi_type!(self.interp.program, $ty);
+                let ty = <$ty>::get_type(self.interp.program);
                 (Value::Type(ty), TypeId::ty())
             }};
         }
 
         Some(match name {
-            "true" => (
-                Value::Bool(true),
-                self.interp.program.intern_type(TypeInfo::Bool),
-            ),
-            "false" => (
-                Value::Bool(false),
-                self.interp.program.intern_type(TypeInfo::Bool),
-            ),
-            "Symbol" => ffi__type!(Ident),
-            "CmdResult" => ffi__type!(CmdResult),
-            "FatExpr" => ffi__type!(FatExpr),
+            "true" => (Value::Bool(true), TypeId::bool()),
+            "false" => (Value::Bool(false), TypeId::bool()),
+            "Symbol" => ffi_type!(Ident),
+            "CmdResult" => ffi_type!(CmdResult),
+            "FatExpr" => ffi_type!(FatExpr),
             "getchar" => cfn!(
                 libc::getchar,
                 FnType {
@@ -1799,11 +1816,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             _ => {} // fallthrough
         }
-        // println!(
-        //     "immediate_eval_expr {} with consts:\n{}",
-        //     e.log(self.pool),
-        //     self.interp.program.log_consts(constants)
-        // );
 
         let state = DebugState::ComputeCached(e.clone());
         self.push_state(&state);
@@ -1861,7 +1873,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
         debug_assert!(func.closed_constants.local.is_empty());
         debug_assert!(func.closed_constants.is_valid);
-        // println!("ADD_FUNC {}", func.log_captures(self.pool));
         func.closed_constants = constants.close(&func.capture_vars_const)?;
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
@@ -1869,10 +1880,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 func.closed_constants.insert(*capture, val);
             }
         }
-        // println!(
-        //     "ADD_FUNC CLOSED {}",
-        //     self.interp.program.log_consts(&func.closed_constants)
-        // );
         let id = self.interp.program.add_func(func);
         Ok(id)
     }
@@ -2017,7 +2024,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // #[track_caller]
+    #[track_caller]
     fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
         if found == expected || found.is_any() || expected.is_any() {
             Ok(())
@@ -2437,7 +2444,7 @@ impl<'p> FnBody<'p> {
         value: T,
     ) -> Res<'p, (StackRange, TypeId)> {
         let ty = T::get_type(program);
-        let value = value.serialize();
+        let value = value.serialize_one();
         let to = self.reserve_slots(program, ty)?;
         self.push(Bc::LoadConstant {
             slot: to.first,
@@ -2463,7 +2470,7 @@ impl<'p> FnBody<'p> {
         ip
     }
 
-    pub fn produce_tuple(
+    fn produce_tuple(
         &mut self,
         program: &mut Program<'p>,
         owned_values: Vec<Structured>,
