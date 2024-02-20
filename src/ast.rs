@@ -249,7 +249,7 @@ impl<'p> Pattern<'p> {
     pub fn remove_named(&mut self, arg_name: Var<'p>) {
         let start = self.bindings.len();
         self.bindings.retain(|b| match b {
-            Binding::Var(name, _) => *name == arg_name,
+            Binding::Var(name, _) => *name != arg_name,
             _ => true,
         });
         debug_assert_ne!(start, self.bindings.len());
@@ -741,6 +741,41 @@ impl<'p> Program<'p> {
 
     pub fn named_tuple(&mut self, _todo_name: &str, types: Vec<TypeId>) -> TypeId {
         self.tuple_of(types)
+    }
+
+    pub fn is_comptime_only(&self, value: &Structured) -> bool {
+        match value {
+            Structured::Emitted(_, _) => false, // sure hope not or we're already fucked.
+            Structured::TupleDifferent(ty, _) | Structured::Const(ty, _) => {
+                self.is_comptime_only_type(*ty)
+            }
+        }
+    }
+
+    pub fn is_comptime_only_type(&self, ty: TypeId) -> bool {
+        match &self.types[ty.0] {
+            TypeInfo::Unit
+            | TypeInfo::Any
+            | TypeInfo::Never
+            | TypeInfo::F64
+            | TypeInfo::I64
+            | TypeInfo::Bool => false,
+            // TODO: supply "runtime" versions of these for macros to work with
+            TypeInfo::Fn(_) => true,
+            // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
+            TypeInfo::Type => false,
+            TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
+            TypeInfo::Unique(ty, _)
+            | TypeInfo::Named(ty, _)
+            | TypeInfo::Ptr(ty)
+            | TypeInfo::Slice(ty) => self.is_comptime_only_type(*ty),
+            TypeInfo::Struct { fields, .. } => {
+                fields.iter().any(|f| self.is_comptime_only_type(f.ty))
+            }
+            TypeInfo::Enum { cases, .. } => {
+                cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
+            }
+        }
     }
 }
 

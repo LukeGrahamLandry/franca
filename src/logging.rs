@@ -156,12 +156,19 @@ pub fn save_logs(folder: &str) {
 
 macro_rules! outln {
     ($tag:expr, $($arg:tt)*) => {{
-        let tag: crate::logging::LogTag = $tag;
-        crate::logging::LOG.with(|settings| {
-            if (settings.borrow().track & (1 << tag as usize)) != 0 {
+        if cfg!(feature = "some_log") {
+            let tag: crate::logging::LogTag = $tag;
+            crate::logging::LOG.with(|settings| {
+                if (settings.borrow().track & (1 << tag as usize)) != 0 {
+                    settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
+                }
+            })
+        } else if $tag == crate::logging::LogTag::ShowPrint || $tag == crate::logging::LogTag::ShowErr {
+            let tag: crate::logging::LogTag = $tag;
+            crate::logging::LOG.with(|settings| {
                 settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
-            }
-        })
+            })
+        }
     }};
 }
 
@@ -555,10 +562,10 @@ impl<'p> PoolLog<'p> for Func<'p> {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
-            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\n A:{:?}]\n{}\n{}\n",
+            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\nARG: {:?}\n A:{:?}]\n{}\n{}\n",
             self.synth_name(pool),
             self.get_name(pool),
-            self.ret.log(pool), // TODO: arg
+            self.ret.log(pool),
             self.local_constants
                 .iter()
                 .map(|e| e.log(pool))
@@ -568,6 +575,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
                 .as_ref()
                 .map(|e| e.log(pool))
                 .unwrap_or_else(|| "@NO_BODY@".to_owned()),
+            self.arg, // TODO: better formatting.
             self.annotations.iter().map(|i| pool.get(i.name)),
             if self.capture_vars.is_empty() {
                 String::from("Raw function, no captures.")

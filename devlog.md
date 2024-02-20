@@ -1,4 +1,11 @@
 
+## the road to partial evaluation (Web 19)
+
+Need to track which values are const known to make it easier to deal with baking closures passed as arguments to other functions. 
+
+- resolve_function was typechecking the arg before checking if the func var was just a GetFn instead of an OverloadSet
+- sad day remove_named calling Vec::retain with flipped condition so i was removing all args accept the one i bound. 
+
 ## sneaky swapping for mutation (Feb 16)
 
 Previously I was cloning a bunch of stuff to deal with all the asts being in the program struct. 

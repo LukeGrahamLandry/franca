@@ -363,6 +363,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 });
                 let ret_ty = func.ret.unwrap();
                 let ret = result.reserve_slots(self.interp.program, func.ret.unwrap())?;
+                // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
+                //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
+                //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
                 assert!(func.referencable_name, "fn no body needs name");
                 result.push(Bc::CallBuiltin {
                     name: func.name,
@@ -411,29 +414,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_runtime_call(
         &mut self,
         result: &mut FnBody<'p>,
-        f: FuncId,
+        original_f: FuncId,
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
         // Note: f will be compiled differently depending on the calling convention.
         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-        self.infer_types(f)?;
-        // let func = &self.interp.program.funcs[f.0];
-
-        // but i need to have already evaluated arg because i need to treat a tuple literal and a var lookup tuple as the same thing.
-        // let arg_exprs = if let Expr::Tuple(args) = arg.deref_mut() {
-        //     args.iter_mut().collect()
-        // } else {
-        //     vec![arg]
-        // };
-
-        // TODO: support Fns in tuples/structs/etc.
-        // for ((name, ty), arg_expr) in func.arg.flatten().into_iter().zip(arg_exprs) {
-        //     let name = unwrap!(name, "arg requires name");
-        //     let info = &self.interp.program.types[ty.0];
-        //     if let TypeInfo::Fn(_) = info {
-        //         let new_fn = self.bind_const_arg(&result.constants, f, name, arg_expr.clone())?;
-        //     }
-        // }
+        self.infer_types(original_f)?;
 
         let mut arg = self.compile_expr(result, arg, None)?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
@@ -441,14 +427,67 @@ impl<'a, 'p> Compile<'a, 'p> {
             arg = self.interp.program.load_value(Value::Unit);
         }
 
-        let func = &self.interp.program.funcs[f.0];
-        let f_ty = self.interp.program.funcs[f.0].unwrap_ty();
-        // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
+        let f_ty = self.interp.program.funcs[original_f.0].unwrap_ty();
         self.type_check_arg(arg.ty(), f_ty.arg, "bad arg")?;
+
+        // TODO: if its a pure function you might want to do the call at comptime
+        // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
+        let (f, arg) = if !self.interp.program.is_comptime_only_type(f_ty.arg) {
+            (original_f, arg)
+        } else {
+            let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
+            self.push_state(&state);
+            // Some part of the argument must be known at comptime.
+            // You better compile_expr noticed and didn't put it in a stack slot.
+            let func = &self.interp.program.funcs[original_f.0];
+            let pattern = func.arg.flatten();
+            match arg {
+                Structured::Emitted(_, _) => ice!(
+                    "{:?} is comptime only but {:?} is only known at runtime.",
+                    self.interp.program.log_type(f_ty.arg),
+                    arg
+                ),
+                Structured::Const(_, _) => ice!("TODO: fully const comptime arg {:?}. (should be trivial just don't need it yet)", arg),
+                Structured::TupleDifferent(_, arg_values) => {
+                    assert_eq!(
+                        pattern.len(),
+                        arg_values.len(),
+                        "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
+                        pattern,
+                        arg_values,
+                        func.synth_name(self.pool)
+                    );
+                    let mut current_fn = original_f;
+                    let mut skipped_args = vec![];
+                    let mut skipped_types = vec![];
+                    for ((name, ty), arg_value) in pattern.into_iter().zip(arg_values) {
+                        if self.interp.program.is_comptime_only_type(ty) {
+                            let name = unwrap!(name, "arg needs name (unreachable?)");
+                            current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
+                        } else {
+                            skipped_args.push(arg_value);
+                            skipped_types.push(ty);
+                        }
+                    }
+                    let arg_ty = self.interp.program.tuple_of(skipped_types);
+                    debug_assert_ne!(current_fn, original_f);
+                    self.pop_state(state);
+                    (current_fn, Structured::TupleDifferent(arg_ty, skipped_args))
+                }
+            }
+        };
+
+        let f_ty = self.interp.program.funcs[f.0].unwrap_ty();
+
+        // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
         debug_assert_eq!(
             self.interp.program.slot_count(arg.ty()),
-            self.interp.program.slot_count(f_ty.arg)
+            self.interp.program.slot_count(f_ty.arg),
+            "{:?} vs {:?}",
+            self.interp.program.log_type(arg.ty()),
+            self.interp.program.log_type(f_ty.arg),
         );
+        let func = &self.interp.program.funcs[f.0];
         // TODO: some huristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
         let force_inline = func.has_tag(self.pool, "inline");
@@ -581,22 +620,31 @@ impl<'a, 'p> Compile<'a, 'p> {
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
     fn bind_const_arg(
         &mut self,
-        caller_constants: &Constants<'p>,
         o_f: FuncId,
         arg_name: Var<'p>,
-        arg_expr: FatExpr<'p>,
+        arg: Structured,
     ) -> Res<'p, FuncId> {
         let mut new_func = self.interp.program.funcs[o_f.0].clone();
         new_func.referencable_name = false;
         let arg_ty =
             self.get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
-        let arg_value = self.immediate_eval_expr(caller_constants, arg_expr, arg_ty)?;
+        self.type_check_arg(arg.ty(), arg_ty, "bind arg")?;
+        let arg_value = arg.get()?;
+
+        // TODO: not sure if i actually need this but it seems like i should.
+        if let Value::GetFn(arg_func) = &arg_value {
+            // TODO: support fns nested in tuples.
+            let extra_captures = &self.interp.program.funcs[arg_func.0].capture_vars;
+            new_func.capture_vars.extend(extra_captures);
+            // TODO: do I need to take its closed closed constants too?
+        }
         new_func
             .closed_constants
             .insert(arg_name, (arg_value, arg_ty));
         new_func.arg.remove_named(arg_name);
 
         let known_type = new_func.finished_type.is_some();
+        new_func.finished_type = None;
         let f_id = self.interp.program.add_func(new_func);
         // If it was fully resolved before, we can't leave the wrong answer there.
         // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
@@ -1333,110 +1381,110 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
+        let value = if let Some((value, _)) = result.constants.get(name) {
+            if let Value::GetFn(f) = value {
+                self.pop_state(state);
+                return Ok(f);
+            }
+            value
+        } else {
+            err!(CErr::VarNotFound(name))
+        };
+
         match self.type_of(result, arg) {
             Ok(Some(arg_ty)) => {
-                if let Some((value, _)) = result.constants.get(name) {
-                    match value {
-                        Value::GetFn(f) => Ok(f),
-                        Value::OverloadSet(i) => {
-                            let overloads = &self.interp.program.overload_sets[i];
+                match value {
+                    Value::GetFn(f) => Ok(f),
+                    Value::OverloadSet(i) => {
+                        let overloads = &self.interp.program.overload_sets[i];
 
-                            let accept = |f_ty: FnType| {
-                                arg_ty == f_ty.arg
-                                    && (requested_ret.is_none()
-                                        || (requested_ret.unwrap() == f_ty.ret))
-                            };
+                        let accept = |f_ty: FnType| {
+                            arg_ty == f_ty.arg
+                                && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret))
+                        };
 
-                            let mut found = None;
-                            for check in &overloads.0 {
-                                if accept(check.ty) {
-                                    found = Some(check.func);
-                                    break;
-                                }
-                            }
-
-                            if let Some(found) = found {
-                                self.pop_state(state);
-                                return Ok(found);
-                            }
-
-                            let log_goal = |s: &mut Self| {
-                                format!(
-                                    "for fn {}({}) {:?};",
-                                    name.log(s.pool),
-                                    s.interp.program.log_type(arg_ty),
-                                    requested_ret
-                                        .map(|t| s.interp.program.log_type(t))
-                                        .unwrap_or_else(|| "??".to_string())
-                                )
-                            };
-
-                            // Compute overloads.
-                            if let Some(decls) = self.interp.program.declarations.get(&name.0) {
-                                let mut found = None;
-                                let decls = decls.clone();
-                                for f in &decls {
-                                    if let Ok(f_ty) = self.infer_types(*f) {
-                                        if accept(f_ty) {
-                                            assert!(
-                                                found.is_none(),
-                                                "AmbiguousCall {:?} vs {:?} \n{}",
-                                                found,
-                                                (f, f_ty),
-                                                log_goal(self)
-                                            );
-                                            found = Some((*f, f_ty));
-                                        }
-                                    }
-                                }
-                                match found {
-                                    Some((func, ty)) => {
-                                        self.interp.program.overload_sets[i].0.push(
-                                            OverloadOption {
-                                                name: name.0,
-                                                ty,
-                                                func,
-                                            },
-                                        );
-                                        self.pop_state(state);
-                                        Ok(func)
-                                    }
-                                    None => {
-                                        // TODO: put the message in the error so !assert_compile_error doesn't print it.
-                                        outln!(ShowErr, "not found {}", log_goal(self));
-                                        for f in &decls {
-                                            if let Ok(f_ty) = self.infer_types(*f) {
-                                                outln!(
-                                                    ShowErr,
-                                                    "- found {:?} fn({}) {};",
-                                                    f,
-                                                    self.interp.program.log_type(f_ty.arg),
-                                                    self.interp.program.log_type(f_ty.ret),
-                                                );
-                                            }
-                                        }
-                                        outln!(
-                                            ShowErr,
-                                            "Maybe you forgot to instantiate a generic?"
-                                        );
-
-                                        err!(CErr::AmbiguousCall)
-                                    }
-                                }
-                            } else {
-                                err!(CErr::VarNotFound(name))
+                        let mut found = None;
+                        for check in &overloads.0 {
+                            if accept(check.ty) {
+                                found = Some(check.func);
+                                break;
                             }
                         }
-                        _ => {
-                            err!(
-                                "Expected function for {} but found {:?}",
-                                name.log(self.pool),
-                                value
+
+                        if let Some(found) = found {
+                            self.pop_state(state);
+                            return Ok(found);
+                        }
+
+                        let log_goal = |s: &mut Self| {
+                            format!(
+                                "for fn {}({}) {:?};",
+                                name.log(s.pool),
+                                s.interp.program.log_type(arg_ty),
+                                requested_ret
+                                    .map(|t| s.interp.program.log_type(t))
+                                    .unwrap_or_else(|| "??".to_string())
                             )
+                        };
+
+                        // Compute overloads.
+                        if let Some(decls) = self.interp.program.declarations.get(&name.0) {
+                            let mut found = None;
+                            let decls = decls.clone();
+                            for f in &decls {
+                                if let Ok(f_ty) = self.infer_types(*f) {
+                                    if accept(f_ty) {
+                                        assert!(
+                                            found.is_none(),
+                                            "AmbiguousCall {:?} vs {:?} \n{}",
+                                            found,
+                                            (f, f_ty),
+                                            log_goal(self)
+                                        );
+                                        found = Some((*f, f_ty));
+                                    }
+                                }
+                            }
+                            match found {
+                                Some((func, ty)) => {
+                                    self.interp.program.overload_sets[i].0.push(OverloadOption {
+                                        name: name.0,
+                                        ty,
+                                        func,
+                                    });
+                                    self.pop_state(state);
+                                    Ok(func)
+                                }
+                                None => {
+                                    // TODO: put the message in the error so !assert_compile_error doesn't print it.
+                                    outln!(ShowErr, "not found {}", log_goal(self));
+                                    for f in &decls {
+                                        if let Ok(f_ty) = self.infer_types(*f) {
+                                            outln!(
+                                                ShowErr,
+                                                "- found {:?} fn({}) {};",
+                                                f,
+                                                self.interp.program.log_type(f_ty.arg),
+                                                self.interp.program.log_type(f_ty.ret),
+                                            );
+                                        }
+                                    }
+                                    outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
+
+                                    err!(CErr::AmbiguousCall)
+                                }
+                            }
+                        } else {
+                            err!(CErr::VarNotFound(name))
                         }
                     }
-                } else {
-                    err!(CErr::VarNotFound(name))
+                    _ => {
+                        err!(
+                            "Expected function for {} but found {:?}",
+                            name.log(self.pool),
+                            value
+                        )
+                    }
                 }
             }
             Ok(None) => err!(
@@ -2354,7 +2402,15 @@ impl<'p> FnBody<'p> {
         let (slot, _ty) = match value {
             Structured::Emitted(ty, slot) => (slot, ty),
             Structured::Const(_, value) => self.load_constant(program, value)?,
-            Structured::TupleDifferent(_, _) => todo!(),
+            Structured::TupleDifferent(_, values) => {
+                let slots: Res<'p, Vec<_>> = values
+                    .into_iter()
+                    .map(|value| self.load(program, value))
+                    .collect();
+                let slots = slots?;
+                let slots = self.create_tuple_slots(program, expected, slots)?;
+                (slots, expected)
+            }
         };
         // TODO: another typecheck?
         Ok((slot, expected))
@@ -2438,10 +2494,24 @@ impl<'p> FnBody<'p> {
             ));
         }
 
+        if !all_stack {
+            return Ok(Structured::TupleDifferent(tuple_ty, owned_values));
+        }
+
         let owned_values: Vec<_> = owned_values
             .into_iter()
             .map(|v| self.load(program, v).unwrap())
             .collect();
+        let ret = self.create_tuple_slots(program, tuple_ty, owned_values)?;
+        Ok(Structured::Emitted(tuple_ty, ret))
+    }
+
+    fn create_tuple_slots(
+        &mut self,
+        program: &mut Program<'p>,
+        tuple_ty: TypeId,
+        owned_values: Vec<(StackRange, TypeId)>,
+    ) -> Res<'p, StackRange> {
         // They might already be consecutive
 
         debug_assert!(!owned_values.is_empty());
@@ -2476,8 +2546,7 @@ impl<'p> FnBody<'p> {
             assert_eq!(count, ret.count);
             ret
         };
-
-        Ok(Structured::Emitted(tuple_ty, ret))
+        Ok(ret)
     }
 }
 

@@ -28,7 +28,7 @@ pub mod scope;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
     compiler::{Compile, CompileError, ExecTime},
-    logging::{outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
+    logging::{get_logs, outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
     parse::Parser,
     scope::ResolveScope,
 };
@@ -129,13 +129,15 @@ pub fn run_main<'a: 'p, 'p>(
             outln!(FinalAst, "{}", interp.interp.program.log_finished_ast(id));
         }
         
-        outln!(ShowPrint, "===============================");
+        println!("{}", get_logs(ShowPrint));
+        println!("{}", get_logs(ShowErr));
         if let Some(path) = save {
             let folder = &format!("target/latest_log/{path}");
             fs::create_dir_all(folder).unwrap();
             save_logs(folder);
             println!( "Wrote log to {folder:?}");
         }
+        println!("===============================");
     }
 
     fn log_err<'p>(
