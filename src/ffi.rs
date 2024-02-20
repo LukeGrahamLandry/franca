@@ -25,6 +25,7 @@ pub trait InterpSend<'p>: Sized {
     fn serialize_one(self) -> Value {
         let mut values = vec![];
         self.serialize(&mut values);
+        debug_assert_eq!(values.len(), Self::size());
         Value::Tuple {
             container_type: TypeId::any(),
             values,
@@ -34,6 +35,8 @@ pub trait InterpSend<'p>: Sized {
     fn deserialize_one(value: Value) -> Option<Self> {
         value.deserialize()
     }
+
+    fn size() -> usize;
 }
 
 // TODO: put these in a file that you can look at to debug.
@@ -86,6 +89,10 @@ macro_rules! send_num {
                     None
                 }
             }
+
+            fn size() -> usize {
+                1
+            }
         }
     };
     ($ty:tt, $($arg:tt)*) => {
@@ -116,6 +123,10 @@ impl<'p> InterpSend<'p> for bool {
             None
         }
     }
+
+    fn size() -> usize {
+        1
+    }
 }
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
@@ -135,6 +146,10 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         Some((A::deserialize(values)?, B::deserialize(values)?))
+    }
+
+    fn size() -> usize {
+        A::size() + B::size()
     }
 }
 
@@ -175,6 +190,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
             None
         }
     }
+
+    fn size() -> usize {
+        1
+    }
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
@@ -200,6 +219,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
             None
         }
     }
+
+    fn size() -> usize {
+        1
+    }
 }
 
 impl<'p> InterpSend<'p> for Value {
@@ -217,6 +240,10 @@ impl<'p> InterpSend<'p> for Value {
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         values.next()
+    }
+
+    fn size() -> usize {
+        1
     }
 }
 
@@ -237,16 +264,31 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
                 values.push(Value::Bool(true));
                 v.serialize(values);
             }
-            None => values.push(Value::Bool(false)),
+            None => {
+                values.push(Value::Bool(false));
+                for _ in 0..T::size() {
+                    values.push(Value::Unit);
+                }
+            }
         }
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         match values.next()? {
-            Value::Bool(true) => Some(T::deserialize(values)), // TODO: flatten
-            Value::Bool(false) => Some(None),
+            Value::Bool(true) => Some(T::deserialize(values)),
+            Value::Bool(false) => {
+                for _ in 0..T::size() {
+                    let unit = values.next()?;
+                    debug_assert_eq!(unit, Value::Unit);
+                }
+                Some(None)
+            }
             _ => None,
         }
+    }
+
+    fn size() -> usize {
+        1 + T::size()
     }
 }
 
@@ -270,6 +312,10 @@ impl<'p> InterpSend<'p> for Span {
         let (a, b) = <(u32, u32)>::deserialize(values)?;
         let res: Span = unsafe { mem::transmute((a, b)) };
         Some(res)
+    }
+
+    fn size() -> usize {
+        2
     }
 }
 
@@ -295,6 +341,10 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
                 .collect::<Self>(),
         )
     }
+
+    fn size() -> usize {
+        1
+    }
 }
 
 impl<'p> InterpSend<'p> for String {
@@ -312,6 +362,10 @@ impl<'p> InterpSend<'p> for String {
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         Self::from_utf8(Vec::<u8>::deserialize(values)?).ok()
+    }
+
+    fn size() -> usize {
+        1
     }
 }
 

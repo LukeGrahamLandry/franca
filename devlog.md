@@ -3,6 +3,7 @@
 
 - fix logging of recursive types
 - my InterpSend for option always said None cause im dumb
+- need to make sure everything has a staticly known serialized size. so padding for enums and vecs as allocations. 
 
 ## the road to partial evaluation (Web 19)
 
