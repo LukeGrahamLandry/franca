@@ -14,7 +14,17 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend)]
+// It feels like this could trivially be a generic function but somehow no. I dare you to fix it.
+macro_rules! ffi_type {
+    ($program:expr, $name:ty) => {{
+        let ty = $program.get_ffi_type::<$name>(<$name as crate::ffi::InterpSend>::get_type_key());
+        ty
+    }};
+}
+
+pub(crate) use ffi_type;
+
+#[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
 pub struct TypeId(pub usize);
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
@@ -62,9 +72,10 @@ pub enum VarType {
     Const,
 }
 
-#[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
+#[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     Any,
+    #[default]
     Never,
     F64,
     I64,
@@ -507,9 +518,13 @@ impl<'p> Program<'p> {
     /// This allows ffi types to be unique.
     pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
+            // TODO: recusive data structures. you need to create a place holder for where you're going to put it when you're ready.
+            let placeholder = self.types.len();
+            self.types.push(TypeInfo::Never);
+            self.ffi_types.insert(id, TypeId(placeholder));
             let ty = T::get_type(self);
-            self.ffi_types.insert(id, ty);
-            ty
+            self.types[placeholder] = self.types[ty.0].clone();
+            TypeId(placeholder)
         })
     }
 
@@ -618,7 +633,7 @@ impl<'p> Program<'p> {
             Value::GetFn(f) => self.func_type(*f),
             Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
-            Value::Symbol(_) => Ident::get_type(self),
+            Value::Symbol(_) => ffi_type!(self, Ident),
             Value::InterpAbsStackAddr(_) => TypeId::any(),
             Value::Heap { .. } => TypeId::any(),
             Value::OverloadSet(_) => TypeId::any(),

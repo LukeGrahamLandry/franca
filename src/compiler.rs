@@ -13,7 +13,8 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var, VarType,
+    ffi_type, Annotation, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var,
+    VarType,
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
@@ -1607,15 +1608,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Some((Value::Type(ty), tyty));
         }
 
-        // It feels like this could trivially be a generic function but somehow no. I dare you to fix it.
-        macro_rules! ffi_type {
-            ($name:ty) => {{
-                let id = unsafe { mem::transmute(std::any::TypeId::of::<$name>()) };
-                let ty = self.interp.program.get_ffi_type::<$name>(id);
-                (Value::Type(ty), TypeId::ty())
-            }};
-        }
-
         macro_rules! cfn {
             ($fn:expr, $ty:expr) => {{
                 #[cfg(not(feature = "interp_c_ffi"))]
@@ -1636,6 +1628,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             }};
         }
 
+        macro_rules! ffi__type {
+            ($ty:ty) => {{
+                let ty = ffi_type!(self.interp.program, $ty);
+                (Value::Type(ty), TypeId::ty())
+            }};
+        }
+
         Some(match name {
             "true" => (
                 Value::Bool(true),
@@ -1645,8 +1644,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Value::Bool(false),
                 self.interp.program.intern_type(TypeInfo::Bool),
             ),
-            "Symbol" => ffi_type!(Ident),
-            "CmdResult" => ffi_type!(CmdResult),
+            "Symbol" => ffi__type!(Ident),
+            "CmdResult" => ffi__type!(CmdResult),
+            "FatExpr" => ffi__type!(FatExpr),
             "getchar" => cfn!(
                 libc::getchar,
                 FnType {

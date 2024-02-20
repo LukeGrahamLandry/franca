@@ -28,7 +28,12 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let expanded = quote! {
         // The generated impl.
         impl #impl_generics crate::ffi::InterpSend<'p> for #name #ty_generics #where_clause {
-            fn get_type(program: &mut crate::ast::Program<'p>) -> TypeId {
+            fn get_type_key() -> u128 {
+                // # Safety: trust me bro
+                unsafe { std::mem::transmute(std::any::TypeId::of::<#name>()) }
+            }
+
+            fn create_type(program: &mut crate::ast::Program<'p>) -> TypeId {
                 #get_type
             }
             fn serialize(self) -> Value {

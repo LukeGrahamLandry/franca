@@ -3,14 +3,18 @@ use std::collections::HashMap;
 use codemap::Span;
 
 use crate::{
-    ast::{Program, TypeId, TypeInfo},
+    ast::{ffi_type, Program, TypeId, TypeInfo},
     bc::Value,
     logging::{outln, LogTag::ShowErr},
 };
 
 // TODO
 pub trait InterpSend<'p>: Sized {
-    fn get_type(interp: &mut Program<'p>) -> TypeId;
+    fn get_type_key() -> u128; // fuck off bro
+    fn get_type(program: &mut Program<'p>) -> TypeId {
+        program.get_ffi_type::<Self>(Self::get_type_key())
+    }
+    fn create_type(interp: &mut Program<'p>) -> TypeId;
     fn serialize(self) -> Value;
     fn deserialize(value: Value) -> Option<Self>;
 }
@@ -25,7 +29,10 @@ impl Value {
 macro_rules! send_num {
     ($ty:tt) => {
         impl<'p> InterpSend<'p> for $ty {
-            fn get_type(program: &mut Program<'p>) -> TypeId {
+            fn get_type_key() -> u128 {
+                unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+            }
+            fn create_type(program: &mut Program<'p>) -> TypeId {
                 program.intern_type(TypeInfo::I64)
             }
 
@@ -52,7 +59,13 @@ macro_rules! send_num {
 send_num!(i64, i32, i16, i8, u64, u32, u16, u8, usize, isize);
 
 impl<'p> InterpSend<'p> for bool {
-    fn get_type(program: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn get_type(interp: &mut Program<'p>) -> TypeId {
+        ffi_type!(interp, Self)
+    }
+    fn create_type(program: &mut Program<'p>) -> TypeId {
         program.intern_type(TypeInfo::Bool)
     }
 
@@ -70,7 +83,10 @@ impl<'p> InterpSend<'p> for bool {
 }
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
-    fn get_type(program: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        mix::<A, B>(6749973390999)
+    }
+    fn create_type(program: &mut Program<'p>) -> TypeId {
         let a = A::get_type(program);
         let b = B::get_type(program);
         program.tuple_of(vec![a, b])
@@ -98,7 +114,11 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
-    fn get_type(program: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        mix::<T, i16>(999998827262625)
+    }
+
+    fn create_type(program: &mut Program<'p>) -> TypeId {
         let ty = T::get_type(program);
         program.intern_type(TypeInfo::Ptr(ty))
     }
@@ -136,7 +156,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
-    fn get_type(program: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        mix::<T, i8>(67445234555533)
+    }
+
+    fn create_type(program: &mut Program<'p>) -> TypeId {
         let ty = T::get_type(program);
         program.intern_type(TypeInfo::Ptr(ty))
     }
@@ -151,7 +175,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
 }
 
 impl<'p> InterpSend<'p> for Value {
-    fn get_type(_interp: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+
+    fn create_type(_interp: &mut Program<'p>) -> TypeId {
         TypeId::any()
     }
 
@@ -166,7 +194,13 @@ impl<'p> InterpSend<'p> for Value {
 
 // TODO: this should be an enum
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
+    fn get_type_key() -> u128 {
+        mix::<T, bool>(8090890890986)
+    }
     fn get_type(interp: &mut Program<'p>) -> TypeId {
+        ffi_type!(interp, Self)
+    }
+    fn create_type(interp: &mut Program<'p>) -> TypeId {
         let t = T::get_type(interp);
         interp.tuple_of(vec![TypeId::bool(), t])
     }
@@ -203,7 +237,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
 }
 
 impl<'p> InterpSend<'p> for Span {
-    fn get_type(_interp: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+
+    fn create_type(_interp: &mut Program<'p>) -> TypeId {
         todo!()
     }
 
@@ -219,7 +257,11 @@ impl<'p> InterpSend<'p> for Span {
 impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p>
     for HashMap<K, V>
 {
-    fn get_type(interp: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        mix::<K, V>(1234567890)
+    }
+
+    fn create_type(interp: &mut Program<'p>) -> TypeId {
         Vec::<(K, V)>::get_type(interp)
     }
 
@@ -237,7 +279,11 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
 }
 
 impl<'p> InterpSend<'p> for String {
-    fn get_type(interp: &mut Program<'p>) -> TypeId {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+
+    fn create_type(interp: &mut Program<'p>) -> TypeId {
         Vec::<u8>::get_type(interp)
     }
 
@@ -248,6 +294,12 @@ impl<'p> InterpSend<'p> for String {
     fn deserialize(value: Value) -> Option<Self> {
         Self::from_utf8(Vec::<u8>::deserialize(value)?).ok()
     }
+}
+
+fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
+    A::get_type_key()
+        .wrapping_mul(B::get_type_key())
+        .wrapping_mul(extra)
 }
 
 #[test]

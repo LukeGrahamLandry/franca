@@ -1,6 +1,9 @@
 use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock};
 
-use crate::ffi::InterpSend;
+use crate::{
+    ast::{ffi_type, Program, TypeId},
+    ffi::InterpSend,
+};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
@@ -128,7 +131,14 @@ fn string_pool() {
 }
 
 impl<'p> InterpSend<'p> for Ident<'p> {
-    fn get_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
+    fn get_type_key() -> u128 {
+        // i dare you to change the generic to Self
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
+    }
+    fn get_type(interp: &mut Program<'p>) -> TypeId {
+        ffi_type!(interp, Ident)
+    }
+    fn create_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
         interp.intern_type(crate::ast::TypeInfo::I64) // TODO: have a unique Symbol type
     }
 
