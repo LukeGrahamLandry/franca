@@ -78,9 +78,13 @@ impl<'a, 'p> Parser<'a, 'p> {
             Fn => {
                 self.start_subexpr();
                 let loc = self.eat(Fn)?;
-                if let Symbol(_) = self.peek() {
-                    return Err(self.error_next("Fn expr must not have name".into()));
-                }
+                let name = if let Symbol(i) = self.peek() {
+                    self.pop();
+                    // return Err(self.error_next("Fn expr must not have name".into()));
+                    Some(i)
+                } else {
+                    None
+                };
                 // Args are optional so you can do `if(a, fn=b, fn=c)`
                 let arg = if self.maybe(LeftParen) {
                     let a = self.parse_args()?;
@@ -98,9 +102,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(Equals)?;
                 let body = self.parse_expr()?;
 
-                let mut name = body.expr.log(self.pool);
-                name.truncate(25);
-                let name = self.pool.intern(&name);
+                let name = name.unwrap_or_else(|| {
+                    let mut name = body.expr.log(self.pool);
+                    name.truncate(25);
+                    self.pool.intern(&name)
+                });
+
                 let func = Func::new(name, arg, ret, Some(body), loc, false);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
@@ -121,11 +128,11 @@ impl<'a, 'p> Parser<'a, 'p> {
                         }
                     } else {
                         self.start_subexpr();
-                        self.expr(Expr::Value(Value::Unit))
+                        self.expr(Expr::unit())
                     }
                 } else {
                     self.start_subexpr();
-                    self.expr(Expr::Value(Value::Unit))
+                    self.expr(Expr::unit())
                 };
 
                 self.eat(RightSquiggle)?;
@@ -147,7 +154,10 @@ impl<'a, 'p> Parser<'a, 'p> {
             Number(f) => {
                 self.start_subexpr();
                 self.pop();
-                Ok(self.expr(Expr::Value(Value::I64(f))))
+                Ok(self.expr(Expr::Value {
+                    ty: TypeId::i64(),
+                    value: Value::I64(f).into(),
+                }))
             }
             Symbol(i) => {
                 self.start_subexpr();
@@ -225,7 +235,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         let args = self.comma_sep_expr()?;
         self.eat(RightParen)?;
         Ok(match args.len() {
-            0 => self.expr(Expr::Value(Value::Unit)),
+            0 => self.expr(Expr::unit()),
             1 => {
                 self.end_subexpr();
                 args.into_iter().next().unwrap()

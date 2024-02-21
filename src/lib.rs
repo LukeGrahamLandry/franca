@@ -108,7 +108,7 @@ pub fn run_main<'a: 'p, 'p>(
     let body = Some(FatExpr::synthetic(
         Expr::Block {
             body: stmts,
-            result: Box::new(FatExpr::synthetic(Expr::Value(Value::Unit), user_span)),
+            result: Box::new(FatExpr::synthetic(Expr::unit(), user_span)),
             locals: None,
         },
         user_span,
@@ -227,7 +227,7 @@ pub fn run_main<'a: 'p, 'p>(
 
                             outln!(ShowPrint, "===============");
                             let start = timestamp();
-                            match interp.run(f, arg.clone(), ExecTime::Runtime) {
+                            match interp.run(f, arg.clone().into(), ExecTime::Runtime) {
                                 Err(e) => {
                                     log_err(codemap, &mut interp, e, save);
                                     return false;
@@ -239,7 +239,7 @@ pub fn run_main<'a: 'p, 'p>(
                                     outln!(ShowPrint, 
                                         "Interpreter finished running main() in {seconds:.5} seconds."
                                     );
-                                    debug_assert_eq!(result, expect);
+                                    debug_assert_eq!(result, expect.into());
                                     // TODO: change this when i add assert(bool)
                                     let assertion_count = src.split("assert_eq(").count() - 1;
                                     // debug so dont crash in web if not using my system of one run per occurance.

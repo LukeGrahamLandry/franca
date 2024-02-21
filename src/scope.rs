@@ -192,7 +192,7 @@ impl<'p> ResolveScope<'p> {
             }
             Expr::SuffixMacro(_, e) | Expr::RefType(e) => self.resolve_expr(e),
             Expr::Closure(func) => self.resolve_func(func),
-            Expr::Value(_) => {}
+            Expr::Value { .. } => {}
             Expr::GetNamed(name) => {
                 if let Some(var) = self.find_var(name) {
                     *expr.deref_mut() = Expr::GetVar(var);

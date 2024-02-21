@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     ast::{Program, TypeId, TypeInfo},
-    bc::Value,
+    bc::{Value, Values},
     logging::{outln, LogTag::ShowErr},
 };
 
@@ -20,18 +20,16 @@ pub trait InterpSend<'p>: Sized {
     /// This should only be called once! Use get_type which caches it.
     fn create_type(interp: &mut Program<'p>) -> TypeId;
     fn serialize(self, values: &mut Vec<Value>);
-    fn serialize_one(self) -> Value {
+    fn serialize_one(self) -> Values {
         let mut values = vec![];
         self.serialize(&mut values);
         debug_assert_eq!(values.len(), Self::size());
-        Value::Tuple {
-            container_type: TypeId::any(),
-            values,
-        }
+        values.into()
     }
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
-    fn deserialize_one(value: Value) -> Option<Self> {
-        value.deserialize()
+    fn deserialize_one(value: Values) -> Option<Self> {
+        let value: Vec<_> = value.into();
+        Self::deserialize(&mut value.into_iter())
     }
 
     fn size() -> usize;
@@ -56,13 +54,13 @@ impl Value {
     ) -> Option<T> {
         T::deserialize(values)
     }
+}
 
+impl Values {
     pub fn deserialize<'p, T: InterpSend<'p> + Sized>(self) -> Option<T> {
-        if let Value::Tuple { values, .. } = self {
-            T::deserialize(&mut values.into_iter()) // TODO: deeper flatten?
-        } else {
-            T::deserialize(&mut vec![self].into_iter())
-        }
+        let values = self.vec(); // TODO: no alloc for one
+        debug_assert_eq!(values.len(), T::size());
+        T::deserialize(&mut values.into_iter()) // TODO: deeper flatten?
     }
 }
 
@@ -162,7 +160,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
-        let parts: Vec<_> = self.into_iter().map(|e| e.serialize_one()).collect();
+        let mut parts = vec![];
+        for e in self {
+            e.serialize(&mut parts);
+        }
         values.push(Value::new_box(parts))
     }
 
@@ -179,11 +180,12 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
                 return None;
             }
 
-            let res: Option<Vec<_>> = value.values[first..first + count]
-                .iter()
-                .map(|v| T::deserialize_one(v.clone()))
-                .collect();
-            res
+            let mut values = value.values.iter().cloned();
+            let mut res = vec![];
+            for _ in first..first + count {
+                res.push(T::deserialize(&mut values)?);
+            }
+            Some(res)
         } else {
             None
         }
@@ -480,9 +482,8 @@ pub mod c {
 
     use crate::{
         ast::{Program, TypeId, TypeInfo},
-        bc::Value,
+        bc::{Value, Values},
         compiler::Res,
-        interp::to_flat_seq,
         logging::err,
     };
     type CTy = libffi::middle::Type;
@@ -519,9 +520,9 @@ pub mod c {
         program: &mut Program<'p>,
         ptr: usize,
         f_ty: crate::ast::FnType,
-        arg: Value,
-    ) -> Res<'p, Value> {
-        let args = to_flat_seq(arg);
+        arg: Values,
+    ) -> Res<'p, Values> {
+        let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
         let mut b = Builder::new();
@@ -538,11 +539,11 @@ pub mod c {
 
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
-            Value::Unit
+            Value::Unit.into()
         } else if f_ty.ret == TypeId::i64() {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::I64(result)
+            Value::I64(result).into()
         } else {
             todo!("unsupported c ret type {}", program.log_type(f_ty.ret))
         })

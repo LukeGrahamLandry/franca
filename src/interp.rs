@@ -63,7 +63,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Value, when: ExecTime) -> Res<'p, Value> {
+    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
         let init_heights = (self.call_stack.len(), self.value_stack.len());
 
         // A fake callframe representing the calling rust program.
@@ -99,7 +99,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let result = self.take_slots(ret);
 
         // Sanity checks that we didn't mess anything up for the next guy.
-        assert!(result != Value::Poison);
+        assert!(!result.is_poison());
         assert!(self.value_stack.pop() == Some(Value::Poison));
         let _final_callframe = self.call_stack.pop().unwrap();
         // assert!(self, final_callframe == marker_callframe, "bad frame");
@@ -139,7 +139,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     false_ip,
                 } => {
                     let cond = self.take_slot(cond);
-                    let cond = self.to_bool(cond)?;
+                    let cond = self.to_bool(cond.into())?;
                     let next_ip = if cond { true_ip } else { false_ip };
                     let frame = self.call_stack.last_mut().unwrap();
                     frame.current_ip = next_ip;
@@ -198,25 +198,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                     let f = self.take_slot(f);
                     let arg = self.take_slots(arg);
-                    let f = self.to_func(f)?;
+                    let f = self.to_func(f.into())?;
                     self.push_callframe(f, ret, arg, when)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
-                }
-                &Bc::MoveCreateTuple { values, target } => {
-                    let tuple = self.take_slots(values);
-                    *self.get_slot_mut(target) = tuple;
-                    self.bump_ip();
-                }
-                &Bc::CloneCreateTuple { values, target } => {
-                    let values = (0..values.count)
-                        .map(|i| self.clone_slot(values.offset(i)))
-                        .collect();
-                    *self.get_slot_mut(target) = Value::Tuple {
-                        container_type: TypeId::any(),
-                        values,
-                    };
-                    self.bump_ip();
                 }
                 &Bc::Move { from, to } => {
                     let v = self.take_slot(from);
@@ -242,12 +227,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let v = self.take_slot(from.offset(i));
                         *self.get_slot_mut(to.offset(i)) = v;
                     }
-                    self.bump_ip();
-                }
-                &Bc::ExpandTuple { from, to } => {
-                    let tuple = self.take_slot(from);
-                    let to = self.range_to_index(to);
-                    self.expand_maybe_tuple(tuple, to)?;
                     self.bump_ip();
                 }
                 &Bc::Drop(slot) => {
@@ -291,7 +270,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.clone_slot(enum_ptr);
                     let tag = self.slice_ptr(arg, 0, 1)?;
                     let tag = self.deref_ptr(tag)?;
-                    assert_eq!(tag, Value::I64(value));
+                    assert_eq!(tag, Values::One(Value::I64(value)));
                     self.bump_ip();
                 }
                 &Bc::CallC { f, ret, arg } => {
@@ -307,7 +286,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let (ptr, f_ty) = self.to_c_func(f)?;
                         let arg = self.take_slots(arg);
                         let result = ffi::c::call(self.program, ptr, f_ty, arg)?;
-                        *self.get_slot_mut(ret.single()) = result;
+                        *self.get_slot_mut(ret.single()) = result.single()?;
                     }
                 }
             }
@@ -315,11 +294,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    fn expand_maybe_tuple(&mut self, value: Value, target: StackAbsoluteRange) -> Res<'p, ()> {
+    fn expand_maybe_tuple(&mut self, value: Values, target: StackAbsoluteRange) -> Res<'p, ()> {
         logln!("Expand {:?} TO {} slots", value, target.count);
         match target.count.cmp(&1) {
             std::cmp::Ordering::Equal => {
-                self.value_stack[target.first.0] = value;
+                self.value_stack[target.first.0] = value.single()?;
             }
             std::cmp::Ordering::Less => {
                 todo!("zero argument return. probably just works but untested.")
@@ -370,19 +349,16 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn deref_ptr(&mut self, arg: Value) -> Res<'p, Value> {
+    fn deref_ptr(&mut self, arg: Value) -> Res<'p, Values> {
         match arg {
             Value::InterpAbsStackAddr(addr) => {
                 if addr.count == 1 {
                     let value = self.value_stack[addr.first.0].clone();
                     assert_ne!(value, Value::Poison);
-                    Ok(value)
+                    Ok(value.into())
                 } else {
                     let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
-                    Ok(Value::Tuple {
-                        container_type: TypeId::any(),
-                        values: values.to_vec(),
-                    })
+                    Ok(values.to_vec().into())
                 }
             }
             Value::Heap {
@@ -395,20 +371,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Ok(if count == 1 {
                     let value = data.values[first].clone(); // Note: [first] NOT [0]
                     assert_ne!(value, Value::Poison);
-                    value
+                    value.into()
                 } else {
                     let values = &data.values[first..first + count];
-                    Value::Tuple {
-                        container_type: TypeId::any(),
-                        values: values.to_vec(),
-                    }
+                    values.into_iter().cloned().collect::<Vec<_>>().into()
                 })
             }
             _ => err!("Wanted ptr found {:?}", arg),
         }
     }
 
-    pub fn runtime_builtin(&mut self, name: &str, arg: Value) -> Res<'p, Value> {
+    pub fn runtime_builtin(&mut self, name: &str, arg: Values) -> Res<'p, Values> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
@@ -421,31 +394,31 @@ impl<'a, 'p> Interp<'a, 'p> {
                 err!("Program panicked: {arg:?}",)
             }
             "assert_eq" => {
-                let (a, b) = self.split_to_pair(arg)?;
+                let (a, b) = self.to_pair(arg)?;
                 assert_eq!(a, b, "runtime_builtin:assert_eq");
                 self.assertion_count += 1; // sanity check for making sure tests actually ran
-                Value::Unit
+                Value::Unit.into()
             }
             "is_comptime" => {
-                assert_eq!(arg, Value::Unit);
+                assert_eq!(arg, Values::One(Value::Unit));
                 let when = self.call_stack.last().unwrap().when;
-                Value::Bool(when == ExecTime::Comptime)
+                Value::Bool(when == ExecTime::Comptime).into()
             }
-            "get" => self.deref_ptr(arg)?,
+            "get" => self.deref_ptr(arg.single()?)?,
             "set" => {
                 let (addr, value) = self.to_pair(arg)?;
-                self.set_ptr(addr, value)?
+                self.set_ptr(addr, value.into())?.into()
             }
             "is_uninit" => {
                 let range = match arg {
-                    Value::InterpAbsStackAddr(addr) => {
+                    Values::One(Value::InterpAbsStackAddr(addr)) => {
                         &self.value_stack[addr.first.0..addr.first.0 + addr.count]
                     }
-                    Value::Heap {
+                    Values::One(Value::Heap {
                         value,
                         first,
                         count,
-                    } => {
+                    }) => {
                         let data = unsafe { &*value };
                         assert!(
                             data.references > 0
@@ -457,24 +430,25 @@ impl<'a, 'p> Interp<'a, 'p> {
                     _ => err!("Wanted ptr found {:?}", arg),
                 };
                 let result = range.iter().all(|v| v == &Value::Poison);
-                Value::Bool(result)
+                Value::Bool(result).into()
             }
             "len" => match arg {
-                Value::InterpAbsStackAddr(addr) => Value::I64(addr.count as i64),
-                Value::Heap { count, .. } => Value::I64(count as i64),
+                Values::One(Value::InterpAbsStackAddr(addr)) => Value::I64(addr.count as i64),
+                Values::One(Value::Heap { count, .. }) => Value::I64(count as i64),
                 _ => err!("Wanted ptr found {:?}", arg),
-            },
+            }
+            .into(),
             "Ptr" => {
                 let inner_ty = self.to_type(arg)?;
-                Value::Type(self.program.ptr_type(inner_ty))
+                Value::Type(self.program.ptr_type(inner_ty)).into()
             }
             "Slice" => {
                 let inner_ty = self.to_type(arg)?;
-                Value::Type(self.program.slice_type(inner_ty))
+                Value::Type(self.program.slice_type(inner_ty)).into()
             }
             "is_oob_stack" => {
                 let addr = self.to_stack_addr(arg)?;
-                Value::Bool(addr.first.0 >= self.value_stack.len())
+                Value::Bool(addr.first.0 >= self.value_stack.len()).into()
             }
             "slice" => {
                 // last is not included
@@ -514,10 +488,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     _ => err!("Wanted ptr found {:?}", addr),
                 }
+                .into()
             }
             "alloc" => {
                 let (ty, count) = self.to_pair(arg)?;
-                let (ty, count) = (self.to_type(ty)?, self.to_int(count)?);
+                let (ty, count) = (self.to_type(ty.into())?, self.to_int(count.into())?);
                 assert!(count >= 0);
                 let count = count as usize * self.program.slot_count(ty);
                 let values = vec![Value::Poison; count];
@@ -530,6 +505,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     first: 0,
                     count,
                 }
+                .into()
             }
             "dump_ffi_types" => {
                 let msg = self.program.dump_ffi_types();
@@ -538,36 +514,36 @@ impl<'a, 'p> Interp<'a, 'p> {
             "dealloc" => {
                 let (ty, ptr) = self.to_pair(arg)?;
                 let (_ty, (ptr, ptr_first, ptr_count)) =
-                    (self.to_type(ty)?, self.to_heap_ptr(ptr)?);
+                    (self.to_type(ty.into())?, self.to_heap_ptr(ptr.into())?);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
                 // let slots = ptr_count * self.program.slot_count(ty);  // TODO: arrays of tuples should be flattened and then this makes sense for the check below.
                 assert_eq!(ptr_val.values.len(), ptr_count);
                 let _ = unsafe { Box::from_raw(ptr) };
-                Value::Unit
+                Value::Unit.into()
             }
             "print" => {
-                outln!(ShowPrint, "{}", arg);
-                Value::Unit
+                outln!(ShowPrint, "{:?}", arg);
+                Value::Unit.into()
             }
             "reflect_print" => {
                 outln!(ShowPrint, "=== start print ===");
                 self.reflect_print(arg, 0)?;
                 outln!(ShowPrint, "=== end print ===");
-                Value::Unit
+                Value::Unit.into()
             }
             "print_callstack" => {
                 outln!(ShowPrint, "{}", self.log_callstack());
-                Value::Unit
+                Value::Unit.into()
             }
             "Fn" => {
                 // println!("Fn: {:?}", arg);
                 let (arg, ret) = self.to_pair(arg)?;
-                let (arg, ret) = (self.to_type(arg)?, self.to_type(ret)?);
+                let (arg, ret) = (self.to_type(arg.into())?, self.to_type(ret.into())?);
                 let ty = self.program.intern_type(TypeInfo::Fn(FnType { arg, ret }));
                 // println!("=> {}", self.program.log_type(ty));
-                Value::Type(ty)
+                Value::Type(ty).into()
             }
             "add" => bin_int!(self, +, arg, Value::I64),
             "sub" => bin_int!(self, -, arg, Value::I64),
@@ -581,7 +557,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "le" => bin_int!(self, <=, arg, Value::Bool),
             // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
-                if let Value::Type(ty) = arg {
+                if let Values::One(Value::Type(ty)) = arg {
                     assert!(
                         false,
                         "Ty arg should be tuple of types not type {:?}",
@@ -591,20 +567,20 @@ impl<'a, 'p> Interp<'a, 'p> {
                 print!("Ty: {:?}", arg);
                 let ty = self.to_type(arg)?;
                 // println!(" => {:?}", self.program.log_type(ty));
-                Value::Type(ty)
+                Value::Type(ty).into()
             }
             "Unique" => {
                 let ty = self.to_type(arg)?;
-                Value::Type(self.program.unique_ty(ty))
+                Value::Type(self.program.unique_ty(ty)).into()
             }
             "tag_value" => {
                 let (enum_ty, name) = self.to_pair(arg)?;
-                let (enum_ty, name) = (self.to_type(enum_ty)?, self.to_int(name)?);
+                let (enum_ty, name) = (self.to_type(enum_ty.into())?, self.to_int(name.into())?);
                 let name = unwrap!(self.pool.upcast(name), "bad symbol");
                 let cases = unwrap!(self.program.get_enum(enum_ty), "not enum");
                 let index = cases.iter().position(|f| f.0 == name);
                 let index = unwrap!(index, "bad case name");
-                Value::I64(index as i64)
+                Value::I64(index as i64).into()
             }
             "system" => {
                 self.fail_on_wasm("fn system")?;
@@ -618,19 +594,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 for arg in arg {
                     cmd.arg(arg);
                 }
-                let mut values = vec![];
                 match cmd.output() {
                     Ok(output) => CmdResult {
                         status: output.status.code().unwrap(),
                         stdout: output.stdout,
                         stderr: output.stderr,
                     }
-                    .serialize(&mut values),
+                    .serialize_one(),
                     Err(e) => err!("Error running {cmd:?}: {e:?}",),
-                }
-                Value::Tuple {
-                    container_type: TypeId::any(),
-                    values,
                 }
             }
             "puts" => {
@@ -639,19 +610,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                     "expect str not {arg:?}"
                 );
                 outln!(ShowPrint, "{arg}");
-                Value::Unit
+                Value::Unit.into()
             }
             "cli_args" => {
                 self.fail_on_wasm("fn cli_args")?;
                 let mut args = env::args();
                 args.next(); // The interpreter's exe.
                 let args: Vec<_> = args.collect();
-                let mut values = vec![];
-                args.serialize(&mut values);
-                Value::Tuple {
-                    container_type: TypeId::any(),
-                    values,
-                }
+                args.serialize_one()
             }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
@@ -662,7 +628,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         &mut self,
         f: FuncId,
         ret: StackRange,
-        arg: Value,
+        arg: Values,
         when: ExecTime,
     ) -> Res<'p, ()> {
         let func = self.ready[f.0].as_ref();
@@ -692,14 +658,10 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    fn push_expanded(&mut self, arg: Value) {
+    fn push_expanded(&mut self, arg: Values) {
         match arg {
-            Value::Tuple { values, .. } => {
-                for v in values {
-                    self.push_expanded(v);
-                }
-            }
-            _ => self.value_stack.push(arg),
+            Values::One(arg) => self.value_stack.push(arg),
+            Values::Many(values) => self.value_stack.extend(values),
         }
     }
 
@@ -725,21 +687,18 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     /// If slot ranges over multiple, return them as a tuple.
     #[track_caller]
-    fn take_slots(&mut self, slot: StackRange) -> Value {
+    fn take_slots(&mut self, slot: StackRange) -> Values {
         if slot.count == 0 {
-            Value::Unit
+            Value::Unit.into()
         } else if slot.count == 1 {
-            self.take_slot(slot.first)
+            self.take_slot(slot.first).into()
         } else {
             let mut values = vec![];
             for i in 0..slot.count {
                 values.push(self.take_slot(StackOffset(slot.first.0 + i)))
             }
 
-            Value::Tuple {
-                container_type: TypeId::any(), // TODO
-                values,
-            }
+            values.into()
         }
     }
 
@@ -791,23 +750,26 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn to_type(&mut self, value: Value) -> Res<'p, TypeId> {
-        if let Value::Type(id) = value {
-            Ok(id)
-        } else if let Value::Tuple { values, .. } = value {
-            let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v)).collect();
-            Ok(self.program.tuple_of(values?))
-        } else if let Value::Unit = value {
-            // This lets you use the literal `()` as a type (i dont parse it as a tuple because reasons). TODO: check if that still true with new parser
-            Ok(self.program.intern_type(TypeInfo::Unit))
-        } else {
-            err!(CErr::TypeError("Type", value))
+    pub fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
+        match value {
+            Values::One(Value::Unit) => Ok(self.program.intern_type(TypeInfo::Unit)),
+            Values::One(Value::Type(id)) => Ok(id),
+            Values::Many(values) => {
+                let values: Res<'_, Vec<_>> = values
+                    .into_iter()
+                    .map(|v| self.to_type(v.into()).into())
+                    .collect();
+                Ok(self.program.tuple_of(values?))
+            }
+            _ => {
+                err!(CErr::TypeError("Type", value))
+            }
         }
     }
 
     #[track_caller]
-    fn to_bool(&self, value: Value) -> Res<'p, bool> {
-        if let Value::Bool(v) = value {
+    fn to_bool(&self, value: Values) -> Res<'p, bool> {
+        if let Values::One(Value::Bool(v)) = value {
             Ok(v)
         } else {
             err!(CErr::TypeError("bool", value))
@@ -815,24 +777,20 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn to_seq(&self, value: Value) -> Res<'p, Vec<Value>> {
-        match value {
-            Value::Tuple { values, .. } => Ok(values),
-
-            _ => err!(CErr::TypeError("AnyTuple | AnyArray", value)),
-        }
+    fn to_seq(&self, value: Values) -> Res<'p, Vec<Value>> {
+        Ok(value.vec())
     }
 
     #[track_caller]
-    fn to_triple(&self, value: Value) -> Res<'p, (Value, Value, Value)> {
-        let values = self.to_seq(value)?;
+    fn to_triple(&self, value: Values) -> Res<'p, (Value, Value, Value)> {
+        let values = value.vec();
         assert_eq!(values.len(), 3, "arity {:?}", values);
         Ok((values[0].clone(), values[1].clone(), values[2].clone()))
     }
 
     #[track_caller]
-    fn to_func(&self, value: Value) -> Res<'p, FuncId> {
-        if let Value::GetFn(id) = value {
+    fn to_func(&self, value: Values) -> Res<'p, FuncId> {
+        if let Values::One(Value::GetFn(id)) = value {
             Ok(id)
         } else {
             err!(CErr::TypeError("AnyFunc", value))
@@ -840,40 +798,15 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
+    fn to_pair(&self, value: Values) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
         assert_eq!(values.len(), 2, "arity {:?}", values);
         Ok((values[0].clone(), values[1].clone()))
     }
 
     #[track_caller]
-    fn split_to_pair(&self, value: Value) -> Res<'p, (Value, Value)> {
-        let values = to_flat_seq(value);
-
-        // TODO: sad cloning
-        if values.len() == 2 {
-            return Ok((values[0].clone(), values[1].clone()));
-        }
-
-        assert_eq!(values.len() % 2, 0, "arity {:?}", values);
-        let first = (values[0..values.len() / 2]).to_vec();
-        let second = (values[values.len() / 2..]).to_vec();
-
-        Ok((
-            Value::Tuple {
-                container_type: TypeId::any(),
-                values: first,
-            },
-            Value::Tuple {
-                container_type: TypeId::any(),
-                values: second,
-            },
-        ))
-    }
-
-    #[track_caller]
-    fn to_stack_addr(&self, value: Value) -> Res<'p, StackAbsoluteRange> {
-        if let Value::InterpAbsStackAddr(r) = value {
+    fn to_stack_addr(&self, value: Values) -> Res<'p, StackAbsoluteRange> {
+        if let Values::One(Value::InterpAbsStackAddr(r)) = value {
             Ok(r)
         } else {
             err!(CErr::TypeError("StackAddr", value))
@@ -888,16 +821,16 @@ impl<'a, 'p> Interp<'a, 'p> {
             // TODO: have a special unwrap method for this
             Ok(r as i64)
         } else {
-            err!(CErr::TypeError("i64", value))
+            err!(CErr::TypeError("i64", value.into()))
         }
     }
 
-    fn to_heap_ptr(&self, value: Value) -> Res<'p, (*mut InterpBox, usize, usize)> {
-        if let Value::Heap {
+    fn to_heap_ptr(&self, value: Values) -> Res<'p, (*mut InterpBox, usize, usize)> {
+        if let Values::One(Value::Heap {
             value,
             first,
             count,
-        } = value
+        }) = value
         {
             Ok((value, first, count))
         } else {
@@ -906,9 +839,9 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // TODO: macros for each builtin arg type cause this sucks.
-    fn load_int_pair(&self, v: Value) -> Res<'p, (i64, i64)> {
+    fn load_int_pair(&self, v: Values) -> Res<'p, (i64, i64)> {
         match v {
-            Value::Tuple { mut values, .. } => {
+            Values::Many(mut values) => {
                 assert_eq!(values.len(), 2, "load_int_pair wrong arity {:?}", values);
                 let a = replace(&mut values[0], Value::Poison);
                 let b = replace(&mut values[1], Value::Poison);
@@ -932,15 +865,15 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn set_ptr(&mut self, addr: Value, value: Value) -> Res<'p, Value> {
+    fn set_ptr(&mut self, addr: Value, value: Values) -> Res<'p, Value> {
         Ok(match addr {
             Value::InterpAbsStackAddr(addr) => {
                 // TODO: call drop if not poison
                 // Note: the slots you're setting to are allowed to contain poison
                 if addr.count == 1 {
-                    self.value_stack[addr.first.0] = value;
+                    self.value_stack[addr.first.0] = value.single()?;
                 } else {
-                    let values = self.to_seq(value)?;
+                    let values: Vec<Value> = value.into();
                     assert_eq!(values.len(), addr.count);
                     for (i, entry) in values.into_iter().enumerate() {
                         self.value_stack[addr.first.0 + i] = entry;
@@ -961,9 +894,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                         && (first + count) <= ptr.values.len()
                 );
                 if count == 1 {
-                    ptr.values[first] = value;
+                    ptr.values[first] = value.single()?;
                 } else {
-                    let values = self.to_seq(value)?;
+                    let values: Vec<_> = value.into();
                     assert_eq!(values.len(), count);
                     for (i, entry) in values.into_iter().enumerate() {
                         ptr.values[first + i] = entry;
@@ -975,58 +908,56 @@ impl<'a, 'p> Interp<'a, 'p> {
         })
     }
 
-    fn reflect_print(&mut self, mut arg: Value, mut depth: usize) -> Res<'p, ()> {
-        loop {
-            outln!(ShowPrint, "{}{}", "=".repeat(depth), arg);
-            match arg {
-                Value::InterpAbsStackAddr(slot) => {
-                    if slot.count == 1 {
-                        arg = self.deref_ptr(arg)?;
-                    } else {
-                        for i in 0..slot.count {
-                            self.reflect_print(
-                                Value::InterpAbsStackAddr(StackAbsoluteRange {
-                                    first: StackAbsolute(slot.first.0 + i),
-                                    count: 1,
-                                }),
-                                depth + 2,
-                            )?;
+    fn reflect_print(&mut self, mut arg: Values, mut depth: usize) -> Res<'p, ()> {
+        for mut v in arg.vec() {
+            loop {
+                outln!(ShowPrint, "{}{}", "=".repeat(depth), v);
+                match v {
+                    Value::InterpAbsStackAddr(slot) => {
+                        if slot.count == 1 {
+                            v = self.deref_ptr(v)?.single()?;
+                        } else {
+                            for i in 0..slot.count {
+                                self.reflect_print(
+                                    Value::InterpAbsStackAddr(StackAbsoluteRange {
+                                        first: StackAbsolute(slot.first.0 + i),
+                                        count: 1,
+                                    })
+                                    .into(),
+                                    depth + 2,
+                                )?;
+                            }
+                            break;
                         }
-                        break;
                     }
-                }
-                Value::Heap {
-                    value,
-                    first,
-                    count,
-                } => {
-                    let values = unsafe { &mut *value };
-                    outln!(ShowPrint, "{}{:?}", "=".repeat(depth), values.values);
-                    if count == 1 {
-                        arg = self.deref_ptr(arg)?;
-                    } else {
-                        for i in 0..count {
-                            self.reflect_print(
-                                Value::Heap {
-                                    value,
-                                    first: first + i,
-                                    count: 1,
-                                },
-                                depth + 2,
-                            )?;
+                    Value::Heap {
+                        value,
+                        first,
+                        count,
+                    } => {
+                        let values = unsafe { &mut *value };
+                        outln!(ShowPrint, "{}{:?}", "=".repeat(depth), values.values);
+                        if count == 1 {
+                            v = self.deref_ptr(v)?.single()?;
+                        } else {
+                            for i in 0..count {
+                                self.reflect_print(
+                                    Value::Heap {
+                                        value,
+                                        first: first + i,
+                                        count: 1,
+                                    }
+                                    .into(),
+                                    depth + 2,
+                                )?;
+                            }
+                            break;
                         }
-                        break;
                     }
+                    _ => break,
                 }
-                Value::Tuple { values, .. } => {
-                    for v in values {
-                        self.reflect_print(v, depth + 2)?;
-                    }
-                    break;
-                }
-                _ => break,
+                depth += 2;
             }
-            depth += 2;
         }
         Ok(())
     }
@@ -1036,13 +967,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             err!("Operation {name:?} suported on wasm target.",)
         }
         Ok(())
-    }
-}
-
-pub fn to_flat_seq(value: Value) -> Vec<Value> {
-    match value {
-        Value::Tuple { values, .. } => values.into_iter().flat_map(to_flat_seq).collect(),
-        e => vec![e],
     }
 }
 

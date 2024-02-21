@@ -2,6 +2,7 @@
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
     compiler::{CErr, DebugInfo, ExecTime, Res},
+    ffi::InterpSend,
     logging::err,
     pool::Ident,
 };
@@ -63,20 +64,7 @@ pub enum Bc<'p> {
         from: StackRange,
         to: StackRange,
     },
-    ExpandTuple {
-        from: StackOffset,
-        to: StackRange,
-    },
     Drop(StackRange),
-    // TODO: having memory is bad!
-    MoveCreateTuple {
-        values: StackRange,
-        target: StackOffset,
-    },
-    CloneCreateTuple {
-        values: StackRange,
-        target: StackOffset,
-    },
     SlicePtr {
         base: StackOffset,
         offset: usize,
@@ -117,20 +105,11 @@ pub struct FnBody<'p> {
     pub to_drop: Vec<(StackRange, TypeId)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Value {
     F64(u64), // TODO: hash
     I64(i64),
     Bool(bool),
-    Enum {
-        container_type: TypeId,
-        tag: usize,
-        value: Box<Self>,
-    },
-    Tuple {
-        container_type: TypeId,
-        values: Vec<Self>,
-    },
     // Both closures and types don't have values at runtime, all uses must be inlined.
     Type(TypeId),
     GetFn(FuncId),
@@ -153,10 +132,16 @@ pub enum Value {
     },
 }
 
+#[derive(Debug, InterpSend, Clone, Hash, PartialEq, Eq)]
+pub enum Values {
+    One(Value),
+    Many(Vec<Value>),
+}
+
 #[derive(Debug, Clone)]
 pub enum Structured {
     Emitted(TypeId, StackRange),
-    Const(TypeId, Value),
+    Const(TypeId, Values),
     TupleDifferent(TypeId, Vec<Structured>),
 }
 
@@ -169,7 +154,7 @@ impl Structured {
         }
     }
 
-    pub fn get<'p>(self) -> Res<'p, Value> {
+    pub fn get<'p>(self) -> Res<'p, Values> {
         match self {
             Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) => {
                 err!("not const {self:?}",)
@@ -202,8 +187,8 @@ impl From<(StackRange, TypeId)> for Structured {
     }
 }
 
-impl From<(Value, TypeId)> for Structured {
-    fn from((value, ty): (Value, TypeId)) -> Self {
+impl From<(Values, TypeId)> for Structured {
+    fn from((value, ty): (Values, TypeId)) -> Self {
         Structured::Const(ty, value)
     }
 }
@@ -256,7 +241,7 @@ impl std::fmt::Debug for ConstId {
 
 #[derive(Debug, Clone, Default, InterpSend)]
 pub struct Constants<'p> {
-    pub local: HashMap<Var<'p>, (Value, TypeId)>,
+    pub local: HashMap<Var<'p>, (Values, TypeId)>,
     pub is_valid: bool,
 }
 
@@ -280,12 +265,12 @@ impl<'p> Constants<'p> {
         self.local.extend(other.local.clone())
     }
 
-    pub fn get(&self, k: Var<'p>) -> Option<(Value, TypeId)> {
+    pub fn get(&self, k: Var<'p>) -> Option<(Values, TypeId)> {
         debug_assert!(self.is_valid);
         self.local.get(&k).cloned()
     }
 
-    pub fn insert(&mut self, k: Var<'p>, v: (Value, TypeId)) -> Option<(Value, TypeId)> {
+    pub fn insert(&mut self, k: Var<'p>, v: (Values, TypeId)) -> Option<(Values, TypeId)> {
         debug_assert!(self.is_valid);
         self.local.insert(k, v)
     }
@@ -299,14 +284,6 @@ impl<'p> Constants<'p> {
 }
 
 impl Value {
-    pub fn to_tuple(self) -> Option<Vec<Value>> {
-        if let Value::Tuple { values, .. } = self {
-            Some(values)
-        } else {
-            None
-        }
-    }
-
     pub fn to_func(self) -> Option<FuncId> {
         if let Value::GetFn(f) = self {
             Some(f)
@@ -334,5 +311,63 @@ impl Value {
         } else {
             None
         }
+    }
+}
+
+impl From<Value> for Values {
+    fn from(value: Value) -> Self {
+        Values::One(value)
+    }
+}
+
+impl From<Vec<Value>> for Values {
+    fn from(value: Vec<Value>) -> Self {
+        if value.len() == 1 {
+            Values::One(value.into_iter().next().unwrap())
+        } else {
+            Values::Many(value)
+        }
+    }
+}
+
+impl From<Values> for Vec<Value> {
+    fn from(value: Values) -> Self {
+        match value {
+            Values::One(v) => vec![v],
+            Values::Many(v) => v,
+        }
+    }
+}
+impl From<Vec<Values>> for Values {
+    fn from(value: Vec<Values>) -> Self {
+        let mut res = vec![];
+        for x in value {
+            let x: Vec<_> = x.into();
+            res.extend(x)
+        }
+        res.into()
+    }
+}
+
+impl Values {
+    pub fn is_poison(&self) -> bool {
+        match self {
+            Values::One(v) => *v == Value::Poison,
+            Values::Many(v) => v.iter().any(|v| *v == Value::Poison),
+        }
+    }
+
+    #[track_caller]
+    pub fn single(self) -> Res<'static, Value> {
+        match self {
+            Values::One(v) => Ok(v),
+            Values::Many(v) => {
+                err!("expected single found {v:?}",)
+            }
+        }
+    }
+
+    pub fn vec(self) -> Vec<Value> {
+        self.into()
     }
 }

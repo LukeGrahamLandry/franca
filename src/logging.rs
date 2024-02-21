@@ -9,7 +9,7 @@ use std::{fs, mem};
 macro_rules! bin_int {
     ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
         let (a, b) = $self.load_int_pair($arg)?;
-        $res(a $op b)
+        $res(a $op b).into()
     }};
 }
 
@@ -103,7 +103,8 @@ pub enum LogTag {
     FinalAst = 4,
     ShowPrint = 5,
     ShowErr = 6,
-    _Last = 7,
+    Macros = 7,
+    _Last = 8,
 }
 
 pub struct LogSettings {
@@ -318,13 +319,15 @@ impl<'p> Program<'p> {
                 );
                 for c in const_reads.drain() {
                     if let Some((val, ty)) = func.closed_constants.get(c) {
-                        collect_func_references_value(&val, &mut pending);
                         out += &format!(
                             "const {:?}: {} = {:?};\n",
                             c.log(self.pool),
                             self.log_type(ty),
                             val
                         );
+                        val.vec()
+                            .iter()
+                            .for_each(|v| collect_func_references_value(v, &mut pending));
                     }
                 }
                 out += "=======================================\n\n\n\n";
@@ -416,13 +419,12 @@ fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
     let mut vals = vec![v];
     while let Some(v) = vals.pop() {
         match v {
-            Value::Tuple { values, .. } => vals.extend(values),
             Value::GetFn(f) => refs.push(*f),
             Value::Heap { value, .. } => {
                 let value = unsafe { &**value };
                 vals.extend(&value.values);
             }
-            Value::OverloadSet(_) | Value::Enum { .. } => {
+            Value::OverloadSet(_) => {
                 // TODO // unreachable!("finished ast contained {v:?}")
             }
             _ => {}
@@ -436,7 +438,11 @@ fn collect_func_references<'p>(
     const_reads: &mut HashSet<Var<'p>>,
 ) {
     match expr {
-        Expr::Value(v) => collect_func_references_value(v, refs),
+        Expr::Value { value, .. } => value
+            .clone()
+            .vec()
+            .iter()
+            .for_each(|v| collect_func_references_value(v, refs)),
         Expr::Call(f, arg) => {
             collect_func_references(f, refs, const_reads);
             collect_func_references(arg, refs, const_reads);
@@ -593,9 +599,15 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 format!("T[{}]", args)
             }
             Expr::RefType(e) => format!("&({})", e.log(pool)),
-            Expr::Value(Value::Unit) => "unit".to_string(),
-            Expr::Value(Value::GetFn(f)) => format!("Fn{}", f.0),
-            Expr::Value(v) => format!("{:?}", v),
+            Expr::Value {
+                value: Values::One(Value::Unit),
+                ..
+            } => "unit".to_string(),
+            Expr::Value {
+                value: Values::One(Value::GetFn(f)),
+                ..
+            } => format!("Fn{}", f.0),
+            Expr::Value { ty, value } => format!("{:?}", value),
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.log(pool), pool.get(*i)),
@@ -728,17 +740,10 @@ impl<'p> PoolLog<'p> for Bc<'p> {
                 cond, true_ip, false_ip
             ),
             Bc::Goto { ip } => write!(f, "goto {ip};",),
-            Bc::MoveCreateTuple { values, target } => {
-                write!(f, "{target:?} = move{values:?};")
-            }
-            Bc::CloneCreateTuple { values, target } => {
-                write!(f, "{target:?} = @clone{values:?};")
-            }
             Bc::Ret(i) => write!(f, "return {i:?};"),
             Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
             Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
             Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from),
-            Bc::ExpandTuple { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::Load { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
             Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
@@ -835,14 +840,6 @@ impl fmt::Display for Value {
             Value::F64(v) => write!(f, "{v}"),
             Value::I64(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
-            Value::Enum { .. } => todo!(),
-            Value::Tuple { values, .. } => {
-                write!(f, "(");
-                for v in values {
-                    write!(f, "{v}, ")?;
-                }
-                write!(f, ")")
-            }
             _ => write!(f, "{self:?}"),
         }
     }

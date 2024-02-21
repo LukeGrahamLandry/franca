@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Constants, Structured, Value},
+    bc::{Constants, Structured, Value, Values},
     compiler::insert_multi,
     ffi::{init_interp_send, InterpSend},
     pool::{Ident, StringPool},
@@ -111,7 +111,10 @@ pub struct Var<'p>(pub Ident<'p>, pub usize);
 
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
-    Value(Value),
+    Value {
+        ty: TypeId,
+        value: Values,
+    },
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
         body: Vec<FatStmt<'p>>,
@@ -280,7 +283,13 @@ impl<'p> FatExpr<'p> {
     }
     // used for moving out of ast
     pub fn null(loc: Span) -> Self {
-        FatExpr::synthetic(Expr::Value(Value::Poison), loc)
+        FatExpr::synthetic(
+            Expr::Value {
+                ty: TypeId::any(),
+                value: Value::Poison.into(),
+            },
+            loc,
+        )
     }
 }
 
@@ -438,7 +447,7 @@ pub struct Program<'p> {
     pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
-    pub generics_memo: HashMap<(FuncId, Value), Value>,
+    pub generics_memo: HashMap<(FuncId, Values), Values>,
     // If you're looking for a function/type name that doesn't exist, these are places you can try instantiating them.
     pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
@@ -575,11 +584,11 @@ impl<'p> Program<'p> {
     }
 
     pub fn load_fn(&mut self, id: FuncId) -> Structured {
-        Structured::Const(self.func_type(id), Value::GetFn(id))
+        Structured::Const(self.func_type(id), Value::GetFn(id).into())
     }
 
     pub fn load_value(&mut self, v: Value) -> Structured {
-        Structured::Const(self.type_of(&v), v)
+        Structured::Const(self.type_of(&v), v.into())
     }
 
     pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {
@@ -645,18 +654,17 @@ impl<'p> Program<'p> {
             Value::F64(_) => self.intern_type(TypeInfo::F64),
             Value::I64(_) => TypeId::i64(),
             Value::Bool(_) => TypeId::bool(),
-            Value::Enum { container_type, .. } => *container_type,
-            Value::Tuple {
-                values,
-                container_type,
-            } => {
-                if !container_type.is_any() {
-                    return *container_type;
-                }
+            // Value::Tuple {
+            //     values,
+            //     container_type,
+            // } => {
+            //     if !container_type.is_any() {
+            //         return *container_type;
+            //     }
 
-                let types = values.iter().map(|v| self.type_of(v)).collect();
-                self.tuple_of(types)
-            }
+            //     let types = values.iter().map(|v| self.type_of(v)).collect();
+            //     self.tuple_of(types)
+            // }
             Value::Type(_) => self.intern_type(TypeInfo::Type),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
             Value::GetFn(f) => self.func_type(*f),
@@ -667,6 +675,15 @@ impl<'p> Program<'p> {
             Value::Heap { .. } => TypeId::any(),
             Value::OverloadSet(_) => TypeId::any(),
             Value::CFnPtr { ty, .. } => self.intern_type(TypeInfo::Fn(*ty)),
+        }
+    }
+    pub fn type_of_raw(&mut self, v: &Values) -> TypeId {
+        match v {
+            Values::One(v) => self.type_of(v),
+            Values::Many(values) => {
+                let types = values.iter().map(|v| self.type_of(v)).collect();
+                self.tuple_of(types)
+            }
         }
     }
 
@@ -908,6 +925,20 @@ impl<'p> Expr<'p> {
             Expr::GetVar(v) => Some(v.0),
             &Expr::GetNamed(i) => Some(i),
             _ => None,
+        }
+    }
+
+    pub fn unit() -> Expr<'p> {
+        Expr::Value {
+            ty: TypeId::unit(),
+            value: Value::Unit.into(),
+        }
+    }
+
+    pub fn ty(ty: TypeId) -> Expr<'p> {
+        Expr::Value {
+            ty: TypeId::ty(),
+            value: Value::Type(ty).into(),
         }
     }
 }
