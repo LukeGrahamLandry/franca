@@ -121,8 +121,8 @@ pub enum Value {
     InterpAbsStackAddr(StackAbsoluteRange),
     Heap {
         value: *mut InterpBox,
-        logical_first: usize,
-        logical_count: usize,
+        physical_first: usize,
+        physical_count: usize,
         stride: usize,
     },
     Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
@@ -302,8 +302,8 @@ impl Value {
         }));
         Value::Heap {
             value,
-            logical_first: 0,
-            logical_count: count / stride,
+            physical_first: 0,
+            physical_count: count,
             stride,
         }
     }

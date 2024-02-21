@@ -259,7 +259,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     ret,
                 } => {
                     let base = self.take_slot(base);
-                    let res = self.slice_ptr(base, offset, count)?;
+                    let res = self.raw_slice_ptr(base, offset, count)?;
                     *self.get_slot_mut(ret) = res;
                     self.bump_ip();
                 }
@@ -279,7 +279,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Bc::DebugLine(_) | Bc::DebugMarker(_, _) => self.bump_ip(),
                 &Bc::TagCheck { enum_ptr, value } => {
                     let arg = self.clone_slot(enum_ptr);
-                    let tag = self.slice_ptr(arg, 0, 1)?;
+                    let tag = self.raw_slice_ptr(arg, 0, 1)?;
                     let tag = self.deref_ptr(tag)?;
                     assert_eq!(tag, Values::One(Value::I64(value)));
                     self.bump_ip();
@@ -327,34 +327,40 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(())
     }
 
-    fn slice_ptr(&mut self, base: Value, offset: usize, count: usize) -> Res<'p, Value> {
+    // I care not for your stride!
+    fn raw_slice_ptr(
+        &mut self,
+        base: Value,
+        physical_offset: usize,
+        physical_count: usize,
+    ) -> Res<'p, Value> {
         match base {
             Value::InterpAbsStackAddr(addr) => {
-                assert!(count <= addr.count);
+                assert!(physical_count <= addr.count);
                 Ok(Value::InterpAbsStackAddr(StackAbsoluteRange {
-                    first: StackAbsolute(addr.first.0 + offset),
-                    count,
+                    first: StackAbsolute(addr.first.0 + physical_offset),
+                    count: physical_count,
                 }))
             }
             Value::Heap {
                 value,
-                logical_first: first,
-                logical_count: count,
+                physical_first,
+                physical_count: old_physical_count,
                 stride,
             } => {
-                let abs_first = first + count;
-                let abs_last = abs_first + count;
+                let abs_first = physical_first + physical_offset;
+                let abs_last = abs_first + physical_count;
                 // Slicing operations are bounds checked.
                 let data = unsafe { &*value };
                 assert!(
                     data.references > 0
-                        && (abs_first * stride) < data.values.len()
-                        && (abs_last * stride) <= data.values.len()
+                        && (abs_first) < data.values.len()
+                        && (abs_last) <= data.values.len()
                 );
                 Ok(Value::Heap {
                     value,
-                    logical_first: first + offset,
-                    logical_count: count,
+                    physical_first: abs_first,
+                    physical_count: abs_last,
                     stride,
                 })
             }
@@ -365,31 +371,19 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn deref_ptr(&mut self, arg: Value) -> Res<'p, Values> {
         match arg {
             Value::InterpAbsStackAddr(addr) => {
-                if addr.count == 1 {
-                    let value = self.value_stack[addr.first.0].clone();
-                    assert_ne!(value, Value::Poison);
-                    Ok(value.into())
-                } else {
-                    let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
-                    Ok(values.to_vec().into())
-                }
+                let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
+                Ok(values.to_vec().into())
             }
             Value::Heap {
                 value,
-                logical_first: first,
-                logical_count: count,
-                stride,
+                physical_first: first,
+                physical_count: count,
+                ..
             } => {
                 let data = unsafe { &*value };
                 assert!(data.references > 0);
-                Ok(if stride == 1 {
-                    let value = data.values[first].clone(); // Note: [first] NOT [0]
-                    assert_ne!(value, Value::Poison);
-                    value.into()
-                } else {
-                    let values = &data.values[first..first + (count * stride)];
-                    values.into_iter().cloned().collect::<Vec<_>>().into()
-                })
+                let values = &data.values[first..first + count];
+                Ok(values.into_iter().cloned().collect::<Vec<_>>().into())
             }
             _ => err!("Wanted ptr found {:?}", arg),
         }
@@ -418,11 +412,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let when = self.call_stack.last().unwrap().when;
                 Value::Bool(when == ExecTime::Comptime).into()
             }
-            "get" => self.deref_ptr(arg.single()?)?,
-            "set" => {
-                let (addr, value) = self.to_pair(arg)?;
-                self.set_ptr(addr, value.into())?.into()
-            }
             "is_uninit" => {
                 let range = match arg {
                     Values::One(Value::InterpAbsStackAddr(addr)) => {
@@ -430,32 +419,36 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     Values::One(Value::Heap {
                         value,
-                        logical_first: first,
-                        logical_count: count,
+                        physical_first: first,
+                        physical_count: count,
                         stride,
                     }) => {
                         let data = unsafe { &*value };
                         assert!(
                             data.references > 0
-                                && (first * stride) < data.values.len()
-                                && (count * stride) < data.values.len()
+                                && (first) < data.values.len()
+                                && (count) < data.values.len()
                         );
-                        &data.values[(first * stride)..((first + count) * stride)]
+                        &data.values[(first)..(first + count)]
                     }
                     _ => err!("Wanted ptr found {:?}", arg),
                 };
                 let result = range.iter().all(|v| v == &Value::Poison);
                 Value::Bool(result).into()
             }
-            "len" => match arg {
+            "raw_len" => match arg {
                 Values::One(Value::InterpAbsStackAddr(addr)) => Value::I64(addr.count as i64),
-                Values::One(Value::Heap {
-                    logical_count: count,
-                    ..
-                }) => Value::I64(count as i64),
+                Values::One(Value::Heap { physical_count, .. }) => {
+                    Value::I64(physical_count as i64)
+                }
                 _ => err!("Wanted ptr found {:?}", arg),
             }
             .into(),
+            "size_of" => {
+                let ty = self.to_type(arg)?;
+                let stride = self.program.slot_count(ty);
+                Value::I64(stride as i64).into()
+            }
             "Ptr" => {
                 let inner_ty = self.to_type(arg)?;
                 Value::Type(self.program.ptr_type(inner_ty)).into()
@@ -468,7 +461,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let addr = self.to_stack_addr(arg)?;
                 Value::Bool(addr.first.0 >= self.value_stack.len()).into()
             }
-            "slice" => {
+            "raw_slice" => {
                 // last is not included
                 let (addr, new_first, new_last) = self.to_triple(arg)?;
                 let (new_first, new_last) = (self.to_int(new_first)?, self.to_int(new_last)?);
@@ -488,7 +481,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     Value::Heap {
                         value,
-                        logical_first: first,
+                        physical_first: first,
                         stride,
                         ..
                     } => {
@@ -498,15 +491,15 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let data = unsafe { &*value };
                         assert!(
                             data.references > 0
-                                && abs_first < (data.values.len() / stride)
-                                && abs_last <= (data.values.len() / stride),
+                                && abs_first < (data.values.len())
+                                && abs_last <= (data.values.len()),
                             "[len={}]{abs_first}..<{abs_last}",
                             data.values.len()
                         );
                         Value::Heap {
                             value,
-                            logical_first: abs_first,
-                            logical_count: abs_last - abs_first,
+                            physical_first: abs_first,
+                            physical_count: abs_last - abs_first,
                             stride,
                         }
                     }
@@ -526,8 +519,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }));
                 Value::Heap {
                     value,
-                    logical_first: 0,
-                    logical_count: count as usize,
+                    physical_first: 0,
+                    physical_count: count as usize * stride,
                     stride,
                 }
                 .into()
@@ -545,7 +538,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
                 // let slots = ptr_count * self.program.slot_count(ty);  // TODO: arrays of tuples should be flattened and then this makes sense for the check below.
-                assert_eq!(ptr_val.values.len(), ptr_count * stride);
+                assert_eq!(ptr_val.values.len(), ptr_count);
                 let _ = unsafe { Box::from_raw(ptr) };
                 Value::Unit.into()
             }
@@ -644,6 +637,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 args.next(); // The interpreter's exe.
                 let args: Vec<_> = args.collect();
                 args.serialize_one()
+            }
+            "type_id" => {
+                let ty = self.to_type(arg)?;
+                Value::I64(ty.0 as i64).into()
             }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
@@ -813,6 +810,17 @@ impl<'a, 'p> Interp<'a, 'p> {
         assert_eq!(values.len(), 3, "arity {:?}", values);
         Ok((values[0].clone(), values[1].clone(), values[2].clone()))
     }
+    #[track_caller]
+    fn to_quad(&self, value: Values) -> Res<'p, (Value, Value, Value, Value)> {
+        let values = value.vec();
+        assert_eq!(values.len(), 4, "arity {:?}", values);
+        Ok((
+            values[0].clone(),
+            values[1].clone(),
+            values[2].clone(),
+            values[3].clone(),
+        ))
+    }
 
     #[track_caller]
     fn to_func(&self, value: Values) -> Res<'p, FuncId> {
@@ -854,8 +862,8 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn to_heap_ptr(&self, value: Values) -> Res<'p, (*mut InterpBox, usize, usize, usize)> {
         if let Values::One(Value::Heap {
             value,
-            logical_first: first,
-            logical_count: count,
+            physical_first: first,
+            physical_count: count,
             stride,
         }) = value
         {
@@ -910,25 +918,21 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             Value::Heap {
                 value: ptr_value,
-                logical_first: first,
-                logical_count: count,
-                stride,
+                physical_first: first,
+                physical_count: count,
+                ..
             } => {
                 // Slicing operations are bounds checked.
                 let ptr = unsafe { &mut *ptr_value };
                 assert!(
                     ptr.references > 0
                         && first < ptr.values.len()
-                        && (first + (count * stride)) <= ptr.values.len()
+                        && (first + count) <= ptr.values.len()
                 );
-                if (count * stride) == 1 {
-                    ptr.values[first] = value.single()?;
-                } else {
-                    let values: Vec<_> = value.into();
-                    assert_eq!(values.len(), (count * stride));
-                    for (i, entry) in values.into_iter().enumerate() {
-                        ptr.values[first + i] = entry;
-                    }
+                let values: Vec<_> = value.into();
+                assert_eq!(values.len(), count);
+                for (i, entry) in values.into_iter().enumerate() {
+                    ptr.values[first + i] = entry;
                 }
                 Value::Unit
             }
@@ -960,29 +964,25 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     Value::Heap {
                         value,
-                        logical_first: first,
-                        logical_count: count,
+                        physical_first: first,
+                        physical_count: count,
                         stride,
                     } => {
                         let values = unsafe { &mut *value };
                         outln!(ShowPrint, "{}{:?}", "=".repeat(depth), values.values);
-                        if count == 1 {
-                            v = self.deref_ptr(v)?.single()?;
-                        } else {
-                            for i in 0..count {
-                                self.reflect_print(
-                                    Value::Heap {
-                                        value,
-                                        logical_first: first + i,
-                                        logical_count: 1,
-                                        stride,
-                                    }
-                                    .into(),
-                                    depth + 2,
-                                )?;
-                            }
-                            break;
+                        for i in 0..(count / stride) {
+                            self.reflect_print(
+                                Value::Heap {
+                                    value,
+                                    physical_first: first + (i * stride),
+                                    physical_count: stride,
+                                    stride,
+                                }
+                                .into(),
+                                depth + 2,
+                            )?;
                         }
+                        break;
                     }
                     _ => break,
                 }

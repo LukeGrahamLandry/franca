@@ -11,6 +11,8 @@ fn slice_eq() Unit = {unit};
 fn foreach() Unit = {unit};
 fn enumerate() Unit = {unit};
 fn index() Unit = {unit};
+fn slice() Unit = {unit};
+fn len() Unit = {unit};
 
 // TODO: scope resolution for recursion. 
 fn memcpy() Unit = {unit};
@@ -21,19 +23,30 @@ fn memcpy() Unit = {unit};
     //       so it thinks fn vec runtime captures T so it uses emit_capturing_call
     const T = T;
     
+    fn len(self: Ptr(T)) i64 = {
+        div(raw_len(self), size_of(T))
+    }
+    
     fn get(self: Ptr(T), i: i64) T = {
         assert(lt(i, len(self)), "OOB");
-        slice(self, i, add(i, 1))[]
+        let v: Ptr(T) = index(self, i);  // TODO: fix so dont need useless binding 
+        v[]
     }
     
     fn index(self: Ptr(T), i: i64) Ptr(T) = {
         assert(lt(i, len(self)), "OOB");
-        slice(self, i, add(i, 1))
+        subslice(self, i, 1)
     }
     
     fn set(self: Ptr(T), i: i64, v: T) Unit = {
         assert(lt(i, len(self)), "OOB");
-        slice(self, i, add(i, 1))[] = v
+        subslice(self, i, 1)[] = v
+    }
+    
+    fn slice(ptr: Ptr(T), first: i64, past_last: i64) Ptr(T) = {
+        let first = mul(first, size_of(T));
+        let past_last = mul(past_last, size_of(T));
+        raw_slice(ptr, first, past_last)
     }
     
     fn subslice(ptr: Ptr(T), first: i64, count: i64) Ptr(T) = {
@@ -43,7 +56,8 @@ fn memcpy() Unit = {unit};
     const P: Type = (i64, Ptr(T));  // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
     fn enumerate(arr: Ptr(T), f: Fn(P, Unit)) Unit = {
         var i = 0;
-        (fn() bool = lt(i, len(arr)), fn() Unit = {
+        let l: i64 = len(arr);
+        (fn() bool = lt(i, l), fn() Unit = {
             let e: Ptr(T) = subslice(arr, i, 1);
             f(i, e);
             i = add(i, 1);
@@ -52,7 +66,8 @@ fn memcpy() Unit = {unit};
     
     fn foreach(arr: Ptr(T), f: Fn(Ptr(T), Unit)) Unit = {
         var i = 0;
-        (fn() bool = lt(i, len(arr)), fn() Unit = {
+        let l: i64 = len(arr);
+        (fn() bool = lt(i, l), fn() Unit = {
             let e: Ptr(T) = subslice(arr, i, 1);
             f(e);
             i = add(i, 1);
@@ -88,7 +103,7 @@ fn memcpy() Unit = {unit};
     
     fn reserve(self: Ptr(Self), extra: i64) Unit = {
         let total = add(self.len[], extra);
-        let old_cap = len(self.maybe_uninit[]);
+        let old_cap: i64 = len(self.maybe_uninit[]);
         (lt(old_cap, total), fn() = {
             let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
             var new: Self = list(cap);
@@ -104,7 +119,7 @@ fn memcpy() Unit = {unit};
     
     fn push(self: Ptr(Self), v: T) Unit = {
         reserve(self, 1);
-        let last = slice(self.maybe_uninit[], self.len[], add(self.len[], 1)); 
+        let last: Ptr(T) = slice(self.maybe_uninit[], self.len[], add(self.len[], 1)); 
         last[] = v;
         self.len[] = add(self.len[], 1);
     }
@@ -128,6 +143,7 @@ fn memcpy() Unit = {unit};
                     and(lt(i, len(lhs)), prev) 
                 }, 
                 fn() Unit = { 
+                
                     prev = eq(get(lhs, i), get(rhs, i)); 
                     i = add(i, 1); 
                 },

@@ -171,23 +171,22 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         if let Value::Heap {
             value,
-            logical_first: first,
-            logical_count: count,
+            physical_first: first,
+            physical_count: count,
             stride,
         } = values.next()?
         {
             debug_assert_eq!(stride, T::size());
+            debug_assert_eq!(count % stride, 0);
             let value = unsafe { &mut *value };
             if value.references <= 0 {
                 outln!(ShowErr, "deserialize: references < 1");
                 return None;
             }
 
-            let mut values = value.values[first * stride..(first + count) * stride]
-                .to_vec()
-                .into_iter();
+            let mut values = value.values[first..(first + count)].to_vec().into_iter();
             let mut res = vec![];
-            for _ in 0..count {
+            for _ in 0..(count / stride) {
                 res.push(T::deserialize(&mut values)?);
             }
             debug_assert!(values.next().is_none());
