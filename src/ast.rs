@@ -83,7 +83,7 @@ pub enum TypeInfo<'p> {
     },
     Enum {
         cases: Vec<(Ident<'p>, TypeId)>,
-        size: usize,
+        size_including_tag: usize,
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(TypeId, usize),
@@ -404,8 +404,9 @@ impl<'p> Func<'p> {
         self.annotations.iter().any(|a| a.name == name)
     }
 
+    #[track_caller]
     pub fn unwrap_ty(&self) -> FnType {
-        self.finished_type.unwrap()
+        self.finished_type.expect("fn type infered")
     }
 
     pub fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {
@@ -606,8 +607,21 @@ impl<'p> Program<'p> {
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
             &TypeInfo::Struct { size, .. } => size,
-            &TypeInfo::Enum { size, .. } => size,
-            _ => 1,
+            &TypeInfo::Enum {
+                size_including_tag: size,
+                ..
+            } => size,
+            TypeInfo::Any
+            | TypeInfo::Never
+            | TypeInfo::F64
+            | TypeInfo::I64
+            | TypeInfo::Bool
+            | TypeInfo::Fn(_)
+            | TypeInfo::Ptr(_)
+            | TypeInfo::Slice(_)
+            | TypeInfo::Type
+            | TypeInfo::Unit => 1,
+            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         }
     }
 
@@ -699,6 +713,7 @@ impl<'p> Program<'p> {
         }
     }
 
+    #[track_caller]
     pub fn func_type(&mut self, id: FuncId) -> TypeId {
         let ty = self.funcs[id.0].unwrap_ty();
         self.intern_type(TypeInfo::Fn(ty))
@@ -785,7 +800,7 @@ impl<'p> Program<'p> {
             let size = fields.iter().map(|f| self.slot_count(f.ty)).max().unwrap();
             let ty = TypeInfo::Enum {
                 cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
-                size: size + 1, // for tag.
+                size_including_tag: size + 1, // for tag.
             };
             self.intern_type(ty)
         } else if let TypeInfo::Tuple(fields) = ty {
@@ -795,7 +810,7 @@ impl<'p> Program<'p> {
                     .into_iter()
                     .map(|ty| (self.synth_name(ty), ty))
                     .collect(),
-                size: size + 1, // for tag.
+                size_including_tag: size + 1, // for tag.
             };
             self.intern_type(ty)
         } else {

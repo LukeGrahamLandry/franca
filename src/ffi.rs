@@ -29,6 +29,7 @@ pub trait InterpSend<'p>: Sized {
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
     fn deserialize_one(value: Values) -> Option<Self> {
         let value: Vec<_> = value.into();
+        debug_assert_eq!(value.len(), Self::size());
         Self::deserialize(&mut value.into_iter())
     }
 
@@ -79,7 +80,7 @@ macro_rules! send_num {
             }
 
             fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-                if let Value::I64(i) = values.next().unwrap() {
+                if let Value::I64(i) = values.next()? {
                     Some(i as $ty)
                 } else {
                     None
@@ -164,27 +165,32 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         for e in self {
             e.serialize(&mut parts);
         }
-        values.push(Value::new_box(parts))
+        values.push(Value::new_box(T::size(), parts))
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         if let Value::Heap {
             value,
-            first,
-            count,
+            logical_first: first,
+            logical_count: count,
+            stride,
         } = values.next()?
         {
+            debug_assert_eq!(stride, T::size());
             let value = unsafe { &mut *value };
             if value.references <= 0 {
                 outln!(ShowErr, "deserialize: references < 1");
                 return None;
             }
 
-            let mut values = value.values.iter().cloned();
+            let mut values = value.values[first * stride..(first + count) * stride]
+                .to_vec()
+                .into_iter();
             let mut res = vec![];
-            for _ in first..first + count {
+            for _ in 0..count {
                 res.push(T::deserialize(&mut values)?);
             }
+            debug_assert!(values.next().is_none());
             Some(res)
         } else {
             None

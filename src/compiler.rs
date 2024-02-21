@@ -167,7 +167,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
-        let result = self.interp.run(f, arg, when);
+        let return_slot_count = self.return_stack_slots(f);
+        let result = self.interp.run(f, arg, when, return_slot_count);
         let result = self.tag_err(result);
         self.pop_state(state2);
         result
@@ -955,6 +956,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
+    #[track_caller]
     fn func_expr(&mut self, id: FuncId) -> Expr<'p> {
         Expr::Value {
             ty: self.interp.program.func_type(id),
@@ -1226,7 +1228,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "enum" => {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(result, pattern)?;
-                            let ty = self.interp.program.intern_type(ty);
+                            let ty = self.interp.program.to_enum(ty);
                             expr.expr = Expr::ty(ty);
                             self.interp.program.load_value(Value::Type(ty).into())
                         } else {
@@ -1283,7 +1285,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     TypeInfo::Struct {
                         fields, as_tuple, ..
                     } => {
-                        assert_eq!(fields.len(), values.len());
+                        assert_eq!(
+                            fields.len(),
+                            values.len(),
+                            "Cannot assign {values:?} to type {} = {fields:?}",
+                            self.interp.program.log_type(requested)
+                        );
                         let all = names.into_iter().zip(values).zip(fields);
                         let mut values = vec![];
                         for ((name, mut value), field) in all {
@@ -1296,8 +1303,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ret = result.produce_tuple(self.interp.program, values, as_tuple)?;
                         ret.unchecked_cast(requested)
                     }
-                    TypeInfo::Enum { cases, size } => {
-                        assert_eq!(1, values.len());
+                    TypeInfo::Enum {
+                        cases,
+                        size_including_tag: size,
+                    } => {
+                        assert_eq!(
+                            1,
+                            values.len(),
+                            "{} is an enum, value should have one active varient not {values:?}",
+                            self.interp.program.log_type(requested)
+                        );
                         let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
                         let type_hint = cases[i].1;
                         let value = self.compile_expr(result, &mut values[0], Some(type_hint))?;
@@ -1342,7 +1357,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .iter()
                     .map(|b| Value::I64(*b as i64))
                     .collect();
-                self.interp.program.load_value(Value::new_box(bytes))
+                self.interp.program.load_value(Value::new_box(1, bytes))
             }
             Expr::PrefixMacro { name, arg, target } => {
                 outln!(
@@ -1366,6 +1381,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let full_arg = FatExpr::synthetic(full_arg, loc);
                 let f = self.resolve_function(result, *name, &full_arg, Some(want))?;
                 assert!(self.interp.program.funcs[f.0].has_tag(self.pool, "annotation"));
+                self.infer_types(f)?;
                 let get_func = FatExpr::synthetic(self.func_expr(f), loc);
                 let full_call =
                     FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
@@ -1904,6 +1920,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             result,
             self.interp.program.funcs[func_id.0].log(self.pool)
         );
+        assert_eq!(
+            self.interp.program.slot_count(ret_ty),
+            result.len(),
+            "bad arity {result:?}"
+        );
         self.pop_state(state);
         Ok(result)
     }
@@ -1938,6 +1959,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let cond = self.compile_expr(result, &mut parts[0], None)?;
             let if_true = if let Expr::Closure(func) = parts[1].deref_mut() {
                 let f = self.add_func(mem::take(func), &result.constants)?;
+                self.infer_types(f)?;
                 *parts[1].deref_mut() = self.func_expr(f);
                 f
             } else {
@@ -1945,6 +1967,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
             let if_false = if let Expr::Closure(func) = parts[2].deref_mut() {
                 let f = self.add_func(mem::take(func), &result.constants)?;
+                self.infer_types(f)?;
                 *parts[2].deref_mut() = self.func_expr(f);
                 f
             } else {
@@ -2010,6 +2033,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = if let Expr::Closure(func) = parts[0].deref_mut() {
                 let f = self.add_func(mem::take(func), &result.constants)?;
+                self.infer_types(f)?;
                 *parts[0].deref_mut() = self.func_expr(f);
                 f
             } else {
@@ -2017,6 +2041,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
             let body = if let Expr::Closure(func) = parts[1].deref_mut() {
                 let f = self.add_func(mem::take(func), &result.constants)?;
+                self.infer_types(f)?;
                 *parts[1].deref_mut() = self.func_expr(f);
                 f
             } else {
@@ -2411,7 +2436,10 @@ impl<'p> FnBody<'p> {
     fn reserve_slots(&mut self, program: &Program<'p>, ty: TypeId) -> Res<'p, StackRange> {
         let ty = program.raw_type(ty);
         match &program.types[ty.0] {
-            TypeInfo::Enum { size, .. } => {
+            TypeInfo::Enum {
+                size_including_tag: size,
+                ..
+            } => {
                 let size = *size;
                 let first = StackOffset(self.stack_slots);
                 self.slot_types.push(TypeId::i64());

@@ -121,8 +121,9 @@ pub enum Value {
     InterpAbsStackAddr(StackAbsoluteRange),
     Heap {
         value: *mut InterpBox,
-        first: usize,
-        count: usize,
+        logical_first: usize,
+        logical_count: usize,
+        stride: usize,
     },
     Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(usize),
@@ -292,16 +293,18 @@ impl Value {
         }
     }
 
-    pub fn new_box(values: Vec<Value>) -> Value {
+    pub fn new_box(stride: usize, values: Vec<Value>) -> Value {
         let count = values.len();
+        debug_assert_eq!(values.len() % stride, 0);
         let value = Box::into_raw(Box::new(InterpBox {
             references: 1,
             values,
         }));
         Value::Heap {
             value,
-            first: 0,
-            count,
+            logical_first: 0,
+            logical_count: count / stride,
+            stride,
         }
     }
 
@@ -369,5 +372,13 @@ impl Values {
 
     pub fn vec(self) -> Vec<Value> {
         self.into()
+    }
+
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        match self {
+            Values::One(_) => 1,
+            Values::Many(v) => v.len(),
+        }
     }
 }
