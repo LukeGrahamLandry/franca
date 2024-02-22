@@ -45,7 +45,6 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
                 #deserialize
             }
 
-
             fn size() -> usize {
                 use crate::ffi::InterpSend;
                 #size
@@ -134,7 +133,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                     #i => {
                         let result: Option<Self> = #fields;
                         let size: usize = #size;
-                        (result, size) 
+                        (result, size)
                     },
                 }
             });

@@ -54,6 +54,11 @@ impl TypeId {
     pub fn bool() -> TypeId {
         TypeId(4)
     }
+
+    // Be careful that this is in the pool correctly!
+    pub fn void_ptr() -> TypeId {
+        TypeId(5)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
@@ -90,6 +95,7 @@ pub enum TypeInfo<'p> {
     Named(TypeId, Ident<'p>),
     Type,
     Unit, // TODO: same as empty tuple but easier to type
+    VoidPtr,
 }
 
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
@@ -517,6 +523,7 @@ impl<'p> Program<'p> {
                 TypeInfo::Type,
                 TypeInfo::I64,
                 TypeInfo::Bool,
+                TypeInfo::VoidPtr,
                 TypeInfo::F64,
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
             ],
@@ -531,7 +538,7 @@ impl<'p> Program<'p> {
             log_type_rec: RefCell::new(vec![]),
         };
 
-        init_interp_send!(&mut program, FatStmt);
+        init_interp_send!(&mut program, FatStmt, TypeInfo);
 
         program
     }
@@ -618,6 +625,7 @@ impl<'p> Program<'p> {
             | TypeInfo::Bool
             | TypeInfo::Fn(_)
             | TypeInfo::Ptr(_)
+            | TypeInfo::VoidPtr
             | TypeInfo::Slice(_)
             | TypeInfo::Type
             | TypeInfo::Unit => 1,
@@ -659,35 +667,20 @@ impl<'p> Program<'p> {
         ty == &TypeInfo::Type
     }
 
-    // TODO: The world might be a better place if the root types were in TypeId,
-    //       So you didn't need to do the interning dance for i64/f64/unit/any
-    //       The important thing is that they're copy and quick to compare no matter how much nesting.
-    //       Tho number types might become something with flags so maybe just Type, Unit, Any should be blessed.
     pub fn type_of(&mut self, v: &Value) -> TypeId {
         match v {
             Value::F64(_) => self.intern_type(TypeInfo::F64),
             Value::I64(_) => TypeId::i64(),
             Value::Bool(_) => TypeId::bool(),
-            // Value::Tuple {
-            //     values,
-            //     container_type,
-            // } => {
-            //     if !container_type.is_any() {
-            //         return *container_type;
-            //     }
-
-            //     let types = values.iter().map(|v| self.type_of(v)).collect();
-            //     self.tuple_of(types)
-            // }
-            Value::Type(_) => self.intern_type(TypeInfo::Type),
+            Value::Type(_) => TypeId::ty(),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
             Value::GetFn(f) => self.func_type(*f),
             Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),
-            Value::InterpAbsStackAddr(_) => TypeId::any(),
+            Value::InterpAbsStackAddr(_) => todo!(),
             Value::Heap { .. } => TypeId::any(),
-            Value::OverloadSet(_) => TypeId::any(),
+            Value::OverloadSet(_) => todo!(),
             Value::CFnPtr { ty, .. } => self.intern_type(TypeInfo::Fn(*ty)),
         }
     }
@@ -745,11 +738,13 @@ impl<'p> Program<'p> {
         }
     }
 
+    // TODO: skip through named and unique as well.
     pub fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
+        ptr_ty = self.raw_type(ptr_ty);
         let mut d = 0;
         while let &TypeInfo::Ptr(inner) = &self.types[ptr_ty.0] {
             d += 1;
-            ptr_ty = inner;
+            ptr_ty = self.raw_type(inner);
         }
         d
     }
@@ -844,6 +839,7 @@ impl<'p> Program<'p> {
                 | TypeInfo::Never
                 | TypeInfo::F64
                 | TypeInfo::I64
+                | TypeInfo::VoidPtr
                 | TypeInfo::Bool => false,
                 // TODO: supply "runtime" versions of these for macros to work with
                 TypeInfo::Fn(_) => true,

@@ -70,16 +70,16 @@ impl<'a, 'p> Interp<'a, 'p> {
         when: ExecTime,
         return_slot_count: usize,
     ) -> Res<'p, Values> {
-        let init_heights = (self.call_stack.len(), self.value_stack.len());
+        let _init_heights = (self.call_stack.len(), self.value_stack.len());
 
         // A fake callframe representing the calling rust program.
         let marker_callframe = CallFrame {
-            stack_base: StackAbsolute(0),
+            stack_base: StackAbsolute(self.value_stack.len()),
             current_func: FuncId(0), // TODO: actually reserve 0 cause i do this a lot
             current_ip: 0,
             return_slot: StackAbsoluteRange {
-                first: StackAbsolute(0),
-                count: 0,
+                first: StackAbsolute(self.value_stack.len()),
+                count: return_slot_count, // This matters even though it shouldn't. It's used for passing info to continuation
             },
             is_rust_marker: true, // used for exiting the run loop. this is the only place we set it true.
             debug_name: self.pool.intern("@interp::run@"),
@@ -97,24 +97,30 @@ impl<'a, 'p> Interp<'a, 'p> {
 
         // Call the function
         self.push_callframe(f, ret, arg, when)?;
+        self.run_continuation()
+    }
 
+    fn run_continuation(&mut self) -> Res<'p, Values> {
         if let Err(e) = self.run_inst_loop() {
             outln!(ShowErr, "{}", self.log_callstack());
             return Err(e);
         }
 
         // Give the return value to the caller.
+        let frame = unwrap!(self.call_stack.last(), "");
+
+        let ret = self.index_to_range(frame.return_slot);
         let result = self.take_slots(ret);
 
         // Sanity checks that we didn't mess anything up for the next guy.
         assert!(!result.is_poison());
-        for _ in 0..return_slot_count {
+        for _ in 0..ret.count {
             assert!(self.value_stack.pop() == Some(Value::Poison));
         }
         let _final_callframe = self.call_stack.pop().unwrap();
         // assert!(self, final_callframe == marker_callframe, "bad frame");
-        let end_heights = (self.call_stack.len(), self.value_stack.len());
-        assert!(init_heights == end_heights, "bad stack size");
+        // let end_heights = (self.call_stack.len(), self.value_stack.len());
+        // assert!(init_heights == end_heights, "bad stack size");
         self.last_loc = None;
         Ok(result)
     }
@@ -137,9 +143,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
-                Bc::LoadConstant { slot, value } => {
-                    let slot = *slot;
-                    let value = value.clone();
+                &Bc::LoadConstant { slot, value } => {
                     *self.get_slot_mut(slot) = value;
                     self.bump_ip();
                 }
@@ -162,10 +166,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let name = self.pool.get(name);
                     // Calling Convention: arguments passed to a function are moved out of your stack.
                     let arg = self.take_slots(arg);
-                    let value = self.runtime_builtin(name, arg.clone())?;
                     let abs = self.range_to_index(ret);
-                    self.expand_maybe_tuple(value, abs)?;
                     self.bump_ip();
+                    // Note: at this point you have to be re-enterant because you might suspend to ask the compiler to do something.
+                    let value = self.runtime_builtin(name, arg.clone(), Some(abs))?;
+                    self.expand_maybe_tuple(value, abs)?;
                 }
                 &Bc::Ret(slot) => {
                     logln!("{}", self.log_callstack());
@@ -345,8 +350,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             Value::Heap {
                 value,
                 physical_first,
-                physical_count: old_physical_count,
                 stride,
+                ..
             } => {
                 let abs_first = physical_first + physical_offset;
                 let abs_last = abs_first + physical_count;
@@ -360,7 +365,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Ok(Value::Heap {
                     value,
                     physical_first: abs_first,
-                    physical_count: abs_last,
+                    physical_count,
                     stride,
                 })
             }
@@ -383,13 +388,18 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let data = unsafe { &*value };
                 assert!(data.references > 0);
                 let values = &data.values[first..first + count];
-                Ok(values.into_iter().cloned().collect::<Vec<_>>().into())
+                Ok(values.to_vec().into())
             }
             _ => err!("Wanted ptr found {:?}", arg),
         }
     }
 
-    pub fn runtime_builtin(&mut self, name: &str, arg: Values) -> Res<'p, Values> {
+    pub fn runtime_builtin(
+        &mut self,
+        name: &str,
+        arg: Values,
+        ret_slot_for_suspend: Option<StackAbsoluteRange>,
+    ) -> Res<'p, Values> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
@@ -421,7 +431,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         value,
                         physical_first: first,
                         physical_count: count,
-                        stride,
+                        ..
                     }) => {
                         let data = unsafe { &*value };
                         assert!(
@@ -509,7 +519,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "alloc" => {
                 let (ty, count) = self.to_pair(arg)?;
-                let (ty, count) = (self.to_type(ty.into())?, self.to_int(count.into())?);
+                let (ty, count) = (self.to_type(ty.into())?, self.to_int(count)?);
                 let stride = self.program.slot_count(ty);
                 assert!(count >= 0);
                 let values = vec![Value::Poison; count as usize * stride];
@@ -594,7 +604,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "tag_value" => {
                 let (enum_ty, name) = self.to_pair(arg)?;
-                let (enum_ty, name) = (self.to_type(enum_ty.into())?, self.to_int(name.into())?);
+                let (enum_ty, name) = (self.to_type(enum_ty.into())?, self.to_int(name)?);
                 let name = unwrap!(self.pool.upcast(name), "bad symbol");
                 let cases = unwrap!(self.program.get_enum(enum_ty), "not enum");
                 let index = cases.iter().position(|f| f.0 == name);
@@ -642,9 +652,31 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ty = self.to_type(arg)?;
                 Value::I64(ty.0 as i64).into()
             }
+            "infer_raw_deref_type" => {
+                let name = self.pool.intern(name);
+                self.suspend(
+                    name,
+                    arg,
+                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
+                )?
+            }
             _ => ice!("Known builtin is not implemented. {}", name),
         };
         Ok(value)
+    }
+
+    fn suspend(
+        &mut self,
+        name: Ident<'p>,
+        arg: Values,
+        ret: StackAbsoluteRange,
+    ) -> Res<'p, Values> {
+        err!(CErr::InterpMsgToCompiler(name, arg, ret))
+    }
+
+    pub fn resume(&mut self, result: Values, ret: StackAbsoluteRange) -> Res<'p, Values> {
+        self.expand_maybe_tuple(result, ret)?;
+        self.run_continuation()
     }
 
     fn push_callframe(
@@ -698,7 +730,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let frame = self.call_stack.last().unwrap();
         let value = &self.value_stack[frame.stack_base.0 + slot.0];
         debug_assert_ne!(value, &Value::Poison);
-        value.clone()
+        *value
     }
 
     #[track_caller]
@@ -743,6 +775,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
+    fn index_to_range(&mut self, slot: StackAbsoluteRange) -> StackRange {
+        let frame = self.call_stack.last().unwrap();
+        StackRange {
+            first: StackOffset(frame.stack_base.0 + slot.first.0),
+            count: slot.count,
+        }
+    }
+
     fn next_inst(&self) -> &Bc<'p> {
         let frame = self.call_stack.last().unwrap();
         let body = self
@@ -778,10 +818,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             Values::One(Value::Unit) => Ok(self.program.intern_type(TypeInfo::Unit)),
             Values::One(Value::Type(id)) => Ok(id),
             Values::Many(values) => {
-                let values: Res<'_, Vec<_>> = values
-                    .into_iter()
-                    .map(|v| self.to_type(v.into()).into())
-                    .collect();
+                let values: Res<'_, Vec<_>> =
+                    values.into_iter().map(|v| self.to_type(v.into())).collect();
                 Ok(self.program.tuple_of(values?))
             }
             _ => {
@@ -808,18 +846,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn to_triple(&self, value: Values) -> Res<'p, (Value, Value, Value)> {
         let values = value.vec();
         assert_eq!(values.len(), 3, "arity {:?}", values);
-        Ok((values[0].clone(), values[1].clone(), values[2].clone()))
-    }
-    #[track_caller]
-    fn to_quad(&self, value: Values) -> Res<'p, (Value, Value, Value, Value)> {
-        let values = value.vec();
-        assert_eq!(values.len(), 4, "arity {:?}", values);
-        Ok((
-            values[0].clone(),
-            values[1].clone(),
-            values[2].clone(),
-            values[3].clone(),
-        ))
+        Ok((values[0], values[1], values[2]))
     }
 
     #[track_caller]
@@ -835,7 +862,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     fn to_pair(&self, value: Values) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
         assert_eq!(values.len(), 2, "arity {:?}", values);
-        Ok((values[0].clone(), values[1].clone()))
+        Ok((values[0], values[1]))
     }
 
     #[track_caller]
@@ -940,7 +967,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         })
     }
 
-    fn reflect_print(&mut self, mut arg: Values, mut depth: usize) -> Res<'p, ()> {
+    fn reflect_print(&mut self, arg: Values, mut depth: usize) -> Res<'p, ()> {
         for mut v in arg.vec() {
             loop {
                 outln!(ShowPrint, "{}{}", "=".repeat(depth), v);
@@ -969,19 +996,27 @@ impl<'a, 'p> Interp<'a, 'p> {
                         stride,
                     } => {
                         let values = unsafe { &mut *value };
-                        outln!(ShowPrint, "{}{:?}", "=".repeat(depth), values.values);
-                        for i in 0..(count / stride) {
-                            self.reflect_print(
-                                Value::Heap {
-                                    value,
-                                    physical_first: first + (i * stride),
-                                    physical_count: stride,
-                                    stride,
-                                }
-                                .into(),
-                                depth + 2,
-                            )?;
+                        outln!(
+                            ShowPrint,
+                            "{}{:?}",
+                            "=".repeat(depth),
+                            &values.values[first..(first + count)]
+                        );
+                        if (count % stride) == 0 && count != stride {
+                            for i in 0..(count / stride) {
+                                self.reflect_print(
+                                    Value::Heap {
+                                        value,
+                                        physical_first: first + (i * stride),
+                                        physical_count: stride,
+                                        stride,
+                                    }
+                                    .into(),
+                                    depth + 2,
+                                )?;
+                            }
                         }
+
                         break;
                     }
                     _ => break,

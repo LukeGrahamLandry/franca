@@ -53,6 +53,7 @@ pub enum CErr<'p> {
     Msg(String),
     AmbiguousCall,
     VarNotFound(Var<'p>),
+    InterpMsgToCompiler(Ident<'p>, Values, StackAbsoluteRange),
 }
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
@@ -425,7 +426,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut arg = self.compile_expr(result, arg, Some(f_ty.arg))?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
         if arg.is_empty() {
-            arg = self.interp.program.load_value(Value::Unit.into());
+            arg = self.interp.program.load_value(Value::Unit);
         }
 
         self.type_check_arg(arg.ty(), f_ty.arg, "bad arg")?;
@@ -711,7 +712,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if func.body.is_none() {
             // TODO: don't re-eval the arg type every time.
             let name = func.synth_name(self.pool);
-            return self.interp.runtime_builtin(name, arg_value);
+            return self.interp.runtime_builtin(name, arg_value, None);
         }
 
         // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
@@ -811,15 +812,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 dropping,
                 kind,
             } => {
-                // println!(
-                //     "BEFORE DeclConst {} = {:?}\n{}",
-                //     name.log(self.pool),
-                //     value,
-                //     self.interp.program.log_consts(&result.constants)
-                // );
                 let no_type = matches!(ty, LazyType::Infer);
                 self.infer_types_progress(&result.constants, ty)?;
-                let expected_ty = ty.unwrap();
+                let mut expected_ty = ty.unwrap();
 
                 match kind {
                     VarType::Const => {
@@ -845,14 +840,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                             value = Value::Type(self.to_type(value)?).into()
                         }
                         let found_ty = self.interp.program.type_of_raw(&value);
-                        self.type_check_arg(found_ty, expected_ty, "var decl")?;
-                        // println!("DeclConst {} = {:?}", name.log(self.pool), value);
-                        let ty = if expected_ty.is_any() {
-                            found_ty
+                        if no_type {
+                            expected_ty = found_ty;
                         } else {
-                            expected_ty
-                        };
-                        result.constants.insert(*name, (value, ty));
+                            self.type_check_arg(found_ty, expected_ty, "var decl")?;
+                        }
+                        result.constants.insert(*name, (value, expected_ty));
                         // println!("{}", self.interp.program.log_consts(&result.constants));
                     }
                     VarType::Let | VarType::Var => {
@@ -1007,7 +1000,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     };
                     return Ok(result);
                 }
-                ice!("TODO: dynamic call {expr:?}")
+                ice!("function not declared or \nTODO: dynamic call {expr:?}")
             }
             Expr::Block {
                 body,
@@ -1083,7 +1076,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some((val, ty)) = self.builtin_constant(name) {
                     expr.expr = Expr::Value {
                         ty,
-                        value: val.clone().into(),
+                        value: val.into(),
                     };
                     Structured::Const(ty, val.into())
                 } else {
@@ -1189,7 +1182,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             ty: TypeId::ty(),
                             value: Value::Type(ty).into(),
                         };
-                        self.interp.program.load_value(Value::Type(ty).into())
+                        self.interp.program.load_value(Value::Type(ty))
                     }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
@@ -1199,7 +1192,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         *result = self.restore_state(state);
                         expr.expr = Expr::unit();
-                        self.interp.program.load_value(Value::Unit.into())
+                        self.interp.program.load_value(Value::Unit)
                     }
                     "comptime_print" => {
                         outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
@@ -1210,14 +1203,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                         );
                         outln!(ShowPrint, "VALUE: {:?}", value);
                         expr.expr = Expr::unit();
-                        self.interp.program.load_value(Value::Unit.into())
+                        self.interp.program.load_value(Value::Unit)
                     }
                     "struct" => {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(result, pattern)?;
                             let ty = self.interp.program.intern_type(ty);
                             expr.expr = Expr::ty(ty);
-                            self.interp.program.load_value(Value::Type(ty).into())
+                            self.interp.program.load_value(Value::Type(ty))
                         } else {
                             err!(
                                 "expected map literal: .{{ name: Type, ... }} but found {:?}",
@@ -1230,7 +1223,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let ty = self.struct_type(result, pattern)?;
                             let ty = self.interp.program.to_enum(ty);
                             expr.expr = Expr::ty(ty);
-                            self.interp.program.load_value(Value::Type(ty).into())
+                            self.interp.program.load_value(Value::Type(ty))
                         } else {
                             err!(
                                 "expected map literal: .{{ name: Type, ... }} but found {:?}",
@@ -1385,18 +1378,54 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let get_func = FatExpr::synthetic(self.func_expr(f), loc);
                 let full_call =
                     FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
-                let new_expr = self.immediate_eval_expr(&result.constants, full_call, want)?;
-                // TODO: deserialize should return a meaningful error message
-                *expr = unwrap!(
-                    FatExpr::deserialize_one(new_expr.clone()),
-                    "macro failed. returned {new_expr:?}"
-                );
-                outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
-                outln!(LogTag::Macros, "================\n");
-                // Now evaluate whatever the macro gave us.
-                self.compile_expr(result, expr, requested)?
+
+                let mut response = self.immediate_eval_expr(&result.constants, full_call, want);
+                loop {
+                    match response {
+                        Ok(new_expr) => {
+                            // TODO: deserialize should return a meaningful error message
+                            *expr = unwrap!(
+                                FatExpr::deserialize_one(new_expr.clone()),
+                                "macro failed. returned {new_expr:?}"
+                            );
+                            outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
+                            outln!(LogTag::Macros, "================\n");
+                            // Now evaluate whatever the macro gave us.
+                            break self.compile_expr(result, expr, requested)?;
+                        }
+                        Err(msg) => match msg.reason {
+                            CErr::InterpMsgToCompiler(name, arg, ret) => {
+                                let name = self.pool.get(name);
+                                let res = self.handle_macro_msg(result, name, arg)?;
+                                println!("resume...");
+                                response = self.interp.resume(res, ret);
+                            }
+                            _ => return Err(msg),
+                        },
+                    }
+                }
             }
         })
+    }
+
+    fn handle_macro_msg(
+        &mut self,
+        result: &mut FnBody<'p>,
+        name: &str,
+        arg: Values,
+    ) -> Res<'p, Values> {
+        match name {
+            "infer_raw_deref_type" => {
+                println!("{arg:?}");
+                let expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
+                println!("{expr:?}");
+                let ty = unwrap!(self.type_of(result, &expr)?, "could not infer type"); // TODO: make it less painful to return an option
+                println!("{ty:?}");
+                let ty = self.interp.program.types[ty.0].clone();
+                Ok(ty.serialize_one())
+            }
+            _ => err!("Macro send unknown message: {name} with {arg:?}",),
+        }
     }
 
     fn addr_macro(
@@ -1682,6 +1711,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "Type" => Some(Type),
             "bool" => Some(Bool),
             "Any" => Some(Any),
+            "VoidPtr" => Some(VoidPtr),
             _ => None,
         };
         if let Some(ty) = ty {
@@ -1849,7 +1879,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         ret_ty: TypeId,
     ) -> Res<'p, Values> {
         match e.deref() {
-            Expr::Value { ty, value } => return Ok(value.clone().into()),
+            Expr::Value { value, .. } => return Ok(value.clone()),
             Expr::GetVar(var) => {
                 // fast path for builtin type identifiers
                 if let Some((value, _)) = constants.get(*var) {
@@ -2108,6 +2138,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         if found == expected || found.is_any() || expected.is_any() {
             Ok(())
         } else {
+            // TODO: fix infering variable types so any doesn't skip this requirement.
+            if self.interp.program.slot_count(found) != self.interp.program.slot_count(expected) {
+                err!(CErr::TypeCheck(found, expected, msg))
+            }
+
             match (
                 &self.interp.program.types[found.0],
                 &self.interp.program.types[expected.0],
@@ -2236,7 +2271,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         container_ptr: Structured,
         name: Ident<'p>,
     ) -> Res<'p, Structured> {
-        let mut container_ptr_ty = container_ptr.ty();
+        let mut container_ptr_ty = self.interp.program.raw_type(container_ptr.ty());
         let mut container_ptr = result.load(self.interp.program, container_ptr)?.0;
         // Auto deref for nested place expressions.
         // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
@@ -2244,6 +2279,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if depth > 1 {
             for _ in 0..(depth - 1) {
                 container_ptr_ty = unwrap!(self.interp.program.unptr_ty(container_ptr_ty), "");
+                container_ptr_ty = self.interp.program.raw_type(container_ptr_ty);
                 let ret = result.reserve_slots(self.interp.program, container_ptr_ty)?;
                 result.push(Bc::Load {
                     from: container_ptr.single(),
@@ -2309,7 +2345,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 );
             }
             _ => err!(
-                "only structs support field access but found {} = {}",
+                "only structs/enums support field access but found {} = {}",
                 self.interp.program.log_type(container_ty),
                 self.interp.program.log_type(raw_container_ty)
             ),

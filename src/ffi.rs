@@ -184,7 +184,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
                 return None;
             }
 
-            let mut values = value.values[first..(first + count)].to_vec().into_iter();
+            let mut values = value.values[first..(first + count)].iter().copied();
             let mut res = vec![];
             for _ in 0..(count / stride) {
                 res.push(T::deserialize(&mut values)?);

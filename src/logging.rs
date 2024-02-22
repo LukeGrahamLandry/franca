@@ -254,6 +254,7 @@ impl<'p> Program<'p> {
                 }
                 TypeInfo::Type => "Type".to_owned(),
                 TypeInfo::Unit => "Unit".to_owned(),
+                TypeInfo::VoidPtr => "(&Void)".to_owned(),
             }
         })
     }
@@ -607,7 +608,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 value: Values::One(Value::GetFn(f)),
                 ..
             } => format!("Fn{}", f.0),
-            Expr::Value { ty, value } => format!("{:?}", value),
+            Expr::Value { value, .. } => format!("{:?}", value),
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.log(pool), pool.get(*i)),

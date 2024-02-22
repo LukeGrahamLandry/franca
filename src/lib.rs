@@ -227,7 +227,7 @@ pub fn run_main<'a: 'p, 'p>(
 
                             outln!(ShowPrint, "===============");
                             let start = timestamp();
-                            match interp.run(f, arg.clone().into(), ExecTime::Runtime) {
+                            match interp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
                                     log_err(codemap, &mut interp, e, save);
                                     return false;
