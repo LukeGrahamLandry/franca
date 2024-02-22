@@ -1,4 +1,4 @@
-cargo test || exit
+RUST_MIN_STACK=8388608 cargo test || exit
 cargo build --target wasm32-unknown-unknown --release --lib --no-default-features --features some_log || exit
 
 TARGET_PATH="target/wasm32-unknown-unknown/release"

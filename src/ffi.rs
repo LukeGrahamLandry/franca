@@ -177,7 +177,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         } = values.next()?
         {
             debug_assert_eq!(stride, T::size());
-            debug_assert_eq!(count % stride, 0);
+            debug_assert_eq!(count % T::size(), 0);
             let value = unsafe { &mut *value };
             if value.references <= 0 {
                 outln!(ShowErr, "deserialize: references < 1");
@@ -186,7 +186,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
             let mut values = value.values[first..(first + count)].iter().copied();
             let mut res = vec![];
-            for _ in 0..(count / stride) {
+            for _ in 0..(count / T::size()) {
                 res.push(T::deserialize(&mut values)?);
             }
             debug_assert!(values.next().is_none());

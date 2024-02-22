@@ -367,7 +367,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn deref_ptr(&mut self, arg: Value) -> Res<'p, Values> {
+    pub fn deref_ptr(&mut self, arg: Value) -> Res<'p, Values> {
         match arg {
             Value::InterpAbsStackAddr(addr) => {
                 let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
@@ -502,7 +502,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         Value::Heap {
                             value,
                             physical_first: abs_first,
-                            physical_count: abs_last - abs_first,
+                            physical_count: (new_last - new_first) as usize,
                             stride,
                         }
                     }
@@ -862,7 +862,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn to_pair(&self, value: Values) -> Res<'p, (Value, Value)> {
+    pub fn to_pair(&self, value: Values) -> Res<'p, (Value, Value)> {
         let values = self.to_seq(value)?;
         assert_eq!(values.len(), 2, "arity {:?}", values);
         Ok((values[0], values[1]))
@@ -878,7 +878,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     #[track_caller]
-    fn to_int(&self, value: Value) -> Res<'p, i64> {
+    pub fn to_int(&self, value: Value) -> Res<'p, i64> {
         if let Value::I64(r) = value {
             Ok(r)
         } else if let Value::Symbol(r) = value {

@@ -65,14 +65,18 @@ assert_eq(true, @is_declared() i64);
 ////////////////////
 
 fn tag_symbol(E: Type, value: i64) Symbol;
+fn print_ast(v: FatExpr) Unit;
 
 // Note: this sucks because it can't use @match because that implementation wants to use this function. 
 fn visit_expr(start: Ptr(FatExpr), f: Fn(Ptr(FatExpr), Unit)) Unit = {
     var stack: List(Ptr(FatExpr)) = list(1);
     push(stack!addr, start);
     
-    (fn() bool = ne(stack.len[], 0), fn() Unit = {
+    (fn() bool = gt(stack.len[], 0), fn() Unit = {
+        puts("stack len:");
+        print(stack.len[]);
         let e: Ptr(FatExpr) = pop_last(stack!addr);
+        print_ast(e[]);
         f(e);
         
         let tag: Symbol = tag_symbol(Expr, e.expr!tag[]);
@@ -88,7 +92,26 @@ fn visit_expr(start: Ptr(FatExpr), f: Fn(Ptr(FatExpr), Unit)) Unit = {
                     push(stack!addr, part);
                 });
             }, fn() Unit ={
-                // @todo
+                (eq(tag, PrefixMacro!symbol), fn() Unit ={
+                    let arg: Ptr(FatExpr) = e.expr.PrefixMacro.arg[];
+                    let target: Ptr(FatExpr) = e.expr.PrefixMacro.target[];
+                    push(stack!addr, arg);
+                    push(stack!addr, target);
+                }, fn() Unit ={
+                    (eq(tag, Closure!symbol), fn() Unit ={
+                        puts("a");
+                        const OptExpr: Type = (i64, FatExpr);
+                        let body: Ptr(OptExpr) = e.expr.Closure.body;  // TODO: better option ffi
+                        (fn(a: i64, b: FatExpr) Unit = { assert_eq(a, 0); })(body[]);
+                        body!reflect_print;
+                        let body: Ptr(FatExpr) = raw_slice(body, 1, size_of(OptExpr));
+                        body!reflect_print;
+                        push(stack!addr, body);
+                        puts("b");
+                    }, fn() Unit ={
+                        // @todo
+                    })!if
+                })!if
             })!if
         })!if
     })!while;
@@ -97,8 +120,9 @@ fn visit_expr(start: Ptr(FatExpr), f: Fn(Ptr(FatExpr), Unit)) Unit = {
 
 const Subst: Type = (Symbol, FatExpr);
 const ___dasdasddsfe = List(Subst);
-fn apply_placeholders(template: FatExpr, replacements: Ptr(Subst)) FatExpr = {
-    visit_expr(template!addr, fn(expr: Ptr(FatExpr)) Unit = {
+// TODO: instead of this, extend `!quote` to capture ast vars? 
+fn apply_placeholders(template: Ptr(FatExpr), replacements: Ptr(Subst)) Unit = {
+    visit_expr(template, fn(expr: Ptr(FatExpr)) Unit = {
         (eq(expr.expr!tag[], tag_value(Expr, GetNamed!symbol)), fn()={
             let found: Symbol = expr.expr.GetNamed[];
             foreach(replacements, fn(key: Symbol, value: FatExpr) Unit = 
@@ -108,7 +132,6 @@ fn apply_placeholders(template: FatExpr, replacements: Ptr(Subst)) FatExpr = {
             );
         }, fn()=())!if;
     });
-    template
 }
 
 @annotation
@@ -121,7 +144,12 @@ fn apply_func_with_five(number: FatExpr, func: FatExpr) FatExpr = {
         (number_placeholder!symbol, number),
         (function_placeholder!symbol, func),
     )!slice;
-    apply_placeholders(template, replacements)
+    // Note: this is not equivilent to a simple string find-and-replace on the source code.
+    // It only replaces free variables in the ast. Overlapping names in the macro args should be unaffected. 
+    // The `!quote` macro runs name resolution relitive to the instantiation of quote (the body of this function), 
+    // and the arguments of the macro are resolved before calling the macro handler.
+    apply_placeholders(template!addr, replacements);
+    template
 }
 
 let seven = @apply_func_with_five(2) add;
@@ -154,80 +182,72 @@ fn box(T: Type) Fn(T, Ptr(T)) = {
     })
 }
 
-/*
-// TODO
+// Convert a pointer to a value into an ast that will produce that value when evaluated. 
+fn literal_ast(ty: Type, ptr: Any) FatExpr;
+fn intern_type(ty: TypeInfo) TypeId;
+
+// TODO: need to have an actual clone method because just relying on stack copy will share heap ptrs. 
+// TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
+// TODO: this has a referential transparency problem
 @annotation
 fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     let stmts: Ptr(FatStmt) = target.expr.Block.body[];
     let enum_type: TypeInfo = infer_raw_deref_type(arg);
+    let enum_type: TypeId = intern_type(enum_type);
     
+    // Declaring variables is weird because name resolution has already run.
+    let handler = (@with_var(arg_var, arg_init) @with_var(tag_val, arg_var!tag!deref) body)!quote;
+    var body = (if_false)!quote;
     
-    let get_tag_var = 
-    
-    var get_tag: FatExpr = arg; // Clone
-    const boxed = box(FatExpr);
-    get_tag.expr[] = .{ SuffixMacro: (tag!symbol, boxed(arg)) };
-    
-    var output_expr: FatExpr = panic("unhandled varient")!quote;
-    output_expr.loc[] = target.loc[];
-    
-    /*
-    var false_expr: FatExpr = false!quote;
-    var init_branch: FatExpr = ((false, fn)!if)!quote
-    branch.expr[] = .{ SuffixMacro: (if!symbol, boxed(init_branch)) };
-    */
-    
-    const find_ = fn(name: Symbol) FatExpr = {
-        let found: FatExpr = panic("handler without matching varient")!quote;
-        let cases: Ptr(CasePayload) = enum_type.Enum.cases[];
-        foreach(cases, fn(check: Symbol, ty: TypeId) Unit = {
-            (eq(name, check))!if;
-            print(name);
-        });
-        found
-    };
-    
-    stmts!reflect_print;
-    puts("Looking for cases");
     foreach(stmts, fn(stmt: Ptr(FatStmt)) Unit = {
-        stmt!reflect_print;
         // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
         (eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol)), fn()={
             let expr: FatExpr = stmt.stmt.Eval[];
-            let name = expr.expr.Closure.name[];
+            let name: Symbol = expr.expr.Closure.name[];
+            let handler_body: (i64, FatExpr) = expr.expr.Closure.body[];  // TODO: better option ffi
+            let handler_body = (fn(a: i64, b: FatExpr) FatExpr = { assert_eq(a, 0); b })(handler_body);
+            
+            let new_branch = (eq(tag_val, tag_value(enum_type_placeholder, case_tag_name)), fn() Unit = case_handler, fn() Unit = if_false)!quote;
+            
+            let new_rep = (
+                (case_tag_name!symbol, literal_ast(Symbol, name!addr)),
+                (case_handler!symbol, handler_body),
+            )!slice;
+            apply_placeholders(new_branch!addr, new_rep);
+            
+            // TODO: single element slice. really just want to addr rvalue?
+            let body_rep = (
+                (if_false!symbol, new_branch),
+                (asklsaklsalk!symbol, new_branch),
+            )!slice;
+            apply_placeholders(body!addr, body_rep);
             
             
-            
-            
-            
-            
-            let cond = arg; // clone
-            
-            
-            
-            
-            
-            
-            /*
-            print(name);
-            
-            puts("case handler:");
-            print(fid);
-            */
         }, fn()=())!if;
     });
-
-    arg
+    let body_rep = (  // TODO: single element slice
+        (if_false!symbol, panic("unhandled match case")!quote),
+        (lmdksdsalmkdasklm!symbol, panic("unhandled match case")!quote),
+    )!slice;
+    apply_placeholders(body!addr, body_rep);
+    
+    let handler_rep = (
+        (arg_init!symbol, arg),
+        (body!symbol, body),
+        (enum_type_placeholder!symbol, literal_ast(Type, enum_type!addr))
+    )!slice;
+    apply_placeholders(handler!addr, handler_rep);
+    
+    handler
 }
 
-// TODO: ret
-fn unwrap_or_99(m: Option(i64)) Option(i64) = @match(m) {
+fn unwrap_or_99(m: Option(i64)) i64 = @match(m) {
     (fn Some(x: i64) i64 = x);
     (fn None(x: Unit) i64 = 99);
 }
 
 let x = unwrap_or_99(yes);
-*/
+
 /*
 asser t_eq(x, 12);
 let x =  unwrap_or_99(no);

@@ -13,7 +13,8 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var, VarType,
+    garbage_loc, Annotation, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var,
+    VarInfo, VarType,
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
@@ -1365,6 +1366,47 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.interp.program.load_value(Value::new_box(1, bytes))
             }
             Expr::PrefixMacro { name, arg, target } => {
+                let name_str = self.pool.get(name.0);
+                if name_str == "with_var" {
+                    if let Expr::Tuple(exprs) = &mut arg.expr {
+                        assert_eq!(exprs.len(), 2);
+                        if let Expr::GetNamed(name) = exprs[0].expr {
+                            let name = Var(name, self.interp.program.vars.len());
+                            self.interp.program.vars.push(VarInfo {
+                                ty: TypeId::any(),
+                                kind: VarType::Var,
+                                loc,
+                            });
+
+                            let mut res = mem::take(target);
+                            let value = mem::take(&mut exprs[1]);
+                            res.walk(&mut |expr| {
+                                if let Expr::GetNamed(n) = expr {
+                                    if *n == name.0 {
+                                        *expr = Expr::GetVar(name);
+                                    }
+                                }
+                            });
+                            expr.expr = Expr::Block {
+                                body: vec![FatStmt {
+                                    stmt: Stmt::DeclVar {
+                                        name,
+                                        ty: LazyType::Infer,
+                                        value: Some(value),
+                                        dropping: None,
+                                        kind: VarType::Var,
+                                    },
+                                    annotations: vec![],
+                                    loc,
+                                }],
+                                result: res,
+                                locals: Some(vec![name]),
+                            };
+                            return self.compile_expr(result, expr, requested);
+                        }
+                    }
+                }
+
                 outln!(
                     LogTag::Macros,
                     "PrefixMacro: {}\nARG: {}\nTARGET: {}",
@@ -1439,6 +1481,37 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
                 let id = self.promote_closure(&result.constants, &mut expr)?;
                 Ok(id.serialize_one())
+            }
+            "literal_ast" => {
+                let (ty, ptr) = self.interp.to_pair(arg)?;
+                let (ty, mut value) =
+                    (self.interp.to_type(ty.into())?, self.interp.deref_ptr(ptr)?);
+                // TODO: stricter typecheck
+                assert_eq!(self.interp.program.slot_count(ty), value.len());
+                if ty == TypeId::ty() {
+                    if let Ok(id) = self.interp.to_int(value.clone().single()?) {
+                        value = Values::One(Value::Type(TypeId(id as usize)))
+                    }
+                }
+                let result = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
+                println!(
+                    "literal_ast: {} is {}",
+                    result.log(self.pool),
+                    self.interp.program.log_type(ty)
+                );
+                Ok(result.serialize_one())
+            }
+            "intern_type" => {
+                let arg: TypeInfo = unwrap!(arg.deserialize(), "");
+                Ok(self.interp.program.intern_type(arg).serialize_one())
+            }
+            "print_ast" => {
+                outln!(ShowPrint, "print_ast1: {arg:?}");
+                let arg: FatExpr = unwrap!(arg.deserialize(), "");
+                outln!(ShowPrint, "show...");
+                outln!(ShowPrint, "print_ast2: {arg:?}");
+                outln!(ShowPrint, "print_ast3: {}", arg.log(self.pool));
+                Ok(Values::One(Value::Unit))
             }
             _ => err!("Macro send unknown message: {name} with {arg:?}",),
         }

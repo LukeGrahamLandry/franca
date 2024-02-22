@@ -157,7 +157,10 @@ pub fn save_logs(folder: &str) {
 
 macro_rules! outln {
     ($tag:expr, $($arg:tt)*) => {{
-        if cfg!(feature = "some_log") {
+        if cfg!(feature = "println_now") && $tag == crate::logging::LogTag::ShowPrint {
+            println!($($arg)*);
+
+        } else if cfg!(feature = "some_log") {
             let tag: crate::logging::LogTag = $tag;
             crate::logging::LOG.with(|settings| {
                 if (settings.borrow().track & (1 << tag as usize)) != 0 {
@@ -629,6 +632,12 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             Expr::FieldAccess(container, name) => {
                 format!("{}.{}", container.log(pool), pool.get(*name))
             }
+            Expr::PrefixMacro { name, arg, target } => format!(
+                "[@{}({}) {}]",
+                name.log(pool),
+                arg.log(pool),
+                target.log(pool)
+            ),
             _ => format!("{:?}", self),
         }
     }
@@ -976,7 +985,8 @@ pub fn log_tag_info() {
     let info = |tag: LogTag, msg: &str| outln!(tag, "{msg}\n###################################");
 
     info(Parsing, "The parser uncovers the structure of your program without any understanding of its semantics.");
-    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation.");
+    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation.\n
+        Overloads have been resolved, types are explicit, macros have been applied.");
     info(
         Macros,
         "Macros are functions, written in this language, that transform the AST.",

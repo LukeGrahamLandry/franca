@@ -497,7 +497,6 @@ pub struct Program<'p> {
     pub overload_sets: Vec<OverloadSet<'p>>,
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
-    pub size_check: Vec<(TypeId, usize)>,
 }
 
 #[derive(Clone)]
@@ -573,14 +572,9 @@ impl<'p> Program<'p> {
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
-            size_check: vec![],
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
-
-        for (ty, expected) in mem::take(&mut program.size_check) {
-            debug_assert_eq!(expected, program.slot_count(ty), "{}", program.log_type(ty));
-        }
 
         program
     }
@@ -588,12 +582,12 @@ impl<'p> Program<'p> {
     /// This allows ffi types to be unique.
     pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            // TODO: recusive data structures. you need to create a place holder for where you're going to put it when you're ready.
+            let n = self.intern_type(TypeInfo::Never);
+            // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId(placeholder);
-            // TODO: this is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
+            // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            let n = self.intern_type(TypeInfo::Never);
             self.types.push(TypeInfo::Struct {
                 fields: vec![],
                 size: T::size(),
@@ -603,13 +597,7 @@ impl<'p> Program<'p> {
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] =
                 TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
-            self.size_check.push((ty_final, T::size()));
-
-            // It might not be a new type, like for numbers that all use TypeId::i64().
-            if ty.0 > placeholder {
-                // debug_assert_eq!(self.types.len() - 1, ty.0);
-                // self.types.pop();
-            }
+            debug_assert_eq!(self.slot_count(ty_final), T::size());
             ty_final
         })
     }
@@ -1033,4 +1021,49 @@ impl<'p> Default for Func<'p> {
 pub fn garbage_loc() -> Span {
     // Surely any (u32, u32) is valid
     unsafe { mem::zeroed() }
+}
+
+impl<'p> Expr<'p> {
+    pub fn walk<M: FnMut(&mut Expr<'p>)>(&mut self, f: &mut M) {
+        f(self);
+        match self {
+            Expr::Call(a, b) => {
+                a.walk(f);
+                b.walk(f);
+            }
+            Expr::Block { result, body, .. } => {
+                for stmt in body {
+                    match stmt.deref_mut() {
+                        Stmt::Eval(e) => e.walk(f),
+                        _ => {}
+                    }
+                }
+                // TODO: body
+                result.walk(f);
+            }
+            Expr::ArrayLiteral(_) => todo!(),
+            Expr::Tuple(e) => {
+                for e in e {
+                    e.walk(f);
+                }
+            }
+            Expr::RefType(_) => todo!(),
+            Expr::EnumLiteral(_) => todo!(),
+            Expr::Closure(func) => {
+                if let Some(e) = func.body.as_mut() {
+                    e.walk(f)
+                }
+            }
+            Expr::SuffixMacro(_, arg) => {
+                arg.walk(f);
+            }
+            Expr::FieldAccess(_, _) => todo!(),
+            Expr::StructLiteralP(_) => todo!(),
+            Expr::PrefixMacro { arg, target, .. } => {
+                arg.walk(f);
+                target.walk(f);
+            }
+            Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) | Expr::GetVar(_) => {}
+        }
+    }
 }
