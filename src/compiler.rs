@@ -17,7 +17,7 @@ use crate::ast::{
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
-use crate::interp::{CallFrame, CmdResult, Interp};
+use crate::interp::{CmdResult, Interp};
 use crate::logging::{outln, LogTag, PoolLog};
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -36,7 +36,7 @@ pub struct CompileError<'p> {
     pub reason: CErr<'p>,
     pub trace: String,
     pub value_stack: Vec<Value>,
-    pub call_stack: Vec<CallFrame<'p>>,
+    pub call_stack: String,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +72,7 @@ pub struct Compile<'a, 'p> {
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
     currently_inlining: Vec<FuncId>,
+    currently_compiling: Vec<FuncId>,
     last_loc: Option<Span>,
 }
 
@@ -106,6 +107,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             currently_inlining: vec![],
             last_loc: None,
             interp: Interp::new(pool, program),
+            currently_compiling: vec![],
         }
     }
 
@@ -185,7 +187,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Err(err) = &mut res {
             err.trace = self.log_trace();
             err.value_stack = self.interp.value_stack.clone();
-            err.call_stack = self.interp.call_stack.clone();
+            err.call_stack = self.interp.log_callstack();
             err.loc = self.interp.last_loc.or(self.last_loc);
         }
         res
@@ -307,8 +309,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    // This is used for
-    // - emiting normal functions into a fresh FnBody
     /// IMPORTANT: this pulls a little sneaky on ya so you can't access the body of the function inside the main emit handlers.
     fn emit_body(
         &mut self,
@@ -970,10 +970,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
-            Expr::Closure(func) => {
-                let id = self.add_func(mem::take(func), &result.constants)?;
-                self.infer_types(id)?;
-                *expr.deref_mut() = self.func_expr(id);
+            Expr::Closure(_) => {
+                let id = self.promote_closure(&result.constants, expr)?;
                 self.interp.program.load_fn(id)
             }
             Expr::Call(f, arg) => {
@@ -1043,7 +1041,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some((from, ty)) = result.vars.get(var).cloned() {
                     let to = result.reserve_slots(self.interp.program, ty)?;
-                    debug_assert_eq!(from.count, to.count);
+                    debug_assert_eq!(from.count, to.count, "{}", self.interp.program.log_type(ty));
                     if from.count == 1 {
                         result.push(Bc::Clone {
                             from: from.first,
@@ -1096,6 +1094,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "if" => self.emit_call_if(result, arg)?,
                     "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
+                    "quote" => {
+                        let arg: FatExpr<'p> = mem::take(arg); // Take the contents of the box, not the box itself!
+                        let value = arg.serialize_one();
+                        let ty = FatExpr::get_type(self.interp.program);
+                        expr.expr = Expr::Value {
+                            ty,
+                            value: value.clone(),
+                        };
+                        Structured::Const(ty, value)
+                    }
                     "slice" => {
                         let container = self.compile_expr(result, arg, None)?;
                         let container_ty = container.ty();
@@ -1268,80 +1276,84 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::StructLiteralP(pattern) => {
                 let requested = unwrap!(requested, "struct literal needs type hint");
                 let names: Vec<_> = pattern.flatten_names();
-                // TODO: why must this suck so bad
-                let values: Option<_> = pattern.flatten_exprs();
-                let mut values: Vec<FatExpr<'_>> = values.unwrap();
-                assert_eq!(names.len(), values.len());
-                let raw_container_ty = self.interp.program.raw_type(requested);
+                mut_replace!(*pattern, |mut pattern: Pattern<'p>| {
+                    // TODO: why must this suck so bad
+                    let values: Option<_> = pattern.flatten_exprs_mut();
+                    let mut values: Vec<_> = values.unwrap();
+                    assert_eq!(names.len(), values.len());
+                    let raw_container_ty = self.interp.program.raw_type(requested);
 
-                match self.interp.program.types[raw_container_ty.0].clone() {
-                    TypeInfo::Struct {
-                        fields, as_tuple, ..
-                    } => {
-                        assert_eq!(
-                            fields.len(),
-                            values.len(),
-                            "Cannot assign {values:?} to type {} = {fields:?}",
-                            self.interp.program.log_type(requested)
-                        );
-                        let all = names.into_iter().zip(values).zip(fields);
-                        let mut values = vec![];
-                        for ((name, mut value), field) in all {
-                            assert_eq!(name, field.name);
-                            let value = self.compile_expr(result, &mut value, Some(field.ty))?;
-                            self.type_check_arg(value.ty(), field.ty, "struct field")?;
-                            values.push(value.unchecked_cast(field.ty));
+                    let res = match self.interp.program.types[raw_container_ty.0].clone() {
+                        TypeInfo::Struct {
+                            fields, as_tuple, ..
+                        } => {
+                            assert_eq!(
+                                fields.len(),
+                                values.len(),
+                                "Cannot assign {values:?} to type {} = {fields:?}",
+                                self.interp.program.log_type(requested)
+                            );
+                            let all = names.into_iter().zip(values).zip(fields);
+                            let mut values = vec![];
+                            for ((name, value), field) in all {
+                                assert_eq!(name, field.name);
+                                let value = self.compile_expr(result, value, Some(field.ty))?;
+                                self.type_check_arg(value.ty(), field.ty, "struct field")?;
+                                values.push(value.unchecked_cast(field.ty));
+                            }
+
+                            let ret =
+                                result.produce_tuple(self.interp.program, values, as_tuple)?;
+                            ret.unchecked_cast(requested)
                         }
-
-                        let ret = result.produce_tuple(self.interp.program, values, as_tuple)?;
-                        ret.unchecked_cast(requested)
-                    }
-                    TypeInfo::Enum {
-                        cases,
-                        size_including_tag: size,
-                    } => {
-                        assert_eq!(
-                            1,
-                            values.len(),
-                            "{} is an enum, value should have one active varient not {values:?}",
-                            self.interp.program.log_type(requested)
-                        );
-                        let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
-                        let type_hint = cases[i].1;
-                        let value = self.compile_expr(result, &mut values[0], Some(type_hint))?;
-                        self.type_check_arg(value.ty(), type_hint, "enum case")?;
-                        // TODO: make this constexpr
-                        let value = result.load(self.interp.program, value)?.0;
-                        if value.count >= size {
-                            ice!("Enum value won't fit.")
-                        }
-                        let mut ret =
-                            result.reserve_slots(self.interp.program, raw_container_ty)?;
-                        result.push(Bc::LoadConstant {
-                            slot: ret.first,
-                            value: Value::I64(i as i64),
-                        });
-                        result.push(Bc::MoveRange {
-                            from: value,
-                            to: StackRange {
-                                first: ret.offset(1),
-                                count: value.count,
-                            },
-                        });
-
-                        // If this is a smaller varient, pad out the slot with units instead of poisons.
-                        ret.count = size;
-                        for i in (value.count + 1)..ret.count {
+                        TypeInfo::Enum {
+                            cases,
+                            size_including_tag: size,
+                        } => {
+                            assert_eq!(
+                                1,
+                                values.len(),
+                                "{} is an enum, value should have one active varient not {values:?}",
+                                self.interp.program.log_type(requested)
+                            );
+                            let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
+                            let type_hint = cases[i].1;
+                            let value = self.compile_expr(result, values[0], Some(type_hint))?;
+                            self.type_check_arg(value.ty(), type_hint, "enum case")?;
+                            // TODO: make this constexpr
+                            let value = result.load(self.interp.program, value)?.0;
+                            if value.count >= size {
+                                ice!("Enum value won't fit.")
+                            }
+                            let mut ret =
+                                result.reserve_slots(self.interp.program, raw_container_ty)?;
                             result.push(Bc::LoadConstant {
-                                slot: ret.offset(i),
-                                value: Value::Unit,
+                                slot: ret.first,
+                                value: Value::I64(i as i64),
                             });
-                        }
+                            result.push(Bc::MoveRange {
+                                from: value,
+                                to: StackRange {
+                                    first: ret.offset(1),
+                                    count: value.count,
+                                },
+                            });
 
-                        (ret, requested).into()
-                    }
-                    _ => err!("struct literal but expected {:?}", requested),
-                }
+                            // If this is a smaller varient, pad out the slot with units instead of poisons.
+                            ret.count = size;
+                            for i in (value.count + 1)..ret.count {
+                                result.push(Bc::LoadConstant {
+                                    slot: ret.offset(i),
+                                    value: Value::Unit,
+                                });
+                            }
+
+                            (ret, requested).into()
+                        }
+                        _ => err!("struct literal but expected {:?}", requested),
+                    };
+                    Ok((pattern, res))
+                })
             }
             &mut Expr::String(i) => {
                 let bytes = self.pool.get(i);
@@ -1371,8 +1383,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ty: self.interp.program.tuple_of(vec![expr_ty, expr_ty]),
                     value: Values::Many(values),
                 };
-                let full_arg = FatExpr::synthetic(full_arg, loc);
-                let f = self.resolve_function(result, *name, &full_arg, Some(want))?;
+                let mut full_arg = FatExpr::synthetic(full_arg, loc);
+                let f = self.resolve_function(result, *name, &mut full_arg, Some(want))?;
                 assert!(self.interp.program.funcs[f.0].has_tag(self.pool, "annotation"));
                 self.infer_types(f)?;
                 let get_func = FatExpr::synthetic(self.func_expr(f), loc);
@@ -1397,7 +1409,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                             CErr::InterpMsgToCompiler(name, arg, ret) => {
                                 let name = self.pool.get(name);
                                 let res = self.handle_macro_msg(result, name, arg)?;
-                                println!("resume...");
                                 response = self.interp.resume(res, ret);
                             }
                             _ => return Err(msg),
@@ -1410,19 +1421,24 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn handle_macro_msg(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &FnBody<'p>,
         name: &str,
         arg: Values,
     ) -> Res<'p, Values> {
         match name {
             "infer_raw_deref_type" => {
-                println!("{arg:?}");
-                let expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
-                println!("{expr:?}");
-                let ty = unwrap!(self.type_of(result, &expr)?, "could not infer type"); // TODO: make it less painful to return an option
-                println!("{ty:?}");
+                let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
+                // TODO: make it less painful to return an option
+                let ty = unwrap!(self.type_of(result, &mut expr)?, "could not infer type");
+                // TODO: deref. you want to get enum not ptr(enum)
+                let ty = self.interp.program.raw_type(ty);
                 let ty = self.interp.program.types[ty.0].clone();
                 Ok(ty.serialize_one())
+            }
+            "promote_closure" => {
+                let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
+                let id = self.promote_closure(&result.constants, &mut expr)?;
+                Ok(id.serialize_one())
             }
             _ => err!("Macro send unknown message: {name} with {arg:?}",),
         }
@@ -1479,9 +1495,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: better error messages
     fn resolve_function(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &FnBody<'p>,
         name: Var<'p>,
-        arg: &FatExpr<'p>,
+        arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
     ) -> Res<'p, FuncId> {
         // If there's only one option, we don't care what type it is.
@@ -1586,7 +1602,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 }
                             }
                         } else {
-                            err!(CErr::VarNotFound(name))
+                            err!(
+                                "expected declarations for overload set {:?}\n{}",
+                                name.log(self.pool),
+                                log_goal(self)
+                            )
                         }
                     }
                     _ => {
@@ -1611,14 +1631,21 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
-    fn type_of(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+    // It's sad that this could mutate expr, but the easiest way to typecheck closures is to promote them to functions,
+    // which you have to do anyway eventually so you might as well save that work.
+    // But it means you have to be careful that if inference fails, you haven't lost the expr in the process.
+    // TODO: maybe this should be more fused with the normal compiling process?
+    //       then need to be more careful about what gets put in the result
+    //       cause like for blocks too, it would be nice to infer a function's return type by just compiling
+    //       the function and seeing what you get.
+    fn type_of(&mut self, result: &FnBody<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if let Some(ty) = expr.ty {
             return Ok(Some(ty));
         }
-        Ok(Some(match expr.deref() {
+        Ok(Some(match expr.deref_mut() {
             Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
-                if let Expr::GetVar(i) = f.deref().deref() {
+                if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
                         if self.infer_types(fid).is_ok() {
                             let f_ty = self.interp.program.funcs[fid.0].unwrap_ty();
@@ -1631,11 +1658,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Block { result: e, .. } => return self.type_of(result, e),
             Expr::Tuple(values) => {
                 let types: Res<'p, Vec<_>> =
-                    values.iter().map(|v| self.type_of(result, v)).collect();
+                    values.iter_mut().map(|v| self.type_of(result, v)).collect();
                 let types = types?;
                 let before = types.len();
                 let types: Vec<_> = types.into_iter().flatten().collect();
-                assert_eq!(before, types.len());
+                assert_eq!(before, types.len(), "some of tuple not infered");
                 self.interp.program.tuple_of(types)
             }
             Expr::FieldAccess(container, name) => {
@@ -1646,18 +1673,25 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(None);
                 }
             }
+            Expr::Closure(_) => {
+                if let Ok(id) = self.promote_closure(&result.constants, expr) {
+                    // TODO: this unwraps.
+                    self.interp.program.func_type(id)
+                } else {
+                    ice!("TODO: closure inference failed. need to make promote_closure non-destructive")
+                }
+            }
             Expr::GetNamed(_)
             | Expr::StructLiteralP(_)
             | Expr::ArrayLiteral(_)
             | Expr::RefType(_)
             | Expr::EnumLiteral(_)
-            | Expr::PrefixMacro { .. }
-            | Expr::Closure(_) => return Ok(None),
+            | Expr::PrefixMacro { .. } => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
-                    "addr" => match arg.deref().deref() {
+                    "addr" => match arg.deref_mut().deref_mut() {
                         Expr::GetVar(var) => {
                             let (_, value_ty) = *result
                                 .vars
@@ -1665,7 +1699,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 .expect("Missing resolved var (TODO: addr of const?)");
                             self.interp.program.intern_type(TypeInfo::Ptr(value_ty))
                         }
-                        &Expr::GetNamed(i) => {
+                        &mut Expr::GetNamed(i) => {
                             logln!(
                                 "UNDECLARED IDENT: {} (in SuffixMacro::addr)",
                                 self.pool.get(i)
@@ -1692,7 +1726,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else if let Some((_, ty)) = result.constants.get(*var) {
                     ty
                 } else {
-                    ice!("type check missing var {var:?}")
+                    ice!("type check missing var {:?}", var.log(self.pool))
                 }
             }
             Expr::String(_) => self
@@ -1978,6 +2012,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(id)
     }
 
+    // TODO: calling this in infer is wrong because it might fail and lose the function
+    fn promote_closure(
+        &mut self,
+        constants: &Constants<'p>,
+        expr: &mut FatExpr<'p>,
+    ) -> Res<'p, FuncId> {
+        if let Expr::Closure(func) = expr.deref_mut() {
+            let f = self.add_func(mem::take(func), constants)?;
+            self.infer_types(f)?;
+            expr.expr = self.func_expr(f);
+            Ok(f)
+        } else {
+            ice!("want closure")
+        }
+    }
+
     // TODO: make this not a special case.
     /// This swaps out the closures for function accesses.
     fn emit_call_if(
@@ -1987,19 +2037,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     ) -> Res<'p, Structured> {
         let (cond, if_true, if_false) = if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], None)?;
-            let if_true = if let Expr::Closure(func) = parts[1].deref_mut() {
-                let f = self.add_func(mem::take(func), &result.constants)?;
-                self.infer_types(f)?;
-                *parts[1].deref_mut() = self.func_expr(f);
-                f
+            let if_true = if let Expr::Closure(_) = parts[1].deref_mut() {
+                self.promote_closure(&result.constants, &mut parts[1])?
             } else {
                 ice!("if second arg must be func not {:?}", parts[1]);
             };
-            let if_false = if let Expr::Closure(func) = parts[2].deref_mut() {
-                let f = self.add_func(mem::take(func), &result.constants)?;
-                self.infer_types(f)?;
-                *parts[2].deref_mut() = self.func_expr(f);
-                f
+            let if_false = if let Expr::Closure(_) = parts[2].deref_mut() {
+                self.promote_closure(&result.constants, &mut parts[2])?
             } else {
                 ice!("if third arg must be func not {:?}", parts[2]);
             };
@@ -2061,19 +2105,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
         let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref_mut() {
-            let cond = if let Expr::Closure(func) = parts[0].deref_mut() {
-                let f = self.add_func(mem::take(func), &result.constants)?;
-                self.infer_types(f)?;
-                *parts[0].deref_mut() = self.func_expr(f);
-                f
+            let cond = if let Expr::Closure(_) = parts[0].deref_mut() {
+                self.promote_closure(&result.constants, &mut parts[0])?
             } else {
                 ice!("while first arg must be func not {:?}", parts[0]);
             };
-            let body = if let Expr::Closure(func) = parts[1].deref_mut() {
-                let f = self.add_func(mem::take(func), &result.constants)?;
-                self.infer_types(f)?;
-                *parts[1].deref_mut() = self.func_expr(f);
-                f
+            let body = if let Expr::Closure(_) = parts[1].deref_mut() {
+                self.promote_closure(&result.constants, &mut parts[1])?
             } else {
                 ice!("while second arg must be func not {:?}", parts[1]);
             };

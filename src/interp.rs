@@ -15,10 +15,7 @@ use crate::{
 };
 use crate::{bc::*, ffi};
 
-use crate::logging::{
-    assert, assert_eq, bin_int, err, ice, logln,
-    LogTag::{ShowErr, ShowPrint},
-};
+use crate::logging::{assert, assert_eq, bin_int, err, ice, logln, LogTag::ShowPrint};
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'p> {
@@ -101,10 +98,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     fn run_continuation(&mut self) -> Res<'p, Values> {
-        if let Err(e) = self.run_inst_loop() {
-            outln!(ShowErr, "{}", self.log_callstack());
-            return Err(e);
-        }
+        self.run_inst_loop()?;
 
         // Give the return value to the caller.
         let frame = unwrap!(self.call_stack.last(), "");
@@ -403,13 +397,12 @@ impl<'a, 'p> Interp<'a, 'p> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
-                outln!(ShowErr, "{}", self.log_callstack());
-                // TODO: let comptime panics get caught by !assert_compile_error
-                if let Some(s) = String::deserialize_one(arg.clone()) {
-                    outln!(ShowErr, "{s}");
-                }
-                outln!(ShowErr, "{arg:?}");
-                err!("Program panicked: {arg:?}",)
+                let msg = if let Some(s) = String::deserialize_one(arg.clone()) {
+                    s
+                } else {
+                    format!("{arg:?}")
+                };
+                err!("Program panicked: \n{msg}\nAt {}", self.log_callstack())
             }
             "assert_eq" => {
                 let (a, b) = self.to_pair(arg)?;
@@ -611,6 +604,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let index = unwrap!(index, "bad case name");
                 Value::I64(index as i64).into()
             }
+            "tag_symbol" => {
+                let (enum_ty, tag_val) = self.to_pair(arg)?;
+                let (enum_ty, tag_val) = (self.to_type(enum_ty.into())?, self.to_int(tag_val)?);
+                let cases = unwrap!(self.program.get_enum(enum_ty), "not enum");
+                let case = unwrap!(cases.get(tag_val as usize), "enum tag too high");
+
+                Value::Symbol(case.0 .0).into()
+            }
             "system" => {
                 self.fail_on_wasm("fn system")?;
                 let mut arg = unwrap!(
@@ -652,7 +653,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ty = self.to_type(arg)?;
                 Value::I64(ty.0 as i64).into()
             }
-            "infer_raw_deref_type" => {
+            _ => {
+                // TODO: since this nolonger checks if its an expected name, you get worse error messages.
                 let name = self.pool.intern(name);
                 self.suspend(
                     name,
@@ -660,11 +662,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
                 )?
             }
-            _ => ice!("Known builtin is not implemented. {}", name),
         };
         Ok(value)
     }
 
+    // This does not spark joy...
+    // I think I'll be spending a while reading about algebreic effects.
     fn suspend(
         &mut self,
         name: Ident<'p>,
@@ -901,6 +904,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // TODO: macros for each builtin arg type cause this sucks.
+    #[track_caller]
     fn load_int_pair(&self, v: Values) -> Res<'p, (i64, i64)> {
         match v {
             Values::Many(mut values) => {
@@ -913,9 +917,11 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
+    #[track_caller]
     fn load_int(&self, v: Value) -> Res<'p, i64> {
         match v {
             Value::I64(i) => Ok(i),
+            Value::Symbol(i) => Ok(i as i64),
             v => err!("load_int {:?}", v),
         }
     }

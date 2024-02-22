@@ -182,6 +182,15 @@ pub struct Pattern<'p> {
     pub loc: Span,
 }
 
+impl<'p> Default for Pattern<'p> {
+    fn default() -> Self {
+        Self {
+            bindings: vec![],
+            loc: garbage_loc(),
+        }
+    }
+}
+
 // arguments of a function and left of variable declaration.
 #[derive(Clone, Debug, InterpSend)]
 pub enum Binding<'p> {
@@ -209,6 +218,19 @@ impl<'p> Binding<'p> {
             Binding::Named(_, ty) => ty.unwrap(),
             Binding::Var(_, ty) => ty.unwrap(),
             Binding::Discard(ty) => ty.unwrap(),
+        }
+    }
+
+    pub fn name(&self) -> Option<Ident<'p>> {
+        match self {
+            Binding::Named(n, _) => Some(*n),
+            Binding::Var(n, _) => Some(n.0),
+            Binding::Discard(_) => None,
+        }
+    }
+    pub fn lazy(&self) -> &LazyType<'p> {
+        match self {
+            Binding::Named(_, l) | Binding::Var(_, l) | Binding::Discard(l) => l,
         }
     }
 }
@@ -266,7 +288,21 @@ impl<'p> Pattern<'p> {
             })
             .collect()
     }
-
+    pub fn flatten_exprs_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
+        self.bindings
+            .iter_mut()
+            .map(|b| match b {
+                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
+            })
+            .map(|t| match t {
+                LazyType::EvilUnit => panic!(),
+                LazyType::Infer => None,
+                LazyType::PendingEval(e) => Some(e),
+                LazyType::Finished(_) => None,
+                LazyType::Different(_) => unreachable!(),
+            })
+            .collect()
+    }
     pub fn remove_named(&mut self, arg_name: Var<'p>) {
         let start = self.bindings.len();
         self.bindings.retain(|b| match b {
@@ -461,6 +497,7 @@ pub struct Program<'p> {
     pub overload_sets: Vec<OverloadSet<'p>>,
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
+    pub size_check: Vec<(TypeId, usize)>,
 }
 
 #[derive(Clone)]
@@ -536,9 +573,14 @@ impl<'p> Program<'p> {
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
+            size_check: vec![],
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
+
+        for (ty, expected) in mem::take(&mut program.size_check) {
+            debug_assert_eq!(expected, program.slot_count(ty), "{}", program.log_type(ty));
+        }
 
         program
     }
@@ -548,18 +590,27 @@ impl<'p> Program<'p> {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             // TODO: recusive data structures. you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            self.types.push(TypeInfo::Never);
-            self.ffi_types.insert(id, TypeId(placeholder));
+            let ty_final = TypeId(placeholder);
+            // TODO: this is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
+            // The problem manifested as wierd bugs in array stride for a few types.
+            let n = self.intern_type(TypeInfo::Never);
+            self.types.push(TypeInfo::Struct {
+                fields: vec![],
+                size: T::size(),
+                as_tuple: n,
+            });
+            self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] =
                 TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
+            self.size_check.push((ty_final, T::size()));
 
             // It might not be a new type, like for numbers that all use TypeId::i64().
             if ty.0 > placeholder {
                 // debug_assert_eq!(self.types.len() - 1, ty.0);
                 // self.types.pop();
             }
-            TypeId(placeholder)
+            ty_final
         })
     }
 
@@ -613,8 +664,8 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         match &self.types[ty.0] {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
-            &TypeInfo::Struct { size, .. } => size,
-            &TypeInfo::Enum {
+            &TypeInfo::Struct { size, .. }
+            | &TypeInfo::Enum {
                 size_including_tag: size,
                 ..
             } => size,
@@ -680,7 +731,7 @@ impl<'p> Program<'p> {
             Value::Symbol(_) => Ident::get_type(self),
             Value::InterpAbsStackAddr(_) => todo!(),
             Value::Heap { .. } => TypeId::any(),
-            Value::OverloadSet(_) => todo!(),
+            Value::OverloadSet(_) => TypeId::any(),
             Value::CFnPtr { ty, .. } => self.intern_type(TypeInfo::Fn(*ty)),
         }
     }

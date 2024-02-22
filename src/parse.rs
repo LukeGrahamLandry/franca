@@ -48,6 +48,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             stmts.push(p.parse_stmt()?);
         }
         let _full = p.end_subexpr();
+        debug_assert!(p.spans.is_empty(), "leaked parse loc context");
 
         Ok(stmts)
     }
@@ -251,7 +252,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             // Require name, optional body.
             Fn => {
                 let loc = self.lexer.nth(0).span;
-                self.start_subexpr();
                 self.eat(Fn)?;
                 let name = self.ident()?;
 

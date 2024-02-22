@@ -28,7 +28,7 @@ pub mod scope;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
     compiler::{Compile, CompileError, ExecTime},
-    logging::{get_logs, outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
+    logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
     parse::Parser,
     scope::ResolveScope,
 };
@@ -79,6 +79,7 @@ pub fn run_main<'a: 'p, 'p>(
     expect: Value,
     save: Option<&str>,
 ) -> bool {
+    log_tag_info();
     let start = timestamp();
     let mut codemap = CodeMap::new();
     let mut stmts = Vec::<FatStmt<'p>>::new();
@@ -169,6 +170,7 @@ pub fn run_main<'a: 'p, 'p>(
 
         outln!(ShowErr, "Internal: {}", e.internal_loc);
         outln!(ShowErr, "{}", e.trace);
+        outln!(ShowErr, "{}", e.call_stack);
         log_dbg(interp, save);
     }
 

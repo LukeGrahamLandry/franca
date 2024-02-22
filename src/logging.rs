@@ -21,7 +21,7 @@ macro_rules! err {
             reason: $payload,
             trace: String::new(),
             value_stack: vec![],
-            call_stack: vec![],
+            call_stack: String::new(),
         })
     }};
     ($($arg:tt)*) => {{
@@ -266,10 +266,11 @@ impl<'p> Program<'p> {
         for (i, ty) in self.types.iter().enumerate() {
             writeln!(
                 s,
-                "- {:?} = {} = {:?}",
+                "- {:?} = {} = {:?}; size={}",
                 TypeId(i),
                 self.log_type(TypeId(i)),
-                ty
+                ty,
+                self.slot_count(TypeId(i))
             );
         }
         writeln!(s, "====================");
@@ -279,9 +280,7 @@ impl<'p> Program<'p> {
     pub fn log_finished_ast(&self, start: FuncId) -> String {
         let mut done = HashSet::new();
         let mut pending = vec![start];
-        let mut out = String::from(
-            "This is the Ast of the program after comptime execution but before code generation.\n###################################\n\n",
-        );
+        let mut out = String::new();
         let mut const_reads = HashSet::new();
 
         while let Some(next) = pending.pop() {
@@ -612,6 +611,24 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.log(pool), pool.get(*i)),
+            Expr::StructLiteralP(pattern) => {
+                let body: String = pattern
+                    .bindings
+                    .iter()
+                    .map(|b| {
+                        format!(
+                            "{}: ({}), ",
+                            b.name().map_or("_", |n| pool.get(n)),
+                            b.lazy().log(pool)
+                        )
+                    })
+                    .collect();
+
+                format!(".{{ {body} }}")
+            }
+            Expr::FieldAccess(container, name) => {
+                format!("{}.{}", container.log(pool), pool.get(*name))
+            }
             _ => format!("{:?}", self),
         }
     }
@@ -952,4 +969,21 @@ impl<'p> Func<'p> {
         }
         s
     }
+}
+
+pub fn log_tag_info() {
+    use LogTag::*;
+    let info = |tag: LogTag, msg: &str| outln!(tag, "{msg}\n###################################");
+
+    info(Parsing, "The parser uncovers the structure of your program without any understanding of its semantics.");
+    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation.");
+    info(
+        Macros,
+        "Macros are functions, written in this language, that transform the AST.",
+    );
+    info(Scope, "As part of resolving variable shadowing, we find out if any functions are actually closures that capture part of thier environment.");
+    info(
+        Bytecode,
+        "Your program broken down into simple instructions. This is the format understood by the comptime interpreter. It's also the only backend that exists so far.",
+    );
 }

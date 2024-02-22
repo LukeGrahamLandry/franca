@@ -50,6 +50,7 @@ pub enum TokenType<'p> {
     PlusEq,
     MinusEq,
     DoubleColon,
+    Pipe,
     Error(LexErr),
 }
 
@@ -120,6 +121,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '^' => self.one(UpArrow),
             '&' => self.one(Amp),
             '?' => self.one(Question),
+            '|' => self.one(Pipe),
             '+' => self.pair('=', Error(LexErr::Unexpected('+')), PlusEq),
             '-' => self.pair('=', Error(LexErr::Unexpected('-')), MinusEq),
             c => self.err(LexErr::Unexpected(c)),
