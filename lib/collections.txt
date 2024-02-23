@@ -15,6 +15,8 @@ fn len() Unit = {unit};
 fn find() Unit = {unit};
 fn pop_last() Unit = {unit};
 fn memcpy() Unit = {unit};
+fn get() Unit = {unit};
+fn set() Unit = {unit};
 
 @comptime @impl
 fn Slice(T: Type) Type = {
@@ -119,7 +121,7 @@ fn List(T: Type) Type = {
     @pub fn list(cap: i64) Self = .{ maybe_uninit: .{ ptr: alloc(T, cap), len: cap}, len: 0 };
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
-    @pub fn list_clone(from: Ptr(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
+    @pub fn list_clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
         let self: Self = list(len(from));
         push_all(self!addr, from);
         self
@@ -134,7 +136,8 @@ fn List(T: Type) Type = {
     }
     
     @pub fn get(self: Self, i: i64) T = {
-        index(self!addr, i)[]
+        let ptr: Ptr(T) = index(self!addr, i);
+        ptr[]
     }
     
     @pub fn reserve(self: Ptr(Self), extra: i64) Unit = {
@@ -175,11 +178,10 @@ fn List(T: Type) Type = {
         self.len[] = add(self.len[], len(new));
     }
     
-    @pub fn drop(self: Ptr(Self)) = dealloc(T, self.maybe_uninit.ptr[]);
+    @pub fn drop(self: Ptr(Self)) = dealloc(T, self.maybe_uninit.ptr[], self.maybe_uninit.len[]);
     
     Self
 }
-
 
 const Str = Slice(u8);
 fn dump_ffi_types() Str;
@@ -217,22 +219,7 @@ fn split(haystack: Str, needle: Str) List(Str) = {
 // TODO: better error message if you call this on Ptr(Str)
 fn splitlines(s: Str) List(Str) = {
     var lf: Str = (10)!slice;  // TODO: string escapes
-    let lines = split(s, lf);
-    
-    /*  this doesndent wordked :(
-    var cr: Str = (13)!slice;
-    var lines: List(Str) = list(1);
-    let temp = split(s, lf);
-    var i = 0;
-    (fn() bool = lt(i, temp.len[]), fn() Unit = {   // TODO: split needs to take an array of things cause this is stupid 
-        let x = split(get(temp, i), cr);
-        let x: Ptr(Str) = items(x!addr);
-        push_all(lines!addr, x);
-        i = add(i, 1); 
-    })!while;
-    */
-    
-    lines
+    split(s, lf)
 }
 
 fn endswith(haystack: Str, needle: Str) bool = {
@@ -313,3 +300,9 @@ fn multi_puts(s: Slice(Str)) Unit = {
 
 // TODO: this is stupid. i have a whole house of cards going on with unique types. 
 @pub fn str_eq(lhs: (Ptr(u8), i64), rhs: (Ptr(u8), i64)) bool = slice_eq(slice(lhs), slice(rhs));
+
+// See `puts(Str)` or `e!reflect_print` for something more useful. TODO: make this generic.
+@env fn print(i: i64) Unit = {
+    let s: Str = str(i);  // TODO: dont treat missing type annotation as Any. actually infer it
+    puts(s.ptr[], s.len[]);
+}

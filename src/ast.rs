@@ -3,7 +3,6 @@ use crate::{
     bc::{Constants, Structured, Value, Values},
     compiler::insert_multi,
     ffi::{init_interp_send, InterpSend},
-    logging::{outln, LogTag},
     pool::{Ident, StringPool},
 };
 use codemap::Span;
@@ -1043,9 +1042,8 @@ impl<'p> Expr<'p> {
             }
             Expr::Block { result, body, .. } => {
                 for stmt in body {
-                    match stmt.deref_mut() {
-                        Stmt::Eval(e) => e.walk(f),
-                        _ => {}
+                    if let Stmt::Eval(e) = stmt.deref_mut() {
+                        e.walk(f)
                     }
                 }
                 // TODO: body

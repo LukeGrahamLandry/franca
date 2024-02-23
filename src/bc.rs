@@ -123,7 +123,6 @@ pub enum Value {
         value: *mut InterpBox,
         physical_first: usize,
         physical_count: usize,
-        stride: usize,
     },
     Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(usize),
@@ -315,9 +314,8 @@ impl Value {
         }
     }
 
-    pub fn new_box(stride: usize, values: Vec<Value>, is_constant: bool) -> Value {
+    pub fn new_box(values: Vec<Value>, is_constant: bool) -> Value {
         let count = values.len();
-        debug_assert_eq!(values.len() % stride, 0);
         let value = Box::into_raw(Box::new(InterpBox {
             references: 1,
             values,
@@ -327,7 +325,6 @@ impl Value {
             value,
             physical_first: 0,
             physical_count: count,
-            stride,
         }
     }
 

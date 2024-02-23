@@ -344,7 +344,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             Value::Heap {
                 value,
                 physical_first,
-                stride,
                 ..
             } => {
                 let abs_first = physical_first + physical_offset;
@@ -360,7 +359,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     value,
                     physical_first: abs_first,
                     physical_count,
-                    stride,
                 })
             }
             _ => err!("Wanted ptr found {:?}", base),
@@ -485,7 +483,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     Value::Heap {
                         value,
                         physical_first: first,
-                        stride,
                         ..
                     } => {
                         let abs_first = first + new_first as usize;
@@ -503,7 +500,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                             value,
                             physical_first: abs_first,
                             physical_count: (new_last - new_first) as usize,
-                            stride,
                         }
                     }
                     _ => err!("Wanted ptr found {:?}", addr),
@@ -525,7 +521,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     value,
                     physical_first: 0,
                     physical_count: count as usize * stride,
-                    stride,
                 }
                 .into()
             }
@@ -534,10 +529,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 msg.serialize_one()
             }
             "dealloc" => {
-                let (ty, ptr) = self.to_pair(arg)?;
-                let (ty, (ptr, ptr_first, ptr_count, stride)) =
-                    (self.to_type(ty.into())?, self.to_heap_ptr(ptr.into())?);
-                assert_eq!(stride, self.program.slot_count(ty));
+                let (ty, ptr, count) = self.to_triple(arg)?;
+                let (ty, count, (ptr, ptr_first, ptr_count)) = (
+                    self.to_type(ty.into())?,
+                    self.to_int(count)?,
+                    self.to_heap_ptr(ptr.into())?,
+                );
+                assert_eq!(self.program.slot_count(ty) * count as usize, ptr_count);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
@@ -655,14 +653,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 Value::I64(ty.0 as i64).into()
             }
             "clone_const" => {
-                let (ptr, first, count, stride) = self.to_heap_ptr(arg)?;
+                let (ptr, first, count) = self.to_heap_ptr(arg)?;
                 let ptr = unsafe { &mut *ptr };
                 assert!(
                     ptr.is_constant,
                     "clone_const but not const, you could just mutate it"
                 );
                 let values = ptr.values[first..(first + count)].to_vec();
-                Value::new_box(stride, values, false).into()
+                Value::new_box(values, false).into()
             }
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
@@ -750,7 +748,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     #[track_caller]
     fn take_slot(&mut self, slot: StackOffset) -> Value {
         let value = replace(self.get_slot_mut(slot), Value::Poison);
-        debug_assert_ne!(value, Value::Poison);
+        debug_assert_ne!(value, Value::Poison, "{}", self.log_callstack());
         value
     }
 
@@ -900,15 +898,14 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    fn to_heap_ptr(&self, value: Values) -> Res<'p, (*mut InterpBox, usize, usize, usize)> {
+    fn to_heap_ptr(&self, value: Values) -> Res<'p, (*mut InterpBox, usize, usize)> {
         if let Values::One(Value::Heap {
             value,
             physical_first: first,
             physical_count: count,
-            stride,
         }) = value
         {
-            Ok((value, first, count, stride))
+            Ok((value, first, count))
         } else {
             err!(CErr::TypeError("Heap", value))
         }
@@ -1013,7 +1010,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                         value,
                         physical_first: first,
                         physical_count: count,
-                        stride,
                     } => {
                         let values = unsafe { &mut *value };
                         outln!(
@@ -1022,20 +1018,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                             "=".repeat(depth),
                             &values.values[first..(first + count)]
                         );
-                        if (count % stride) == 0 && count != stride {
-                            for i in 0..(count / stride) {
-                                self.reflect_print(
-                                    Value::Heap {
-                                        value,
-                                        physical_first: first + (i * stride),
-                                        physical_count: stride,
-                                        stride,
-                                    }
-                                    .into(),
-                                    depth + 2,
-                                )?;
-                            }
-                        }
 
                         break;
                     }

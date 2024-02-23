@@ -36,7 +36,6 @@ pub trait InterpSend<'p>: Sized {
     fn size() -> usize;
 }
 
-// TODO: put these in a file that you can look at to debug.
 macro_rules! init_interp_send {
     ($program:expr, $ty:ty) => {
         <$ty>::get_type($program);
@@ -168,7 +167,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
             e.serialize(&mut parts);
         }
         debug_assert_eq!(parts.len(), T::size() * len);
-        values.push(Value::new_box(T::size(), parts, false));
+        values.push(Value::new_box(parts, false));
         values.push(Value::I64(len as i64));
     }
 
@@ -221,7 +220,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         let inner: T = *self;
         inner.serialize(&mut parts);
         debug_assert_eq!(parts.len(), T::size());
-        values.push(Value::new_box(T::size(), parts, false))
+        values.push(Value::new_box(parts, false))
     }
 
     fn deserialize(values_in: &mut impl Iterator<Item = Value>) -> Option<Self> {

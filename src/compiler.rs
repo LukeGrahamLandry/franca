@@ -73,7 +73,7 @@ pub struct Compile<'a, 'p> {
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
     currently_inlining: Vec<FuncId>,
-    currently_compiling: Vec<FuncId>,
+    _currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     last_loc: Option<Span>,
 }
 
@@ -108,7 +108,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             currently_inlining: vec![],
             last_loc: None,
             interp: Interp::new(pool, program),
-            currently_compiling: vec![],
+            _currently_compiling: vec![],
         }
     }
 
@@ -2325,6 +2325,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if self.type_check_arg(f, e, msg).is_ok() {
                         return Ok(());
                     }
+                }
+                (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => {
+                    return Ok(())
                 }
                 (TypeInfo::Tuple(_), TypeInfo::Type) | (TypeInfo::Type, TypeInfo::Tuple(_)) => {
                     return Ok(())
