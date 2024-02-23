@@ -67,16 +67,21 @@ assert_eq(true, @is_declared() i64);
 fn tag_symbol(E: Type, value: i64) Symbol;
 fn print_ast(v: FatExpr) Unit;
 
+// TODO: Calling the same macro time is totally fucked because you alias the constants!
+//       I need copy vs clone. but this is my temporary fix. you need to call this every time you use !quote. 
+// TODO: it correctly errors when yuou try to mutate through an array but not when you just try to set a field value i guess? 
+//       need to put is_constant on Values instead of on InterpBox. 
+fn clone_ast(e: FatExpr) FatExpr;
+// Only works on const heap pointers (panics otherwise).
+fn clone_const(ptr: Any) Any;
+
 // Note: this sucks because it can't use @match because that implementation wants to use this function. 
 fn visit_expr(start: Ptr(FatExpr), f: Fn(Ptr(FatExpr), Unit)) Unit = {
     var stack: List(Ptr(FatExpr)) = list(1);
     push(stack!addr, start);
     
     (fn() bool = gt(stack.len[], 0), fn() Unit = {
-        puts("stack len:");
-        print(stack.len[]);
         let e: Ptr(FatExpr) = pop_last(stack!addr);
-        print_ast(e[]);
         f(e);
         
         let tag: Symbol = tag_symbol(Expr, e.expr!tag[]);
@@ -99,17 +104,19 @@ fn visit_expr(start: Ptr(FatExpr), f: Fn(Ptr(FatExpr), Unit)) Unit = {
                     push(stack!addr, target);
                 }, fn() Unit ={
                     (eq(tag, Closure!symbol), fn() Unit ={
-                        puts("a");
                         const OptExpr: Type = (i64, FatExpr);
                         let body: Ptr(OptExpr) = e.expr.Closure.body;  // TODO: better option ffi
-                        (fn(a: i64, b: FatExpr) Unit = { assert_eq(a, 0); })(body[]);
-                        body!reflect_print;
+                        (fn(a: i64, b: FatExpr) Unit = { assert(eq(a, 0), "missing body"); })(body[]);
                         let body: Ptr(FatExpr) = raw_slice(body, 1, size_of(OptExpr));
-                        body!reflect_print;
                         push(stack!addr, body);
-                        puts("b");
                     }, fn() Unit ={
-                        // @todo
+                        (eq(tag, SuffixMacro!symbol), fn() Unit ={
+                            (fn(a: Symbol, arg: Ptr(FatExpr)) Unit = { 
+                                push(stack!addr, arg);
+                             })(e.expr.SuffixMacro[]);
+                        }, fn() Unit ={
+                            // @todo
+                        })!if
                     })!if
                 })!if
             })!if
@@ -138,7 +145,7 @@ fn apply_placeholders(template: Ptr(FatExpr), replacements: Ptr(Subst)) Unit = {
 fn apply_func_with_five(number: FatExpr, func: FatExpr) FatExpr = {
     // The following is equvilent to rust's `quote!{ #func(5, #number) }`.
     // Ask the compiler to give us the ast for the expression "function_placeholder(5, number_placeholder)"
-    var template: FatExpr = (function_placeholder(5, number_placeholder))!quote;
+    var template: FatExpr = clone_ast((function_placeholder(5, number_placeholder))!quote);
     // Traverse our new expression and replace specific variables with the macro invocation's arguments. 
     let replacements = (
         (number_placeholder!symbol, number),
@@ -161,9 +168,6 @@ assert_eq(seven, 7);
 
 @comptime
 fn Option(T: Type) Type = .{ Some: T, None: Unit }!enum;
-
-let yes: Option(i64) = .{ Some: 12 };
-let no: Option(i64) = .{ None: unit };
 
 // puts(dump_ffi_types());
 
@@ -196,28 +200,41 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     let enum_type: TypeId = intern_type(enum_type);
     
     // Declaring variables is weird because name resolution has already run.
-    let handler = (@with_var(arg_var, arg_init) @with_var(tag_val, arg_var!tag!deref) body)!quote;
+    let handler = clone_ast((@with_var(arg_var, arg_init) @with_var(tag_val, arg_var!tag!deref) body_placeholder)!quote);
     var body = (if_false)!quote;
     
     foreach(stmts, fn(stmt: Ptr(FatStmt)) Unit = {
         // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
         (eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol)), fn()={
-            let expr: FatExpr = stmt.stmt.Eval[];
-            let name: Symbol = expr.expr.Closure.name[];
-            let handler_body: (i64, FatExpr) = expr.expr.Closure.body[];  // TODO: better option ffi
-            let handler_body = (fn(a: i64, b: FatExpr) FatExpr = { assert_eq(a, 0); b })(handler_body);
+            let handler_body: FatExpr = stmt.stmt.Eval[];
+            let name: Symbol = handler_body.expr.Closure.name[];
             
-            let new_branch = (eq(tag_val, tag_value(enum_type_placeholder, case_tag_name)), fn() Unit = case_handler, fn() Unit = if_false)!quote;
+            // TODO: infer output type instead of just forcing int. 
+            let new_branch = clone_ast((eq(tag_val, tag_value(enum_type_placeholder, case_tag_name)), 
+                fn() i64 = (case_handler)(case_access_placeholder!deref), 
+                fn() i64 = if_false_temp
+            )!if!quote);
+            
+            var case_access: FatExpr = clone_ast((arg_var.___)!quote);
+            raw_slice(case_access.expr.FieldAccess, 1, 2)[] = name;
             
             let new_rep = (
                 (case_tag_name!symbol, literal_ast(Symbol, name!addr)),
                 (case_handler!symbol, handler_body),
+                (enum_type_placeholder!symbol, literal_ast(Type, enum_type!addr)),
+                (case_access_placeholder!symbol, case_access)
             )!slice;
             apply_placeholders(new_branch!addr, new_rep);
             
             // TODO: single element slice. really just want to addr rvalue?
             let body_rep = (
                 (if_false!symbol, new_branch),
+                (asklsaklsalk!symbol, new_branch),
+            )!slice;
+            apply_placeholders(body!addr, body_rep);
+            
+            let body_rep = (
+                (if_false_temp!symbol, clone_ast(if_false!quote)),
                 (asklsaklsalk!symbol, new_branch),
             )!slice;
             apply_placeholders(body!addr, body_rep);
@@ -233,7 +250,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     
     let handler_rep = (
         (arg_init!symbol, arg),
-        (body!symbol, body),
+        (body_placeholder!symbol, body),
         (enum_type_placeholder!symbol, literal_ast(Type, enum_type!addr))
     )!slice;
     apply_placeholders(handler!addr, handler_rep);
@@ -241,18 +258,34 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     handler
 }
 
-fn unwrap_or_99(m: Option(i64)) i64 = @match(m) {
-    (fn Some(x: i64) i64 = x);
-    (fn None(x: Unit) i64 = 99);
-}
+const StupidEnum = .{ Only: i64 }!enum;
 
-let x = unwrap_or_99(yes);
 
-/*
-asser t_eq(x, 12);
-let x =  unwrap_or_99(no);
-asser t_eq(x, 99);
-*/
+let useless: StupidEnum = .{ Only: 18 };
+let y: i64 = @match(useless) {
+    (fn Only(inner: i64) i64 = inner);  // TODO: error if you dont put it in a closure
+};
+assert_eq(18, y);
+
+
+// TODO: you can't put the match in the function because it does close over the constants the match needs to call. 
+//      but it shouldn't need to. the anotation handler should have grabbed them at its declaration like any other function.
+//      it shouldn't be emitting a call to `intern_type`, it should be baking the result. 
+// fn unwrap_or_99(m: Option(i64)) i64 = @todo();
+
+let yes: Option(i64) = .{ Some: 12 };
+let no: Option(i64) = .{ None: unit };
+let res = @match(yes) {
+    (fn Some(payload: i64) i64 = payload);
+    (fn None(payload: Unit) i64 = 99);
+};
+assert_eq(res, 12);
+
+let res = @match(no) {
+    (fn Some(payload: i64) i64 = payload);
+    (fn None(payload: Unit) i64 = 99);
+};
+assert_eq(res, 99);
 
 canary
 }

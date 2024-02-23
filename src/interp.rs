@@ -519,6 +519,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let value = Box::into_raw(Box::new(InterpBox {
                     references: 1,
                     values,
+                    is_constant: false,
                 }));
                 Value::Heap {
                     value,
@@ -652,6 +653,16 @@ impl<'a, 'p> Interp<'a, 'p> {
             "type_id" => {
                 let ty = self.to_type(arg)?;
                 Value::I64(ty.0 as i64).into()
+            }
+            "clone_const" => {
+                let (ptr, first, count, stride) = self.to_heap_ptr(arg)?;
+                let ptr = unsafe { &mut *ptr };
+                assert!(
+                    ptr.is_constant,
+                    "clone_const but not const, you could just mutate it"
+                );
+                let values = ptr.values[first..(first + count)].to_vec();
+                Value::new_box(stride, values, false).into()
             }
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
@@ -962,6 +973,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                         && first < ptr.values.len()
                         && (first + count) <= ptr.values.len()
                 );
+                if ptr.is_constant {
+                    err!("Illegal mutation of baked constant",)
+                }
                 let values: Vec<_> = value.into();
                 assert_eq!(values.len(), count);
                 for (i, entry) in values.into_iter().enumerate() {

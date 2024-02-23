@@ -1096,9 +1096,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
                     "quote" => {
-                        let arg: FatExpr<'p> = mem::take(arg); // Take the contents of the box, not the box itself!
-                        let value = arg.serialize_one();
+                        let arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
+                        let mut value = arg.serialize_one();
+                        value.make_heap_constant();
                         let ty = FatExpr::get_type(self.interp.program);
+                        // TODO: want to do this but then my mutation fucks everything. you really do need to do the clone.
+                        //       replace with that constant and a clone. need to impl clone. but deep clone that works on heap ptrs.
                         expr.expr = Expr::Value {
                             ty,
                             value: value.clone(),
@@ -1363,10 +1366,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .iter()
                     .map(|b| Value::I64(*b as i64))
                     .collect();
-                self.interp.program.load_value(Value::new_box(1, bytes))
+                self.interp
+                    .program
+                    .load_value(Value::new_box(1, bytes, true))
             }
             Expr::PrefixMacro { name, arg, target } => {
                 let name_str = self.pool.get(name.0);
+                // TODO: this doesn't work in general because it doesnt recalculate closure captures.
                 if name_str == "with_var" {
                     if let Expr::Tuple(exprs) = &mut arg.expr {
                         assert_eq!(exprs.len(), 2);
@@ -1512,6 +1518,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 outln!(ShowPrint, "print_ast2: {arg:?}");
                 outln!(ShowPrint, "print_ast3: {}", arg.log(self.pool));
                 Ok(Values::One(Value::Unit))
+            }
+            "clone_ast" => {
+                let arg: FatExpr = unwrap!(arg.deserialize(), "");
+                Ok(arg.serialize_one())
             }
             _ => err!("Macro send unknown message: {name} with {arg:?}",),
         }

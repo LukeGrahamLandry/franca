@@ -165,7 +165,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         for e in self {
             e.serialize(&mut parts);
         }
-        values.push(Value::new_box(T::size(), parts))
+        values.push(Value::new_box(T::size(), parts, false))
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {

@@ -985,8 +985,7 @@ pub fn log_tag_info() {
     let info = |tag: LogTag, msg: &str| outln!(tag, "{msg}\n###################################");
 
     info(Parsing, "The parser uncovers the structure of your program without any understanding of its semantics.");
-    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation.\n
-        Overloads have been resolved, types are explicit, macros have been applied.");
+    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation. \nOverloads have been resolved, types are explicit, macros have been applied.");
     info(
         Macros,
         "Macros are functions, written in this language, that transform the AST.",

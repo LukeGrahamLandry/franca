@@ -229,6 +229,7 @@ impl StackRange {
 pub struct InterpBox {
     pub references: isize,
     pub values: Vec<Value>,
+    pub is_constant: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -284,6 +285,27 @@ impl<'p> Constants<'p> {
     }
 }
 
+impl Values {
+    pub fn make_heap_constant(&mut self) {
+        match self {
+            Values::One(v) => {
+                if let Value::Heap { value, .. } = v {
+                    let value = unsafe { &mut **value };
+                    value.is_constant = true;
+                }
+            }
+            Values::Many(values) => {
+                for v in values {
+                    if let Value::Heap { value, .. } = v {
+                        let value = unsafe { &mut **value };
+                        value.is_constant = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl Value {
     pub fn to_func(self) -> Option<FuncId> {
         if let Value::GetFn(f) = self {
@@ -293,12 +315,13 @@ impl Value {
         }
     }
 
-    pub fn new_box(stride: usize, values: Vec<Value>) -> Value {
+    pub fn new_box(stride: usize, values: Vec<Value>, is_constant: bool) -> Value {
         let count = values.len();
         debug_assert_eq!(values.len() % stride, 0);
         let value = Box::into_raw(Box::new(InterpBox {
             references: 1,
             values,
+            is_constant,
         }));
         Value::Heap {
             value,

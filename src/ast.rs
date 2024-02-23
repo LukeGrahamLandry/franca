@@ -635,7 +635,10 @@ impl<'p> Program<'p> {
     }
 
     pub fn load_value(&mut self, v: Value) -> Structured {
-        Structured::Const(self.type_of(&v), v.into())
+        let ty = self.type_of(&v);
+        let mut v: Values = v.into();
+        v.make_heap_constant();
+        Structured::Const(ty, v)
     }
 
     pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {
@@ -1057,7 +1060,7 @@ impl<'p> Expr<'p> {
             Expr::SuffixMacro(_, arg) => {
                 arg.walk(f);
             }
-            Expr::FieldAccess(_, _) => todo!(),
+            Expr::FieldAccess(e, _) => e.walk(f),
             Expr::StructLiteralP(_) => todo!(),
             Expr::PrefixMacro { arg, target, .. } => {
                 arg.walk(f);
