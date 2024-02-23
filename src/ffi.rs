@@ -29,7 +29,7 @@ pub trait InterpSend<'p>: Sized {
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
     fn deserialize_one(value: Values) -> Option<Self> {
         let value: Vec<_> = value.into();
-        debug_assert_eq!(value.len(), Self::size());
+        debug_assert_eq!(value.len(), Self::size(), "{value:?}");
         Self::deserialize(&mut value.into_iter())
     }
 
@@ -157,27 +157,32 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn create_type(program: &mut Program<'p>) -> TypeId {
         let ty = T::get_type(program);
-        program.intern_type(TypeInfo::Ptr(ty))
+        let ty = program.intern_type(TypeInfo::Ptr(ty));
+        program.intern_type(TypeInfo::Tuple(vec![ty, TypeId::i64()]))
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
+        let len = self.len();
         let mut parts = vec![];
         for e in self {
             e.serialize(&mut parts);
         }
-        values.push(Value::new_box(T::size(), parts, false))
+        debug_assert_eq!(parts.len(), T::size() * len);
+        values.push(Value::new_box(T::size(), parts, false));
+        values.push(Value::I64(len as i64));
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        let ptr = values.next()?;
+        let len = usize::deserialize(values)?;
         if let Value::Heap {
             value,
             physical_first: first,
             physical_count: count,
-            stride,
-        } = values.next()?
+            ..
+        } = ptr
         {
-            debug_assert_eq!(stride, T::size());
-            debug_assert_eq!(count % T::size(), 0);
+            debug_assert_eq!(len * T::size(), count);
             let value = unsafe { &mut *value };
             if value.references <= 0 {
                 outln!(ShowErr, "deserialize: references < 1");
@@ -186,7 +191,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
             let mut values = value.values[first..(first + count)].iter().copied();
             let mut res = vec![];
-            for _ in 0..(count / T::size()) {
+            for _ in 0..len {
                 res.push(T::deserialize(&mut values)?);
             }
             debug_assert!(values.next().is_none());
@@ -197,7 +202,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     }
 
     fn size() -> usize {
-        1
+        2
     }
 }
 
@@ -212,14 +217,32 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
-        vec![*self].serialize(values)
+        let mut parts = vec![];
+        let inner: T = *self;
+        inner.serialize(&mut parts);
+        debug_assert_eq!(parts.len(), T::size());
+        values.push(Value::new_box(T::size(), parts, false))
     }
 
-    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-        let mut v = <Vec<T>>::deserialize(values)?.into_iter();
-        let me = v.next()?;
-        if v.next().is_none() {
-            Some(Box::new(me))
+    fn deserialize(values_in: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        if let Value::Heap {
+            value,
+            physical_first: first,
+            physical_count: count,
+            ..
+        } = values_in.next()?
+        {
+            debug_assert_eq!(count, T::size(), "box must contain one element");
+            let value = unsafe { &mut *value };
+            if value.references <= 0 {
+                outln!(ShowErr, "deserialize: references < 1");
+                return None;
+            }
+
+            let mut values = value.values[first..(first + count)].iter().copied();
+            let res = Box::new(T::deserialize(&mut values)?);
+            debug_assert!(values.next().is_none());
+            Some(res)
         } else {
             None
         }
@@ -320,7 +343,7 @@ impl<'p> InterpSend<'p> for Span {
     }
 
     fn size() -> usize {
-        2
+        <(u32, u32)>::size()
     }
 }
 
@@ -348,7 +371,7 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     }
 
     fn size() -> usize {
-        1
+        Vec::<(K, V)>::size()
     }
 }
 
@@ -370,7 +393,7 @@ impl<'p> InterpSend<'p> for String {
     }
 
     fn size() -> usize {
-        1
+        Vec::<u8>::size()
     }
 }
 

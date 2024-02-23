@@ -3,6 +3,7 @@ use crate::{
     bc::{Constants, Structured, Value, Values},
     compiler::insert_multi,
     ffi::{init_interp_send, InterpSend},
+    logging::{outln, LogTag},
     pool::{Ident, StringPool},
 };
 use codemap::Span;
@@ -597,7 +598,12 @@ impl<'p> Program<'p> {
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] =
                 TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
-            debug_assert_eq!(self.slot_count(ty_final), T::size());
+            debug_assert_eq!(
+                self.slot_count(ty_final),
+                T::size(),
+                "{}",
+                self.log_type(ty_final)
+            );
             ty_final
         })
     }
@@ -759,7 +765,8 @@ impl<'p> Program<'p> {
     }
 
     pub fn slice_type(&mut self, value_ty: TypeId) -> TypeId {
-        self.intern_type(TypeInfo::Slice(value_ty))
+        let ptr = self.ptr_type(value_ty);
+        self.intern_type(TypeInfo::Tuple(vec![ptr, TypeId::i64()]))
     }
 
     pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {

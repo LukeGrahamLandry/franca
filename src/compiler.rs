@@ -779,6 +779,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Drop the instantiation of the function specialized to this call's arguments.
         // We cache the result and will never need to call it again.
         let mut func = mem::take(&mut self.interp.program.funcs[f.0]);
+        let name = func.name;
         let body = func.body.take();
         let result = if let Some(body) = body {
             self.immediate_eval_expr(&func.closed_constants, body, ret)?
@@ -788,6 +789,15 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let ty = self.interp.program.type_of_raw(&result);
         self.type_check_arg(ty, ret, "generic result")?;
+
+        outln!(
+            LogTag::Generics,
+            "{:?}={} of {:?} => {:?}",
+            key.0,
+            self.pool.get(name),
+            key.1,
+            result
+        );
 
         self.interp
             .program
@@ -910,6 +920,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                         result
                             .constants
                             .insert(var, (Value::OverloadSet(index).into(), TypeId::any()));
+                    }
+                }
+
+                let func = &self.interp.program.funcs[id.0];
+                if func.has_tag(self.pool, "impl") {
+                    for stmt in &func.local_constants {
+                        if let Stmt::DeclFunc(new) = &stmt.stmt {
+                            if new.referencable_name {
+                                // hey, if you're ever looking for this name, try calling me and I might give you one.
+                                insert_multi(&mut self.interp.program.impls, new.name, id);
+                            }
+                        }
                     }
                 }
             }
@@ -1112,21 +1134,25 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let container = self.compile_expr(result, arg, None)?;
                         let container_ty = container.ty();
                         let ty = self.interp.program.tuple_types(container.ty());
-                        let expect = if let Some(types) = ty {
+                        let (expect, count) = if let Some(types) = ty {
                             let expect = *unwrap!(types.iter().find(|t| !t.is_any()), "all any");
                             for t in types {
                                 self.type_check_arg(*t, expect, "match slice types")?;
                             }
-                            expect
+                            (expect, types.len())
                         } else {
-                            container.ty()
+                            (container.ty(), 1)
                         };
-                        let ptr_ty = self.interp.program.ptr_type(expect);
+                        let ptr_ty = self.interp.program.slice_type(expect);
                         let ptr = result.reserve_slots(self.interp.program, ptr_ty)?;
                         let slot = result.load(self.interp.program, container)?.0;
                         result.push(Bc::AbsoluteStackAddr {
                             of: slot,
-                            to: ptr.single(),
+                            to: ptr.offset(0),
+                        });
+                        result.push(Bc::LoadConstant {
+                            slot: ptr.offset(1),
+                            value: Value::I64(count as i64),
                         });
                         result.to_drop.push((slot, container_ty));
                         (ptr, ptr_ty).into()
@@ -1360,15 +1386,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 })
             }
             &mut Expr::String(i) => {
-                let bytes = self.pool.get(i);
-                let bytes = bytes
-                    .as_bytes()
-                    .iter()
-                    .map(|b| Value::I64(*b as i64))
-                    .collect();
-                self.interp
-                    .program
-                    .load_value(Value::new_box(1, bytes, true))
+                let bytes = self.pool.get(i).to_string();
+                let mut bytes = bytes.serialize_one();
+                bytes.make_heap_constant();
+                Structured::Const(String::get_type(self.interp.program), bytes)
             }
             Expr::PrefixMacro { name, arg, target } => {
                 let name_str = self.pool.get(name.0);
@@ -1500,11 +1521,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 let result = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
-                println!(
-                    "literal_ast: {} is {}",
-                    result.log(self.pool),
-                    self.interp.program.log_type(ty)
-                );
                 Ok(result.serialize_one())
             }
             "intern_type" => {
@@ -1639,10 +1655,32 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         // Compute overloads.
                         if let Some(decls) = self.interp.program.declarations.get(&name.0) {
+                            outln!(
+                                LogTag::Generics,
+                                "Compute overloads of {} = L{i}",
+                                name.log(self.pool),
+                            );
                             let mut found = None;
-                            let decls = decls.clone();
+                            let decls: Vec<_> = decls
+                                .iter()
+                                .copied()
+                                .filter(|f| !overloads.0.iter().any(|old| old.func == *f))
+                                .collect();
                             for f in &decls {
                                 if let Ok(f_ty) = self.infer_types(*f) {
+                                    outln!(
+                                        LogTag::Generics,
+                                        "- {f:?} is {} -> {}",
+                                        self.interp.program.log_type(f_ty.arg),
+                                        self.interp.program.log_type(f_ty.ret)
+                                    );
+                                    // Even if it wasn't right, still keep the work.
+                                    // TODO: this is probably wrong if you use !assert_compile_error
+                                    self.interp.program.overload_sets[i].0.push(OverloadOption {
+                                        name: name.0,
+                                        ty: f_ty,
+                                        func: *f,
+                                    });
                                     if accept(f_ty) {
                                         assert!(
                                             found.is_none(),
@@ -1656,12 +1694,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 }
                             }
                             match found {
-                                Some((func, ty)) => {
-                                    self.interp.program.overload_sets[i].0.push(OverloadOption {
-                                        name: name.0,
-                                        ty,
-                                        func,
-                                    });
+                                Some((func, _)) => {
                                     self.pop_state(state);
                                     Ok(func)
                                 }
@@ -1679,6 +1712,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                                             );
                                         }
                                     }
+                                    outln!(
+                                        ShowErr,
+                                        "Impls: {:?}",
+                                        self.interp.program.impls.get(&name.0)
+                                    );
                                     outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
 
                                     err!(CErr::AmbiguousCall)
@@ -1812,10 +1850,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("type check missing var {:?}", var.log(self.pool))
                 }
             }
-            Expr::String(_) => self
-                .interp
-                .program
-                .intern_type(TypeInfo::Ptr(TypeId::i64())),
+            Expr::String(_) => String::get_type(self.interp.program),
         }))
     }
 
@@ -2278,6 +2313,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                             return Ok(());
                         }
                     }
+                }
+                // TODO: only allow destructuring in some contexts.
+                (&TypeInfo::Struct { as_tuple, .. }, TypeInfo::Tuple(_)) => {
+                    return self.type_check_arg(as_tuple, expected, msg);
+                }
+                (TypeInfo::Tuple(_), &TypeInfo::Struct { as_tuple, .. }) => {
+                    return self.type_check_arg(found, as_tuple, msg);
                 }
                 (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
                     if self.type_check_arg(f, e, msg).is_ok() {

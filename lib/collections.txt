@@ -3,7 +3,6 @@ fn list() Unit = {unit};
 fn push() Unit = {unit};
 fn items() Unit = {unit};
 fn drop() Unit = {unit};
-fn addr() Unit = {unit};
 fn subslice() Unit = {unit};
 fn push_all() Unit = {unit};
 fn list_clone() Unit = {unit};
@@ -15,49 +14,47 @@ fn slice() Unit = {unit};
 fn len() Unit = {unit};
 fn find() Unit = {unit};
 fn pop_last() Unit = {unit};
-
-// TODO: scope resolution for recursion. 
 fn memcpy() Unit = {unit};
 
-// TODO: move the slice iteration utils out of this. make iterators chainable. 
-@comptime fn List(T: Type) Type = {
-    const Self: Type = .{ maybe_uninit: Ptr(T), len: i64 }!struct;
-    // TODO: it doesnt realize that arguments are const if its @comptime, 
-    //       so it thinks fn vec runtime captures T so it uses emit_capturing_call
-    const T = T;
+@comptime @impl
+fn Slice(T: Type) Type = {
+    const Self: Type = .{ ptr: Ptr(T), len: i64 }!struct;
+    const T = T;  // TODO
     
-    fn len(self: Ptr(T)) i64 = {
-        div(raw_len(self), size_of(T))
-    }
+    @pub fn slice(ptr: Ptr(T)) Self = .{ ptr: ptr, len: 1 };
+    @pub fn slice(ptr: Ptr(T), count: i64) Self = .{ ptr: ptr, len: count };
+    @pub fn len(self: Self) i64 = self.len[];
     
-    fn get(self: Ptr(T), i: i64) T = {
+    @pub fn get(self: Self, i: i64) T = {
         assert(lt(i, len(self)), "OOB");
         let v: Ptr(T) = index(self, i);  // TODO: fix so dont need useless binding 
         v[]
     }
     
-    fn index(self: Ptr(T), i: i64) Ptr(T) = {
+    @pub fn index(self: Self, i: i64) Ptr(T) = {
         assert(lt(i, len(self)), "OOB");
-        subslice(self, i, 1)
+        let s: Self = subslice(self, i, 1);
+        s.ptr[]
     }
     
-    fn set(self: Ptr(T), i: i64, v: T) Unit = {
+    @pub fn set(self: Self, i: i64, v: T) Unit = {
         assert(lt(i, len(self)), "OOB");
-        subslice(self, i, 1)[] = v
+        index(self, i)[] = v
     }
     
-    fn slice(ptr: Ptr(T), first: i64, past_last: i64) Ptr(T) = {
-        let first = mul(first, size_of(T));
-        let past_last = mul(past_last, size_of(T));
-        raw_slice(ptr, first, past_last)
+    @pub fn slice(self: Self, first: i64, past_last: i64) Self = {
+        let raw_first = mul(first, size_of(T));
+        let raw_past_last = mul(past_last, size_of(T));
+        let new_ptr = raw_slice(self.ptr[], raw_first, raw_past_last);
+        .{ ptr: new_ptr, len: sub(past_last, first) }
     }
     
-    fn subslice(ptr: Ptr(T), first: i64, count: i64) Ptr(T) = {
+    @pub fn subslice(ptr: Self, first: i64, count: i64) Self = {
         slice(ptr, first, add(first, count))
     }
     
     const P: Type = (i64, Ptr(T));  // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
-    fn enumerate(arr: Ptr(T), f: Fn(P, Unit)) Unit = {
+    @pub fn enumerate(arr: Self, f: Fn(P, Unit)) Unit = {
         var i = 0;
         let l: i64 = len(arr);
         (fn() bool = lt(i, l), fn() Unit = {
@@ -70,89 +67,28 @@ fn memcpy() Unit = {unit};
     // TODO: I don't love that I have to write the deref version seperatly
     //       but I dont have let destructuring (only function args) so its a pain to take tuples by pointer. 
     //       I should be able to destructure Ptr(A, B) to (Ptr(A), Ptr(B))
-    fn foreach(arr: Ptr(T), f: Fn(T, Unit)) Unit = {
+    @pub fn foreach(arr: Self, f: Fn(T, Unit)) Unit = {
         foreach(arr, fn(v: Ptr(T)) Unit = f(v[]))
     }
     
-    fn foreach(arr: Ptr(T), f: Fn(Ptr(T), Unit)) Unit = {
+    @pub fn foreach(arr: Self, f: Fn(Ptr(T), Unit)) Unit = {
         var i = 0;
         let l: i64 = len(arr);
         (fn() bool = lt(i, l), fn() Unit = {
-            let e: Ptr(T) = subslice(arr, i, 1);
+            let e: Ptr(T) = index(arr, i);
             f(e);
             i = add(i, 1);
         })!while;
     }
     
-    fn memcpy(dest: Ptr(T), src: Ptr(T)) Unit = {
+    @pub fn memcpy(dest: Self, src: Self) Unit = {
         assert(eq(len(dest), len(src)), "OOB");  // Note: not using `asser t_eq` because the vm tracks those for my tests
         const f = fn(i: i64, e: Ptr(T)) Unit = set(dest, i, e[]);
         enumerate(src, f);
     }
-
-    fn list(cap: i64) Self = .{ maybe_uninit: alloc(T, cap), len: 0 };
-    
-    // Can't reuse the allocation because drop() will free it. TODO: COW
-    fn list_clone(from: Ptr(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
-        let self: Self = list(len(from));
-        push_all(self!addr, from);
-        self
-    }
-    
-    fn items(self: Ptr(Self)) Ptr(T) = {
-        slice(self.maybe_uninit[], 0, self.len[])
-    }
-    
-    fn addr(self: Ptr(Self), i: i64) Ptr(T) = {
-        subslice(self.maybe_uninit[], i, 1)
-    }
-    
-    fn get(self: Self, i: i64) T = {
-        addr(self!addr, i)[]
-    }
-    
-    fn reserve(self: Ptr(Self), extra: i64) Unit = {
-        let total = add(self.len[], extra);
-        let old_cap: i64 = len(self.maybe_uninit[]);
-        (lt(old_cap, total), fn() = {
-            let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
-            var new: Self = list(cap);
-            (gt(self.len[], 0), fn() Unit = {  // TODO: it doesnt let you create a zero length slice in items()
-                let dest: Ptr(T) = subslice(new.maybe_uninit[], 0, self.len[]);
-                memcpy(dest, items(self));
-                new.len[] = self.len[];
-            }, fn() Unit = ())!if;
-            drop(self);
-            self[] = new;
-        }, fn()=())!if
-    }
-    
-    fn push(self: Ptr(Self), v: T) Unit = {
-        reserve(self, 1);
-        let last: Ptr(T) = slice(self.maybe_uninit[], self.len[], add(self.len[], 1)); 
-        last[] = v;
-        self.len[] = add(self.len[], 1);
-    }
-    
-    fn pop_last(self: Ptr(Self)) T = {
-        assert(gt(self.len[], 0), "OOB");
-        let i = sub(self.len[], 1);
-        let e: Ptr(T) = index(self.maybe_uninit[], i);
-        self.len[] = i;
-        e[]
-    }
-    
-    fn push_all(self: Ptr(Self), new: Ptr(T)) Unit = {
-        reserve(self, len(new));
-        let dest: Ptr(T) = subslice(self.maybe_uninit[], self.len[], len(new));
-        memcpy(dest, new);
-        self.len[] = add(self.len[], len(new));
-    }
-    
-    fn drop(self: Ptr(Self)) = dealloc(T, self.maybe_uninit[]);
     
     // TODO: have eq be generic and do something sane but currently its just in the vm and does addr_eq which should be a seperate thing. 
-    fn slice_eq(lhs: Ptr(T), rhs: Ptr(T)) bool = {
+    @pub fn slice_eq(lhs: Self, rhs: Self) bool = {
         (eq(len(lhs), len(rhs)), fn() bool = {
             var i = 0;
             var prev = true;  // TODO: this is weird because 'and' doesn't short circuit  
@@ -161,7 +97,6 @@ fn memcpy() Unit = {unit};
                     and(lt(i, len(lhs)), prev) 
                 }, 
                 fn() Unit = { 
-                
                     prev = eq(get(lhs, i), get(rhs, i)); 
                     i = add(i, 1); 
                 },
@@ -172,6 +107,82 @@ fn memcpy() Unit = {unit};
     
     Self
 }
+
+
+@comptime @impl
+fn List(T: Type) Type = {
+    const Self: Type = .{ maybe_uninit: Slice(T), len: i64 }!struct;
+    // TODO: it doesnt realize that arguments are const if its @comptime, 
+    //       so it thinks fn vec runtime captures T so it uses emit_capturing_call
+    const T = T;
+    
+    @pub fn list(cap: i64) Self = .{ maybe_uninit: .{ ptr: alloc(T, cap), len: cap}, len: 0 };
+    
+    // Can't reuse the allocation because drop() will free it. TODO: COW
+    @pub fn list_clone(from: Ptr(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
+        let self: Self = list(len(from));
+        push_all(self!addr, from);
+        self
+    }
+    
+    @pub fn items(self: Ptr(Self)) Slice(T) = {
+        slice(self.maybe_uninit[], 0, self.len[])
+    }
+    
+    @pub fn index(self: Ptr(Self), i: i64) Ptr(T) = {
+        index(self.maybe_uninit[], i)
+    }
+    
+    @pub fn get(self: Self, i: i64) T = {
+        index(self!addr, i)[]
+    }
+    
+    @pub fn reserve(self: Ptr(Self), extra: i64) Unit = {
+        let total = add(self.len[], extra);
+        let old_cap: i64 = len(self.maybe_uninit[]);
+        (lt(old_cap, total), fn() = {
+            let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
+            var new: Self = list(cap);
+            (gt(self.len[], 0), fn() Unit = {  // TODO: it doesnt let you create a zero length slice in items()
+                let dest: Slice(T) = subslice(new.maybe_uninit[], 0, self.len[]);
+                memcpy(dest, items(self));
+                new.len[] = self.len[];
+            }, fn() Unit = ())!if;
+            drop(self);
+            self[] = new;
+        }, fn()=())!if
+    }
+    
+    @pub fn push(self: Ptr(Self), v: T) Unit = {
+        reserve(self, 1);
+        let last: Ptr(T) = index(self.maybe_uninit[], self.len[]); 
+        last[] = v;
+        self.len[] = add(self.len[], 1);
+    }
+    
+    @pub fn pop_last(self: Ptr(Self)) T = {
+        assert(gt(self.len[], 0), "OOB");
+        let i = sub(self.len[], 1);
+        let e: Ptr(T) = index(self.maybe_uninit[], i);
+        self.len[] = i;
+        e[]
+    }
+    
+    @pub fn push_all(self: Ptr(Self), new: Slice(T)) Unit = {
+        reserve(self, len(new));
+        let dest: Slice(T) = subslice(self.maybe_uninit[], self.len[], len(new));
+        memcpy(dest, new);
+        self.len[] = add(self.len[], len(new));
+    }
+    
+    @pub fn drop(self: Ptr(Self)) = dealloc(T, self.maybe_uninit.ptr[]);
+    
+    Self
+}
+
+
+const Str = Slice(u8);
+fn dump_ffi_types() Str;
 
 // TODO: this is really inefficient if you already own 'a'
 fn concat(a: Str, b: Str) Str = {
@@ -295,7 +306,10 @@ fn hex(s: Str) i64 = {
     total
 }
 
-fn multi_puts(s: Ptr(Str)) Unit = {
+fn multi_puts(s: Slice(Str)) Unit = {
     const one = fn(s: Ptr(Str)) Unit = puts(s[]);
     foreach(s, one);
 }
+
+// TODO: this is stupid. i have a whole house of cards going on with unique types. 
+@pub fn str_eq(lhs: (Ptr(u8), i64), rhs: (Ptr(u8), i64)) bool = slice_eq(slice(lhs), slice(rhs));

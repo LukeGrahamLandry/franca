@@ -104,7 +104,8 @@ pub enum LogTag {
     ShowPrint = 5,
     ShowErr = 6,
     Macros = 7,
-    _Last = 8,
+    Generics = 8,
+    _Last = 9,
 }
 
 pub struct LogSettings {
