@@ -1,7 +1,7 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
-    compiler::{CErr, DebugInfo, ExecTime, Res},
+    compiler::{DebugInfo, ExecTime, Res},
     ffi::InterpSend,
     logging::err,
     pool::Ident,
@@ -10,7 +10,7 @@ use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
 
-#[derive(Clone)]
+#[derive(Clone, InterpSend)]
 pub enum Bc<'p> {
     // Call through a runtime known function pointer.
     CallDynamic {
@@ -45,7 +45,7 @@ pub enum Bc<'p> {
         of: StackRange,
         to: StackOffset,
     },
-    DebugMarker(&'static str, Ident<'p>),
+    DebugMarker(Ident<'p>, Ident<'p>),
     DebugLine(Span),
     // Clone, Move, and Drop are for managing linear types.
     Clone {
@@ -193,19 +193,19 @@ impl From<(Values, TypeId)> for Structured {
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackOffset(pub usize);
 
-#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq, InterpSend)]
 pub struct StackAbsolute(pub usize);
 
-#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq, InterpSend)]
 pub struct StackAbsoluteRange {
     pub first: StackAbsolute,
     pub count: usize,
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackRange {
     pub first: StackOffset,
     pub count: usize,
@@ -255,7 +255,9 @@ impl<'p> Constants<'p> {
             if let Some(val) = self.local.get(k) {
                 new.local.insert(*k, val.clone());
             } else {
-                err!(CErr::VarNotFound(*k))
+                // TODO: !quote captures a bunch of stuff that it doesn't actually need?
+                //       this seems like a massive problem.
+                // err!(CErr::VarNotFound(*k))
             }
         }
         Ok(new)

@@ -977,6 +977,7 @@ impl<'p> Func<'p> {
                 writeln!(s, "    - {}", d.log(pool).replace('\n', " "));
             }
         }
+        writeln!(s, "====");
         s
     }
 }

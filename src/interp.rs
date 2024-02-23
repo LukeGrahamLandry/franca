@@ -662,6 +662,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let values = ptr.values[first..(first + count)].to_vec();
                 Value::new_box(values, false).into()
             }
+            "str" => {
+                let arg = unwrap!(
+                    Ident::deserialize_one(arg.clone()),
+                    "expected symbol found {arg:?}"
+                );
+                let s = self.pool.get(arg).to_string();
+                s.serialize_one()
+            }
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
                 let name = self.pool.intern(name);

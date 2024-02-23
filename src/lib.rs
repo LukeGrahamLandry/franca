@@ -42,7 +42,7 @@ macro_rules! stdlib {
     };
 }
 
-static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("macros")];
+static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("macros"), stdlib!("targets/js")];
 
 macro_rules! test_file {
     ($case:ident) => {

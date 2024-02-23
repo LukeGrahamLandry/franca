@@ -398,7 +398,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(ret_val.ty(), func.ret.unwrap(), "bad return value")?;
         // We're done with our arguments, get rid of them. Same for other vars.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        result.push(Bc::DebugMarker("drop_args", func.get_name(self.pool)));
+        result.push(Bc::DebugMarker(
+            self.pool.intern("drop_args"),
+            func.get_name(self.pool),
+        ));
         args_to_drop.extend(result.to_drop.drain(0..).map(|(s, _)| (None, s)));
         for (var, range) in args_to_drop {
             if let Some(var) = var {
@@ -532,7 +535,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         // TODO: constants!
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
-        result.push(Bc::DebugMarker("start:capturing_call", name));
+        result.push(Bc::DebugMarker(
+            self.pool.intern("start:capturing_call"),
+            name,
+        ));
         self.infer_types(f)?;
         assert!(
             !self.currently_inlining.contains(&f),
@@ -546,7 +552,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         result.constants.add_all(my_consts);
 
         let return_range = self.emit_body(result, arg, f)?;
-        result.push(Bc::DebugMarker("end:capturing_call", name));
+        result.push(Bc::DebugMarker(
+            self.pool.intern("end:capturing_call"),
+            name,
+        ));
         self.currently_inlining.retain(|check| *check != f);
         self.pop_state(state);
         Ok(return_range)
@@ -565,7 +574,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.currently_inlining.push(f);
         self.ensure_compiled(f, result.when)?;
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
-        result.push(Bc::DebugMarker("start:inline_call", name));
+        result.push(Bc::DebugMarker(self.pool.intern("start:inline_call"), name));
         // This move ensures they end up at the base of the renumbered stack.
         let func = &self.interp.program.funcs[f.0];
         let msg = "capturing calls are already inlined. what are you doing here?";
@@ -610,7 +619,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "inline function had no ret instruction. \n{}",
             func.log(self.pool)
         );
-        result.push(Bc::DebugMarker("end:inline_call", name));
+        result.push(Bc::DebugMarker(self.pool.intern("end:inline_call"), name));
         self.currently_inlining.retain(|check| *check != f);
         Ok(Structured::Emitted(f_ty.ret, ret.unwrap()))
     }
@@ -1551,6 +1560,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         match arg.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
                 if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
+                    let kind = self.interp.program.vars[var.1].kind;
+                    if kind != VarType::Var {
+                        err!(
+                            "Can only take address of vars not {kind:?} {}. TODO: allow read field.",
+                            var.log(self.pool)
+                        )
+                    }
+
                     let ptr_ty = self.interp.program.ptr_type(value_ty);
                     let addr_slot = result.reserve_slots(self.interp.program, ptr_ty)?;
                     result.push(Bc::AbsoluteStackAddr {
@@ -1838,6 +1855,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             return Ok(None);
                         }
                     }
+                    "symbol" => Ident::get_type(self.interp.program),
                     _ => return Ok(None),
                 }
             }
@@ -2187,7 +2205,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             .load_constant(self.interp.program, Values::One(Value::Unit))?
             .0; // Note: before you start doing ip stuff!
         let name = self.pool.intern("builtin:if");
-        let branch_ip = result.push(Bc::DebugMarker("patch", name));
+        let branch_ip = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
         let true_ip = result.insts.len();
         let true_ret = self.emit_capturing_call(result, arg, if_true)?;
         let true_ret = result.load(self.interp.program, true_ret)?.0;
@@ -2195,7 +2213,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             from: true_ret,
             to: ret,
         });
-        let jump_over_false = result.push(Bc::DebugMarker("patch", name));
+        let jump_over_false = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
         let false_ip = result.insts.len();
         let false_ret = self.emit_capturing_call(result, arg, if_false)?;
         let false_ret = result.load(self.interp.program, false_ret)?.0;
@@ -2253,7 +2271,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             .load_constant(self.interp.program, unit_val.clone())?
             .0;
         let cond_ret = self.emit_capturing_call(result, unit, cond_fn)?;
-        let branch_ip = result.push(Bc::DebugMarker("patch", name));
+        let branch_ip = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
 
         let body_ip = result.insts.len();
         let unit = result
