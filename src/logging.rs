@@ -897,7 +897,7 @@ impl<'p> DebugState<'p> {
         match self {
             DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f) => {
-                format!("| Prep Interp | {}", show_f(*f))
+                format!("| Comptime    | {}", show_f(*f))
             }
             DebugState::EnsureCompiled(f, when) => {
                 format!("| Ensure Comp | {} for {:?}", show_f(*f), when)

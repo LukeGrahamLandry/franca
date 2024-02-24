@@ -3,11 +3,10 @@
 #![allow(clippy::wrong_self_convention)]
 use codemap::Span;
 use std::marker::PhantomData;
-use std::mem;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::panic::Location;
 
-use crate::ast::{Annotation, FatStmt, Pattern, VarType};
+use crate::ast::{FatStmt, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
 use crate::interp::Interp;
@@ -17,7 +16,7 @@ use crate::{
     pool::{Ident, StringPool},
 };
 
-use crate::logging::{assert, assert_eq, err, ice, logln, unwrap};
+use crate::logging::{assert, assert_eq, err, ice, unwrap};
 
 #[derive(Debug, Clone)]
 pub struct DebugInfo<'p> {
@@ -63,19 +62,24 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
             return Ok(());
         }
         let func = &self.interp.program.funcs[f.0];
-        let wip = func.wip.clone().unwrap(); // TODO
+        let wip = unwrap!(func.wip.clone(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
         let mut result = self.empty_fn(&wip);
         let func = &self.interp.program.funcs[f.0];
         let arg_range = result.reserve_slots(self.interp.program, func.unwrap_ty().arg)?;
-        let return_value = self.emit_body(&mut result, arg_range, f)?;
-        let return_value = result.load(self.interp.program, return_value)?.0;
-        result.push(Bc::Ret(return_value));
-        self.interp.ready[f.0] = Some(result);
-        for id in wip.callees.clone() {
-            self.compile(id)?;
+        let return_value = self.emit_body(&mut result, arg_range, f);
+        match return_value {
+            Ok(return_value) => {
+                let return_value = result.load(self.interp.program, return_value)?.0;
+                result.push(Bc::Ret(return_value));
+                self.interp.ready[f.0] = Some(result);
+                Ok(())
+            }
+            Err(mut e) => {
+                e.loc = self.last_loc;
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     fn emit_body(
@@ -156,18 +160,24 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         &mut self,
         result: &mut FnBody<'p>,
         f: FuncId,
-        arg: &FatExpr<'p>,
+        arg_expr: &FatExpr<'p>,
     ) -> Res<'p, Structured> {
-        let arg = self.compile_expr(result, arg)?;
+        let arg = self.compile_expr(result, arg_expr)?;
         let func = &self.interp.program.funcs[f.0];
         let f_ty = func.unwrap_ty();
-        assert!(!self.interp.program.is_comptime_only_type(f_ty.arg));
+        assert!(
+            !self.interp.program.is_comptime_only_type(f_ty.arg),
+            "{}",
+            arg_expr.log(self.pool)
+        );
         let func = &self.interp.program.funcs[f.0];
-        assert!(func.capture_vars.is_empty());
+        let will_capture = func.capture_vars.is_empty();
         let will_inline = func.has_tag(self.pool, "inline");
         let (arg, _) = result.load(self.interp.program, arg)?;
         if will_inline {
             self.emit_inline_call(result, arg, f)
+        } else if will_capture {
+            self.emit_capturing_call(result, arg, f)
         } else {
             let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
             result.push(Bc::CallDirect { f, ret, arg });
@@ -206,7 +216,11 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         };
 
         let ip_offset = result.insts.len();
-        let func = self.interp.ready[f.0].as_ref().unwrap();
+        let func = unwrap!(
+            self.interp.ready[f.0].as_ref(),
+            "inline fn must be compiled: {}",
+            func.wip.as_ref().unwrap().why
+        );
         // TODO: check for recusion somewhere.
         // TODO: put constants somewhere so dont have to clone them each time a function is inlined.
         result.stack_slots += func.stack_slots;
@@ -296,18 +310,29 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>) -> Res<'p, Structured> {
+        assert!(
+            !expr.ty.is_unknown(),
+            "Not typechecked: {}",
+            expr.log(self.pool)
+        );
         result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
             Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
+                assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.pool));
+                assert!(
+                    !arg.ty.is_unknown(),
+                    "Not typechecked: {}",
+                    arg.log(self.pool)
+                );
                 if let Some(f_id) = f.as_fn() {
                     let func = &self.interp.program.funcs[f_id.0];
                     assert!(!func.has_tag(self.pool, "comptime"));
-                    return Ok(self.emit_runtime_call(result, f_id, arg)?);
+                    return self.emit_runtime_call(result, f_id, arg);
                 }
-                unreachable!()
+                unreachable!("{}", f.log(self.pool))
             }
             Expr::Block {
                 body,
@@ -322,7 +347,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                 for local in locals.as_ref().expect("resolve failed") {
                     if let Some((slot, _ty)) = result.vars.remove(local) {
                         result.push(Bc::Drop(slot));
-                    } else {
+                    } else if !result.constants.get(*local).is_some() {
                         ice!("Missing local {local:?}")
                     }
                 }
@@ -358,7 +383,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                     debug_assert_eq!(expr.ty, ty);
                     Structured::Const(ty, value)
                 } else {
-                    ice!("Missing resolved variable {:?}", var.log(self.pool))
+                    ice!("Missing resolved variable {:?}", var.log(self.pool),)
                 }
             }
             Expr::GetNamed(_) => unreachable!(),
@@ -369,7 +394,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    "if" => self.emit_call_if(result, arg)?,
+                    "if" => self.emit_call_if(result, arg, expr.ty)?,
                     "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
                     "quote" => unreachable!(),
@@ -549,7 +574,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                     _ => err!("struct literal but expected {:?}", requested),
                 }
             }
-            Expr::String(_) | Expr::PrefixMacro { .. } => unreachable!(),
+            Expr::String(_) | Expr::PrefixMacro { .. } => unreachable!("{}", expr.log(self.pool)),
         })
     }
 
@@ -610,7 +635,12 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
 
     // TODO: make this not a special case.
     /// This swaps out the closures for function accesses.
-    fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, Structured> {
+    fn emit_call_if(
+        &mut self,
+        result: &mut FnBody<'p>,
+        arg: &FatExpr<'p>,
+        out_ty: TypeId,
+    ) -> Res<'p, Structured> {
         let (cond, if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
             let cond = self.compile_expr(result, &parts[0])?;
             let if_true = parts[1].as_fn().unwrap();
@@ -622,7 +652,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         // TODO: if its constant you don't need the branch...
         let cond = result.load(self.interp.program, cond)?.0;
 
-        let ret = result.reserve_slots(self.interp.program, arg.ty)?;
+        let ret = result.reserve_slots(self.interp.program, out_ty)?;
 
         let unit = result
             .load_constant(self.interp.program, Values::One(Value::Unit))?
@@ -837,6 +867,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
 }
 
 impl<'p> FnBody<'p> {
+    #[track_caller]
     fn reserve_slots_raw(
         &mut self,
         program: &Program<'p>,
@@ -870,6 +901,7 @@ impl<'p> FnBody<'p> {
         Ok(StackRange { first, count })
     }
 
+    #[track_caller]
     fn reserve_slots(&mut self, program: &Program<'p>, ty: TypeId) -> Res<'p, StackRange> {
         let ty = program.raw_type(ty);
         match &program.types[ty.0] {

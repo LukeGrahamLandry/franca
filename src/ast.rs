@@ -687,7 +687,7 @@ impl<'p> Program<'p> {
     pub fn slot_count(&self, ty: TypeId) -> usize {
         let ty = self.raw_type(ty);
         match &self.types[ty.0] {
-            TypeInfo::Unknown => panic!("slot_count unknown"),
+            TypeInfo::Unknown => 9999,
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
             &TypeInfo::Struct { size, .. }
             | &TypeInfo::Enum {
