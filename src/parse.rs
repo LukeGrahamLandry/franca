@@ -502,7 +502,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             expr,
             loc: self.end_subexpr(),
             id: self.expr_id,
-            ty: None,
+            ty: TypeId::unknown(),
             known: Known::Maybe,
         }
     }

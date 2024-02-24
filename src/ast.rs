@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
-    compiler::insert_multi,
+    compiler::{insert_multi, FnWip},
     ffi::{init_interp_send, InterpSend},
     pool::{Ident, StringPool},
 };
@@ -26,38 +26,48 @@ pub struct FnType {
 }
 
 impl TypeId {
-    pub fn is_any(&self) -> bool {
+    pub fn is_unknown(&self) -> bool {
         self.0 == 0
     }
 
-    /// Placeholder to use while working on typechecking.
-    pub fn any() -> TypeId {
+    pub fn is_any(&self) -> bool {
+        self.0 == 1
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn unknown() -> TypeId {
         TypeId(0)
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn unit() -> TypeId {
+    /// Placeholder to use while working on typechecking.
+    pub fn any() -> TypeId {
         TypeId(1)
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn ty() -> TypeId {
+    pub fn unit() -> TypeId {
         TypeId(2)
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn i64() -> TypeId {
+    pub fn ty() -> TypeId {
         TypeId(3)
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn bool() -> TypeId {
+    pub fn i64() -> TypeId {
         TypeId(4)
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn void_ptr() -> TypeId {
+    pub fn bool() -> TypeId {
         TypeId(5)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn void_ptr() -> TypeId {
+        TypeId(6)
     }
 }
 
@@ -70,8 +80,9 @@ pub enum VarType {
 
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
-    Any,
     #[default]
+    Unknown,
+    Any,
     Never,
     F64,
     I64,
@@ -166,7 +177,7 @@ pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Span,
     pub id: usize,
-    pub ty: Option<TypeId>,
+    pub ty: TypeId,
     pub known: Known,
 }
 
@@ -273,6 +284,7 @@ impl<'p> Pattern<'p> {
             .collect()
     }
 
+    // TODO: remove?
     pub fn flatten_exprs(&self) -> Option<Vec<FatExpr<'p>>> {
         self.bindings
             .iter()
@@ -288,9 +300,26 @@ impl<'p> Pattern<'p> {
             })
             .collect()
     }
+
     pub fn flatten_exprs_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
         self.bindings
             .iter_mut()
+            .map(|b| match b {
+                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
+            })
+            .map(|t| match t {
+                LazyType::EvilUnit => panic!(),
+                LazyType::Infer => None,
+                LazyType::PendingEval(e) => Some(e),
+                LazyType::Finished(_) => None,
+                LazyType::Different(_) => unreachable!(),
+            })
+            .collect()
+    }
+
+    pub fn flatten_exprs_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
+        self.bindings
+            .iter()
             .map(|b| match b {
                 Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
             })
@@ -319,7 +348,7 @@ impl<'p> FatExpr<'p> {
             expr,
             loc,
             id: 123456789,
-            ty: None,
+            ty: TypeId::unknown(),
             known: Known::ComptimeOnly,
         }
     }
@@ -399,6 +428,7 @@ pub struct Func<'p> {
     pub closed_constants: Constants<'p>,
     pub finished_type: Option<FnType>,
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
+    pub wip: Option<FnWip<'p>>,
     pub evil_uninit: bool,
 }
 
@@ -427,6 +457,7 @@ impl<'p> Func<'p> {
             finished_type: None,
             referencable_name: has_name,
             evil_uninit: false,
+            wip: None,
         }
     }
 
@@ -476,7 +507,6 @@ pub struct FuncId(pub usize);
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct VarInfo {
-    pub ty: TypeId,
     pub kind: VarType,
     pub loc: Span,
 }
@@ -554,6 +584,7 @@ impl<'p> Program<'p> {
             // Any needs to be first becuase I use TypeId(0) as a place holder.
             // The rest are just common ones that i want to find faster if i end up iterating the array.
             types: vec![
+                TypeInfo::Unknown,
                 TypeInfo::Any,
                 TypeInfo::Unit,
                 TypeInfo::Type,
@@ -583,7 +614,7 @@ impl<'p> Program<'p> {
     /// This allows ffi types to be unique.
     pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            let n = self.intern_type(TypeInfo::Never);
+            let n = self.intern_type(TypeInfo::Unknown);
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId(placeholder);
@@ -636,10 +667,6 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Unique(ty, self.types.len()))
     }
 
-    pub fn load_fn(&mut self, id: FuncId) -> Structured {
-        Structured::Const(self.func_type(id), Value::GetFn(id).into())
-    }
-
     pub fn load_value(&mut self, v: Value) -> Structured {
         let ty = self.type_of(&v);
         let mut v: Values = v.into();
@@ -660,6 +687,7 @@ impl<'p> Program<'p> {
     pub fn slot_count(&self, ty: TypeId) -> usize {
         let ty = self.raw_type(ty);
         match &self.types[ty.0] {
+            TypeInfo::Unknown => panic!("slot_count unknown"),
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
             &TypeInfo::Struct { size, .. }
             | &TypeInfo::Enum {
@@ -870,7 +898,7 @@ impl<'p> Program<'p> {
 
     pub fn is_comptime_only(&self, value: &Structured) -> bool {
         match value {
-            Structured::Emitted(_, _) => false, // sure hope not or we're already fucked.
+            Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => false, // sure hope not or we're already fucked.
             Structured::TupleDifferent(ty, _) | Structured::Const(ty, _) => {
                 self.is_comptime_only_type(*ty)
             }
@@ -885,6 +913,7 @@ impl<'p> Program<'p> {
             match &self.types[ty.0] {
                 TypeInfo::Unit
                 | TypeInfo::Any
+                | TypeInfo::Unknown
                 | TypeInfo::Never
                 | TypeInfo::F64
                 | TypeInfo::I64
@@ -988,6 +1017,16 @@ impl<'p> Expr<'p> {
         }
     }
 
+    pub fn as_fn(&self) -> Option<FuncId> {
+        match self {
+            &Expr::Value {
+                value: Values::One(Value::GetFn(f)),
+                ..
+            } => Some(f),
+            _ => None,
+        }
+    }
+
     pub fn unit() -> Expr<'p> {
         Expr::Value {
             ty: TypeId::unit(),
@@ -1024,6 +1063,7 @@ impl<'p> Default for Func<'p> {
             finished_type: None,
             referencable_name: false,
             evil_uninit: true,
+            wip: None,
         }
     }
 }

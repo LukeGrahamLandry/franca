@@ -205,10 +205,11 @@ pub(crate) use err;
 
 use crate::ast::FatStmt;
 use crate::bc::*;
+use crate::emit_bc::DebugInfo;
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
-    compiler::{CErr, CompileError, DebugInfo, DebugState},
+    compiler::{CErr, CompileError, DebugState},
     interp::Interp,
     pool::StringPool,
 };
@@ -223,6 +224,7 @@ impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
         safe_rec!(self, t, format!("{t:?}"), {
             match &self.types[t.0] {
+                TypeInfo::Unknown => "Unknown".to_owned(),
                 TypeInfo::Any => "Any".to_owned(),
                 TypeInfo::Never => "Never".to_owned(),
                 TypeInfo::F64 => "f64".to_owned(),

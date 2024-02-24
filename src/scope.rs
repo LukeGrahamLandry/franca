@@ -3,7 +3,7 @@ use std::{mem, ops::DerefMut};
 use codemap::Span;
 
 use crate::{
-    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Stmt, TypeId, Var, VarInfo, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Stmt, Var, VarInfo, VarType},
     logging::{outln, LogTag::Scope},
     pool::{Ident, StringPool},
 };
@@ -99,11 +99,7 @@ impl<'p> ResolveScope<'p> {
                     self.resolve_expr(value);
                 }
                 let (old, new) = self.decl_var(name);
-                self.info.push(VarInfo {
-                    ty: TypeId::any(),
-                    kind: *kind,
-                    loc,
-                });
+                self.info.push(VarInfo { kind: *kind, loc });
                 let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
@@ -138,7 +134,6 @@ impl<'p> ResolveScope<'p> {
                         let (_, v) = self.decl_var(&func.name);
                         func.var_name = Some(v);
                         self.info.push(VarInfo {
-                            ty: TypeId::any(),
                             kind: VarType::Const,
                             loc: func.loc,
                         });
@@ -281,7 +276,6 @@ impl<'p> ResolveScope<'p> {
                 if declaring {
                     let (_old, var) = self.decl_var(name);
                     self.info.push(VarInfo {
-                        ty: TypeId::any(),
                         kind: VarType::Var,
                         loc,
                     });

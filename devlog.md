@@ -1,4 +1,11 @@
 
+## spliting sema
+
+I want to do a jit asm backend and use that for comptime instead of my dumb interpreter, 
+so i guess should start by seperating the stuff that emits bytecode from the comptime rewriting the ast. 
+They're clearly two seperate things happening together in compiler.rs currently. 
+Then it should be less painful to add more backends. 
+
 ## serializing asts
 
 - fix logging of recursive types

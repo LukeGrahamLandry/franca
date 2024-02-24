@@ -1,10 +1,6 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
-    ast::{FnType, FuncId, TypeId, Var},
-    compiler::{DebugInfo, ExecTime, Res},
-    ffi::InterpSend,
-    logging::err,
-    pool::Ident,
+    ast::{FnType, FuncId, TypeId, Var}, compiler::{ExecTime, Res}, emit_bc::DebugInfo, ffi::InterpSend, logging::err, pool::Ident
 };
 use codemap::Span;
 use interp_derive::InterpSend;
@@ -143,6 +139,7 @@ pub enum Structured {
     Emitted(TypeId, StackRange),
     Const(TypeId, Values),
     TupleDifferent(TypeId, Vec<Structured>),
+    RuntimeOnly(TypeId),
 }
 
 impl Structured {
@@ -150,13 +147,16 @@ impl Structured {
         match self {
             Structured::Emitted(ty, _)
             | Structured::Const(ty, _)
-            | Structured::TupleDifferent(ty, _) => *ty,
+            | Structured::TupleDifferent(ty, _)
+            | Structured::RuntimeOnly(ty) => *ty,
         }
     }
 
     pub fn get<'p>(self) -> Res<'p, Values> {
         match self {
-            Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) => {
+            Structured::Emitted(_, _)
+            | Structured::TupleDifferent(_, _)
+            | Structured::RuntimeOnly(_) => {
                 err!("not const {self:?}",)
             }
             Structured::Const(_, v) => Ok(v),
@@ -167,7 +167,7 @@ impl Structured {
         match self {
             Structured::Emitted(_, s) => s.count == 0,
             Structured::TupleDifferent(_, s) => s.is_empty(),
-            Structured::Const(_, _) => false,
+            Structured::RuntimeOnly(_) | Structured::Const(_, _) => false,
         }
     }
 
@@ -176,6 +176,7 @@ impl Structured {
             Structured::Emitted(_, v) => Structured::Emitted(ty, v),
             Structured::TupleDifferent(_, v) => Structured::TupleDifferent(ty, v),
             Structured::Const(_, v) => Structured::Const(ty, v),
+            Structured::RuntimeOnly(_) => Structured::RuntimeOnly(ty),
         }
     }
 }

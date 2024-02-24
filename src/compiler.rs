@@ -1,13 +1,13 @@
-//! Converts ASTs into my bytecode-ish format.
+//! Converts ASTs into... simpler asts.
 //! Type checking, overload resolution, implicit function calls, inlining, monomorphization, etc.
 //! Uses the interpreter for comptime evalutation (build scripts, generics, macros, etc).
 
 #![allow(clippy::wrong_self_convention)]
 use codemap::Span;
-use std::collections::{HashMap, HashSet};
+use interp_derive::InterpSend;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
-use std::marker::PhantomData;
 use std::mem;
 use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
@@ -59,13 +59,6 @@ pub enum CErr<'p> {
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
-#[derive(Debug, Clone)]
-pub struct DebugInfo<'p> {
-    pub internal_loc: &'static Location<'static>,
-    pub src_loc: Span,
-    pub p: PhantomData<&'p str>,
-}
-
 pub struct Compile<'a, 'p> {
     pub pool: &'a StringPool<'p>,
     pub interp: Interp<'a, 'p>,
@@ -96,7 +89,19 @@ struct StackHeights<'p> {
     value_stack: usize,
     call_stack: usize,
     debug_trace: usize,
-    result: FnBody<'p>,
+    result: FnWip<'p>,
+}
+
+#[derive(Clone, Debug, InterpSend)]
+pub struct FnWip<'p> {
+    pub stack_slots: usize,
+    pub vars: HashMap<Var<'p>, TypeId>, // TODO: use a vec
+    pub when: ExecTime,
+    pub func: FuncId,
+    pub why: String,
+    pub last_loc: Span,
+    pub constants: Constants<'p>,
+    pub callees: Vec<FuncId>,
 }
 
 impl<'a, 'p> Compile<'a, 'p> {
@@ -201,20 +206,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         func: FuncId,
         loc: Span,
         parent: Option<Constants<'p>>,
-    ) -> FnBody<'p> {
-        FnBody {
-            insts: vec![],
+    ) -> FnWip<'p> {
+        FnWip {
             stack_slots: 0,
             vars: Default::default(),
             when,
-            slot_types: vec![],
             func,
             why: self.log_trace(),
-            debug: vec![],
             last_loc: loc,
             constants: parent
                 .unwrap_or_else(|| self.interp.program.funcs[func.0].closed_constants.clone()),
-            to_drop: vec![],
+            callees: vec![],
         }
     }
 
@@ -258,10 +260,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
     fn ensure_compiled(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        if let Some(Some(_)) = self.interp.ready.get(f.0) {
+        let func = &self.interp.program.funcs[f.0];
+        if func.wip.is_some() {
             return Ok(());
         }
-        let func = &self.interp.program.funcs[f.0];
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
         logln!(
@@ -286,15 +288,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.interp.program.funcs[f.0];
         let f_ty = func.unwrap_ty();
         let mut result = self.empty_fn(when, f, func.loc, None);
-        let arg_range = result.reserve_slots(self.interp.program, f_ty.arg)?;
-        let return_value = self.emit_body(&mut result, arg_range, f)?;
-
-        let return_value = result.load(self.interp.program, return_value)?.0;
-        let func = &self.interp.program.funcs[f.0];
-        result.push(Bc::Ret(return_value));
-
-        logln!("{}", result.log(self.pool));
-
+        let return_value = self.emit_body(&mut result, f)?;
+        let func = &mut self.interp.program.funcs[f.0];
         assert!(
             result.vars.is_empty(),
             "undropped vars {:?}",
@@ -304,25 +299,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                 .map(|v| (v.0.log(self.pool), v.1))
                 .collect::<Vec<_>>()
         );
-        self.interp.ready[f.0] = Some(result);
+        func.wip = Some(result);
         logln!("Done JIT: {:?} {}", f, func.synth_name(self.pool));
         self.pop_state(state);
         Ok(())
     }
 
     /// IMPORTANT: this pulls a little sneaky on ya so you can't access the body of the function inside the main emit handlers.
-    fn emit_body(
-        &mut self,
-        result: &mut FnBody<'p>,
-        full_arg_range: StackRange,
-        f: FuncId,
-    ) -> Res<'p, Structured> {
+    fn emit_body(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
         let state = DebugState::EmitBody(f);
         self.push_state(&state);
         let has_body = self.interp.program.funcs[f.0].body.is_some();
         debug_assert!(!self.interp.program.funcs[f.0].evil_uninit);
 
-        let mut args_to_drop = vec![];
         mut_replace!(self.interp.program.funcs[f.0], |func: Func<'p>| {
             assert!(result.when == ExecTime::Comptime || !func.has_tag(self.pool, "comptime"));
 
@@ -330,18 +319,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut slot_count = 0;
             for (name, ty) in arguments {
                 let size = self.interp.program.slot_count(ty);
-                let range = StackRange {
-                    first: full_arg_range.offset(slot_count),
-                    count: size,
-                };
                 if let Some(name) = name {
-                    let prev = result.vars.insert(name, (range, ty));
+                    let prev = result.vars.insert(name, ty);
                     assert!(prev.is_none(), "overwrite arg?");
                 }
-                args_to_drop.push((name, range));
                 slot_count += size;
             }
-            assert_eq!(full_arg_range.count, slot_count);
 
             Ok((func, ()))
         });
@@ -361,25 +344,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     args: None,
                 });
                 let ret_ty = func.ret.unwrap();
-                let ret = result.reserve_slots(self.interp.program, func.ret.unwrap())?;
                 // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
                 //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
                 //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
                 assert!(func.referencable_name, "fn no body needs name");
-                result.push(Bc::CallBuiltin {
-                    name: func.name,
-                    ret,
-                    arg: full_arg_range,
-                });
-                for (var, range) in args_to_drop {
-                    if let Some(var) = var {
-                        let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
-                        assert_eq!(range, slot, "moved arg");
-                    }
-                    // Don't drop, they were moved to the call.
-                }
-
-                Ok((func, (Structured::Emitted(ret_ty, ret))))
+                Ok((func, (Structured::RuntimeOnly(ret_ty))))
             });
             self.pop_state(state);
             return Ok(ret);
@@ -396,28 +365,13 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let func = &self.interp.program.funcs[f.0];
         self.type_check_arg(ret_val.ty(), func.ret.unwrap(), "bad return value")?;
-        // We're done with our arguments, get rid of them. Same for other vars.
-        // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        result.push(Bc::DebugMarker(
-            self.pool.intern("drop_args"),
-            func.get_name(self.pool),
-        ));
-        args_to_drop.extend(result.to_drop.drain(0..).map(|(s, _)| (None, s)));
-        for (var, range) in args_to_drop {
-            if let Some(var) = var {
-                let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
-                assert_eq!(range, slot, "moved arg");
-            }
-            result.push(Bc::Drop(range));
-        }
-
         self.pop_state(state);
         Ok(ret_val)
     }
 
     fn emit_runtime_call(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
         original_f: FuncId,
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
@@ -447,7 +401,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let func = &self.interp.program.funcs[original_f.0];
             let pattern = func.arg.flatten();
             match arg {
-                Structured::Emitted(_, _) => ice!(
+                Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!(
                     "{:?} is comptime only but {:?} is only known at runtime.",
                     self.interp.program.log_type(f_ty.arg),
                     arg
@@ -482,6 +436,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         };
 
+        add_unique(&mut result.callees, f);
         let f_ty = self.interp.program.funcs[f.0].unwrap_ty();
 
         // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
@@ -502,43 +457,28 @@ impl<'a, 'p> Compile<'a, 'p> {
             "{f:?} is both @inline and @noinline"
         );
 
-        let (arg, _) = result.load(self.interp.program, arg)?;
-
         let will_inline = force_inline;
         let func = &self.interp.program.funcs[f.0];
         let ret = if !func.capture_vars.is_empty() {
             // TODO: check that you're calling from the same place as the definition.
             assert!(!deny_inline, "capturing calls are always inlined.");
-            self.emit_capturing_call(result, arg, f)?
+            self.emit_capturing_call(result, f)?
         } else if will_inline {
-            self.emit_inline_call(result, arg, f)?
+            self.emit_inline_call(result, f)?
         } else {
-            let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
             self.ensure_compiled(f, result.when)?;
-            result.push(Bc::CallDirect { f, ret, arg });
-            assert_eq!(self.return_stack_slots(f), ret.count);
-            assert_eq!(self.interp.program.slot_count(f_ty.ret), ret.count);
-            Structured::Emitted(f_ty.ret, ret)
+            Structured::RuntimeOnly(f_ty.ret)
         };
 
         Ok(ret)
     }
 
-    // TODO: should this just inline into the ast so all backends could trivially use the result?
-    fn emit_capturing_call(
-        &mut self,
-        result: &mut FnBody<'p>,
-        arg: StackRange,
-        f: FuncId,
-    ) -> Res<'p, Structured> {
+    // TODO: this should just inline into the ast so all backends could trivially use the result.
+    //       especially since now i really cant do anything else here
+    fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
         let state = DebugState::EmitCapturingCall(f);
         self.push_state(&state);
-        // TODO: constants!
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
-        result.push(Bc::DebugMarker(
-            self.pool.intern("start:capturing_call"),
-            name,
-        ));
         self.infer_types(f)?;
         assert!(
             !self.currently_inlining.contains(&f),
@@ -551,77 +491,25 @@ impl<'a, 'p> Compile<'a, 'p> {
         let my_consts = &self.interp.program.funcs[f.0].closed_constants;
         result.constants.add_all(my_consts);
 
-        let return_range = self.emit_body(result, arg, f)?;
-        result.push(Bc::DebugMarker(
-            self.pool.intern("end:capturing_call"),
-            name,
-        ));
+        let ret = self.emit_body(result, f)?;
         self.currently_inlining.retain(|check| *check != f);
         self.pop_state(state);
-        Ok(return_range)
+        Ok(ret)
     }
 
-    fn emit_inline_call(
-        &mut self,
-        result: &mut FnBody<'p>,
-        arg: StackRange,
-        f: FuncId,
-    ) -> Res<'p, Structured> {
+    // TODO: do this by rewriting the ast. kinda the whole point of inlining is that you compile multiple times so you optimise differently.
+    fn emit_inline_call(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
         assert!(
             !self.currently_inlining.contains(&f),
             "Tried to inline recursive function."
         );
         self.currently_inlining.push(f);
         self.ensure_compiled(f, result.when)?;
-        let name = self.interp.program.funcs[f.0].get_name(self.pool);
-        result.push(Bc::DebugMarker(self.pool.intern("start:inline_call"), name));
-        // This move ensures they end up at the base of the renumbered stack.
         let func = &self.interp.program.funcs[f.0];
         let msg = "capturing calls are already inlined. what are you doing here?";
         assert_eq!(func.capture_vars.len(), 0, "{}", msg);
         let f_ty = func.unwrap_ty();
-
-        let stack_offset = if arg.first.0 == (result.stack_slots - arg.count) {
-            // It's already at the top of the stack so don't need to move
-            result.stack_slots - arg.count
-        } else {
-            let stack_offset = result.stack_slots;
-            let arg_slots = result.reserve_slots(self.interp.program, f_ty.arg)?; // These are included in the new function's stack
-            debug_assert_eq!(arg_slots.count, arg.count);
-            result.push(Bc::MoveRange {
-                from: arg,
-                to: arg_slots,
-            });
-            stack_offset
-        };
-
-        let ip_offset = result.insts.len();
-        let func = self.interp.ready[f.0].as_ref().unwrap();
-        // TODO: check for recusion somewhere.
-        // TODO: put constants somewhere so dont have to clone them each time a function is inlined.
-        result.stack_slots += func.stack_slots;
-        result.slot_types.extend(func.slot_types.iter());
-        let mut ret = None;
-        for (i, mut inst) in func.insts.iter().cloned().enumerate() {
-            assert!(ret.is_none()); // TODO
-            inst.renumber(stack_offset, ip_offset);
-            if let Bc::Ret(return_value) = inst {
-                ret = Some(return_value);
-            } else {
-                result.insts.push(inst);
-                if cfg!(feature = "some_log") {
-                    result.debug.push(result.debug[i].clone());
-                }
-            }
-        }
-        assert!(
-            ret.is_some(),
-            "inline function had no ret instruction. \n{}",
-            func.log(self.pool)
-        );
-        result.push(Bc::DebugMarker(self.pool.intern("end:inline_call"), name));
-        self.currently_inlining.retain(|check| *check != f);
-        Ok(Structured::Emitted(f_ty.ret, ret.unwrap()))
+        Ok(Structured::RuntimeOnly(f_ty.ret))
     }
 
     // TODO: I should probably implement real runtime closures (even if my version is dumb and slow)
@@ -816,14 +704,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(result)
     }
 
-    fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
+    fn compile_stmt(&mut self, result: &mut FnWip<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         debug_assert!(result.constants.is_valid);
         self.last_loc = Some(stmt.loc);
         match stmt.deref_mut() {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
-                let ret = self.compile_expr(result, expr, None)?;
-                result.drop(self.interp.program, ret)?;
+                self.compile_expr(result, expr, None)?;
             }
             Stmt::DeclVar {
                 name,
@@ -869,43 +756,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // println!("{}", self.interp.program.log_consts(&result.constants));
                     }
                     VarType::Let | VarType::Var => {
-                        let value = invert(
-                            value
-                                .as_mut()
-                                .map(|expr| self.compile_expr(result, expr, Some(expected_ty))),
-                        )?;
-                        // self.last_loc = Some(stmt.loc);
-                        let value = match value {
+                        match value {
                             None => {
                                 if no_type {
                                     err!("uninit vars require type hint {}", name.log(self.pool));
                                 }
-                                (
-                                    result.reserve_slots(self.interp.program, expected_ty)?,
-                                    expected_ty,
-                                )
                             }
-                            Some(mut value) => {
+                            Some(value) => {
+                                let value = self.compile_expr(result, value, Some(expected_ty))?;
                                 self.type_check_arg(value.ty(), expected_ty, "var decl")?;
-                                if !expected_ty.is_any() {
-                                    value = value.unchecked_cast(expected_ty);
-                                }
-                                result.load(self.interp.program, value)?
                             }
                         };
 
-                        let prev = result.vars.insert(*name, value);
+                        let prev = result.vars.insert(*name, expected_ty);
                         assert!(prev.is_none(), "shadow is still new var");
-
-                        // TODO: what if shadow is const? that would be more consistant if did it like rust.
-                        if let Some(dropping) = dropping {
-                            // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
-                            // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
-                            // But need to change my debugging check that everything was dropped.
-                            // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
-                            let (slot, _) = unwrap!(result.vars.remove(dropping), "missing shadow");
-                            result.push(Bc::Drop(slot));
-                        }
                     }
                 }
             }
@@ -957,7 +821,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn maybe_direct_fn(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
         f: &mut FatExpr<'p>,
         arg: &mut FatExpr<'p>,
         ret: Option<TypeId>,
@@ -989,11 +853,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // TODO: make the indices always work out so you could just do it with a normal stack machine.
-    //       and just use the slow linear types for debugging.
     fn compile_expr(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
+        expr: &mut FatExpr<'p>,
+        requested: Option<TypeId>,
+    ) -> Res<'p, Structured> {
+        let res = self.compile_expr_inner(result, expr, requested)?;
+        expr.ty = res.ty();
+        Ok(res)
+    }
+
+    // TODO: make the indices always work out so you could just do it with a normal stack machine.
+    //       and just use the slow linear types for debugging.
+    fn compile_expr_inner(
+        &mut self,
+        result: &mut FnWip<'p>,
         expr: &mut FatExpr<'p>,
         requested: Option<TypeId>,
     ) -> Res<'p, Structured> {
@@ -1004,7 +879,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(match expr.deref_mut() {
             Expr::Closure(_) => {
                 let id = self.promote_closure(&result.constants, expr)?;
-                self.interp.program.load_fn(id)
+                Structured::Const(self.interp.program.func_type(id), Value::GetFn(id).into())
             }
             Expr::Call(f, arg) => {
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
@@ -1040,22 +915,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
-                let ret = self.compile_expr(result, value, requested)?;
-
-                for local in locals.as_ref().expect("resolve failed") {
-                    if let Some((slot, _ty)) = result.vars.remove(local) {
-                        result.push(Bc::Drop(slot));
-                    } else if VarType::Const == self.interp.program.vars[local.1].kind {
-                        assert!(
-                            result.vars.remove(local).is_none(),
-                            "constants are not locals"
-                        );
-                    } else {
-                        ice!("Missing local {local:?}")
-                    }
-                }
-
-                ret
+                self.compile_expr(result, value, requested)?
+                // TODO: insert drops for locals
             }
             Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(values) => {
@@ -1067,22 +928,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let values = values?;
                 let types: Vec<_> = values.iter().map(|s| s.ty()).collect();
                 let ty = self.interp.program.tuple_of(types);
-                result.produce_tuple(self.interp.program, values, ty)?
+                self.produce_tuple(values, ty)?
             }
             Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
-                if let Some((from, ty)) = result.vars.get(var).cloned() {
-                    let to = result.reserve_slots(self.interp.program, ty)?;
-                    debug_assert_eq!(from.count, to.count, "{}", self.interp.program.log_type(ty));
-                    if from.count == 1 {
-                        result.push(Bc::Clone {
-                            from: from.first,
-                            to: to.first,
-                        });
-                    } else {
-                        result.push(Bc::CloneRange { from, to });
-                    }
-                    Structured::Emitted(ty, to)
+                if let Some(ty) = result.vars.get(var).cloned() {
+                    Structured::RuntimeOnly(ty)
                 } else if let Some((value, ty)) = result.constants.get(*var) {
                     Structured::Const(ty, value)
                 } else {
@@ -1153,18 +1004,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             (container.ty(), 1)
                         };
                         let ptr_ty = self.interp.program.slice_type(expect);
-                        let ptr = result.reserve_slots(self.interp.program, ptr_ty)?;
-                        let slot = result.load(self.interp.program, container)?.0;
-                        result.push(Bc::AbsoluteStackAddr {
-                            of: slot,
-                            to: ptr.offset(0),
-                        });
-                        result.push(Bc::LoadConstant {
-                            slot: ptr.offset(1),
-                            value: Value::I64(count as i64),
-                        });
-                        result.to_drop.push((slot, container_ty));
-                        (ptr, ptr_ty).into()
+                        Structured::RuntimeOnly(ptr_ty)
                     }
                     "c_call" => {
                         if let Expr::Call(f, arg) = arg.deref_mut().deref_mut().deref_mut() {
@@ -1174,18 +1014,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                                     self.builtin_constant(name),
                                     "undeclared ffi func: {name:?}",
                                 );
+                                assert!(matches!(func, Value::CFnPtr { ptr, ty }));
+                                f.expr = Expr::Value {
+                                    ty: f_ty,
+                                    value: func.into(),
+                                };
                                 let f_ty = unwrap!(self.interp.program.fn_ty(f_ty), "fn");
                                 let arg = self.compile_expr(result, arg, Some(f_ty.arg))?;
-                                let arg = result.load(self.interp.program, arg)?.0;
-                                let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
-                                let (f, _) =
-                                    result.load_constant(self.interp.program, func.into())?;
-                                result.push(Bc::CallC {
-                                    f: f.single(),
-                                    arg,
-                                    ret,
-                                });
-                                (ret, f_ty.ret).into()
+                                Structured::RuntimeOnly(f_ty.ret)
                             } else {
                                 err!("c_call expected Expr:Call(Expr::GetVar, ...args)",)
                             }
@@ -1200,26 +1036,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                             "deref not ptr: {}",
                             self.interp.program.log_type(ptr.ty())
                         );
-                        let to = result.reserve_slots(self.interp.program, ty)?;
-                        let from = result.load(self.interp.program, ptr)?.0;
-                        result.push(Bc::Load {
-                            from: from.single(),
-                            to,
-                        });
-                        (to, ty).into()
+                        Structured::RuntimeOnly(ty)
                     }
                     "first" => self.tuple_access(result, arg, requested, 0),
                     "second" => self.tuple_access(result, arg, requested, 1),
                     "reflect_print" => {
                         let arg = self.compile_expr(result, arg, None)?;
-                        let arg = result.load(self.interp.program, arg)?.0;
-                        let ret = result.reserve_slots(self.interp.program, TypeId::unit())?;
-                        result.push(Bc::CallBuiltin {
-                            name: *macro_name,
-                            ret,
-                            arg,
-                        });
-                        (ret, TypeId::unit()).into()
+                        // TODO: replace expr with fn call
+                        Structured::RuntimeOnly(TypeId::unit())
                     }
                     "type" => {
                         // Note: this does not evaluate the expression.
@@ -1285,25 +1109,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                             .interp
                             .program
                             .intern_type(TypeInfo::Ptr(TypeId::i64()));
-                        let addr = result.load(self.interp.program, addr)?.0;
-                        let ret = result.reserve_slots(self.interp.program, ty)?;
-                        result.push(Bc::SlicePtr {
-                            base: addr.single(),
-                            offset: 0,
-                            count: 1,
-                            ret: ret.single(),
-                        });
-                        (ret, ty).into()
+                        Structured::RuntimeOnly(ty)
                     }
                     "symbol" => {
                         // TODO: use match
-                        if let Expr::GetNamed(i) = arg.deref_mut().deref_mut() {
-                            self.interp.program.load_value(Value::Symbol(i.0))
+                        let value = if let Expr::GetNamed(i) = arg.deref_mut().deref_mut() {
+                            Value::Symbol(i.0)
                         } else if let Expr::GetVar(v) = arg.deref_mut().deref_mut() {
-                            self.interp.program.load_value(Value::Symbol(v.0 .0))
+                            Value::Symbol(v.0 .0)
                         } else {
                             ice!("Expected identifier found {arg:?}")
-                        }
+                        };
+                        expr.expr = Expr::Value {
+                            ty: Ident::get_type(self.interp.program),
+                            value: value.into(),
+                        };
+                        self.interp.program.load_value(value)
                     }
                     _ => err!(CErr::UndeclaredIdent(*macro_name)),
                 }
@@ -1312,6 +1133,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let container_ptr = self.addr_macro(result, e)?;
                 self.field_access_expr(result, container_ptr, *name)?
             }
+            // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => {
                 let requested = unwrap!(requested, "struct literal needs type hint");
                 let names: Vec<_> = pattern.flatten_names();
@@ -1341,9 +1163,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 values.push(value.unchecked_cast(field.ty));
                             }
 
-                            let ret =
-                                result.produce_tuple(self.interp.program, values, as_tuple)?;
-                            ret.unchecked_cast(requested)
+                            Structured::RuntimeOnly(requested)
                         }
                         TypeInfo::Enum {
                             cases,
@@ -1359,35 +1179,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let type_hint = cases[i].1;
                             let value = self.compile_expr(result, values[0], Some(type_hint))?;
                             self.type_check_arg(value.ty(), type_hint, "enum case")?;
-                            // TODO: make this constexpr
-                            let value = result.load(self.interp.program, value)?.0;
-                            if value.count >= size {
-                                ice!("Enum value won't fit.")
-                            }
-                            let mut ret =
-                                result.reserve_slots(self.interp.program, raw_container_ty)?;
-                            result.push(Bc::LoadConstant {
-                                slot: ret.first,
-                                value: Value::I64(i as i64),
-                            });
-                            result.push(Bc::MoveRange {
-                                from: value,
-                                to: StackRange {
-                                    first: ret.offset(1),
-                                    count: value.count,
-                                },
-                            });
-
-                            // If this is a smaller varient, pad out the slot with units instead of poisons.
-                            ret.count = size;
-                            for i in (value.count + 1)..ret.count {
-                                result.push(Bc::LoadConstant {
-                                    slot: ret.offset(i),
-                                    value: Value::Unit,
-                                });
-                            }
-
-                            (ret, requested).into()
+                            Structured::RuntimeOnly(requested)
                         }
                         _ => err!("struct literal but expected {:?}", requested),
                     };
@@ -1409,7 +1201,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let Expr::GetNamed(name) = exprs[0].expr {
                             let name = Var(name, self.interp.program.vars.len());
                             self.interp.program.vars.push(VarInfo {
-                                ty: TypeId::any(),
                                 kind: VarType::Var,
                                 loc,
                             });
@@ -1497,12 +1288,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    fn handle_macro_msg(
-        &mut self,
-        result: &FnBody<'p>,
-        name: &str,
-        arg: Values,
-    ) -> Res<'p, Values> {
+    fn handle_macro_msg(&mut self, result: &FnWip<'p>, name: &str, arg: Values) -> Res<'p, Values> {
         match name {
             "infer_raw_deref_type" => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
@@ -1552,14 +1338,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn addr_macro(
-        &mut self,
-        result: &mut FnBody<'p>,
-        arg: &mut FatExpr<'p>,
-    ) -> Res<'p, Structured> {
+    fn addr_macro(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
         match arg.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
-                if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
+                if let Some(value_ty) = result.vars.get(var).cloned() {
                     let kind = self.interp.program.vars[var.1].kind;
                     if kind != VarType::Var {
                         err!(
@@ -1567,14 +1349,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             var.log(self.pool)
                         )
                     }
-
                     let ptr_ty = self.interp.program.ptr_type(value_ty);
-                    let addr_slot = result.reserve_slots(self.interp.program, ptr_ty)?;
-                    result.push(Bc::AbsoluteStackAddr {
-                        of: stack_slot,
-                        to: addr_slot.single(),
-                    });
-                    Ok((addr_slot, ptr_ty).into())
+                    Ok(Structured::RuntimeOnly(ptr_ty))
                 } else if result.constants.get(*var).is_some() {
                     err!("Took address of constant {}", var.log(self.pool))
                 } else {
@@ -1592,7 +1368,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn mark_state(&self, result: FnBody<'p>) -> StackHeights<'p> {
+    fn mark_state(&self, result: FnWip<'p>) -> StackHeights<'p> {
         StackHeights {
             value_stack: self.interp.value_stack.len(),
             call_stack: self.interp.call_stack.len(),
@@ -1601,7 +1377,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn restore_state(&mut self, state: StackHeights<'p>) -> FnBody<'p> {
+    fn restore_state(&mut self, state: StackHeights<'p>) -> FnWip<'p> {
         drops(&mut self.interp.value_stack, state.value_stack);
         drops(&mut self.interp.call_stack, state.call_stack);
         drops(&mut self.debug_trace, state.debug_trace);
@@ -1611,7 +1387,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: better error messages
     fn resolve_function(
         &mut self,
-        result: &FnBody<'p>,
+        result: &FnWip<'p>,
         name: Var<'p>,
         arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
@@ -1776,9 +1552,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       then need to be more careful about what gets put in the result
     //       cause like for blocks too, it would be nice to infer a function's return type by just compiling
     //       the function and seeing what you get.
-    fn type_of(&mut self, result: &FnBody<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
-        if let Some(ty) = expr.ty {
-            return Ok(Some(ty));
+    fn type_of(&mut self, result: &FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+        if !expr.ty.is_unknown() {
+            return Ok(Some(expr.ty));
         }
         Ok(Some(match expr.deref_mut() {
             Expr::Value { ty, .. } => *ty,
@@ -1831,7 +1607,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: make `let` deeply immutable so only const addr
                     "addr" => match arg.deref_mut().deref_mut() {
                         Expr::GetVar(var) => {
-                            let (_, value_ty) = *result
+                            let value_ty = *result
                                 .vars
                                 .get(var)
                                 .expect("Missing resolved var (TODO: addr of const?)");
@@ -1851,16 +1627,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ptr_ty = self.type_of(result, arg)?;
                         if let Some(ptr_ty) = ptr_ty {
                             return Ok(self.interp.program.unptr_ty(ptr_ty));
-                        } else {
-                            return Ok(None);
                         }
+                        return Ok(None);
                     }
                     "symbol" => Ident::get_type(self.interp.program),
                     _ => return Ok(None),
                 }
             }
             Expr::GetVar(var) => {
-                if let Some((_, ty)) = result.vars.get(var).cloned() {
+                if let Some(ty) = result.vars.get(var).cloned() {
                     ty
                 } else if let Some((_, ty)) = result.constants.get(*var) {
                     ty
@@ -2168,11 +1943,11 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// This swaps out the closures for function accesses.
     fn emit_call_if(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
         let (cond, if_true, if_false) = if let Expr::Tuple(parts) = arg.deref_mut() {
-            let cond = self.compile_expr(result, &mut parts[0], None)?;
+            let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             let if_true = if let Expr::Closure(_) = parts[1].deref_mut() {
                 self.promote_closure(&result.constants, &mut parts[1])?
             } else {
@@ -2187,8 +1962,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else {
             ice!("if args must be tuple not {:?}", arg);
         };
-        // TODO: if its constant you don't need the branch...
-        let cond = result.load(self.interp.program, cond)?.0;
 
         let true_ty = self.infer_types(if_true)?;
         let unit = self.interp.program.intern_type(TypeInfo::Unit);
@@ -2198,46 +1971,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_eq(false_ty.arg, unit, sig)?;
         self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
 
-        // TODO: if returning tuples
-        let ret = result.reserve_slots(self.interp.program, true_ty.ret)?;
+        // TODO: if the condition is const, don't emit the branch.
+        // TODO: inline the functions here instead of making the backend deal with it?
 
-        let arg = result
-            .load_constant(self.interp.program, Values::One(Value::Unit))?
-            .0; // Note: before you start doing ip stuff!
-        let name = self.pool.intern("builtin:if");
-        let branch_ip = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
-        let true_ip = result.insts.len();
-        let true_ret = self.emit_capturing_call(result, arg, if_true)?;
-        let true_ret = result.load(self.interp.program, true_ret)?.0;
-        result.push(Bc::MoveRange {
-            from: true_ret,
-            to: ret,
-        });
-        let jump_over_false = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
-        let false_ip = result.insts.len();
-        let false_ret = self.emit_capturing_call(result, arg, if_false)?;
-        let false_ret = result.load(self.interp.program, false_ret)?.0;
-        result.push(Bc::MoveRange {
-            from: false_ret,
-            to: ret,
-        });
-
-        result.insts[branch_ip] = Bc::JumpIf {
-            // TODO: change to conditional so dont have to store the true_ip
-            cond: cond.first,
-            true_ip,
-            false_ip,
-        };
-        result.insts[jump_over_false] = Bc::Goto {
-            ip: result.insts.len(),
-        };
-
-        Ok((ret, true_ty.ret).into())
+        Ok(Structured::RuntimeOnly(true_ty.ret))
     }
 
     fn emit_call_while(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
         let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref_mut() {
@@ -2263,35 +2005,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_eq(cond_ty.ret, TypeId::bool(), sig)?;
         self.type_check_eq(body_ty.arg, TypeId::unit(), sig)?;
         self.type_check_eq(body_ty.ret, TypeId::unit(), sig)?;
-
-        let name = self.pool.intern("builtin:while");
-        let cond_ip = result.insts.len();
-        let unit_val = Values::One(Value::Unit);
-        let unit = result
-            .load_constant(self.interp.program, unit_val.clone())?
-            .0;
-        let cond_ret = self.emit_capturing_call(result, unit, cond_fn)?;
-        let branch_ip = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
-
-        let body_ip = result.insts.len();
-        let unit = result
-            .load_constant(self.interp.program, unit_val.clone())?
-            .0;
-        let body_ret = self.emit_capturing_call(result, unit, body_fn)?;
-        result.drop(self.interp.program, body_ret)?;
-        result.push(Bc::Goto { ip: cond_ip });
-        let end_ip = result.insts.len();
-
-        // TODO: if cond is constant, we dont need the loop check
-        let cond_ret = result.load(self.interp.program, cond_ret)?.0;
-        result.insts[branch_ip] = Bc::JumpIf {
-            // TODO: change to conditional so dont have to store the true_ip
-            cond: cond_ret.single(),
-            true_ip: body_ip,
-            false_ip: end_ip,
-        };
-
-        Ok(self.interp.program.load_value(Value::Unit))
+        Ok(Structured::RuntimeOnly(TypeId::unit()))
     }
 
     #[track_caller]
@@ -2365,7 +2079,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn struct_type(
         &mut self,
-        result: &FnBody<'p>,
+        result: &FnWip<'p>,
         pattern: &mut Pattern<'p>,
     ) -> Res<'p, TypeInfo<'p>> {
         // TODO: maybe const keyword before name in func/struct lets you be generic.
@@ -2394,7 +2108,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn set_deref(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
         place: &mut FatExpr<'p>,
         value: &mut FatExpr<'p>,
     ) -> Res<'p, ()> {
@@ -2407,21 +2121,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "Only 'var' can be reassigned (not let/const). {:?}",
                     place
                 );
-                let slot = result.vars.get(var);
-                let (slot, oldty) =
-                    *unwrap!(slot, "SetVar: var must be declared: {}", var.log(self.pool));
+                let oldty = result.vars.get(var);
+                let oldty = *unwrap!(
+                    oldty,
+                    "SetVar: var must be declared: {}",
+                    var.log(self.pool)
+                );
 
                 let value = self.compile_expr(result, value, Some(oldty))?;
                 self.type_check_arg(value.ty(), oldty, "reassign var")?;
-                result.push(Bc::Drop(slot));
-                let value = result.load(self.interp.program, value)?.0;
-                assert_eq!(value.count, slot.count);
-                for i in 0..value.count {
-                    result.push(Bc::Move {
-                        from: value.offset(i),
-                        to: slot.offset(i),
-                    });
-                }
                 Ok(())
             }
             Expr::SuffixMacro(macro_name, arg) => {
@@ -2433,13 +2141,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let expected_ty = unwrap!(self.interp.program.unptr_ty(ptr.ty()), "not ptr");
                     let value = self.compile_expr(result, value, Some(expected_ty))?;
                     self.type_check_arg(value.ty(), expected_ty, "set ptr")?;
-                    let ptr = result.load(self.interp.program, ptr)?.0;
-                    let value = result.load(self.interp.program, value)?.0;
-                    result.push(Bc::Store {
-                        to: ptr.single(),
-                        from: value,
-                    });
-
                     return Ok(());
                 }
                 todo!()
@@ -2451,12 +2152,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn field_access_expr(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &mut FnWip<'p>,
         container_ptr: Structured,
         name: Ident<'p>,
     ) -> Res<'p, Structured> {
         let mut container_ptr_ty = self.interp.program.raw_type(container_ptr.ty());
-        let mut container_ptr = result.load(self.interp.program, container_ptr)?.0;
         // Auto deref for nested place expressions.
         // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
         let depth = self.interp.program.ptr_depth(container_ptr_ty);
@@ -2464,12 +2164,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             for _ in 0..(depth - 1) {
                 container_ptr_ty = unwrap!(self.interp.program.unptr_ty(container_ptr_ty), "");
                 container_ptr_ty = self.interp.program.raw_type(container_ptr_ty);
-                let ret = result.reserve_slots(self.interp.program, container_ptr_ty)?;
-                result.push(Bc::Load {
-                    from: container_ptr.single(),
-                    to: ret,
-                });
-                container_ptr = ret;
+                // TODO: not sure if its better to do the loads here or in backend
             }
         }
         let container_ty = unwrap!(
@@ -2485,15 +2180,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if f.name == name {
                         let f = *f;
                         let ty = self.interp.program.ptr_type(f.ty);
-                        let ret = result.reserve_slots(self.interp.program, ty)?;
-
-                        result.push(Bc::SlicePtr {
-                            base: container_ptr.single(),
-                            offset: f.first,
-                            count: f.count,
-                            ret: ret.single(),
-                        });
-                        return Ok((ret, ty).into());
+                        return Ok(Structured::RuntimeOnly(ty));
                     }
                 }
                 err!(
@@ -2507,19 +2194,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if *f_name == name {
                         let f_ty = *f_ty;
                         let ty = self.interp.program.ptr_type(f_ty);
-                        let ret = result.reserve_slots(self.interp.program, ty)?;
-                        let count = self.interp.program.slot_count(f_ty);
-                        result.push(Bc::TagCheck {
-                            enum_ptr: container_ptr.single(),
-                            value: i as i64,
-                        });
-                        result.push(Bc::SlicePtr {
-                            base: container_ptr.single(),
-                            offset: 1,
-                            count,
-                            ret: ret.single(),
-                        });
-                        return Ok((ret, ty).into());
+                        return Ok(Structured::RuntimeOnly(ty));
                     }
                 }
                 err!(
@@ -2592,36 +2267,41 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn bc_to_js_walk(&mut self, f: FuncId) -> Res<'p, String> {
-        let mut out = String::new();
-        let mut done = HashSet::new();
-        let mut pending = vec![f];
-        while let Some(f) = pending.pop() {
-            if done.insert(f) {
-                let (src, called) = self.bc_to_js_one(f)?;
-                out += &src;
-                pending.extend(called);
+    fn produce_tuple(
+        &mut self,
+        owned_values: Vec<Structured>,
+        tuple_ty: TypeId,
+    ) -> Res<'p, Structured> {
+        let mut all_stack = true;
+        let mut all_const = true;
+        for v in &owned_values {
+            match v {
+                Structured::RuntimeOnly(_) => all_const = false,
+                Structured::Const(_, _) => all_stack = false,
+                Structured::TupleDifferent(_, _) => {
+                    all_const = false;
+                    all_stack = false;
+                }
+                Structured::Emitted(_, _) => unreachable!(),
             }
         }
-        Ok(out)
-    }
 
-    fn bc_to_js_one(&mut self, f: FuncId) -> Res<'p, (String, Vec<FuncId>)> {
-        let func = unwrap!(self.interp.ready[f.0].as_ref(), "");
-        let slots = func.stack_slots;
-        let insts = func.insts.clone();
-        let to_call = unwrap!(self.lookup_unique_func(self.pool.intern("bc_to_js")), "");
-        self.ensure_compiled(to_call, ExecTime::Comptime)?;
-        let arg = ((f, slots), insts).serialize_one();
-        let ret = <((FuncId, usize), Vec<Bc>)>::size();
-        let ret = self.interp.run(to_call, arg, ExecTime::Comptime, ret)?;
-        let (src, called): (String, Vec<FuncId>) = unwrap!(ret.deserialize(), "");
-        Ok((src, called))
+        assert!(!(all_const && all_stack), "todo empty");
+        if all_const {
+            let values: Vec<_> = owned_values.into_iter().map(|v| v.get().unwrap()).collect();
+            return Ok(Structured::Const(tuple_ty, values.into()));
+        }
+
+        if !all_stack {
+            return Ok(Structured::TupleDifferent(tuple_ty, owned_values));
+        }
+
+        Ok(Structured::RuntimeOnly(tuple_ty))
     }
 
     fn tuple_access(
         &self,
-        _result: &mut FnBody<'p>,
+        _result: &mut FnWip<'p>,
         _container: &FatExpr<'p>,
         _requested: Option<TypeId>,
         _index: i32,
@@ -2640,233 +2320,10 @@ pub fn insert_multi<K: Hash + Eq, V: Eq>(set: &mut HashMap<K, Vec<V>>, key: K, v
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, InterpSend)]
 pub enum ExecTime {
     Comptime,
     Runtime,
-}
-
-impl<'p> FnBody<'p> {
-    fn reserve_slots_raw(
-        &mut self,
-        program: &Program<'p>,
-        count: usize,
-        ty: TypeId,
-    ) -> Res<'p, StackRange> {
-        let first = StackOffset(self.stack_slots);
-
-        if ty.is_any() {
-            // debug_assert_eq!(count, 1, "no any tuple");
-            for _ in 0..count {
-                self.slot_types.push(TypeId::any());
-            }
-            self.stack_slots += count;
-        } else if count == 1 {
-            self.slot_types.push(ty);
-            self.stack_slots += count;
-        } else {
-            let types = unwrap!(
-                program.tuple_types(ty),
-                "expected multiple slots {:?}",
-                program.log_type(ty)
-            );
-            let mut found = 0;
-            for ty in types {
-                found += self.reserve_slots(program, *ty)?.count;
-            }
-            debug_assert_eq!(found, count, "bad tuple size");
-            // Note: don't bump self.stack_slots here.
-        }
-        Ok(StackRange { first, count })
-    }
-
-    fn reserve_slots(&mut self, program: &Program<'p>, ty: TypeId) -> Res<'p, StackRange> {
-        let ty = program.raw_type(ty);
-        match &program.types[ty.0] {
-            TypeInfo::Enum {
-                size_including_tag: size,
-                ..
-            } => {
-                let size = *size;
-                let first = StackOffset(self.stack_slots);
-                self.slot_types.push(TypeId::i64());
-                self.stack_slots += size;
-                Ok(StackRange { first, count: size })
-            }
-            _ => {
-                let count = program.slot_count(ty);
-                self.reserve_slots_raw(program, count, ty)
-            }
-        }
-    }
-
-    fn load_constant(
-        &mut self,
-        program: &mut Program<'p>,
-        value: Values,
-    ) -> Res<'p, (StackRange, TypeId)> {
-        let ty = program.type_of_raw(&value);
-        match value {
-            Values::One(value) => {
-                let to = self.reserve_slots(program, ty)?;
-                self.push(Bc::LoadConstant {
-                    slot: to.single(),
-                    value,
-                });
-                Ok((to, ty))
-            }
-            Values::Many(values) => {
-                let start = self.stack_slots;
-                let mut count = 0;
-                for value in values {
-                    let (slot, _) = self.load_constant(program, value.into())?;
-                    count += slot.count
-                }
-                Ok((
-                    StackRange {
-                        first: StackOffset(start),
-                        count,
-                    },
-                    ty,
-                ))
-            }
-        }
-    }
-
-    fn load(
-        &mut self,
-        program: &mut Program<'p>,
-        value: Structured,
-    ) -> Res<'p, (StackRange, TypeId)> {
-        let expected = value.ty();
-        let (slot, _ty) = match value {
-            Structured::Emitted(ty, slot) => (slot, ty),
-            Structured::Const(_, value) => self.load_constant(program, value)?,
-            Structured::TupleDifferent(_, values) => {
-                let slots: Res<'p, Vec<_>> = values
-                    .into_iter()
-                    .map(|value| self.load(program, value))
-                    .collect();
-                let slots = slots?;
-                let slots = self.create_tuple_slots(program, expected, slots)?;
-                (slots, expected)
-            }
-        };
-        // TODO: another typecheck?
-        Ok((slot, expected))
-    }
-
-    fn drop(&mut self, _program: &mut Program<'p>, ret: Structured) -> Res<'p, ()> {
-        match ret {
-            Structured::Emitted(_, slots) => {
-                self.push(Bc::Drop(slots));
-            }
-            Structured::Const(_, _) => {} // noop
-            Structured::TupleDifferent(_, s) => {
-                for s in s {
-                    self.drop(_program, s)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[track_caller]
-    fn push(&mut self, inst: Bc<'p>) -> usize {
-        let ip = self.insts.len();
-        self.insts.push(inst);
-
-        #[cfg(feature = "some_log")]
-        {
-            self.debug.push(DebugInfo {
-                internal_loc: Location::caller(),
-                src_loc: self.last_loc,
-                p: Default::default(),
-            });
-            debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
-        }
-        ip
-    }
-
-    fn produce_tuple(
-        &mut self,
-        program: &mut Program<'p>,
-        owned_values: Vec<Structured>,
-        tuple_ty: TypeId,
-    ) -> Res<'p, Structured> {
-        let mut all_stack = true;
-        let mut all_const = true;
-        for v in &owned_values {
-            match v {
-                Structured::Emitted(_, _) => all_const = false,
-                Structured::Const(_, _) => all_stack = false,
-                Structured::TupleDifferent(_, _) => {
-                    all_const = false;
-                    all_stack = false;
-                }
-            }
-        }
-
-        assert!(!(all_const && all_stack), "todo empty");
-        if all_const {
-            let values: Vec<_> = owned_values.into_iter().map(|v| v.get().unwrap()).collect();
-            return Ok(Structured::Const(tuple_ty, values.into()));
-        }
-
-        if !all_stack {
-            return Ok(Structured::TupleDifferent(tuple_ty, owned_values));
-        }
-
-        let owned_values: Vec<_> = owned_values
-            .into_iter()
-            .map(|v| self.load(program, v).unwrap())
-            .collect();
-        let ret = self.create_tuple_slots(program, tuple_ty, owned_values)?;
-        Ok(Structured::Emitted(tuple_ty, ret))
-    }
-
-    fn create_tuple_slots(
-        &mut self,
-        program: &mut Program<'p>,
-        tuple_ty: TypeId,
-        owned_values: Vec<(StackRange, TypeId)>,
-    ) -> Res<'p, StackRange> {
-        // They might already be consecutive
-
-        debug_assert!(!owned_values.is_empty());
-        let mut next = (owned_values[0].0).first;
-        let mut ok = true;
-        for (r, _) in &owned_values {
-            if r.first != next {
-                ok = false;
-                break;
-            }
-            next.0 += r.count;
-        }
-        let ret = if ok {
-            StackRange {
-                first: (owned_values[0].0).first,
-                count: program.slot_count(tuple_ty),
-            }
-        } else {
-            let ret = self.reserve_slots(program, tuple_ty)?;
-            // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
-            let base = ret.first.0;
-            let mut count = 0;
-            for (v, _) in owned_values {
-                for i in 0..v.count {
-                    self.push(Bc::Move {
-                        from: StackOffset(v.first.0 + i),
-                        to: StackOffset(base + count),
-                    });
-                    count += 1;
-                }
-            }
-            assert_eq!(count, ret.count);
-            ret
-        };
-        Ok(ret)
-    }
 }
 
 /// https://users.rust-lang.org/t/convenience-method-for-flipping-option-result-to-result-option/13695
@@ -2874,76 +2331,15 @@ fn invert<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
     x.map_or(Ok(None), |v| v.map(Some))
 }
 
-impl<'p> Bc<'p> {
-    // Used for inlining
-    fn renumber(&mut self, stack_offset: usize, ip_offset: usize) {
-        match self {
-            Bc::CallDynamic { f, ret, arg } | Bc::CallC { f, ret, arg } => {
-                f.0 += stack_offset;
-                ret.first.0 += stack_offset;
-                arg.first.0 += stack_offset;
-            }
-            Bc::CallDirect { f: _, ret, arg } => {
-                ret.first.0 += stack_offset;
-                arg.first.0 += stack_offset;
-            }
-            Bc::CallBuiltin { ret, arg, .. } => {
-                ret.first.0 += stack_offset;
-                arg.first.0 += stack_offset;
-            }
-            Bc::LoadConstant { slot, .. } => slot.0 += stack_offset,
-            Bc::JumpIf {
-                cond,
-                true_ip,
-                false_ip,
-            } => {
-                cond.0 += stack_offset;
-                *true_ip += ip_offset;
-                *false_ip += ip_offset;
-            }
-            Bc::Goto { ip } => *ip += ip_offset,
-            Bc::Drop(arg) | Bc::Ret(arg) => {
-                arg.first.0 += stack_offset;
-            }
-
-            Bc::Move { from, to } | Bc::Clone { from, to } => {
-                from.0 += stack_offset;
-                to.0 += stack_offset;
-            }
-            Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
-                from.first.0 += stack_offset;
-                to.first.0 += stack_offset;
-            }
-            Bc::Load { from, to } => {
-                from.0 += stack_offset;
-                to.first.0 += stack_offset;
-            }
-            Bc::AbsoluteStackAddr { of, to } => {
-                of.first.0 += stack_offset;
-                to.0 += stack_offset;
-            }
-            Bc::Store { from, to } => {
-                from.first.0 += stack_offset;
-                to.0 += stack_offset;
-            }
-            Bc::SlicePtr {
-                base, offset, ret, ..
-            } => {
-                base.0 += stack_offset;
-                *offset += stack_offset;
-                ret.0 += stack_offset;
-            }
-            Bc::TagCheck { enum_ptr, .. } => {
-                enum_ptr.0 += stack_offset;
-            }
-            Bc::DebugLine(_) | Bc::DebugMarker(_, _) => {}
-        }
-    }
-}
-
 fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
     for _ in 0..(vec.len() - new_len) {
         vec.pop();
+    }
+}
+
+fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) {
+    if !vec.contains(&new) {
+        vec.push(new);
     }
 }
 

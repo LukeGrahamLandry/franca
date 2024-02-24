@@ -24,6 +24,7 @@ pub mod logging;
 pub mod parse;
 pub mod pool;
 pub mod scope;
+pub mod emit_bc;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
@@ -253,13 +254,6 @@ pub fn run_main<'a: 'p, 'p>(
                                         "   - {assertion_count} assertions passed. {} comptime evaluations.",
                                         interp.anon_fn_counter
                                     );
-                                    match interp.bc_to_js_walk(f) {
-                                        Ok(src) => println!("{src}"),
-                                        Err(e) => {
-                                            log_err(codemap, &mut interp, e, save);
-                                            return false;
-                                        }
-                                    }
                                 }
                             }
                         }
