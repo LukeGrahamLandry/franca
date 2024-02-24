@@ -4,7 +4,7 @@
 
 #![allow(clippy::wrong_self_convention)]
 use codemap::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -2590,6 +2590,33 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.interp.program.log_type(container_ty)
             ),
         }
+    }
+
+    pub fn bc_to_js_walk(&mut self, f: FuncId) -> Res<'p, String> {
+        let mut out = String::new();
+        let mut done = HashSet::new();
+        let mut pending = vec![f];
+        while let Some(f) = pending.pop() {
+            if done.insert(f) {
+                let (src, called) = self.bc_to_js_one(f)?;
+                out += &src;
+                pending.extend(called);
+            }
+        }
+        Ok(out)
+    }
+
+    fn bc_to_js_one(&mut self, f: FuncId) -> Res<'p, (String, Vec<FuncId>)> {
+        let func = unwrap!(self.interp.ready[f.0].as_ref(), "");
+        let slots = func.stack_slots;
+        let insts = func.insts.clone();
+        let to_call = unwrap!(self.lookup_unique_func(self.pool.intern("bc_to_js")), "");
+        self.ensure_compiled(to_call, ExecTime::Comptime)?;
+        let arg = ((f, slots), insts).serialize_one();
+        let ret = <((FuncId, usize), Vec<Bc>)>::size();
+        let ret = self.interp.run(to_call, arg, ExecTime::Comptime, ret)?;
+        let (src, called): (String, Vec<FuncId>) = unwrap!(ret.deserialize(), "");
+        Ok((src, called))
     }
 
     fn tuple_access(

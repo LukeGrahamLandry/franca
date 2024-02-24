@@ -253,6 +253,13 @@ pub fn run_main<'a: 'p, 'p>(
                                         "   - {assertion_count} assertions passed. {} comptime evaluations.",
                                         interp.anon_fn_counter
                                     );
+                                    match interp.bc_to_js_walk(f) {
+                                        Ok(src) => println!("{src}"),
+                                        Err(e) => {
+                                            log_err(codemap, &mut interp, e, save);
+                                            return false;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -260,7 +267,7 @@ pub fn run_main<'a: 'p, 'p>(
                 }
             }
         }
-    }
+    } // TODO: this is dereanged. put it in a function so you can just use ? to call log_err
 
     outln!(ShowPrint, "===============");
     log_dbg(&interp, save);

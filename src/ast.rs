@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Constants, Structured, Value, Values},
+    bc::{Bc, Constants, Structured, Value, Values},
     compiler::insert_multi,
     ffi::{init_interp_send, InterpSend},
     pool::{Ident, StringPool},
@@ -575,6 +575,7 @@ impl<'p> Program<'p> {
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
+        init_interp_send!(&mut program, Bc,); // TODO: aaaa
 
         program
     }

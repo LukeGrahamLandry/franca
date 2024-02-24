@@ -37,6 +37,7 @@ pub trait InterpSend<'p>: Sized {
 }
 
 macro_rules! init_interp_send {
+    ($program:expr,) => {};
     ($program:expr, $ty:ty) => {
         <$ty>::get_type($program);
     };

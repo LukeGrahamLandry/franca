@@ -491,7 +491,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let data = unsafe { &*value };
                         assert!(
                             data.references > 0
-                                && abs_first < (data.values.len())
+                                && abs_first <= (data.values.len())  // TODO: wrong in general but lets you have zero count
                                 && abs_last <= (data.values.len()),
                             "[len={}]{abs_first}..<{abs_last}",
                             data.values.len()
