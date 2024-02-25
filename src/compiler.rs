@@ -18,7 +18,6 @@ use crate::ast::{
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
-use crate::interp::{CmdResult, Interp};
 use crate::logging::{outln, LogTag, PoolLog};
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -85,14 +84,6 @@ pub enum DebugState<'p> {
     ResolveFnRef(Var<'p>),
 }
 
-#[derive(Clone)]
-struct StackHeights<'p> {
-    value_stack: usize,
-    call_stack: usize,
-    debug_trace: usize,
-    result: FnWip<'p>,
-}
-
 #[derive(Clone, Debug, InterpSend)]
 pub struct FnWip<'p> {
     pub stack_slots: usize,
@@ -105,8 +96,9 @@ pub struct FnWip<'p> {
     pub callees: Vec<FuncId>,
 }
 
-impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
-    pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>) -> Self {
+
+impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
+    pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>, executor: Exec) -> Self {
         Self {
             pool,
             debug_trace: vec![],
@@ -115,7 +107,7 @@ impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
             last_loc: None,
             currently_compiling: vec![],
             program,
-            executor: Interp::new(pool),
+            executor,
         }
     }
 
@@ -184,7 +176,7 @@ impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
         result
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
+    pub fn run(&mut self, f: FuncId, arg: Values, _when: ExecTime) -> Res<'p, Values> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
         let result = self.executor.run_func(self.program, f, arg);
@@ -370,7 +362,7 @@ impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
         arg_expr: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
         let f_ty = self.program.funcs[f.0].unwrap_ty();
-        let arg = self.compile_expr(result, arg_expr, Some(f_ty.arg))?;
+        self.compile_expr(result, arg_expr, Some(f_ty.arg))?;
 
         // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
         let func = &self.program.funcs[f.0];
@@ -1226,7 +1218,7 @@ impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
                             break self.compile_expr(result, expr, requested)?;
                         }
                         Err(msg) => match msg.reason {
-                            CErr::InterpMsgToCompiler(name, arg, ret) => {
+                            CErr::InterpMsgToCompiler(name, arg, _) => {
                                 let name = self.pool.get(name);
                                 let res = self.handle_macro_msg(result, name, arg)?;
                                 response = self.executor.run_continuation(self.program, res);
@@ -1643,7 +1635,7 @@ impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
             "true" => (Value::Bool(true), TypeId::bool()),
             "false" => (Value::Bool(false), TypeId::bool()),
             "Symbol" => ffi_type!(Ident),
-            "CmdResult" => ffi_type!(CmdResult),
+            "CmdResult" => ffi_type!(crate::interp::CmdResult),
             "FatExpr" => ffi_type!(FatExpr),
             "getchar" => cfn!(
                 libc::getchar,
@@ -2042,7 +2034,6 @@ impl<'a, 'p> Compile<'a, 'p, Interp<'a, 'p>> {
 
         let as_tuple = self.program.tuple_of(types);
         let mut fields = vec![];
-        let mut size = 0;
         for (name, ty) in raw_fields {
             fields.push(Field {
                 name: unwrap!(name, "field name").0,

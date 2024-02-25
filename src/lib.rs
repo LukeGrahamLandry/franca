@@ -25,6 +25,8 @@ pub mod parse;
 pub mod pool;
 pub mod scope;
 pub mod emit_bc;
+pub mod interp_arm;
+pub mod arm64;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, interp::Interp, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
@@ -117,7 +119,7 @@ pub fn run_main<'a: 'p, 'p>(
 
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool);
-    let mut interp = Compile::new(pool, &mut program);
+    let mut interp = Compile::new(pool, &mut program, Interp::new(pool));
     // damn turns out defer would maybe be a good idea
     let result = interp.add_declarations(global);
 

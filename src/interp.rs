@@ -984,7 +984,7 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         self.ready.len() > f.0 && self.ready[f.0].is_some()
     }
 
-    fn dump_repr(&self, program: &Program<'p>, f: FuncId) -> String {
+    fn dump_repr(&self, _program: &Program<'p>, f: FuncId) -> String {
         self.ready[f.0]
             .as_ref()
             .map(|func| func.log(self.pool))
@@ -1088,15 +1088,6 @@ impl<'p> Values {
                 Ok((a.to_int()?, b.to_int()?))
             }
             _ => err!("load_int_pair {:?}", self),
-        }
-    }
-
-    #[track_caller]
-    fn to_int(self) -> Res<'p, i64> {
-        match self.single()? {
-            Value::I64(i) => Ok(i),
-            Value::Symbol(i) => Ok(i as i64),
-            v => err!("load_int {:?}", v),
         }
     }
 
