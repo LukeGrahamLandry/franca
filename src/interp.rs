@@ -6,7 +6,8 @@ use std::process::Command;
 use codemap::Span;
 use interp_derive::InterpSend;
 
-use crate::compiler::{CErr, ExecTime, Res};
+use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res};
+use crate::emit_bc::{EmitBc, SizeCache};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, unwrap, PoolLog};
 use crate::{
@@ -28,35 +29,28 @@ pub struct CallFrame<'p> {
     when: ExecTime,
 }
 
-//
-// TODO:
-// - any time you try to call a function it might not be ready yet
-//   and compiling it might require running other comptime functions.
-// - some types need to be passed between the interpreter and the comptime code.
-// - some functions run in the interpreter when bootstraping but then are compiled into the compiler.
-// - some functions are written in rust when bootstraping but then are compiled into the compiler.
-//
-// TODO: bucket array for stack so you can take pointers into it
 pub struct Interp<'a, 'p> {
     pub pool: &'a StringPool<'p>,
     pub value_stack: Vec<Value>,
     pub call_stack: Vec<CallFrame<'p>>,
-    pub program: &'a mut Program<'p>,
     pub ready: Vec<Option<FnBody<'p>>>,
     pub assertion_count: usize,
     pub last_loc: Option<Span>,
+    pub messages: Vec<StackAbsoluteRange>,
+    pub sizes: SizeCache,
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
-    pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>) -> Self {
+    pub fn new(pool: &'a StringPool<'p>) -> Self {
         Self {
             pool,
             value_stack: vec![],
             call_stack: vec![],
-            program,
             ready: vec![],
             assertion_count: 0,
             last_loc: None,
+            messages: vec![],
+            sizes: SizeCache { known: vec![] },
         }
     }
 
@@ -66,6 +60,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg: Values,
         when: ExecTime,
         return_slot_count: usize,
+        program: &mut Program<'p>,
     ) -> Res<'p, Values> {
         let _init_heights = (self.call_stack.len(), self.value_stack.len());
 
@@ -93,12 +88,12 @@ impl<'a, 'p> Interp<'a, 'p> {
         };
 
         // Call the function
-        self.push_callframe(f, ret, arg, when)?;
-        self.run_continuation()
+        self.push_callframe(f, ret, arg, when, program)?;
+        self.run_continuation(program)
     }
 
-    fn run_continuation(&mut self) -> Res<'p, Values> {
-        self.run_inst_loop()?;
+    fn run_continuation(&mut self, program: &mut Program<'p>) -> Res<'p, Values> {
+        self.run_inst_loop(program)?;
 
         // Give the return value to the caller.
         let frame = unwrap!(self.call_stack.last(), "");
@@ -119,7 +114,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         Ok(result)
     }
 
-    fn run_inst_loop(&mut self) -> Res<'p, ()> {
+    fn run_inst_loop(&mut self, program: &mut Program<'p>) -> Res<'p, ()> {
         loop {
             self.update_debug();
             let i = self.next_inst();
@@ -133,7 +128,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                     let arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
-                    self.push_callframe(f, ret, arg, when)?;
+                    self.push_callframe(f, ret, arg, when, program)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -147,7 +142,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     false_ip,
                 } => {
                     let cond = self.take_slot(cond);
-                    let cond = self.to_bool(cond.into())?;
+                    let cond = Values::One(cond).to_bool()?;
                     let next_ip = if cond { true_ip } else { false_ip };
                     let frame = self.call_stack.last_mut().unwrap();
                     frame.current_ip = next_ip;
@@ -163,7 +158,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let abs = self.range_to_index(ret);
                     self.bump_ip();
                     // Note: at this point you have to be re-enterant because you might suspend to ask the compiler to do something.
-                    let value = self.runtime_builtin(name, arg.clone(), Some(abs))?;
+                    let value = self.runtime_builtin(name, arg.clone(), Some(abs), program)?;
                     self.expand_maybe_tuple(value, abs)?;
                 }
                 &Bc::Ret(slot) => {
@@ -208,8 +203,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     self.bump_ip();
                     let f = self.take_slot(f);
                     let arg = self.take_slots(arg);
-                    let f = self.to_func(f.into())?;
-                    self.push_callframe(f, ret, arg, when)?;
+                    let f = Values::One(f).to_func()?;
+                    self.push_callframe(f, ret, arg, when, program)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -293,9 +288,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                     #[cfg(feature = "interp_c_ffi")]
                     {
                         let f = self.take_slot(f);
-                        let (ptr, f_ty) = self.to_c_func(f)?;
+                        let (ptr, f_ty) = Values::One(f).to_c_func()?;
                         let arg = self.take_slots(arg);
-                        let result = ffi::c::call(self.program, ptr, f_ty, arg)?;
+                        let result = ffi::c::call(program, ptr, f_ty, arg)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     }
                 }
@@ -314,7 +309,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 todo!("zero argument return. probably just works but untested.")
             }
             std::cmp::Ordering::Greater => {
-                let values = self.to_seq(value)?;
+                let values = value.to_seq()?;
                 assert_eq!(values.len(), target.count);
                 let base = target.first.0;
                 for (i, v) in values.into_iter().enumerate() {
@@ -391,6 +386,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         name: &str,
         arg: Values,
         ret_slot_for_suspend: Option<StackAbsoluteRange>,
+        program: &mut Program<'p>,
     ) -> Res<'p, Values> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
@@ -403,7 +399,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 err!("Program panicked: \n{msg}\nAt {}", self.log_callstack())
             }
             "assert_eq" => {
-                let (a, b) = self.to_pair(arg)?;
+                let (a, b) = arg.to_pair()?;
                 assert_eq!(a, b, "runtime_builtin:assert_eq");
                 self.assertion_count += 1; // sanity check for making sure tests actually ran
                 Value::Unit.into()
@@ -446,26 +442,26 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             .into(),
             "size_of" => {
-                let ty = self.to_type(arg)?;
-                let stride = self.program.slot_count(ty);
+                let ty = program.to_type(arg)?;
+                let stride = self.size_of(program, ty);
                 Value::I64(stride as i64).into()
             }
             "Ptr" => {
-                let inner_ty = self.to_type(arg)?;
-                Value::Type(self.program.ptr_type(inner_ty)).into()
+                let inner_ty = program.to_type(arg)?;
+                Value::Type(program.ptr_type(inner_ty)).into()
             }
             "Slice" => {
-                let inner_ty = self.to_type(arg)?;
-                Value::Type(self.program.slice_type(inner_ty)).into()
+                let inner_ty = program.to_type(arg)?;
+                Value::Type(program.slice_type(inner_ty)).into()
             }
             "is_oob_stack" => {
-                let addr = self.to_stack_addr(arg)?;
+                let addr = arg.to_stack_addr()?;
                 Value::Bool(addr.first.0 >= self.value_stack.len()).into()
             }
             "raw_slice" => {
                 // last is not included
-                let (addr, new_first, new_last) = self.to_triple(arg)?;
-                let (new_first, new_last) = (self.to_int(new_first)?, self.to_int(new_last)?);
+                let (addr, new_first, new_last) = arg.to_triple()?;
+                let (new_first, new_last) = (new_first.to_int()?, new_last.to_int()?);
                 assert!(
                     new_first >= 0 && new_last >= 0 && new_first <= new_last,
                     "{new_first}..<{new_last}"
@@ -507,9 +503,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                 .into()
             }
             "alloc" => {
-                let (ty, count) = self.to_pair(arg)?;
-                let (ty, count) = (self.to_type(ty.into())?, self.to_int(count)?);
-                let stride = self.program.slot_count(ty);
+                let (ty, count) = arg.to_pair()?;
+                let (ty, count) = (program.to_type(ty.into())?, count.to_int()?);
+                let stride = self.size_of(program, ty);
                 assert!(count >= 0);
                 let values = vec![Value::Poison; count as usize * stride];
                 let value = Box::into_raw(Box::new(InterpBox {
@@ -525,17 +521,17 @@ impl<'a, 'p> Interp<'a, 'p> {
                 .into()
             }
             "dump_ffi_types" => {
-                let msg = self.program.dump_ffi_types();
+                let msg = program.dump_ffi_types();
                 msg.serialize_one()
             }
             "dealloc" => {
-                let (ty, ptr, count) = self.to_triple(arg)?;
+                let (ty, ptr, count) = arg.to_triple()?;
                 let (ty, count, (ptr, ptr_first, ptr_count)) = (
-                    self.to_type(ty.into())?,
-                    self.to_int(count)?,
-                    self.to_heap_ptr(ptr.into())?,
+                    program.to_type(ty.into())?,
+                    count.to_int()?,
+                    Values::One(ptr).to_heap_ptr()?,
                 );
-                assert_eq!(self.program.slot_count(ty) * count as usize, ptr_count);
+                assert_eq!(self.size_of(program, ty) * count as usize, ptr_count);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
@@ -560,9 +556,9 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "Fn" => {
                 // println!("Fn: {:?}", arg);
-                let (arg, ret) = self.to_pair(arg)?;
-                let (arg, ret) = (self.to_type(arg.into())?, self.to_type(ret.into())?);
-                let ty = self.program.intern_type(TypeInfo::Fn(FnType { arg, ret }));
+                let (arg, ret) = arg.to_pair()?;
+                let (arg, ret) = (program.to_type(arg.into())?, program.to_type(ret.into())?);
+                let ty = program.intern_type(TypeInfo::Fn(FnType { arg, ret }));
                 // println!("=> {}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
@@ -582,31 +578,31 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert!(
                         false,
                         "Ty arg should be tuple of types not type {:?}",
-                        self.program.log_type(ty)
+                        program.log_type(ty)
                     );
                 }
                 print!("Ty: {:?}", arg);
-                let ty = self.to_type(arg)?;
+                let ty = program.to_type(arg)?;
                 // println!(" => {:?}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
             "Unique" => {
-                let ty = self.to_type(arg)?;
-                Value::Type(self.program.unique_ty(ty)).into()
+                let ty = program.to_type(arg)?;
+                Value::Type(program.unique_ty(ty)).into()
             }
             "tag_value" => {
-                let (enum_ty, name) = self.to_pair(arg)?;
-                let (enum_ty, name) = (self.to_type(enum_ty.into())?, self.to_int(name)?);
+                let (enum_ty, name) = arg.to_pair()?;
+                let (enum_ty, name) = (program.to_type(enum_ty.into())?, name.to_int()?);
                 let name = unwrap!(self.pool.upcast(name), "bad symbol");
-                let cases = unwrap!(self.program.get_enum(enum_ty), "not enum");
+                let cases = unwrap!(program.get_enum(enum_ty), "not enum");
                 let index = cases.iter().position(|f| f.0 == name);
                 let index = unwrap!(index, "bad case name");
                 Value::I64(index as i64).into()
             }
             "tag_symbol" => {
-                let (enum_ty, tag_val) = self.to_pair(arg)?;
-                let (enum_ty, tag_val) = (self.to_type(enum_ty.into())?, self.to_int(tag_val)?);
-                let cases = unwrap!(self.program.get_enum(enum_ty), "not enum");
+                let (enum_ty, tag_val) = arg.to_pair()?;
+                let (enum_ty, tag_val) = (program.to_type(enum_ty.into())?, tag_val.to_int()?);
+                let cases = unwrap!(program.get_enum(enum_ty), "not enum");
                 let case = unwrap!(cases.get(tag_val as usize), "enum tag too high");
 
                 Value::Symbol(case.0 .0).into()
@@ -649,11 +645,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 args.serialize_one()
             }
             "type_id" => {
-                let ty = self.to_type(arg)?;
+                let ty = program.to_type(arg)?;
                 Value::I64(ty.0 as i64).into()
             }
             "clone_const" => {
-                let (ptr, first, count) = self.to_heap_ptr(arg)?;
+                let (ptr, first, count) = arg.to_heap_ptr()?;
                 let ptr = unsafe { &mut *ptr };
                 assert!(
                     ptr.is_constant,
@@ -669,6 +665,20 @@ impl<'a, 'p> Interp<'a, 'p> {
                 );
                 let s = self.pool.get(arg).to_string();
                 s.serialize_one()
+            }
+            "literal_ast" => {
+                let (ty, ptr) = arg.to_pair()?;
+                let val = self.deref_ptr(ptr)?;
+                let mut v = val.vec();
+                v.insert(0, ty); // aaaaaa
+                let arg = Values::Many(v);
+                // aaaaa
+                let name = self.pool.intern(name);
+                self.suspend(
+                    name,
+                    arg,
+                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
+                )?
             }
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
@@ -691,12 +701,18 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg: Values,
         ret: StackAbsoluteRange,
     ) -> Res<'p, Values> {
+        self.messages.push(ret);
         err!(CErr::InterpMsgToCompiler(name, arg, ret))
     }
 
-    pub fn resume(&mut self, result: Values, ret: StackAbsoluteRange) -> Res<'p, Values> {
+    pub fn resume(
+        &mut self,
+        result: Values,
+        ret: StackAbsoluteRange,
+        program: &mut Program<'p>,
+    ) -> Res<'p, Values> {
         self.expand_maybe_tuple(result, ret)?;
-        self.run_continuation()
+        self.run_continuation(program)
     }
 
     fn push_callframe(
@@ -705,6 +721,8 @@ impl<'a, 'p> Interp<'a, 'p> {
         ret: StackRange,
         arg: Values,
         when: ExecTime,
+
+        program: &mut Program<'p>,
     ) -> Res<'p, ()> {
         let func = self.ready[f.0].as_ref();
         assert!(func.is_some(), "ICE: tried to call {f:?} but not compiled.");
@@ -712,7 +730,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let return_slot = self.range_to_index(ret);
         let stack_base = self.value_stack.len(); // Our stack includes the argument but not the return slot.
         self.push_expanded(arg);
-        let debug_name = self.program.funcs[f.0].get_name(self.pool);
+        let debug_name = program.funcs[f.0].get_name(self.pool);
         self.call_stack.push(CallFrame {
             stack_base: StackAbsolute(stack_base),
             current_func: f,
@@ -832,123 +850,6 @@ impl<'a, 'p> Interp<'a, 'p> {
         body.as_ref().expect("jit current function")
     }
 
-    #[track_caller]
-    pub fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
-        match value {
-            Values::One(Value::Unit) => Ok(self.program.intern_type(TypeInfo::Unit)),
-            Values::One(Value::Type(id)) => Ok(id),
-            Values::Many(values) => {
-                let values: Res<'_, Vec<_>> =
-                    values.into_iter().map(|v| self.to_type(v.into())).collect();
-                Ok(self.program.tuple_of(values?))
-            }
-            _ => {
-                err!(CErr::TypeError("Type", value))
-            }
-        }
-    }
-
-    #[track_caller]
-    fn to_bool(&self, value: Values) -> Res<'p, bool> {
-        if let Values::One(Value::Bool(v)) = value {
-            Ok(v)
-        } else {
-            err!(CErr::TypeError("bool", value))
-        }
-    }
-
-    #[track_caller]
-    fn to_seq(&self, value: Values) -> Res<'p, Vec<Value>> {
-        Ok(value.vec())
-    }
-
-    #[track_caller]
-    fn to_triple(&self, value: Values) -> Res<'p, (Value, Value, Value)> {
-        let values = value.vec();
-        assert_eq!(values.len(), 3, "arity {:?}", values);
-        Ok((values[0], values[1], values[2]))
-    }
-
-    #[track_caller]
-    fn to_func(&self, value: Values) -> Res<'p, FuncId> {
-        if let Values::One(Value::GetFn(id)) = value {
-            Ok(id)
-        } else {
-            err!(CErr::TypeError("AnyFunc", value))
-        }
-    }
-
-    #[track_caller]
-    pub fn to_pair(&self, value: Values) -> Res<'p, (Value, Value)> {
-        let values = self.to_seq(value)?;
-        assert_eq!(values.len(), 2, "arity {:?}", values);
-        Ok((values[0], values[1]))
-    }
-
-    #[track_caller]
-    fn to_stack_addr(&self, value: Values) -> Res<'p, StackAbsoluteRange> {
-        if let Values::One(Value::InterpAbsStackAddr(r)) = value {
-            Ok(r)
-        } else {
-            err!(CErr::TypeError("StackAddr", value))
-        }
-    }
-
-    #[track_caller]
-    pub fn to_int(&self, value: Value) -> Res<'p, i64> {
-        if let Value::I64(r) = value {
-            Ok(r)
-        } else if let Value::Symbol(r) = value {
-            // TODO: have a special unwrap method for this
-            Ok(r as i64)
-        } else {
-            err!(CErr::TypeError("i64", value.into()))
-        }
-    }
-
-    fn to_heap_ptr(&self, value: Values) -> Res<'p, (*mut InterpBox, usize, usize)> {
-        if let Values::One(Value::Heap {
-            value,
-            physical_first: first,
-            physical_count: count,
-        }) = value
-        {
-            Ok((value, first, count))
-        } else {
-            err!(CErr::TypeError("Heap", value))
-        }
-    }
-
-    // TODO: macros for each builtin arg type cause this sucks.
-    #[track_caller]
-    fn load_int_pair(&self, v: Values) -> Res<'p, (i64, i64)> {
-        match v {
-            Values::Many(mut values) => {
-                assert_eq!(values.len(), 2, "load_int_pair wrong arity {:?}", values);
-                let a = replace(&mut values[0], Value::Poison);
-                let b = replace(&mut values[1], Value::Poison);
-                Ok((self.load_int(a)?, self.load_int(b)?))
-            }
-            v => err!("load_int_pair {:?}", v),
-        }
-    }
-
-    #[track_caller]
-    fn load_int(&self, v: Value) -> Res<'p, i64> {
-        match v {
-            Value::I64(i) => Ok(i),
-            Value::Symbol(i) => Ok(i as i64),
-            v => err!("load_int {:?}", v),
-        }
-    }
-
-    fn to_c_func(&self, v: Value) -> Res<'p, (usize, FnType)> {
-        match v {
-            Value::CFnPtr { ptr, ty } => Ok((ptr, ty)),
-            v => err!("to_c_func {:?}", v),
-        }
-    }
-
     fn set_ptr(&mut self, addr: Value, value: Values) -> Res<'p, Value> {
         Ok(match addr {
             Value::InterpAbsStackAddr(addr) => {
@@ -1050,4 +951,173 @@ pub struct CmdResult {
     status: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
+    type SavedState = (usize, usize);
+    fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()> {
+        let init_heights = (self.call_stack.len(), self.value_stack.len());
+        let result = EmitBc::compile(program, self, f);
+        if result.is_ok() {
+            let end_heights = (self.call_stack.len(), self.value_stack.len());
+            assert!(init_heights == end_heights, "bad stack size");
+        }
+        result
+    }
+
+    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
+        let ret = program.funcs[f.0].unwrap_ty().ret;
+        let size = self.size_of(program, ret);
+        self.run(f, arg, ExecTime::Runtime, size, program)
+    }
+
+    fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values> {
+        let ret = unwrap!(self.messages.pop(), "nothing to resume");
+        self.resume(response, ret, program)
+    }
+
+    fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize {
+        self.sizes.slot_count(program, ty)
+    }
+
+    fn is_ready(&self, f: FuncId) -> bool {
+        self.ready.len() > f.0 && self.ready[f.0].is_some()
+    }
+
+    fn dump_repr(&self, program: &Program<'p>, f: FuncId) -> String {
+        self.ready[f.0]
+            .as_ref()
+            .map(|func| func.log(self.pool))
+            .unwrap_or_else(|| String::from("NOT READY"))
+    }
+
+    fn tag_error(&self, err: &mut CompileError<'p>) {
+        err.value_stack = self.value_stack.clone();
+        err.call_stack = self.log_callstack();
+        err.loc = self.last_loc.or(err.loc);
+    }
+
+    fn assertion_count(&self) -> usize {
+        self.assertion_count
+    }
+
+    fn mark_state(&self) -> Self::SavedState {
+        (self.call_stack.len(), self.value_stack.len())
+    }
+
+    fn restore_state(&mut self, (cs, vs): Self::SavedState) {
+        drops(&mut self.call_stack, cs);
+        drops(&mut self.value_stack, vs);
+    }
+}
+
+fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
+    for _ in 0..(vec.len() - new_len) {
+        vec.pop();
+    }
+}
+
+impl<'p> Values {
+    #[track_caller]
+    fn to_bool(self) -> Res<'p, bool> {
+        if let Values::One(Value::Bool(v)) = self {
+            Ok(v)
+        } else {
+            err!(CErr::TypeError("bool", self))
+        }
+    }
+
+    #[track_caller]
+    fn to_seq(self) -> Res<'p, Vec<Value>> {
+        Ok(self.vec())
+    }
+
+    #[track_caller]
+    fn to_triple(self) -> Res<'p, (Value, Value, Value)> {
+        let values = self.vec();
+        assert_eq!(values.len(), 3, "arity {:?}", values);
+        Ok((values[0], values[1], values[2]))
+    }
+
+    #[track_caller]
+    fn to_func(self) -> Res<'p, FuncId> {
+        if let Values::One(Value::GetFn(id)) = self {
+            Ok(id)
+        } else {
+            err!(CErr::TypeError("AnyFunc", self))
+        }
+    }
+
+    #[track_caller]
+    pub fn to_pair(self) -> Res<'p, (Value, Value)> {
+        let values = self.to_seq()?;
+        assert_eq!(values.len(), 2, "arity {:?}", values);
+        Ok((values[0], values[1]))
+    }
+
+    #[track_caller]
+    fn to_stack_addr(self) -> Res<'p, StackAbsoluteRange> {
+        if let Values::One(Value::InterpAbsStackAddr(r)) = self {
+            Ok(r)
+        } else {
+            err!(CErr::TypeError("StackAddr", self))
+        }
+    }
+
+    fn to_heap_ptr(self) -> Res<'p, (*mut InterpBox, usize, usize)> {
+        if let Values::One(Value::Heap {
+            value,
+            physical_first: first,
+            physical_count: count,
+        }) = self
+        {
+            Ok((value, first, count))
+        } else {
+            err!(CErr::TypeError("Heap", self))
+        }
+    }
+
+    // TODO: macros for each builtin arg type cause this sucks.
+    #[track_caller]
+    fn load_int_pair(self) -> Res<'p, (i64, i64)> {
+        match self {
+            Values::Many(mut values) => {
+                assert_eq!(values.len(), 2, "load_int_pair wrong arity {:?}", values);
+                let a = replace(&mut values[0], Value::Poison);
+                let b = replace(&mut values[1], Value::Poison);
+                Ok((a.to_int()?, b.to_int()?))
+            }
+            _ => err!("load_int_pair {:?}", self),
+        }
+    }
+
+    #[track_caller]
+    fn to_int(self) -> Res<'p, i64> {
+        match self.single()? {
+            Value::I64(i) => Ok(i),
+            Value::Symbol(i) => Ok(i as i64),
+            v => err!("load_int {:?}", v),
+        }
+    }
+
+    fn to_c_func(self) -> Res<'p, (usize, FnType)> {
+        match self.single()? {
+            Value::CFnPtr { ptr, ty } => Ok((ptr, ty)),
+            v => err!("to_c_func {:?}", v),
+        }
+    }
+}
+
+impl<'p> Value {
+    #[track_caller]
+    pub fn to_int(self) -> Res<'p, i64> {
+        if let Value::I64(r) = self {
+            Ok(r)
+        } else if let Value::Symbol(r) = self {
+            // TODO: have a special unwrap method for this
+            Ok(r as i64)
+        } else {
+            err!(CErr::TypeError("i64", self.into()))
+        }
+    }
 }

@@ -1,5 +1,5 @@
 
-## spliting sema
+## spliting sema (Feb 24)
 
 I want to do a jit asm backend and use that for comptime instead of my dumb interpreter, 
 so i guess should start by seperating the stuff that emits bytecode from the comptime rewriting the ast. 
@@ -12,7 +12,7 @@ Then it should be less painful to add more backends.
 - my InterpSend for option always said None cause im dumb
 - need to make sure everything has a staticly known serialized size. so padding for enums and vecs as allocations. 
 
-## the road to partial evaluation (Web 19)
+## the road to partial evaluation (Feb 19)
 
 Need to track which values are const known to make it easier to deal with baking closures passed as arguments to other functions. 
 

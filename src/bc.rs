@@ -1,6 +1,11 @@
 //! Low level instructions that the interpreter can execute.
 use crate::{
-    ast::{FnType, FuncId, TypeId, Var}, compiler::{ExecTime, Res}, emit_bc::DebugInfo, ffi::InterpSend, logging::err, pool::Ident
+    ast::{FnType, FuncId, TypeId, Var},
+    compiler::{ExecTime, Res},
+    emit_bc::DebugInfo,
+    ffi::InterpSend,
+    logging::err,
+    pool::Ident,
 };
 use codemap::Span;
 use interp_derive::InterpSend;
@@ -388,6 +393,9 @@ impl Values {
         match self {
             Values::One(v) => Ok(v),
             Values::Many(v) => {
+                if v.len() == 1 {
+                    return Ok(v.into_iter().next().unwrap());
+                }
                 err!("expected single found {v:?}",)
             }
         }

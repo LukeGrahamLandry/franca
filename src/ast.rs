@@ -1,8 +1,9 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
-    compiler::{insert_multi, FnWip},
+    compiler::{insert_multi, CErr, FnWip, Res},
     ffi::{init_interp_send, InterpSend},
+    logging::err,
     pool::{Ident, StringPool},
 };
 use codemap::Span;
@@ -94,12 +95,10 @@ pub enum TypeInfo<'p> {
     Struct {
         // You probably always have few enough that this is faster than a hash map.
         fields: Vec<Field<'p>>,
-        size: usize,
         as_tuple: TypeId,
     },
     Enum {
         cases: Vec<(Ident<'p>, TypeId)>,
-        size_including_tag: usize,
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(TypeId, usize),
@@ -113,8 +112,6 @@ pub enum TypeInfo<'p> {
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
-    pub first: usize,
-    pub count: usize,
 }
 
 #[derive(Clone, PartialEq, Hash, Debug, InterpSend)]
@@ -369,6 +366,9 @@ impl<'p> Pattern<'p> {
     }
 }
 
+// TODO: use this as a canary when I start doing asm stuff.
+pub const MY_SECRET_VALUE: u64 = 0xDEADBEEFCAFEBABE;
+
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
         FatExpr {
@@ -383,7 +383,7 @@ impl<'p> FatExpr<'p> {
     pub fn null(loc: Span) -> Self {
         FatExpr::synthetic(
             Expr::Value {
-                ty: TypeId::any(),
+                ty: TypeId::unknown(),
                 value: Value::Poison.into(),
             },
             loc,
@@ -664,19 +664,12 @@ impl<'p> Program<'p> {
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::Struct {
                 fields: vec![],
-                size: T::size(),
                 as_tuple: n,
             });
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] =
                 TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
-            debug_assert_eq!(
-                self.slot_count(ty_final),
-                T::size(),
-                "{}",
-                self.log_type(ty_final)
-            );
             ty_final
         })
     }
@@ -720,37 +713,15 @@ impl<'p> Program<'p> {
         let ty = TypeInfo::Named(ty, self.pool.intern(name));
         self.intern_type(ty)
     }
+
+    // aaaaa
+    pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
+        let id = self.types.iter().position(|check| *check == ty).unwrap();
+        TypeId(id)
+    }
 }
 
 impl<'p> Program<'p> {
-    // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
-    //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
-    //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
-    pub fn slot_count(&self, ty: TypeId) -> usize {
-        let ty = self.raw_type(ty);
-        match &self.types[ty.0] {
-            TypeInfo::Unknown => 9999,
-            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
-            &TypeInfo::Struct { size, .. }
-            | &TypeInfo::Enum {
-                size_including_tag: size,
-                ..
-            } => size,
-            TypeInfo::Any
-            | TypeInfo::Never
-            | TypeInfo::F64
-            | TypeInfo::I64
-            | TypeInfo::Bool
-            | TypeInfo::Fn(_)
-            | TypeInfo::Ptr(_)
-            | TypeInfo::VoidPtr
-            | TypeInfo::Slice(_)
-            | TypeInfo::Type
-            | TypeInfo::Unit => 1,
-            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-        }
-    }
-
     // TODO: this is O(n), at the very least make sure the common types are at the beginning.
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
         let id = self
@@ -796,9 +767,8 @@ impl<'p> Program<'p> {
             Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),
-            Value::InterpAbsStackAddr(_) => todo!(),
-            Value::Heap { .. } => TypeId::any(),
-            Value::OverloadSet(_) => TypeId::any(),
+            Value::InterpAbsStackAddr(_) | Value::Heap { .. } => TypeId::void_ptr(),
+            Value::OverloadSet(_) => todo!(),
             Value::CFnPtr { ty, .. } => self.intern_type(TypeInfo::Fn(*ty)),
         }
     }
@@ -872,24 +842,15 @@ impl<'p> Program<'p> {
         let name = self.pool.intern(name);
         let mut types = vec![];
         let mut fields = vec![];
-        let mut size = 0;
         for (name, ty) in fields_in {
-            let count = self.slot_count(*ty);
             fields.push(Field {
                 name: self.pool.intern(name),
                 ty: *ty,
-                first: size,
-                count,
             });
             types.push(*ty);
-            size += count;
         }
         let as_tuple = self.tuple_of(types);
-        let ty = TypeInfo::Struct {
-            fields,
-            size,
-            as_tuple,
-        };
+        let ty = TypeInfo::Struct { fields, as_tuple };
         let ty = self.intern_type(ty);
         self.intern_type(TypeInfo::Named(ty, name))
     }
@@ -911,20 +872,16 @@ impl<'p> Program<'p> {
 
     pub fn to_enum(&mut self, ty: TypeInfo<'p>) -> TypeId {
         if let TypeInfo::Struct { fields, .. } = ty {
-            let size = fields.iter().map(|f| self.slot_count(f.ty)).max().unwrap();
             let ty = TypeInfo::Enum {
                 cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
-                size_including_tag: size + 1, // for tag.
             };
             self.intern_type(ty)
         } else if let TypeInfo::Tuple(fields) = ty {
-            let size = fields.iter().map(|ty| self.slot_count(*ty)).max().unwrap();
             let ty = TypeInfo::Enum {
                 cases: fields
                     .into_iter()
                     .map(|ty| (self.synth_name(ty), ty))
                     .collect(),
-                size_including_tag: size + 1, // for tag.
             };
             self.intern_type(ty)
         } else {
@@ -978,6 +935,22 @@ impl<'p> Program<'p> {
                 }
             }
         )
+    }
+
+    #[track_caller]
+    pub fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
+        match value {
+            Values::One(Value::Unit) => Ok(TypeId::unit()),
+            Values::One(Value::Type(id)) => Ok(id),
+            Values::Many(values) => {
+                let values: Res<'_, Vec<_>> =
+                    values.into_iter().map(|v| self.to_type(v.into())).collect();
+                Ok(self.tuple_of(values?))
+            }
+            _ => {
+                err!(CErr::TypeError("Type", value))
+            }
+        }
     }
 }
 

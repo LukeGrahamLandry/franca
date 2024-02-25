@@ -27,11 +27,7 @@ pub mod scope;
 pub mod emit_bc;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId},
-    compiler::{Compile, CompileError, ExecTime},
-    logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog},
-    parse::Parser,
-    scope::ResolveScope,
+    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, interp::Interp, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
 };
 
 macro_rules! stdlib {
@@ -125,11 +121,11 @@ pub fn run_main<'a: 'p, 'p>(
     // damn turns out defer would maybe be a good idea
     let result = interp.add_declarations(global);
 
-    fn log_dbg(interp: &Compile, save: Option<&str>) {
-        outln!(Bytecode, "{}", interp.interp.log(interp.pool));
+    fn log_dbg<'a, 'p>(interp: &Compile<'a, 'p, Interp<'a, 'p>>, save: Option<&str>) {
+        outln!(Bytecode, "{}", interp.executor.log(interp.pool));
         let name = interp.pool.intern("main");
         if let Some(id) = interp.lookup_unique_func(name) {
-            outln!(FinalAst, "{}", interp.interp.program.log_finished_ast(id));
+            outln!(FinalAst, "{}", interp.program.log_finished_ast(id));
         }
         
         println!("{}", get_logs(ShowPrint));
@@ -145,14 +141,14 @@ pub fn run_main<'a: 'p, 'p>(
 
     fn log_err<'p>(
         codemap: CodeMap,
-        interp: &mut Compile<'_, 'p>,
+        interp: &mut Compile<'_, 'p, Interp<'_, 'p>>,
         e: CompileError<'p>,
         save: Option<&str>,
     ) {
         if let Some(loc) = e.loc {
             let diagnostic = vec![Diagnostic {
                 level: Level::Error,
-                message: e.reason.log(interp.interp.program, interp.pool),
+                message: e.reason.log(interp.program, interp.pool),
                 code: None,
                 spans: vec![SpanLabel {
                     span: loc,
@@ -165,7 +161,7 @@ pub fn run_main<'a: 'p, 'p>(
             outln!(
                 ShowErr,
                 "{}",
-                e.reason.log(interp.interp.program, interp.pool)
+                e.reason.log(interp.program, interp.pool)
             );
         }
 
@@ -186,7 +182,7 @@ pub fn run_main<'a: 'p, 'p>(
                 None => {
                     outln!(ShowErr, "FN {name:?} = 'MAIN' NOT FOUND");
                     let decls = interp
-                        .interp
+                        
                         .program
                         .declarations
                         .keys()
@@ -216,18 +212,6 @@ pub fn run_main<'a: 'p, 'p>(
                                 "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
                                 lines as f64 / seconds
                             );
-                            let inst_count: usize = interp
-                                .interp
-                                .ready
-                                .iter()
-                                .flatten()
-                                .map(|func| func.insts.len())
-                                .sum();
-                            outln!(ShowPrint, 
-                                "   - Generated {inst_count} instructions ({:.0} i/sec).",
-                                inst_count as f64 / seconds
-                            );
-
                             outln!(ShowPrint, "===============");
                             let start = timestamp();
                             match interp.run(f, arg.into(), ExecTime::Runtime) {
@@ -247,7 +231,7 @@ pub fn run_main<'a: 'p, 'p>(
                                     let assertion_count = src.split("assert_eq(").count() - 1;
                                     // debug so dont crash in web if not using my system of one run per occurance.
                                     debug_assert_eq!(
-                                        interp.interp.assertion_count, assertion_count,
+                                        interp.executor.assertion_count(), assertion_count,
                                         "vm missed assertions?"
                                     );
                                     outln!(ShowPrint, 

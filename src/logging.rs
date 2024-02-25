@@ -8,7 +8,7 @@ use std::{fs, mem};
 
 macro_rules! bin_int {
     ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
-        let (a, b) = $self.load_int_pair($arg)?;
+        let (a, b) = $arg.load_int_pair()?;
         $res(a $op b).into()
     }};
 }
@@ -272,11 +272,10 @@ impl<'p> Program<'p> {
         for (i, ty) in self.types.iter().enumerate() {
             writeln!(
                 s,
-                "- {:?} = {} = {:?}; size={}",
+                "- {:?} = {} = {:?};",
                 TypeId(i),
                 self.log_type(TypeId(i)),
                 ty,
-                self.slot_count(TypeId(i))
             );
         }
         writeln!(s, "====================");
@@ -499,12 +498,12 @@ impl<'p> PoolLog<'p> for Program<'p> {
 impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut s = String::new();
-        s += &self.program.log_cached_types();
+        // s += &self.program.log_cached_types();
         writeln!(s, "=== {} FUNCTIONS ===", self.ready.len());
         for (i, f) in self.ready.iter().enumerate() {
             write!(s, "FuncId({i}): ");
-            s += &self.program.funcs[i].log(pool);
-            s += "\n";
+            // s += &self.program.funcs[i].log(pool);
+            // s += "\n";
             if let Some(bc) = f {
                 writeln!(s, "{}", bc.log(pool));
             }
