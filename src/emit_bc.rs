@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::Location;
 
-use crate::ast::{FatStmt, VarType};
+use crate::ast::{FatStmt, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
 use crate::interp::Interp;
@@ -58,6 +58,9 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
+        while self.interp.ready.len() <= f.0 {
+            self.interp.ready.push(None);
+        }
         if self.interp.ready[f.0].is_some() {
             return Ok(());
         }
@@ -82,17 +85,14 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         }
     }
 
-    fn emit_body(
-        &mut self,
+    fn bind_args(
+        &self,
         result: &mut FnBody<'p>,
         full_arg_range: StackRange,
-        f: FuncId,
-    ) -> Res<'p, Structured> {
-        let func = &self.interp.program.funcs[f.0];
-        let has_body = func.body.is_some();
-
+        pattern: &Pattern<'p>,
+    ) -> Res<'p, Vec<(Option<Var<'p>>, StackRange)>> {
         let mut args_to_drop = vec![];
-        let arguments = func.arg.flatten();
+        let arguments = pattern.flatten();
         let mut slot_count = 0;
         for (name, ty) in arguments {
             let size = self.interp.program.slot_count(ty);
@@ -108,6 +108,19 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
             slot_count += size;
         }
         assert_eq!(full_arg_range.count, slot_count);
+        Ok(args_to_drop)
+    }
+
+    fn emit_body(
+        &mut self,
+        result: &mut FnBody<'p>,
+        full_arg_range: StackRange,
+        f: FuncId,
+    ) -> Res<'p, Structured> {
+        let func = &self.interp.program.funcs[f.0];
+        let has_body = func.body.is_some();
+
+        let mut args_to_drop = self.bind_args(result, full_arg_range, &func.arg)?;
 
         if !has_body {
             // Functions without a body are always builtins.
@@ -162,6 +175,9 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         f: FuncId,
         arg_expr: &FatExpr<'p>,
     ) -> Res<'p, Structured> {
+        while self.interp.ready.len() <= f.0 {
+            self.interp.ready.push(None);
+        }
         let arg = self.compile_expr(result, arg_expr)?;
         let func = &self.interp.program.funcs[f.0];
         let f_ty = func.unwrap_ty();
@@ -171,13 +187,11 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
             arg_expr.log(self.pool)
         );
         let func = &self.interp.program.funcs[f.0];
-        let will_capture = func.capture_vars.is_empty();
+        assert!(func.capture_vars.is_empty());
         let will_inline = func.has_tag(self.pool, "inline");
         let (arg, _) = result.load(self.interp.program, arg)?;
         if will_inline {
             self.emit_inline_call(result, arg, f)
-        } else if will_capture {
-            self.emit_capturing_call(result, arg, f)
         } else {
             let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
             result.push(Bc::CallDirect { f, ret, arg });
@@ -296,6 +310,11 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
             Stmt::DeclNamed { .. } => unreachable!(),
             Stmt::Noop => {}
             Stmt::DeclFunc(_) => unreachable!(),
+            Stmt::DeclVarPattern { binding, value } => {
+                let full_arg_range = self.compile_expr(result, value.as_ref().unwrap())?;
+                let (full_arg_range, _) = result.load(self.interp.program, full_arg_range)?;
+                let _args_to_drop = self.bind_args(result, full_arg_range, binding)?;
+            }
         }
         Ok(())
     }
@@ -347,7 +366,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                 for local in locals.as_ref().expect("resolve failed") {
                     if let Some((slot, _ty)) = result.vars.remove(local) {
                         result.push(Bc::Drop(slot));
-                    } else if !result.constants.get(*local).is_some() {
+                    } else if result.constants.get(*local).is_none() {
                         ice!("Missing local {local:?}")
                     }
                 }
@@ -614,25 +633,6 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         }
     }
 
-    fn emit_capturing_call(
-        &mut self,
-        result: &mut FnBody<'p>,
-        arg: StackRange,
-        f: FuncId,
-    ) -> Res<'p, Structured> {
-        let name = self.interp.program.funcs[f.0].get_name(self.pool);
-        result.push(Bc::DebugMarker(
-            self.pool.intern("start:capturing_call"),
-            name,
-        ));
-        let return_range = self.emit_body(result, arg, f)?;
-        result.push(Bc::DebugMarker(
-            self.pool.intern("end:capturing_call"),
-            name,
-        ));
-        Ok(return_range)
-    }
-
     // TODO: make this not a special case.
     /// This swaps out the closures for function accesses.
     fn emit_call_if(
@@ -643,8 +643,8 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
     ) -> Res<'p, Structured> {
         let (cond, if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
             let cond = self.compile_expr(result, &parts[0])?;
-            let if_true = parts[1].as_fn().unwrap();
-            let if_false = parts[2].as_fn().unwrap();
+            let if_true = &parts[1];
+            let if_false = &parts[2];
             (cond, if_true, if_false)
         } else {
             ice!("if args must be tuple not {:?}", arg);
@@ -654,13 +654,10 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
 
         let ret = result.reserve_slots(self.interp.program, out_ty)?;
 
-        let unit = result
-            .load_constant(self.interp.program, Values::One(Value::Unit))?
-            .0; // Note: before you start doing ip stuff!
         let name = self.pool.intern("builtin:if");
         let branch_ip = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
         let true_ip = result.insts.len();
-        let true_ret = self.emit_capturing_call(result, unit, if_true)?;
+        let true_ret = self.compile_expr(result, if_true)?;
         let true_ret = result.load(self.interp.program, true_ret)?.0;
         result.push(Bc::MoveRange {
             from: true_ret,
@@ -668,7 +665,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         });
         let jump_over_false = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
         let false_ip = result.insts.len();
-        let false_ret = self.emit_capturing_call(result, unit, if_false)?;
+        let false_ret = self.compile_expr(result, if_false)?;
         let false_ret = result.load(self.interp.program, false_ret)?.0;
         result.push(Bc::MoveRange {
             from: false_ret,
@@ -694,27 +691,18 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         arg: &FatExpr<'p>,
     ) -> Res<'p, Structured> {
         let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref() {
-            let cond = parts[0].as_fn().unwrap();
-            let body = parts[1].as_fn().unwrap();
-            (cond, body)
+            (&parts[0], &parts[1])
         } else {
             ice!("if args must be tuple not {:?}", arg);
         };
 
         let name = self.pool.intern("builtin:while");
         let cond_ip = result.insts.len();
-        let unit_val = Values::One(Value::Unit);
-        let unit = result
-            .load_constant(self.interp.program, unit_val.clone())?
-            .0;
-        let cond_ret = self.emit_capturing_call(result, unit, cond_fn)?;
+        let cond_ret = self.compile_expr(result, cond_fn)?;
         let branch_ip = result.push(Bc::DebugMarker(self.pool.intern("patch"), name));
 
         let body_ip = result.insts.len();
-        let unit = result
-            .load_constant(self.interp.program, unit_val.clone())?
-            .0;
-        let body_ret = self.emit_capturing_call(result, unit, body_fn)?;
+        let body_ret = self.compile_expr(result, body_fn)?;
         result.drop(self.interp.program, body_ret)?;
         result.push(Bc::Goto { ip: cond_ip });
         let end_ip = result.insts.len();

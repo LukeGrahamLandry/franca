@@ -264,11 +264,20 @@ impl<'p> Pattern<'p> {
             .iter()
             .map(|b| {
                 let name = match b {
-                    Binding::Named(_, _) => None,
                     Binding::Var(v, _) => Some(*v),
-                    Binding::Discard(_) => None,
+                    Binding::Named(_, _) | Binding::Discard(_) => None,
                 };
                 (name, b.unwrap())
+            })
+            .collect()
+    }
+
+    pub fn collect_vars(&self) -> Vec<Var<'p>> {
+        self.bindings
+            .iter()
+            .flat_map(|b| match b {
+                &Binding::Var(v, _) => Some(v),
+                Binding::Named(_, _) | Binding::Discard(_) => None,
             })
             .collect()
     }
@@ -340,6 +349,24 @@ impl<'p> Pattern<'p> {
         });
         debug_assert_ne!(start, self.bindings.len());
     }
+
+    pub fn ty(&self, program: &mut Program<'p>) -> TypeId {
+        let types: Vec<_> = self
+            .bindings
+            .iter()
+            .map(|b| match b {
+                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
+            })
+            .map(|t| match t {
+                LazyType::Finished(ty) => *ty,
+                LazyType::Infer
+                | LazyType::PendingEval(_)
+                | LazyType::EvilUnit
+                | LazyType::Different(_) => unreachable!(),
+            })
+            .collect();
+        program.tuple_of(types)
+    }
 }
 
 impl<'p> FatExpr<'p> {
@@ -387,8 +414,23 @@ pub enum Stmt<'p> {
         name: Var<'p>,
         ty: LazyType<'p>,
         value: Option<FatExpr<'p>>,
-        dropping: Option<Var<'p>>, // if this is a redeclaration, immediatly call the drop handler on the old one
+        // TODO: if this is a redeclaration, immediatly call the drop handler on the old one?
+        //       thats not what rust does. but lexical destructors seem like they'd block tail recursion a lot.
+        //       but also i like the thing where you refine your
+        dropping: Option<Var<'p>>,
         kind: VarType,
+    },
+    // I have to write the logic for this anyway to deal with function args and I need it for inlining because I don't want the backend to have to deal with it.
+    // The main thing this solves is letting you defer figuring out how to unwrap an expression.
+    // TODO: but really you don't want the backend to think about pattern matching...
+    //       unless it wants to because it would be cool to emit it as someone else's match statement when transpiling...
+    //       but that gets into a dangerous land of slightly different behaviour everywhere so maybe its a bad idea. Feb-24
+    // TODO: all variables should use this.
+    DeclVarPattern {
+        binding: Pattern<'p>,
+        value: Option<FatExpr<'p>>,
+        // dropping: Option<Var<'p>>,
+        // kind: VarType,  // TODO: put this in pattern so function args really are the same as variables. I hate how many minor variations of shit I have.
     },
 
     // Frontend only

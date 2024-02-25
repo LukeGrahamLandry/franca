@@ -309,7 +309,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.pop_state(state);
         Ok(())
     }
-
+    
     /// IMPORTANT: this pulls a little sneaky on ya so you can't access the body of the function inside the main emit handlers.
     fn emit_body(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
         let state = DebugState::EmitBody(f);
@@ -319,35 +319,30 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         mut_replace!(self.interp.program.funcs[f.0], |func: Func<'p>| {
             assert!(result.when == ExecTime::Comptime || !func.has_tag(self.pool, "comptime"));
-
             let arguments = func.arg.flatten();
-            let mut slot_count = 0;
             for (name, ty) in arguments {
-                let size = self.interp.program.slot_count(ty);
                 if let Some(name) = name {
-                    let prev = result.vars.insert(name, ty);
-                    assert!(prev.is_none(), "overwrite arg?");
+                    let _prev = result.vars.insert(name, ty);
+                    // assert!(prev.is_none(), "overwrite arg?");  // TODO: but closures inlined multiple times in the same fn
                 }
-                slot_count += size;
             }
-
             Ok((func, ()))
         });
 
         if !has_body {
-            let ret = mut_replace!(self.interp.program.funcs[f.0], |mut func: Func<'p>| {
+            let ret = mut_replace!(self.interp.program.funcs[f.0], |func: Func<'p>| {
                 // Functions without a body are always builtins.
                 // It's convient to give them a FuncId so you can put them in a variable,
-                // but just force inline call.
+                // TODO: but just force inline call.
                 logln!(
                     "builtin shim for {} has constants {}",
                     self.interp.program.funcs[f.0].synth_name(self.pool),
                     self.interp.program.log_consts(&func.closed_constants)
                 );
-                func.annotations.push(Annotation {
-                    name: self.pool.intern("inline"),
-                    args: None,
-                });
+                // func.annotations.push(Annotation {
+                //     name: self.pool.intern("inline"),
+                //     args: None,
+                // });
                 let ret_ty = func.ret.unwrap();
                 // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
                 //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
@@ -374,78 +369,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ret_val)
     }
 
+    // This is a normal function call. No comptime args, no runtime captures. TODO WIP
     fn emit_runtime_call(
         &mut self,
         result: &mut FnWip<'p>,
-        original_f: FuncId,
-        arg: &mut FatExpr<'p>,
-    ) -> Res<'p, (Structured, FuncId)> {
-        // Note: f will be compiled differently depending on the calling convention.
-        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-        self.infer_types(original_f)?;
-
-        let f_ty = self.interp.program.funcs[original_f.0].unwrap_ty();
-
-        let mut arg = self.compile_expr(result, arg, Some(f_ty.arg))?;
-        // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
-        if arg.is_empty() {
-            arg = self.interp.program.load_value(Value::Unit);
-        }
-
-        self.type_check_arg(arg.ty(), f_ty.arg, "bad arg")?;
-
-        // TODO: if its a pure function you might want to do the call at comptime
-        // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
-        let (f, arg, force_capturing) = if !self.interp.program.is_comptime_only_type(f_ty.arg) {
-            (original_f, arg, false)
-        } else {
-            let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
-            self.push_state(&state);
-            // Some part of the argument must be known at comptime.
-            // You better compile_expr noticed and didn't put it in a stack slot.
-            let func = &self.interp.program.funcs[original_f.0];
-            println!("bake {}", self.pool.get(func.name));
-            let pattern = func.arg.flatten();
-            match arg {
-                Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!(
-                    "{:?} is comptime only but {:?} is only known at runtime.",
-                    self.interp.program.log_type(f_ty.arg),
-                    arg
-                ),
-                Structured::Const(_, _) => ice!("TODO: fully const comptime arg {:?}. (should be trivial just don't need it yet)", arg),
-                Structured::TupleDifferent(_, arg_values) => {
-                    assert_eq!(
-                        pattern.len(),
-                        arg_values.len(),
-                        "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
-                        pattern,
-                        arg_values,
-                        func.synth_name(self.pool)
-                    );
-                    let mut current_fn = original_f;
-                    let mut skipped_args = vec![];
-                    let mut skipped_types = vec![];
-                    for ((name, ty), arg_value) in pattern.into_iter().zip(arg_values) {
-                        if self.interp.program.is_comptime_only_type(ty) {
-                            let name = unwrap!(name, "arg needs name (unreachable?)");
-                            current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
-                        } else {
-                            skipped_args.push(arg_value);
-                            skipped_types.push(ty);
-                        }
-                    }
-                    let arg_ty = self.interp.program.tuple_of(skipped_types);
-                    debug_assert_ne!(current_fn, original_f);
-                    self.pop_state(state);
-                    (current_fn, Structured::TupleDifferent(arg_ty, skipped_args), true)
-                }
-            }
-        };
-
+        f: FuncId,
+        arg_expr: &mut FatExpr<'p>,
+    ) -> Res<'p, Structured> {
         let f_ty = self.interp.program.funcs[f.0].unwrap_ty();
+        let arg = self.compile_expr(result, arg_expr, Some(f_ty.arg))?;
 
         // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
-        debug_assert_eq!(
+        assert_eq!(
             self.interp.program.slot_count(arg.ty()),
             self.interp.program.slot_count(f_ty.arg),
             "{:?} vs {:?}",
@@ -456,35 +391,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: some huristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
         let force_inline = func.has_tag(self.pool, "inline");
-        let deny_inline = func.has_tag(self.pool, "noinline");
-        assert!(
-            !(force_inline && deny_inline),
-            "{f:?} is both @inline and @noinline"
-        );
-
-        let will_inline = force_inline;
-        let func = &self.interp.program.funcs[f.0];
-        let ret = if !func.capture_vars.is_empty() || force_capturing {
-            // TODO: check that you're calling from the same place as the definition.
-            assert!(!deny_inline, "capturing calls are always inlined.");
-            self.emit_capturing_call(result, f)?
-        } else if will_inline {
-            add_unique(&mut result.callees, f);
-            self.emit_inline_call(result, f)?
-        } else {
-            add_unique(&mut result.callees, f);
-            self.ensure_compiled(f, result.when)?;
-            Structured::RuntimeOnly(f_ty.ret)
-        };
-
-        Ok((ret, f))
+        assert!(func.capture_vars.is_empty());
+        assert!(!force_inline);
+        add_unique(&mut result.callees, f);
+        self.ensure_compiled(f, result.when)?;
+        Ok(Structured::RuntimeOnly(f_ty.ret))
     }
 
-    // TODO: this should just inline into the ast so all backends could trivially use the result.
-    //       especially since now i really cant do anything else here
-    fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
+    // Replace a call expr with the body of the target function. 
+    // The idea is having zero cost (50 cycles) closures :)
+    fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, Structured> {
+        let loc = expr_out.loc;
+        debug_assert_ne!(f, result.func, "recusive inlining?");
         let state = DebugState::EmitCapturingCall(f);
         self.push_state(&state);
+        let arg_expr = if let Expr::Call(_, arg) = expr_out.deref_mut() {
+            arg
+        } else {
+            ice!("")
+        };
+        
         let name = self.interp.program.funcs[f.0].get_name(self.pool);
         self.infer_types(f)?;
         assert!(
@@ -517,11 +443,23 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .collect::<Vec<_>>()
             );
         }
-
-        let ret = self.emit_body(result, f)?;
+        
+        let pattern = func.arg.clone();
+        let locals = func.arg.collect_vars();
+        
+        // TODO: is locals supposed to be just the new ones introduced or recursivly bubbled up?
+        // TODO: now vars aren't unique if you inline the same thing in multiple places. 
+        //       I guess i need to walk the whole tree and rebind them but its hard to think about. have to deal with inner captures too. Feb-24
+        // TODO: can I mem::take func.body? 
+        let new_expr = Expr::Block { body: vec![
+            FatStmt { stmt: Stmt::DeclVarPattern { binding: pattern, value: Some(mem::take(arg_expr)) }, annotations: vec![], loc }
+        ], result: Box::new(func.body.as_ref().unwrap().clone()), locals: Some(locals) };
+        
+        expr_out.expr = new_expr;
         self.currently_inlining.retain(|check| *check != f);
+        let res = self.compile_expr(result, expr_out, None)?;
         self.pop_state(state);
-        Ok(ret)
+        Ok(res)
     }
 
     // TODO: do this by rewriting the ast. kinda the whole point of inlining is that you compile multiple times so you optimise differently.
@@ -851,6 +789,21 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
+            // TODO: unify with and DeclVar
+            // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn. 
+            Stmt::DeclVarPattern { binding, value } => {
+                if let Some(value) = value {
+                    let ty = binding.ty(self.interp.program);
+                    self.compile_expr(result, value, Some(ty))?;
+                }
+                let arguments = binding.flatten();
+                for (name, ty) in arguments {
+                    if let Some(name) = name {
+                        let _prev = result.vars.insert(name, ty);
+                        // assert!(prev.is_none(), "overwrite arg?");  // TODO: but closures inlined multiple times in the same fn
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -929,32 +882,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Call(f, arg) => {
                 // self.compile_expr(result, arg, None)?; // TODO: infer arg type from fn??
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
-                    let func = &self.interp.program.funcs[f_id.0];
-                    let is_comptime = func.has_tag(self.pool, "comptime");
-                    if is_comptime {
-                        let ret = self.emit_comptime_call(result, f_id, arg)?;
-                        let ty = if requested.unwrap_or(TypeId::any()).is_any() {
-                            self.interp.program.type_of_raw(&ret)
-                        } else {
-                            requested.unwrap()
-                        };
-                        expr.expr = Expr::Value {
-                            ty,
-                            value: ret.clone(),
-                        };
-                        return Ok(Structured::Const(ty, ret));
-                    }
-
-                    let (result, new_f) = self.emit_runtime_call(result, f_id, arg)?;
-                    // Since we've called it, we must know the type by now.
-                    // TODO: cope with emit_runtime_call baking const args, needs to change the arg expr
-                    let ty = self.interp.program.func_type(new_f);
-                    f.expr = Expr::Value {
-                        ty,
-                        value: Value::GetFn(new_f).into(),
-                    };
-                    f.ty = ty;
-                    return Ok(result);
+                    return self.compile_call(result, expr, f_id, requested);
                 }
                 ice!("function not declared or \nTODO: dynamic call {expr:?}")
             }
@@ -1155,7 +1083,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     "tag" => {
                         // TODO: auto deref and typecheking
-                        let addr = self.addr_macro(result, arg)?;
+                        self.addr_macro(result, arg)?;
                         let ty = self
                             .interp
                             .program
@@ -1196,9 +1124,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let raw_container_ty = self.interp.program.raw_type(requested);
 
                     let res = match self.interp.program.types[raw_container_ty.0].clone() {
-                        TypeInfo::Struct {
-                            fields, as_tuple, ..
-                        } => {
+                        TypeInfo::Struct { fields, .. } => {
                             assert_eq!(
                                 fields.len(),
                                 values.len(),
@@ -2012,39 +1938,36 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
-        let (_cond, if_true, if_false) = if let Expr::Tuple(parts) = arg.deref_mut() {
+        let unit = self.interp.program.intern_type(TypeInfo::Unit);
+        let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
+        if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
-            let if_true = if let Expr::Closure(_) = parts[1].deref_mut() {
-                self.promote_closure(&result.constants, &mut parts[1])?
+            let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
+               let if_true =  self.promote_closure(&result.constants, &mut parts[1])?;
+               let true_ty = self.infer_types(if_true)?;
+                   self.type_check_eq(true_ty.arg, unit, sig)?;
+                   
+                   self.emit_call_on_unit(result, if_true, &mut parts[1])?;
+                   true_ty
             } else {
                 ice!("if second arg must be func not {:?}", parts[1]);
             };
-            let if_false = if let Expr::Closure(_) = parts[2].deref_mut() {
-                self.promote_closure(&result.constants, &mut parts[2])?
+           if let Expr::Closure(_) = parts[2].deref_mut() {
+                 let if_false = self.promote_closure(&result.constants, &mut parts[2])?;
+                 let false_ty = self.infer_types(if_false)?;
+                 self.type_check_eq(false_ty.arg, unit, sig)?;
+                 self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
+                 
+                 self.emit_call_on_unit(result, if_false, &mut parts[2])?;
             } else {
                 ice!("if third arg must be func not {:?}", parts[2]);
-            };
-            (cond, if_true, if_false)
+            }
+            // TODO: if the condition is const, don't emit the branch.
+            Ok(Structured::RuntimeOnly(true_ty.ret))
         } else {
             ice!("if args must be tuple not {:?}", arg);
-        };
-
-        let true_ty = self.infer_types(if_true)?;
-        let unit = self.interp.program.intern_type(TypeInfo::Unit);
-        let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
-        self.type_check_eq(true_ty.arg, unit, sig)?;
-        let false_ty = self.infer_types(if_false)?;
-        self.type_check_eq(false_ty.arg, unit, sig)?;
-        self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
-
-        self.emit_capturing_call(result, if_true)?;
-        self.emit_capturing_call(result, if_false)?;
-
-        // TODO: if the condition is const, don't emit the branch.
-        // TODO: inline the functions here instead of making the backend deal with it?
-
-        Ok(Structured::RuntimeOnly(true_ty.ret))
+        }
     }
 
     fn emit_call_while(
@@ -2052,40 +1975,40 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
-        let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref_mut() {
-            let cond = if let Expr::Closure(_) = parts[0].deref_mut() {
-                self.promote_closure(&result.constants, &mut parts[0])?
+        let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
+        if let Expr::Tuple(parts) = arg.deref_mut() {
+            if let Expr::Closure(_) = parts[0].deref_mut() {
+                let cond_fn = self.promote_closure(&result.constants, &mut parts[0])?;
+                let cond_ty = self.infer_types(cond_fn)?;
+                self.type_check_eq(cond_ty.arg, TypeId::unit(), sig)?;
+                self.type_check_eq(cond_ty.ret, TypeId::bool(), sig)?;
+                self.emit_call_on_unit(result, cond_fn, &mut parts[0])?;
             } else {
                 unwrap!(
                     parts[0].as_fn(),
                     "while first arg must be func not {:?}",
                     parts[0]
-                )
-            };
-            let body = if let Expr::Closure(_) = parts[1].deref_mut() {
-                self.promote_closure(&result.constants, &mut parts[1])?
+                );
+                todo!("shouldnt get here twice")
+            }
+            if let Expr::Closure(_) = parts[1].deref_mut() {
+                let body_fn = self.promote_closure(&result.constants, &mut parts[1])?;
+                let body_ty = self.infer_types(body_fn)?;
+                self.type_check_eq(body_ty.arg, TypeId::unit(), sig)?;
+                self.type_check_eq(body_ty.ret, TypeId::unit(), sig)?;
+                self.emit_call_on_unit(result, body_fn, &mut parts[1])?;
             } else {
                 unwrap!(
                     parts[1].as_fn(),
                     "while second arg must be func not {:?}",
                     parts[1]
-                )
-            };
-            (cond, body)
+                );
+                todo!("shouldnt get here twice")
+            }
         } else {
             ice!("if args must be tuple not {:?}", arg);
-        };
+        }
 
-        let cond_ty = self.infer_types(cond_fn)?;
-        let body_ty = self.infer_types(body_fn)?;
-        let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
-        self.type_check_eq(cond_ty.arg, TypeId::unit(), sig)?;
-        self.type_check_eq(cond_ty.ret, TypeId::bool(), sig)?;
-        self.type_check_eq(body_ty.arg, TypeId::unit(), sig)?;
-        self.type_check_eq(body_ty.ret, TypeId::unit(), sig)?;
-
-        self.emit_capturing_call(result, cond_fn)?;
-        self.emit_capturing_call(result, body_fn)?;
 
         Ok(Structured::RuntimeOnly(TypeId::unit()))
     }
@@ -2389,6 +2312,166 @@ impl<'a, 'p> Compile<'a, 'p> {
         _index: i32,
     ) -> Structured {
         todo!()
+    }
+
+    fn compile_call(
+        &mut self,
+        result: &mut FnWip<'p>,
+        expr: &mut FatExpr<'p>,
+        original_f: FuncId,
+        requested: Option<TypeId>,
+    ) -> Res<'p, Structured> {
+        let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() {
+            (f, arg)
+        } else {
+            ice!("")
+        };
+        let func = &self.interp.program.funcs[original_f.0];
+        let is_comptime = func.has_tag(self.pool, "comptime");
+        if is_comptime {
+            let ret = self.emit_comptime_call(result, original_f, arg_expr)?;
+            let ty = if requested.unwrap_or(TypeId::any()).is_any() {
+                self.interp.program.type_of_raw(&ret)
+            } else {
+                requested.unwrap()
+            };
+            expr.expr = Expr::Value {
+                ty,
+                value: ret.clone(),
+            };
+            return Ok(Structured::Const(ty, ret));
+        }
+        
+        // Note: f will be compiled differently depending on the calling convention.
+        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
+        self.infer_types(original_f)?;
+
+        let f_ty = self.interp.program.funcs[original_f.0].unwrap_ty();
+
+        let mut arg_val = self.compile_expr(result, arg_expr, Some(f_ty.arg))?;
+        // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
+        if arg_val.is_empty() {
+            arg_val = self.interp.program.load_value(Value::Unit);
+        }
+
+        // TODO: if its a pure function you might want to do the call at comptime
+        // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
+        // TODO: seperate function for this
+        if self.interp.program.is_comptime_only_type(f_ty.arg) {
+            let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
+            self.push_state(&state);
+            // Some part of the argument must be known at comptime.
+            // You better compile_expr noticed and didn't put it in a stack slot.
+            let func = &self.interp.program.funcs[original_f.0];
+            println!("bake {}", self.pool.get(func.name));
+            let pattern = func.arg.flatten();
+            match arg_val {
+                Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!(
+                    "{:?} is comptime only but {:?} is only known at runtime.",
+                    self.interp.program.log_type(f_ty.arg),
+                    arg_val
+                ),
+                Structured::Const(_, _) => ice!("TODO: fully const comptime arg {:?}. (should be trivial just don't need it yet)", arg_expr),
+                Structured::TupleDifferent(_, arg_values) => {
+                    assert_eq!(
+                        pattern.len(),
+                        arg_values.len(),
+                        "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
+                        pattern,
+                        arg_values,
+                        func.synth_name(self.pool)
+                    );
+                    let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
+                        v
+                    } else {
+                        todo!()
+                    };
+                    assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
+                    let mut current_fn = original_f;
+                    let mut skipped_args = vec![];  // TODO: need to remove these baked ones from the arg expr as well!
+                    let mut skipped_types = vec![];
+                    let mut removed = 0;
+                    for (i, ((name, ty), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
+                        if self.interp.program.is_comptime_only_type(ty) {
+                            let id = arg_value.clone().get()?.single()?.to_func(); // TODO: not this
+                            let name = unwrap!(name, "arg needs name (unreachable?)");
+                            current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
+                            // TODO: need to do capturing_call to the ast
+                            if let Some(id) = id {  
+                                println!("- pass {id:?}");
+                                let other_captures = self.interp.program.funcs[id.0].capture_vars.clone();
+                                if other_captures.is_empty() {
+                                    add_unique(&mut result.callees, id);
+                                }
+                                
+                                self.interp.program.funcs[current_fn.0].capture_vars.extend(other_captures)
+                            }
+                            arg_exprs.remove(i - removed);
+                            removed += 1; // TODO: this sucks
+                        } else {
+                            skipped_args.push(arg_value);
+                            skipped_types.push(ty);
+                        }
+                    }
+                    let arg_ty = self.interp.program.tuple_of(skipped_types);
+                    debug_assert_ne!(current_fn, original_f);
+                    if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
+                        if v.len() == 1 {
+                            *arg_expr.deref_mut() = mem::take(v.iter_mut().next().unwrap());
+                        }
+                    }
+                    f_expr.expr = Expr::Value {
+                        ty: self.interp.program.func_type(current_fn),
+                        value: Value::GetFn(current_fn).into(),
+                    };
+                    // TODO: only emit_capturing_call if we based a closure
+                    let res = self.emit_capturing_call(result, current_fn, expr)?;
+                    self.pop_state(state);
+                    return Ok(res);
+                }
+            }
+        }
+
+        let func = &self.interp.program.funcs[original_f.0];
+        // TODO: some huristic based on how many times called and how big the body is.
+        // TODO: pre-intern all these constants so its not a hash lookup everytime
+        let force_inline = func.has_tag(self.pool, "inline");
+        let deny_inline = func.has_tag(self.pool, "noinline");
+        assert!(
+            !(force_inline && deny_inline),
+            "{original_f:?} is both @inline and @noinline"
+        );
+
+        let will_inline = force_inline;
+        let func = &self.interp.program.funcs[original_f.0];
+        if !func.capture_vars.is_empty() {
+            // TODO: check that you're calling from the same place as the definition.
+            assert!(!deny_inline, "capturing calls are always inlined.");
+            self.emit_capturing_call(result, original_f, expr)
+        } else if will_inline {
+            // TODO: this should probably just be the same as a capturing call
+            add_unique(&mut result.callees, original_f);
+            self.emit_inline_call(result, original_f)
+        } else {
+            let res = self.emit_runtime_call(result, original_f, arg_expr)?;
+            // Since we've called it, we must know the type by now.
+            // TODO: cope with emit_runtime_call baking const args, needs to change the arg expr
+            let ty = self.interp.program.func_type(original_f);
+            f_expr.expr = Expr::Value {
+                ty,
+                value: Value::GetFn(original_f).into(),
+            };
+            f_expr.ty = ty;
+            Ok(res)
+        }
+    }
+
+    fn emit_call_on_unit(&mut self, result: &mut FnWip<'p>, cond_fn: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, ()> {
+        let get_fn = FatExpr::synthetic(self.func_expr(cond_fn), expr_out.loc);
+        let unit = FatExpr::synthetic(Expr::unit(), expr_out.loc);
+        expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
+        self.compile_expr(result, expr_out, None)?;
+        Ok(())
     }
 }
 

@@ -418,6 +418,12 @@ fn collect_func_references_stmt<'p>(
         Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => {
             unreachable!("finished ast contained {stmt:?}")
         }
+        Stmt::DeclVarPattern { value, .. } => {
+            if let Some(v) = value {
+                collect_func_references(v, refs, const_reads);
+            }
+            // the bindings should just be types by now
+        }
     }
 }
 

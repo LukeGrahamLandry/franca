@@ -149,6 +149,15 @@ impl<'p> ResolveScope<'p> {
             Stmt::DeclVar { .. } => {
                 unreachable!("added by this pass {stmt:?}")
             }
+            Stmt::DeclVarPattern { binding, value } => {
+                // TODO: this isnt actually tested because only the backend makes these
+                if let Some(value) = value {
+                    self.resolve_expr(value);
+                }
+                for b in &mut binding.bindings {
+                    self.resolve_binding(b, true, loc);
+                }
+            }
         }
     }
 
