@@ -67,7 +67,7 @@ pub struct Compile<'a, 'p> {
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
     currently_inlining: Vec<FuncId>,
-    _currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
+    currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     last_loc: Option<Span>,
 }
 
@@ -114,7 +114,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             currently_inlining: vec![],
             last_loc: None,
             interp: Interp::new(pool, program),
-            _currently_compiling: vec![],
+            currently_compiling: vec![],
         }
     }
 
@@ -160,9 +160,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        // if self.interp.program.funcs[f.0].wip.is_some() {
-        //     return Ok(());
-        // }
+        if !add_unique(&mut self.currently_compiling, f) {
+            // This makes recursion work. 
+            return Ok(());
+        }
         let state = DebugState::Compile(f);
         self.push_state(&state);
         debug_assert!(!self.interp.program.funcs[f.0].evil_uninit);
@@ -176,13 +177,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             let wip = func.wip.as_ref().unwrap();
             let callees = wip.callees.clone();
             for id in callees {
-                self.compile(id, when)?;
+                if self.interp.ready.len() <= id.0 || self.interp.ready[id.0].is_none() {
+                    self.compile(id, when)?;
+                } 
             }
             let mut emit = EmitBc::new(self.pool, &mut self.interp);
             emit.compile(f)?;
         }
         let result = self.tag_err(result);
         self.pop_state(state);
+        self.currently_compiling.retain(|check| *check != f);
 
         result
     }
@@ -425,6 +429,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
 
+        // TODO: !quote adds a bunch of random shit to captures of the ast it returns. 
+        /* 
         for closed in &func.capture_vars {
             assert!(
                 result.vars.contains_key(closed) || result.constants.get(*closed).is_some(),
@@ -443,6 +449,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .collect::<Vec<_>>()
             );
         }
+        */
         
         let pattern = func.arg.clone();
         let locals = func.arg.collect_vars();
@@ -457,7 +464,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         
         expr_out.expr = new_expr;
         self.currently_inlining.retain(|check| *check != f);
-        let res = self.compile_expr(result, expr_out, None)?;
+        let f_ty = func.unwrap_ty();
+        let res = self.compile_expr(result, expr_out, Some(f_ty.ret))?;
         self.pop_state(state);
         Ok(res)
     }
@@ -750,7 +758,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         };
 
                         let prev = result.vars.insert(*name, expected_ty);
-                        assert!(prev.is_none(), "shadow is still new var");
+                        // TODO: closures break this
+                        // assert!(prev.is_none(), "shadow is still new var");
                     }
                 }
             }
@@ -953,7 +962,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    "if" => self.emit_call_if(result, arg)?,
+                    "if" => self.emit_call_if(result, arg, requested)?,
                     "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
                     "quote" => {
@@ -1377,7 +1386,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: &FnWip<'p>,
         name: Var<'p>,
         arg: &mut FatExpr<'p>,
-        requested_ret: Option<TypeId>,
+        mut requested_ret: Option<TypeId>,
     ) -> Res<'p, FuncId> {
         // If there's only one option, we don't care what type it is.
         if let Some(f) = self.lookup_unique_func(name.0) {
@@ -1396,6 +1405,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else {
             err!(CErr::VarNotFound(name))
         };
+        
+        // TODO: get rid of any
+        if let Some(ty) = requested_ret{
+            if ty.is_any() {
+                requested_ret = None
+            }
+        }
 
         match self.type_of(result, arg) {
             Ok(Some(arg_ty)) => {
@@ -1937,6 +1953,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         &mut self,
         result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
+        requested: Option<TypeId>,
     ) -> Res<'p, Structured> {
         let unit = self.interp.program.intern_type(TypeInfo::Unit);
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
@@ -1944,22 +1961,21 @@ impl<'a, 'p> Compile<'a, 'p> {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
             let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
-               let if_true =  self.promote_closure(&result.constants, &mut parts[1])?;
-               let true_ty = self.infer_types(if_true)?;
-                   self.type_check_eq(true_ty.arg, unit, sig)?;
-                   
-                   self.emit_call_on_unit(result, if_true, &mut parts[1])?;
-                   true_ty
+                let if_true =  self.promote_closure(&result.constants, &mut parts[1])?;
+                let true_ty = self.infer_types(if_true)?;
+                self.type_check_eq(true_ty.arg, unit, sig)?;
+                self.emit_call_on_unit(result, if_true, &mut parts[1])?;
+                true_ty
             } else {
                 ice!("if second arg must be func not {:?}", parts[1]);
             };
-           if let Expr::Closure(_) = parts[2].deref_mut() {
-                 let if_false = self.promote_closure(&result.constants, &mut parts[2])?;
-                 let false_ty = self.infer_types(if_false)?;
-                 self.type_check_eq(false_ty.arg, unit, sig)?;
-                 self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
-                 
-                 self.emit_call_on_unit(result, if_false, &mut parts[2])?;
+            if let Expr::Closure(_) = parts[2].deref_mut() {
+                let if_false = self.promote_closure(&result.constants, &mut parts[2])?;
+                let false_ty = self.infer_types(if_false)?;
+                self.type_check_eq(false_ty.arg, unit, sig)?;
+                self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
+                
+                self.emit_call_on_unit(result, if_false, &mut parts[2])?;
             } else {
                 ice!("if third arg must be func not {:?}", parts[2]);
             }
@@ -2353,6 +2369,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if arg_val.is_empty() {
             arg_val = self.interp.program.load_value(Value::Unit);
         }
+        self.type_check_arg(arg_val.ty(), f_ty.arg, "fn arg")?;
 
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
@@ -2420,10 +2437,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                             *arg_expr.deref_mut() = mem::take(v.iter_mut().next().unwrap());
                         }
                     }
+                    let ty = self.interp.program.func_type(current_fn);
                     f_expr.expr = Expr::Value {
-                        ty: self.interp.program.func_type(current_fn),
+                        ty,
                         value: Value::GetFn(current_fn).into(),
                     };
+                    f_expr.ty = ty;
                     // TODO: only emit_capturing_call if we based a closure
                     let res = self.emit_capturing_call(result, current_fn, expr)?;
                     self.pop_state(state);
@@ -2444,14 +2463,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let will_inline = force_inline;
         let func = &self.interp.program.funcs[original_f.0];
-        if !func.capture_vars.is_empty() {
+        if (!func.capture_vars.is_empty() || will_inline) && func.body.is_some() {
             // TODO: check that you're calling from the same place as the definition.
             assert!(!deny_inline, "capturing calls are always inlined.");
             self.emit_capturing_call(result, original_f, expr)
-        } else if will_inline {
-            // TODO: this should probably just be the same as a capturing call
-            add_unique(&mut result.callees, original_f);
-            self.emit_inline_call(result, original_f)
         } else {
             let res = self.emit_runtime_call(result, original_f, arg_expr)?;
             // Since we've called it, we must know the type by now.
@@ -2497,10 +2512,12 @@ fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
     }
 }
 
-fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) {
+fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     if !vec.contains(&new) {
         vec.push(new);
+        return true;
     }
+    false
 }
 
 // i like when my code is rocks not rice

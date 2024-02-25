@@ -90,7 +90,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         result: &mut FnBody<'p>,
         full_arg_range: StackRange,
         pattern: &Pattern<'p>,
-    ) -> Res<'p, Vec<(Option<Var<'p>>, StackRange)>> {
+    ) -> Res<'p, Vec<(Option<Var<'p>>, StackRange, TypeId)>> {
         let mut args_to_drop = vec![];
         let arguments = pattern.flatten();
         let mut slot_count = 0;
@@ -104,7 +104,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                 let prev = result.vars.insert(name, (range, ty));
                 assert!(prev.is_none(), "overwrite arg?");
             }
-            args_to_drop.push((name, range));
+            args_to_drop.push((name, range, ty));
             slot_count += size;
         }
         assert_eq!(full_arg_range.count, slot_count);
@@ -137,7 +137,7 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
                 ret,
                 arg: full_arg_range,
             });
-            for (var, range) in args_to_drop {
+            for (var, range, _ty) in args_to_drop {
                 if let Some(var) = var {
                     let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
                     assert_eq!(range, slot, "moved arg");
@@ -157,8 +157,8 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
             self.pool.intern("drop_args"),
             func.get_name(self.pool),
         ));
-        args_to_drop.extend(result.to_drop.drain(0..).map(|(s, _)| (None, s)));
-        for (var, range) in args_to_drop {
+        args_to_drop.extend(result.to_drop.drain(0..).map(|(s, ty)| (None, s, ty)));
+        for (var, range, _ty) in args_to_drop {
             if let Some(var) = var {
                 let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
                 assert_eq!(range, slot, "moved arg");
@@ -188,77 +188,13 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
         );
         let func = &self.interp.program.funcs[f.0];
         assert!(func.capture_vars.is_empty());
-        let will_inline = func.has_tag(self.pool, "inline");
+        assert!(!func.has_tag(self.pool, "inline"));
         let (arg, _) = result.load(self.interp.program, arg)?;
-        if will_inline {
-            self.emit_inline_call(result, arg, f)
-        } else {
-            let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
-            result.push(Bc::CallDirect { f, ret, arg });
-            assert_eq!(self.return_stack_slots(f), ret.count);
-            assert_eq!(self.interp.program.slot_count(f_ty.ret), ret.count);
-            Ok(Structured::Emitted(f_ty.ret, ret))
-        }
-    }
-
-    fn emit_inline_call(
-        &mut self,
-        result: &mut FnBody<'p>,
-        arg: StackRange,
-        f: FuncId,
-    ) -> Res<'p, Structured> {
-        let name = self.interp.program.funcs[f.0].get_name(self.pool);
-        result.push(Bc::DebugMarker(self.pool.intern("start:inline_call"), name));
-        // This move ensures they end up at the base of the renumbered stack.
-        let func = &self.interp.program.funcs[f.0];
-        let msg = "capturing calls are already inlined. what are you doing here?";
-        assert_eq!(func.capture_vars.len(), 0, "{}", msg);
-        let f_ty = func.unwrap_ty();
-
-        let stack_offset = if arg.first.0 == (result.stack_slots - arg.count) {
-            // It's already at the top of the stack so don't need to move
-            result.stack_slots - arg.count
-        } else {
-            let stack_offset = result.stack_slots;
-            let arg_slots = result.reserve_slots(self.interp.program, f_ty.arg)?; // These are included in the new function's stack
-            debug_assert_eq!(arg_slots.count, arg.count);
-            result.push(Bc::MoveRange {
-                from: arg,
-                to: arg_slots,
-            });
-            stack_offset
-        };
-
-        let ip_offset = result.insts.len();
-        let func = unwrap!(
-            self.interp.ready[f.0].as_ref(),
-            "inline fn must be compiled: {}",
-            func.wip.as_ref().unwrap().why
-        );
-        // TODO: check for recusion somewhere.
-        // TODO: put constants somewhere so dont have to clone them each time a function is inlined.
-        result.stack_slots += func.stack_slots;
-        result.slot_types.extend(func.slot_types.iter());
-        let mut ret = None;
-        for (i, mut inst) in func.insts.iter().cloned().enumerate() {
-            assert!(ret.is_none()); // TODO
-            inst.renumber(stack_offset, ip_offset);
-            if let Bc::Ret(return_value) = inst {
-                ret = Some(return_value);
-            } else {
-                result.insts.push(inst);
-                if cfg!(feature = "some_log") {
-                    result.debug.push(result.debug[i].clone());
-                }
-            }
-        }
-        assert!(
-            ret.is_some(),
-            "inline function had no ret instruction. \n{}",
-            func.log(self.pool)
-        );
-        result.push(Bc::DebugMarker(self.pool.intern("end:inline_call"), name));
-        Ok(Structured::Emitted(f_ty.ret, ret.unwrap()))
+        let ret = result.reserve_slots(self.interp.program, f_ty.ret)?;
+        result.push(Bc::CallDirect { f, ret, arg });
+        assert_eq!(self.return_stack_slots(f), ret.count);
+        assert_eq!(self.interp.program.slot_count(f_ty.ret), ret.count);
+        Ok(Structured::Emitted(f_ty.ret, ret))
     }
 
     fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &FatStmt<'p>) -> Res<'p, ()> {
@@ -313,7 +249,13 @@ impl<'b, 'a, 'p> EmitBc<'b, 'a, 'p> {
             Stmt::DeclVarPattern { binding, value } => {
                 let full_arg_range = self.compile_expr(result, value.as_ref().unwrap())?;
                 let (full_arg_range, _) = result.load(self.interp.program, full_arg_range)?;
-                let _args_to_drop = self.bind_args(result, full_arg_range, binding)?;
+                let args_to_drop = self.bind_args(result, full_arg_range, binding)?;
+                for (name, slot, ty) in args_to_drop {
+                    if name.is_none() {
+                        result.push(Bc::Drop(slot));
+                        // result.to_drop.push((slot, ty));
+                    }
+                }
             }
         }
         Ok(())
