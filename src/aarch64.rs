@@ -1,12 +1,12 @@
 use core::slice;
 use memmap2::{Mmap, MmapOptions};
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Reg {
     pub r: usize,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mem {
     pub addr: Reg,
     pub offset: u64,
@@ -36,6 +36,12 @@ pub enum Inst {
         dest: Reg,
         lhs: Reg,
         rhs: Reg,
+    },
+    WithImm {
+        op: Three,
+        dest: Reg,
+        src: Reg,
+        imm: u64,
     },
     Two {
         op: Two,
@@ -126,6 +132,7 @@ pub struct Assembler {
     _labels: Vec<usize>,
     insts: Vec<Inst>,
     out: Vec<u32>,
+    done: Option<Mmap>,
 }
 
 macro_rules! build {
@@ -136,6 +143,11 @@ macro_rules! build {
 }
 
 impl Assembler {
+    pub fn push(&mut self, i: Inst) {
+        assert!(self.done.is_none());
+        self.insts.push(i)
+    }
+
     pub fn encode_all(&mut self) {
         for i in 0..self.insts.len() {
             let inst = self.encode(self.insts[i]);
@@ -162,6 +174,7 @@ impl Assembler {
                 Three::FDIV => todo!(),
                 Three::AND => todo!(),
             },
+            Inst::WithImm { .. } => todo!(),
             Inst::Two { op, lhs, rhs } => match op {
                 Two::CMP => todo!(),
                 Two::FCMP => todo!(),
@@ -207,16 +220,23 @@ impl Assembler {
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub fn map_exec(&self) -> Mmap {
-        // TODO: emit into this thing so don't have to copy.
-        let mut map = MmapOptions::new()
-            .len(self.out.len() * 4)
-            .map_anon()
-            .unwrap();
-        let bytes = self.out.as_ptr() as *const u8;
-        let bytes = unsafe { slice::from_raw_parts(bytes, self.out.len() * 4) };
-        map.copy_from_slice(bytes);
-        map.make_exec().unwrap()
+    pub fn map_exec(&mut self) -> *const u8 {
+        assert!(!self.out.is_empty());
+        match &self.done {
+            Some(done) => done.as_ptr(),
+            None => {
+                // TODO: emit into this thing so don't have to copy.
+                let mut map = MmapOptions::new()
+                    .len(self.out.len() * 4)
+                    .map_anon()
+                    .unwrap();
+                let bytes = self.out.as_ptr() as *const u8;
+                let bytes = unsafe { slice::from_raw_parts(bytes, self.out.len() * 4) };
+                map.copy_from_slice(bytes);
+                self.done = Some(map.make_exec().unwrap());
+                self.map_exec()
+            }
+        }
     }
 }
 
@@ -226,27 +246,28 @@ impl Reg {
     }
 }
 
+pub const X0: Reg = Reg::u64(0);
+pub const SP: Reg = Reg::u64(14);
+
 #[allow(unused)]
 #[cfg(target_arch = "aarch64")]
 mod encoding_tests {
     use super::{Inst, Reg};
-    use crate::aarch64::{Assembler, Three, Two};
+    use crate::aarch64::{Assembler, Three, Two, X0};
     use std::mem;
+    const X1: Reg = Reg::u64(1);
+    const X2: Reg = Reg::u64(2);
+    const X3: Reg = Reg::u64(3);
 
     fn call_jit<A, R>(arg: A, insts: &[Inst]) -> R {
         let mut asm = Assembler::default();
         asm.insts.extend(insts);
         asm.encode_all();
         println!("{}", asm.log());
-        let map = asm.map_exec();
-        let ptr: extern "C" fn(A) -> R = unsafe { mem::transmute(map.as_ptr()) };
+        let code = asm.map_exec();
+        let ptr: extern "C" fn(A) -> R = unsafe { mem::transmute(code) };
         ptr(arg)
     }
-
-    const X0: Reg = Reg::u64(0);
-    const X1: Reg = Reg::u64(1);
-    const X2: Reg = Reg::u64(2);
-    const X3: Reg = Reg::u64(3);
 
     #[test]
     fn call42() {

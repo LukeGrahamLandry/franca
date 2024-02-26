@@ -101,6 +101,7 @@ impl InterpArm {
                 Inst::Bl(_) => todo!(),
                 Inst::Br(_) => todo!(),
                 Inst::Blr(_) => todo!(),
+                Inst::WithImm { op, dest, src, imm } => todo!(),
             }
             self.registers[15] += 1;
         }

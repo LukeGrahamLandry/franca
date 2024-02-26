@@ -25,6 +25,7 @@ pub struct DebugInfo<'p> {
     pub p: PhantomData<&'p str>,
 }
 
+#[derive(Default)]
 pub struct SizeCache {
     pub known: Vec<Option<usize>>,
 }
@@ -57,7 +58,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Self {
             last_loc: None,
             program,
-            // TODO: !!! actually keep this between calls.
             sizes,
         }
     }
@@ -81,9 +81,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
         let func = &self.program.funcs[f.0];
-        let wip = unwrap!(func.wip.clone(), "Not done comptime for {f:?}"); // TODO
+        let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
-        let mut result = self.empty_fn(&wip);
+        let mut result = self.empty_fn(wip);
         let func = &self.program.funcs[f.0];
         let arg_range = result.reserve_slots(self, func.unwrap_ty().arg)?;
         let return_value = self.emit_body(&mut result, arg_range, f);

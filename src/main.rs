@@ -1,5 +1,6 @@
 use franca::{
     bc::Value,
+    interp::Interp,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
     run_main,
@@ -18,6 +19,7 @@ fn main() {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&name),
+                Interp::new(pool),
             );
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
@@ -27,6 +29,7 @@ fn main() {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&name),
+                Interp::new(pool),
             );
         }
     } else {
@@ -48,6 +51,7 @@ fn main() {
                         .strip_suffix(".txt")
                         .unwrap(),
                 ),
+                Interp::new(pool),
             );
         }
         assert!(passed);

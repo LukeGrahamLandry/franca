@@ -1,7 +1,7 @@
 use std::fs;
 
 use bc::Value;
-use codemap::CodeMap;
+use codemap::{CodeMap, Loc, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use pool::StringPool;
 
@@ -27,6 +27,7 @@ pub mod scope;
 pub mod emit_bc;
 pub mod interp_aarch64;
 pub mod aarch64;
+pub mod emit_aarch64;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, interp::Interp, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
@@ -57,6 +58,7 @@ macro_rules! test_file {
                 Value::I64(3145192),
                 Value::I64(3145192),
                 Some(&stringify!($case)),
+                Interp::new(pool)
             ));
         }
     };
@@ -71,12 +73,13 @@ test_file!(ffi);
 test_file!(collections);
 test_file!(macros);
 
-pub fn run_main<'a: 'p, 'p>(
+pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     pool: &'a StringPool<'p>,
     src: String,
     arg: Value,
     expect: Value,
     save: Option<&str>,
+    executor: Exec,
 ) -> bool {
     log_tag_info();
     let start = timestamp();
@@ -103,31 +106,22 @@ pub fn run_main<'a: 'p, 'p>(
             }
         }
     }
+    
 
-    let name = pool.intern("@toplevel@");
-    let body = Some(FatExpr::synthetic(
-        Expr::Block {
-            body: stmts,
-            result: Box::new(FatExpr::synthetic(Expr::unit(), user_span)),
-            locals: None,
-        },
-        user_span,
-    ));
+   
 
-    let (g_arg, g_ret) = Func::known_args(TypeId::unit(), TypeId::unit(), user_span);
-    let mut global = Func::new(name, g_arg, g_ret, body, user_span, true);
-
+    let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool);
-    let mut interp = Compile::new(pool, &mut program, Interp::new(pool));
-    // damn turns out defer would maybe be a good idea
-    let result = interp.add_declarations(global);
+    let mut comp = Compile::new(pool, &mut program, executor);
+    let result = comp.add_declarations(global);
 
-    fn log_dbg<'a, 'p>(interp: &Compile<'a, 'p, Interp<'a, 'p>>, save: Option<&str>) {
-        outln!(Bytecode, "{}", interp.executor.log(interp.pool));
-        let name = interp.pool.intern("main");
-        if let Some(id) = interp.lookup_unique_func(name) {
-            outln!(FinalAst, "{}", interp.program.log_finished_ast(id));
+    // damn turns out defer would maybe be a good idea
+    fn log_dbg<'a, 'p, Exec: Executor<'p>>(comp: &Compile<'a, 'p, Exec>, save: Option<&str>) {
+        outln!(Bytecode, "{}", comp.executor.log(comp.pool));
+        let name = comp.pool.intern("main");
+        if let Some(id) = comp.lookup_unique_func(name) {
+            outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
         }
         
         println!("{}", get_logs(ShowPrint));
@@ -141,9 +135,9 @@ pub fn run_main<'a: 'p, 'p>(
         println!("===============================");
     }
 
-    fn log_err<'p>(
+    fn log_err<'p, Exec: Executor<'p>>(
         codemap: CodeMap,
-        interp: &mut Compile<'_, 'p, Interp<'_, 'p>>,
+        interp: &mut Compile<'_, 'p, Exec>,
         e: CompileError<'p>,
         save: Option<&str>,
     ) {
@@ -175,15 +169,15 @@ pub fn run_main<'a: 'p, 'p>(
 
     match result {
         Err(e) => {
-            log_err(codemap, &mut interp, e, save);
+            log_err(codemap, &mut comp, e, save);
             return false;
         }
         Ok(_toplevel) => {
             let name = pool.intern("main");
-            match interp.lookup_unique_func(name) {
+            match comp.lookup_unique_func(name) {
                 None => {
                     outln!(ShowErr, "FN {name:?} = 'MAIN' NOT FOUND");
-                    let decls = interp
+                    let decls = comp
                         
                         .program
                         .declarations
@@ -191,13 +185,13 @@ pub fn run_main<'a: 'p, 'p>(
                         .map(|n| pool.get(*n).to_string())
                         .collect::<Vec<String>>();
                     outln!(ShowErr, "Decls: {decls:?}");
-                    log_dbg(&interp, save);
+                    log_dbg(&comp, save);
                     return false;
                 }
                 Some(f) => {
-                    match interp.compile(f, ExecTime::Runtime) {
+                    match comp.compile(f, ExecTime::Runtime) {
                         Err(e) => {
-                            log_err(codemap, &mut interp, e, save);
+                            log_err(codemap, &mut comp, e, save);
                             return false;
                         }
                         Ok(_) => {
@@ -216,9 +210,9 @@ pub fn run_main<'a: 'p, 'p>(
                             );
                             outln!(ShowPrint, "===============");
                             let start = timestamp();
-                            match interp.run(f, arg.into(), ExecTime::Runtime) {
+                            match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
-                                    log_err(codemap, &mut interp, e, save);
+                                    log_err(codemap, &mut comp, e, save);
                                     return false;
                                 }
                                 Ok(result) => {
@@ -233,12 +227,12 @@ pub fn run_main<'a: 'p, 'p>(
                                     let assertion_count = src.split("assert_eq(").count() - 1;
                                     // debug so dont crash in web if not using my system of one run per occurance.
                                     debug_assert_eq!(
-                                        interp.executor.assertion_count(), assertion_count,
+                                        comp.executor.assertion_count(), assertion_count,
                                         "vm missed assertions?"
                                     );
                                     outln!(ShowPrint, 
                                         "   - {assertion_count} assertions passed. {} comptime evaluations.",
-                                        interp.anon_fn_counter
+                                        comp.anon_fn_counter
                                     );
                                 }
                             }
@@ -250,7 +244,7 @@ pub fn run_main<'a: 'p, 'p>(
     } // TODO: this is dereanged. put it in a function so you can just use ? to call log_err
 
     outln!(ShowPrint, "===============");
-    log_dbg(&interp, save);
+    log_dbg(&comp, save);
     true
 }
 
@@ -269,6 +263,23 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
         emitter.emit(diagnostic);
     }
 }
+
+
+pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
+    let name = pool.intern("@toplevel@");
+    let body = Some(FatExpr::synthetic(
+        Expr::Block {
+            body: stmts,
+            result: Box::new(FatExpr::synthetic(Expr::unit(), user_span)),
+            locals: None,
+        },
+        user_span,
+    ));
+
+    let (g_arg, g_ret) = Func::known_args(TypeId::unit(), TypeId::unit(), user_span);
+    Func::new(name, g_arg, g_ret, body, user_span, true)
+}
+
 
 // TODO: its unfortunate that ifdefing this out means i don't get ide here.
 /// C ABI callable from js when targeting wasm.
