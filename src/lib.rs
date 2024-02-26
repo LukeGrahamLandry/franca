@@ -25,8 +25,8 @@ pub mod parse;
 pub mod pool;
 pub mod scope;
 pub mod emit_bc;
-pub mod interp_arm;
-pub mod arm64;
+pub mod interp_aarch64;
+pub mod aarch64;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, interp::Interp, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
@@ -41,7 +41,7 @@ macro_rules! stdlib {
     };
 }
 
-static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("macros"), stdlib!("targets/js")];
+static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("macros")];
 
 macro_rules! test_file {
     ($case:ident) => {

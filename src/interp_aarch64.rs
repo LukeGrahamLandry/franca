@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use crate::{
-    arm64::{Inst, Label, Mem, Three, Two},
+    aarch64::{Inst, Label, Mem, Three, Two},
     compiler::Res,
 };
 
@@ -99,6 +99,8 @@ impl InterpArm {
                 Inst::MOVZ { dest, imm } => todo!(),
                 Inst::MOVK { dest, imm, shift } => todo!(),
                 Inst::Bl(_) => todo!(),
+                Inst::Br(_) => todo!(),
+                Inst::Blr(_) => todo!(),
             }
             self.registers[15] += 1;
         }
