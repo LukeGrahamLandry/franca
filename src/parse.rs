@@ -6,7 +6,7 @@ use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
 use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, TypeId, Var};
+use crate::ast::{Binding, Name, TypeId, Var};
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
@@ -290,10 +290,10 @@ impl<'a, 'p> Parser<'a, 'p> {
                     None
                 };
                 // TODO: allow multiple bindings
-                let (name, ty) = match binding {
-                    Binding::Named(i, e) => (i, e),
-                    Binding::Var(_, _) => unreachable!(),
-                    Binding::Discard(e) => panic!("var decl needs name. {:?}", e),
+                let (name, ty) = match binding.name {
+                    Name::Ident(i) => (i, binding.ty),
+                    Name::Var(_) => unreachable!(),
+                    Name::None => panic!("var decl needs name. {:?}", binding.ty),
                 };
 
                 self.eat(Semicolon)?;
@@ -409,8 +409,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
 
         if args.bindings.is_empty() {
-            args.bindings
-                .push(Binding::Discard(LazyType::Finished(TypeId::unit())));
+            args.bindings.push(Binding {
+                name: Name::None,
+                ty: LazyType::Finished(TypeId::unit()),
+            });
         }
 
         Ok(args)
@@ -426,7 +428,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         } else {
             LazyType::Infer
         };
-        Ok(Binding::Named(name, types))
+        Ok(Binding {
+            name: Name::Ident(name),
+            ty: types,
+        })
     }
 
     #[track_caller]

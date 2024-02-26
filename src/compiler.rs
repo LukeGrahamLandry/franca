@@ -13,8 +13,7 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Binding, FatStmt, Field, OverloadOption, OverloadSet, Pattern, Var,
-    VarInfo, VarType,
+    garbage_loc, Binding, FatStmt, Field, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
@@ -493,15 +492,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         arg_name: Var<'p>,
     ) -> Res<'p, TypeId> {
         for arg in &mut arg.bindings {
-            match arg {
-                Binding::Named(_, _) => unreachable!(),
-                Binding::Var(name, ty) => {
-                    if *name == arg_name {
-                        self.infer_types_progress(constants, ty)?;
-                        return Ok(ty.unwrap());
+            match arg.name {
+                Name::Ident(_) => unreachable!(),
+                Name::Var(name) => {
+                    if name == arg_name {
+                        self.infer_types_progress(constants, &mut arg.ty)?;
+                        return Ok(arg.ty.unwrap());
                     }
                 }
-                Binding::Discard(_) => {}
+                Name::None => {}
             }
         }
         err!(CErr::VarNotFound(arg_name))
@@ -1705,11 +1704,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         constants: &Constants<'p>,
         binding: &mut Binding<'p>,
     ) -> Res<'p, bool> {
-        Ok(match binding {
-            Binding::Named(_, ty) | Binding::Var(_, ty) | Binding::Discard(ty) => {
-                self.infer_types_progress(constants, ty)?
-            }
-        })
+        self.infer_types_progress(constants, &mut binding.ty)
     }
 
     fn infer_pattern(

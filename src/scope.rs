@@ -3,7 +3,7 @@ use std::{mem, ops::DerefMut};
 use codemap::Span;
 
 use crate::{
-    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Stmt, Var, VarInfo, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
     logging::{outln, LogTag::Scope},
     pool::{Ident, StringPool},
 };
@@ -279,20 +279,23 @@ impl<'p> ResolveScope<'p> {
     }
 
     fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) {
-        match binding {
-            Binding::Named(name, e) => {
-                self.resolve_type(e);
+        match binding.name {
+            Name::Ident(name) => {
+                self.resolve_type(&mut binding.ty);
                 if declaring {
-                    let (_old, var) = self.decl_var(name);
+                    let (_old, var) = self.decl_var(&name);
                     self.info.push(VarInfo {
                         kind: VarType::Var,
                         loc,
                     });
-                    *binding = Binding::Var(var, mem::replace(e, LazyType::Infer));
+                    *binding = Binding {
+                        name: Name::Var(var),
+                        ty: mem::replace(&mut binding.ty, LazyType::Infer),
+                    };
                 }
             }
-            Binding::Var(_, _) => unreachable!(),
-            Binding::Discard(e) => self.resolve_type(e),
+            Name::Var(_) => unreachable!(),
+            Name::None => self.resolve_type(&mut binding.ty),
         }
     }
 }

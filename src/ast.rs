@@ -199,47 +199,41 @@ impl<'p> Default for Pattern<'p> {
     }
 }
 
+#[derive(Copy, Clone, Debug, InterpSend, PartialEq, Eq)]
+pub enum Name<'p> {
+    Ident(Ident<'p>),
+    Var(Var<'p>),
+    None,
+}
+
 // arguments of a function and left of variable declaration.
 #[derive(Clone, Debug, InterpSend)]
-pub enum Binding<'p> {
-    Named(Ident<'p>, LazyType<'p>),
-    Var(Var<'p>, LazyType<'p>),
-    Discard(LazyType<'p>),
+pub struct Binding<'p> {
+    pub name: Name<'p>,
+    pub ty: LazyType<'p>,
 }
 
 impl<'p> Binding<'p> {
     pub fn type_for_name(&self, name: Var) -> Option<&LazyType> {
-        match self {
-            Binding::Named(_, _) => unreachable!(),
-            Binding::Var(v, ty) => {
-                if *v == name {
-                    return Some(ty);
-                }
-                None
-            }
-            Binding::Discard(_) => None,
+        if self.name == Name::Var(name) {
+            return Some(&self.ty);
         }
+        None
     }
 
     pub fn unwrap(&self) -> TypeId {
-        match self {
-            Binding::Named(_, ty) => ty.unwrap(),
-            Binding::Var(_, ty) => ty.unwrap(),
-            Binding::Discard(ty) => ty.unwrap(),
-        }
+        self.ty.unwrap()
     }
 
     pub fn name(&self) -> Option<Ident<'p>> {
-        match self {
-            Binding::Named(n, _) => Some(*n),
-            Binding::Var(n, _) => Some(n.0),
-            Binding::Discard(_) => None,
+        match self.name {
+            Name::Ident(n) => Some(n),
+            Name::Var(n) => Some(n.0),
+            Name::None => None,
         }
     }
     pub fn lazy(&self) -> &LazyType<'p> {
-        match self {
-            Binding::Named(_, l) | Binding::Var(_, l) | Binding::Discard(l) => l,
-        }
+        &self.ty
     }
 }
 
@@ -260,9 +254,9 @@ impl<'p> Pattern<'p> {
         self.bindings
             .iter()
             .map(|b| {
-                let name = match b {
-                    Binding::Var(v, _) => Some(*v),
-                    Binding::Named(_, _) | Binding::Discard(_) => None,
+                let name = match b.name {
+                    Name::Var(v) => Some(v),
+                    _ => None,
                 };
                 (name, b.unwrap())
             })
@@ -272,31 +266,22 @@ impl<'p> Pattern<'p> {
     pub fn collect_vars(&self) -> Vec<Var<'p>> {
         self.bindings
             .iter()
-            .flat_map(|b| match b {
-                &Binding::Var(v, _) => Some(v),
-                Binding::Named(_, _) | Binding::Discard(_) => None,
+            .flat_map(|b| match b.name {
+                Name::Var(v) => Some(v),
+                _ => None,
             })
             .collect()
     }
 
     pub fn flatten_names(&self) -> Vec<Ident<'p>> {
-        self.bindings
-            .iter()
-            .map(|b| match b {
-                Binding::Named(i, _) => *i,
-                Binding::Var(v, _) => v.0,
-                Binding::Discard(e) => todo!("struct no name? {e:?}"),
-            })
-            .collect()
+        self.bindings.iter().map(|b| b.name().unwrap()).collect()
     }
 
     // TODO: remove?
     pub fn flatten_exprs(&self) -> Option<Vec<FatExpr<'p>>> {
         self.bindings
             .iter()
-            .map(|b| match b {
-                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e.clone(),
-            })
+            .map(|b| b.ty.clone())
             .map(|t| match t {
                 LazyType::EvilUnit => panic!(),
                 LazyType::Infer => None,
@@ -310,9 +295,7 @@ impl<'p> Pattern<'p> {
     pub fn flatten_exprs_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
         self.bindings
             .iter_mut()
-            .map(|b| match b {
-                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
-            })
+            .map(|b| &mut b.ty)
             .map(|t| match t {
                 LazyType::EvilUnit => panic!(),
                 LazyType::Infer => None,
@@ -326,9 +309,7 @@ impl<'p> Pattern<'p> {
     pub fn flatten_exprs_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
         self.bindings
             .iter()
-            .map(|b| match b {
-                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
-            })
+            .map(|b| &b.ty)
             .map(|t| match t {
                 LazyType::EvilUnit => panic!(),
                 LazyType::Infer => None,
@@ -340,8 +321,8 @@ impl<'p> Pattern<'p> {
     }
     pub fn remove_named(&mut self, arg_name: Var<'p>) {
         let start = self.bindings.len();
-        self.bindings.retain(|b| match b {
-            Binding::Var(name, _) => *name != arg_name,
+        self.bindings.retain(|b| match b.name {
+            Name::Var(name) => name != arg_name,
             _ => true,
         });
         debug_assert_ne!(start, self.bindings.len());
@@ -351,9 +332,7 @@ impl<'p> Pattern<'p> {
         let types: Vec<_> = self
             .bindings
             .iter()
-            .map(|b| match b {
-                Binding::Named(_, e) | Binding::Var(_, e) | Binding::Discard(e) => e,
-            })
+            .map(|b| &b.ty)
             .map(|t| match t {
                 LazyType::Finished(ty) => *ty,
                 LazyType::Infer
@@ -526,7 +505,10 @@ impl<'p> Func<'p> {
 
     pub fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {
         let arg = Pattern {
-            bindings: vec![Binding::Discard(LazyType::Finished(arg))],
+            bindings: vec![Binding {
+                ty: LazyType::Finished(arg),
+                name: Name::None,
+            }],
             loc,
         };
         let ret = LazyType::Finished(ret);
