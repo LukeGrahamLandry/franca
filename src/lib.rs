@@ -8,6 +8,7 @@ use pool::StringPool;
 macro_rules! mut_replace {
     ($value:expr, $f:expr) => {{
         let temp = mem::take(&mut $value);
+        #[allow(clippy::redundant_closure_call)]
         let (temp, out) = $f(temp)?;
         $value = temp;
         out

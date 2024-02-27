@@ -301,7 +301,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
             Qualifier(kind) => {
                 self.pop();
-                let binding = self.parse_type_binding()?;
+                let binding = self.parse_type_binding(false)?;
                 let value = if Equals == self.peek() {
                     self.eat(Equals)?;
                     Some(self.parse_expr()?)
@@ -404,7 +404,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 RightParen | RightSquiggle => break,
                 Comma => return Err(self.expected("Expr")),
                 _ => {
-                    args.bindings.push(self.parse_type_binding()?);
+                    args.bindings.push(self.parse_type_binding(true)?);
                     if Comma == self.peek() {
                         // inner and optional trailing
                         self.eat(Comma)?;
@@ -417,7 +417,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
 
         while RightParen != self.peek() && RightSquiggle != self.peek() {
-            args.bindings.push(self.parse_type_binding()?);
+            args.bindings.push(self.parse_type_binding(true)?);
             if Comma == self.peek() {
                 // inner and optional trailing
                 self.eat(Comma)?;
@@ -431,6 +431,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             args.bindings.push(Binding {
                 name: Name::None,
                 ty: LazyType::Finished(TypeId::unit()),
+                default: None,
             });
         }
 
@@ -439,7 +440,7 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     // TODO: rn just one ident but support tuple for pattern matching
     /// `Names ':' ?Expr`
-    fn parse_type_binding(&mut self) -> Res<Binding<'p>> {
+    fn parse_type_binding(&mut self, allow_default: bool) -> Res<Binding<'p>> {
         let name = self.ident()?;
         let types = if Colon == self.peek() {
             self.pop();
@@ -447,9 +448,17 @@ impl<'a, 'p> Parser<'a, 'p> {
         } else {
             LazyType::Infer
         };
+        let default = if allow_default && Equals == self.peek() {
+            self.pop();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
         Ok(Binding {
             name: Name::Ident(name),
             ty: types,
+            default,
         })
     }
 

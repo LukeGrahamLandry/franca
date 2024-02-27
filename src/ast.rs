@@ -211,6 +211,7 @@ pub enum Name<'p> {
 pub struct Binding<'p> {
     pub name: Name<'p>,
     pub ty: LazyType<'p>,
+    pub default: Option<FatExpr<'p>>,
 }
 
 impl<'p> Binding<'p> {
@@ -508,6 +509,7 @@ impl<'p> Func<'p> {
             bindings: vec![Binding {
                 ty: LazyType::Finished(arg),
                 name: Name::None,
+                default: None,
             }],
             loc,
         };

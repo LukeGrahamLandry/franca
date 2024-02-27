@@ -5,6 +5,7 @@
 #![allow(clippy::wrong_self_convention)]
 use codemap::Span;
 use interp_derive::InterpSend;
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -659,11 +660,17 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 match kind {
                     VarType::Const => {
                         let mut val = match value {
-                            Some(value) => self.immediate_eval_expr(
+                            Some(value) => {
+                                // You don't need to precompile, immediate_eval_expr will do it for you.
+                                // However, we want to update value.ty on our copy to use below to give constant pointers better type inference. 
+                                // This makes addr_of const for @enum work
+                                self.compile_expr(result, value, if no_type { None } else {Some(expected_ty)})?;
+                                
+                                self.immediate_eval_expr(
                                 &result.constants,
                                 value.clone(),
                                 expected_ty,
-                            )?,
+                            )?},
                             None => {
                                 let name = self.pool.get(name.0);
                                 unwrap!(
@@ -681,8 +688,17 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         }
                         let found_ty = self.program.type_of_raw(&val);
                         if no_type {
-                            expected_ty = found_ty;
-                            *ty = LazyType::Finished(found_ty);
+                            expected_ty = if let Some(value) = value {
+                                if !(value.ty.is_unknown() || value.ty.is_any()) {
+                                    // HACK This makes addr_of const for @enum work
+                                    value.ty
+                                } else {
+                                    found_ty
+                                }
+                            } else {
+                                found_ty
+                            };
+                            *ty = LazyType::Finished(expected_ty);
                         } else {
                             self.type_check_arg(found_ty, expected_ty, "var decl")?;
                         }
@@ -1118,7 +1134,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             self.type_check_arg(value.ty(), type_hint, "enum case")?;
                             Structured::RuntimeOnly(requested)
                         }
-                        _ => err!("struct literal but expected {:?}", requested),
+                        _ => err!("struct literal {pattern:?} but expected {:?}", requested),
                     };
                     Ok((pattern, res))
                 })
@@ -1174,6 +1190,67 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             return self.compile_expr(result, expr, requested);
                         }
                     }
+                } else if name_str == "enum" {
+                    self.compile_expr(result, arg, Some(TypeId::ty()))?;
+                    let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
+                    let ty = self.to_type(ty)?;
+                    if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
+                        let mut the_type = Pattern::empty(loc);
+                        let unique_ty = self.program.unique_ty(ty);
+                        // Note: we expand target to an anonamus struct literal, not a type. 
+                        for b in &mut pattern.bindings {
+                            assert!(b.default.is_some());
+                            assert_eq!(b.lazy(), &LazyType::Infer);
+                            b.ty = LazyType::PendingEval(unwrap!(b.default.take(), ""));
+                            the_type.bindings.push(Binding {
+                                name: b.name,
+                                // ty: LazyType::Finished(unique_ty),
+                                ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
+                                default: None,
+                            });
+                        }
+                        let var = Var(self.pool.intern("T"), self.program.vars.len());
+                        self.program.vars.push(VarInfo {
+                            kind: VarType::Const,
+                            loc,
+                        });
+                        pattern.bindings.push(Binding {
+                            name: Name::Var(var),
+                            ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
+                            default: None,
+                        });
+                        the_type.bindings.push(Binding {
+                            name: Name::Var(var),
+                            ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(TypeId::ty()), loc)),
+                            default: None,
+                        });
+                        // TODO: dont add a new variable every time. we just intercept it and look at the identifier. 
+                        // let var = Var(self.pool.intern("as"), self.program.vars.len());
+                        // self.program.vars.push(VarInfo {
+                        //     kind: VarType::Const,
+                        //     loc,
+                        // });
+                        // *expr = mem::take(target);
+                        let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
+                        let the_type = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("struct"), the_type), loc);
+                        let the_type = self.immediate_eval_expr(&result.constants, the_type, TypeId::ty())?;
+                        let the_type = self.to_type(the_type)?;
+                        // *expr = FatExpr::synthetic(Expr::PrefixMacro { name: var, arg, target: mem::take(target) }, loc);
+                        let value = self.immediate_eval_expr(&result.constants, mem::take(target), the_type)?;
+                        let value = Value::new_box(value.vec(), true).into();
+                        let ty = self.program.ptr_type(the_type);
+                        *expr = FatExpr::synthetic(Expr::Value { ty, value }, loc);
+                        expr.ty = ty;
+                        return self.compile_expr(result, expr, Some(ty));
+                    }
+                    err!("Expected struct literal found {target:?}",)
+                } else if name_str == "as" {
+                    self.compile_expr(result, arg, Some(TypeId::ty()))?;
+                    let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
+                    let ty = self.to_type(ty)?;
+                    *expr = mem::take(target);
+                    return self.compile_expr(result, expr, Some(ty));
+                    
                 }
 
                 outln!(
@@ -1333,8 +1410,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     }
                     let ptr_ty = self.program.ptr_type(value_ty);
                     Ok(Structured::RuntimeOnly(ptr_ty))
-                } else if result.constants.get(*var).is_some() {
-                    err!("Took address of constant {}", var.log(self.pool))
+                } else if let Some(value) = result.constants.get(*var) {
+                    // HACK: this is wrong but it makes constant structs work bette
+                    if let TypeInfo::Ptr(_) = self.program.types[value.1.0] {
+                        return Ok(value.into())
+                    }
+                    err!("Took address of constant {}: {:?} ({}) {arg:?}", var.log(self.pool), value.1, self.program.log_type(value.1))
+                    
                 } else {
                     ice!("Missing var {} (in !addr)", var.log(self.pool))
                 }
@@ -1792,6 +1874,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         mut e: FatExpr<'p>,
         ret_ty: TypeId,
     ) -> Res<'p, Values> {
+        // println!("- Eval {} as {:?}", e.log(self.pool), ret_ty);
         match e.deref_mut() {
             Expr::Value { value, .. } => return Ok(value.clone()),
             Expr::GetVar(var) => {

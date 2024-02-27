@@ -569,7 +569,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         to: addr_slot.single(),
                     });
                     Ok((addr_slot, ptr_ty).into())
-                } else if result.constants.get(*var).is_some() {
+                } else if let Some(value) = result.constants.get(*var) {
+                    // HACK: this is wrong but it makes constant structs work better.
+                    if let TypeInfo::Ptr(_) = self.program.types[value.1 .0] {
+                        return Ok(value.into());
+                    }
                     err!("Took address of constant {}", var.log(self.program.pool))
                 } else {
                     ice!("Missing var {} (in !addr)", var.log(self.program.pool))
