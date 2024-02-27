@@ -572,6 +572,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             "lt" => bin_int!(self, <, arg, Value::Bool),
             "ge" => bin_int!(self, >=, arg, Value::Bool),
             "le" => bin_int!(self, <=, arg, Value::Bool),
+            "shift_left" => bin_int!(self, <<, arg, Value::I64),
+            "bit_or" => bin_int!(self, |, arg, Value::I64),
             // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
                 if let Values::One(Value::Type(ty)) = arg {

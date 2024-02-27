@@ -13,7 +13,7 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Binding, FatStmt, Field, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
+    garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
 use crate::bc::*;
 use crate::ffi::InterpSend;
@@ -1275,6 +1275,41 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             "clone_ast" => {
                 let arg: FatExpr = unwrap!(arg.deserialize(), "");
                 Ok(arg.serialize_one())
+            }
+            "get_type_int" => {
+                let arg: FatExpr = unwrap!(arg.deserialize(), "");
+                match arg.deref() {
+                    Expr::Call(f, arg) => {
+                        if let Some(name) = f.as_ident() {
+                            if name == self.pool.intern("from_bit_literal") {
+                                if let Expr::Tuple(parts) = arg.deref().deref() {
+                                    if let Expr::Value { value, .. } = parts[0].deref() {
+                                        let bit_count = value.clone().single()?.to_int()?;
+                                        return Ok(IntType {
+                                            bit_count,
+                                            signed: false,
+                                        }.serialize_one());
+                                    }
+                                    
+                                }
+                                todo!()
+                            }
+                        }
+                    },
+                    Expr::Value { .. } => err!("todo",),
+                    _ => {}
+                }
+                err!("expected binary literal not {arg:?}",);
+            }
+            "new_pair_ast" => {
+                let (a, b): (FatExpr, FatExpr) = unwrap!(arg.deserialize(), "");
+                let loc = a.loc;
+                Ok(FatExpr::synthetic(Expr::Tuple(vec![a, b]), loc).serialize_one())
+            }
+            "new_call_ast" => {
+                let (a, b): (FatExpr, FatExpr) = unwrap!(arg.deserialize(), "");
+                let loc = a.loc;
+                Ok(FatExpr::synthetic(Expr::Call(Box::new(a), Box::new(b)), loc).serialize_one())
             }
             _ => err!("Macro send unknown message: {name} with {arg:?}",),
         }

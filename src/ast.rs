@@ -602,6 +602,12 @@ macro_rules! safe_rec {
 
 pub(crate) use safe_rec;
 
+#[derive(Debug, Clone, Copy, Default, InterpSend)]
+pub struct IntType {
+    pub bit_count: i64,
+    pub signed: bool,
+}
+
 impl<'p> Program<'p> {
     pub fn new(vars: Vec<VarInfo>, pool: &'p StringPool<'p>) -> Self {
         let mut program = Self {
@@ -630,7 +636,7 @@ impl<'p> Program<'p> {
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
-        init_interp_send!(&mut program, Bc,); // TODO: aaaa
+        init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
 
         program
     }

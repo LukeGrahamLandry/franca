@@ -139,3 +139,32 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     
     handler
 }
+
+// TODO: support annotations without a target (just an arg). 
+//       Needs support in the parser, just allow tokens that can't be an expression. 
+//       Try to make sure no sad ambiguity first. 
+// There are implicit range assertions because we get the bit count from the type of the ints. 
+@annotation
+fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
+    let fn_trunc = signed_truncate!quote;
+    let fn_shift = shift_left!quote;
+    let fn_or = bit_or!quote;
+    var zero = 0;
+
+    var parts: Slice(AstExpr) = arg.expr.Tuple[];
+    var expr = literal_ast(i64, zero!addr);
+    var shift = 32;
+    foreach(parts, fn(part: Ptr(AstExpr)) Unit = {
+        var int: IntType = get_type_int(part[]);
+        shift = sub(shift, int.bit_count[]);
+        assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");
+        let next = (int.signed[], 
+            fn() AstExpr = new_call_ast(fn_trunc, new_pair_ast(part[], literal_ast(i64, int.bit_count))),
+            fn() AstExpr = part[]
+        )!if;
+        let next = new_call_ast(fn_shift, new_pair_ast(next, literal_ast(i64, shift!addr)));
+        expr = new_call_ast(fn_or, new_pair_ast(expr, next));
+    });
+    assert(eq(shift, 0), "expected 32 bits. TODO: other sizes.");
+    expr
+}

@@ -329,7 +329,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
                 _ => break,
             }
-            bit_count += 16;
+            bit_count += 5;
         }
 
         self.token(
