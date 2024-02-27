@@ -15,3 +15,7 @@ there must be propoertional terrible things or I'm probably just lying.
 - `src` contains the frontend and the interpreter used for comptime execution. 
 - The programs in `tests` and `lib` actually work on the existing interpreter. 
 - The programs in `plan` are just trying out how potential language features feel. 
+
+### Architecture 
+
+- lex, parse, resolve variable scope happens on all the code at the beginning

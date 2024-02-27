@@ -1037,6 +1037,13 @@ impl<'p> Expr<'p> {
             value: Value::Type(ty).into(),
         }
     }
+
+    pub fn int(v: i64) -> Expr<'p> {
+        Expr::Value {
+            ty: TypeId::i64(),
+            value: Value::I64(v).into(),
+        }
+    }
 }
 
 impl<'p> Default for Func<'p> {

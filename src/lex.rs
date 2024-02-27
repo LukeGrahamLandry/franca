@@ -51,6 +51,8 @@ pub enum TokenType<'p> {
     MinusEq,
     DoubleColon,
     Pipe,
+    // Bit count means leading zeros are observable.
+    BinaryNum { bit_count: u8, value: u128 },
     Error(LexErr),
 }
 
@@ -61,6 +63,9 @@ pub enum LexErr {
     UnterminatedStr,
     Unexpected(char),
     NumParseErr,
+    /// C has it mean octal which I don't really like but I don't want to accept the same syntax and mean something different.
+    DenyLeadingZero,
+    TooManyBits,
 }
 
 pub struct Lexer<'a, 'p> {
@@ -102,7 +107,22 @@ impl<'a, 'p> Lexer<'a, 'p> {
         match self.peek_c() {
             '\0' => self.one(TokenType::Eof),
             '"' | '“' | '”' | '\'' => self.lex_quoted(),
-            '0'..='9' => self.lex_num(),
+            '0' => {
+                self.pop();
+                match self.peek_c() {
+                    'b' => {
+                        self.pop();
+                        self.lex_bin()
+                    }
+                    'x' => {
+                        self.pop();
+                        self.lex_hex()
+                    }
+                    '0'..='9' => self.err(LexErr::DenyLeadingZero),
+                    _ => self.token(Number(0), self.start, self.current),
+                }
+            }
+            '1'..='9' => self.lex_num(),
             'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(),
             '{' => self.pair('}', LeftSquiggle, DoubleSquigle),
             '}' => self.one(RightSquiggle),
@@ -265,6 +285,58 @@ impl<'a, 'p> Lexer<'a, 'p> {
             }
             c => self.peeked.push_back(self.err(LexErr::Unexpected(c))),
         }
+    }
+
+    fn lex_bin(&mut self) -> Token<'p> {
+        let mut bit_count = 0;
+        let mut value = 0;
+
+        while let '0' | '1' = self.peek_c() {
+            if bit_count == 128 {
+                return self.err(LexErr::TooManyBits);
+            }
+            value <<= 1;
+            value += self.pop() as u128 - '0' as u128;
+            bit_count += 1;
+        }
+
+        self.token(
+            TokenType::BinaryNum { bit_count, value },
+            self.start,
+            self.current,
+        )
+    }
+
+    fn lex_hex(&mut self) -> Token<'p> {
+        let mut bit_count = 0;
+        let mut value = 0;
+
+        loop {
+            match self.peek_c() {
+                '0'..='9' => {
+                    if bit_count == 128 {
+                        return self.err(LexErr::TooManyBits);
+                    }
+                    value *= 16;
+                    value += self.pop() as u128 - '0' as u128;
+                }
+                'A'..='F' => {
+                    if bit_count == 128 {
+                        return self.err(LexErr::TooManyBits);
+                    }
+                    value *= 16;
+                    value += self.pop() as u128 - 'A' as u128 + 10;
+                }
+                _ => break,
+            }
+            bit_count += 16;
+        }
+
+        self.token(
+            TokenType::BinaryNum { bit_count, value },
+            self.start,
+            self.current,
+        )
     }
 
     fn peek_c(&mut self) -> char {

@@ -27,10 +27,11 @@ pub mod scope;
 pub mod emit_bc;
 pub mod interp_aarch64;
 pub mod aarch64;
+#[cfg(target_arch = "aarch64")]  // TODO: fix for cross compiling on wasm
 pub mod emit_aarch64;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, interp::Interp, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
+    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
 };
 
 macro_rules! stdlib {
@@ -42,7 +43,8 @@ macro_rules! stdlib {
     };
 }
 
-static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("macros")];
+// TODO: modules! This should be a thing defined in the language. Don't just jam everything on the front of every program. 
+static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("ast"), stdlib!("macros")];
 
 macro_rules! test_file {
     ($case:ident) => {
@@ -58,7 +60,7 @@ macro_rules! test_file {
                 Value::I64(3145192),
                 Value::I64(3145192),
                 Some(&stringify!($case)),
-                Interp::new(pool)
+                crate::interp::Interp::new(pool)
             ));
         }
     };
@@ -291,6 +293,7 @@ pub mod web {
     use crate::bc::Value;
     use crate::logging::{outln, LogTag::*};
     use crate::pool::StringPool;
+    use crate::interp::Interp;
     use crate::run_main;
     use std::alloc::{alloc, Layout};
     use std::ffi::{c_char, CStr, CString};
@@ -318,7 +321,7 @@ pub mod web {
                 return;
             }
         };
-        run_main(pool, src, Value::Unit, Value::Unit, None);
+        run_main(pool, src, Value::Unit, Value::Unit, None, Interp::new(pool));
         save_logs("");
     }
 

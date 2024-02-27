@@ -96,12 +96,13 @@ impl InterpArm {
                         self.registers[15] = self.label(target);
                     }
                 }
-                Inst::MOVZ { dest, imm } => todo!(),
-                Inst::MOVK { dest, imm, shift } => todo!(),
+                Inst::MOVZ { .. } => todo!(),
+                Inst::MOVK { dest, imm } => todo!(),
                 Inst::Bl(_) => todo!(),
                 Inst::Br(_) => todo!(),
                 Inst::Blr(_) => todo!(),
                 Inst::WithImm { op, dest, src, imm } => todo!(),
+                Inst::B(_) => todo!(),
             }
             self.registers[15] += 1;
         }

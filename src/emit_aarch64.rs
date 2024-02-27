@@ -9,10 +9,9 @@ use crate::bc::*;
 use crate::compiler::{Executor, Res};
 use crate::emit_bc::SizeCache;
 use crate::logging::PoolLog;
-use crate::{
-    ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo},
- 
-};
+use crate::
+    ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo}
+ ;
 use crate::aarch64::Two::*;
 use crate::aarch64::Three::*;
 use crate::logging::{assert, assert_eq, err, ice, unwrap};
@@ -141,7 +140,7 @@ impl<'z, 'p: 'z> EmitAsm<'z, 'p> {
             Expr::Value { value, .. } => {
                 let out = match dest {
                     Some(r) => r,
-                    // TODO
+                    // TODO: return it
                     None => Place::Reg(unwrap!(self.open_reg.pop(), "TODO: out of registers")),
                 };
                 match value {
@@ -156,7 +155,7 @@ impl<'z, 'p: 'z> EmitAsm<'z, 'p> {
                     Value::CFnPtr { ptr: i, .. } |
                     // These only make sense during comptime execution but they're also really just numbers.
                     Value::OverloadSet(i) |  Value::GetFn(FuncId(i)) | Value::Type(TypeId(i)) | Value::Symbol(i) => {
-                        self.const_int(u64::from_ne_bytes(i.to_ne_bytes()), out)
+                        self.const_int(*i as u64, out)
                     }
                     Value::Heap {
                         ..
@@ -208,7 +207,6 @@ impl<'z, 'p: 'z> EmitAsm<'z, 'p> {
         };
         Ok(dest)
     }
-    
     
     fn compile_as_place(&mut self, expr: &FatExpr<'p>) -> Res<'p, Place>{ 
         match expr.deref() {
@@ -264,7 +262,7 @@ impl<'z, 'p: 'z> EmitAsm<'z, 'p> {
                 self.open_reg.push(reg);
             },
             Place::Reg(dest) => {
-                self.asm.push(Inst::MOVZ { dest, imm: imm as u16 });  // TODO: other sizes
+                self.asm.push(Inst::MOVZ { dest, imm });  // TODO: other sizes
             },
         }
     }
@@ -325,7 +323,13 @@ impl<'p> Executor<'p> for AsmExecutor {
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()> {
         EmitAsm::compile(program, self, f)
     }
+    
+    #[cfg(not(target_arch = "aarch64"))]
+    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
+        err!("Jitted aarch64 is not supported on this platform.",)
+    }
 
+    #[cfg(target_arch = "aarch64")]
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
         let arg = arg.single()?.to_int()?; // TODO
         let func = unwrap!(self.ready[f.0].as_mut(), "not jitted");
@@ -344,7 +348,7 @@ impl<'p> Executor<'p> for AsmExecutor {
     }
 
     fn is_ready(&self, f: FuncId) -> bool {
-        todo!()
+        self.ready.len() > f.0 && self.ready[f.0].is_some()
     }
 
     fn dump_repr(&self, program: &Program<'p>, f: FuncId) -> String {

@@ -160,6 +160,25 @@ impl<'a, 'p> Parser<'a, 'p> {
                     value: Value::I64(f).into(),
                 }))
             }
+            BinaryNum { bit_count, value } => {
+                if bit_count > 64 {
+                    return Err(self.error_next(String::from("TODO: support >64 bit literals.")));
+                }
+                // TODO: this is ugly
+                self.start_subexpr();
+                self.start_subexpr();
+                self.start_subexpr();
+                self.start_subexpr();
+                self.start_subexpr();
+                self.pop();
+                let v = i64::from_le_bytes((value as u64).to_le_bytes());
+                let v = self.expr(Expr::int(v));
+                let bits = self.expr(Expr::int(bit_count as i64));
+                let pair = self.expr(Expr::Tuple(vec![bits, v]));
+                let func = self.expr(Expr::GetNamed(self.pool.intern("from_bit_literal")));
+                let call = self.expr(Expr::Call(Box::new(func), Box::new(pair)));
+                Ok(call)
+            }
             Symbol(i) => {
                 self.start_subexpr();
                 self.pop();
