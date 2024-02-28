@@ -5,7 +5,6 @@
 #![allow(clippy::wrong_self_convention)]
 use codemap::Span;
 use interp_derive::InterpSend;
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -1236,13 +1235,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(TypeId::ty()), loc)),
                             default: None,
                         });
-                        // TODO: dont add a new variable every time. we just intercept it and look at the identifier. 
-                        // let var = Var(self.pool.intern("as"), self.program.vars.len());
-                        // self.program.vars.push(VarInfo {
-                        //     kind: VarType::Const,
-                        //     loc,
-                        // });
-                        // *expr = mem::take(target);
                         let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
                         let the_type = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("struct"), the_type), loc);
                         let the_type = self.immediate_eval_expr(&result.constants, the_type, TypeId::ty())?;
@@ -1386,7 +1378,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     Expr::Value { .. } => err!("todo",),
                     _ => {
                         let ty = unwrap!(self.type_of(result, &mut arg)?,"");
-                        println!("{} = {}", arg.log(self.pool), self.program.log_type(ty));
+                        // println!("{} = {}", arg.log(self.pool), self.program.log_type(ty));
                         let ty = self.program.raw_type(ty);
                         if let TypeInfo::Int(int) = self.program.types[ty.0] {
                             return Ok(int.serialize_one());

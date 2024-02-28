@@ -1,7 +1,9 @@
+#![feature(allocator_api)]
+
 use std::fs;
 
 use bc::Value;
-use codemap::{CodeMap, Loc, Span};
+use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use pool::StringPool;
 
@@ -28,11 +30,13 @@ pub mod scope;
 pub mod emit_bc;
 pub mod interp_aarch64;
 pub mod aarch64;
+pub mod builtins;
+pub mod arena;
 #[cfg(target_arch = "aarch64")]  // TODO: fix for cross compiling on wasm
 pub mod emit_aarch64;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *}, PoolLog}, parse::Parser, scope::ResolveScope
+    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
 
 macro_rules! stdlib {
@@ -152,6 +156,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
         e: CompileError<'p>,
         save: Option<&str>,
     ) {
+        outln!(ShowPrint, "ERROR");
         if let Some(loc) = e.loc {
             let diagnostic = vec![Diagnostic {
                 level: Level::Error,

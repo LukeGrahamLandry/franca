@@ -16,9 +16,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
 pub struct TypeId(pub usize);
 
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
@@ -79,6 +81,7 @@ pub enum VarType {
     Const,
 }
 
+#[repr(C)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     #[default]
@@ -606,6 +609,7 @@ macro_rules! safe_rec {
 
 pub(crate) use safe_rec;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
 pub struct IntType {
     pub bit_count: i64,

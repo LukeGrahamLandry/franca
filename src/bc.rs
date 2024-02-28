@@ -121,6 +121,7 @@ pub enum Value {
     // Crash if you try to read one.
     Poison,
     InterpAbsStackAddr(StackAbsoluteRange),
+    // Note: you can't just put these in a function's arena because they get copied by value.
     Heap {
         value: *mut InterpBox,
         physical_first: usize,

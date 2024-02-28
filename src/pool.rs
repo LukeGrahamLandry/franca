@@ -133,7 +133,7 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
     }
 
-    fn create_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
+    fn create_type(_: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
         crate::ast::TypeId::i64() // TODO: have a unique Symbol type
     }
 

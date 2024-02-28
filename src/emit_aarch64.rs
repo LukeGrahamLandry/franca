@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use codemap::Span;
 use std::collections::HashMap;
 use std::mem;
@@ -14,7 +16,7 @@ use crate::
  ;
 use crate::aarch64::Two::*;
 use crate::aarch64::Three::*;
-use crate::logging::{assert, assert_eq, err, ice, unwrap};
+use crate::logging::{assert_eq, err, ice, unwrap};
 
 #[derive(Default)]
 pub struct AsmExecutor {
@@ -313,7 +315,7 @@ impl SizeCache {
 }
 
 impl<'p> PoolLog<'p> for AsmExecutor {
-    fn log(&self, pool: &crate::pool::StringPool<'p>) -> String {
+    fn log(&self, _: &crate::pool::StringPool<'p>) -> String {
         String::from("AsmExecutor")
     }
 }
@@ -331,7 +333,7 @@ impl<'p> Executor<'p> for AsmExecutor {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
+    fn run_func(&mut self, _: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
         let arg = arg.single()?.to_int()?; // TODO
         let func = unwrap!(self.ready[f.0].as_mut(), "not jitted");
         let code = func.asm.map_exec();
@@ -340,7 +342,7 @@ impl<'p> Executor<'p> for AsmExecutor {
         Ok(Value::I64(res).into())
     }
 
-    fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values> {
+    fn run_continuation(&mut self, _: &mut Program<'p>, _: Values) -> Res<'p, Values> {
         todo!()
     }
 
@@ -352,7 +354,7 @@ impl<'p> Executor<'p> for AsmExecutor {
         self.ready.len() > f.0 && self.ready[f.0].is_some()
     }
 
-    fn dump_repr(&self, program: &Program<'p>, f: FuncId) -> String {
+    fn dump_repr(&self, _: &Program<'p>, f: FuncId) -> String {
         if let Some(f) = &self.ready[f.0] {
             f.asm.log()
         } else {
@@ -360,7 +362,7 @@ impl<'p> Executor<'p> for AsmExecutor {
         }
     }
 
-    fn tag_error(&self, err: &mut crate::compiler::CompileError<'p>) {
+    fn tag_error(&self, _: &mut crate::compiler::CompileError<'p>) {
        // TODO
     }
 
@@ -373,7 +375,7 @@ impl<'p> Executor<'p> for AsmExecutor {
         // TODO
     }
 
-    fn restore_state(&mut self, state: Self::SavedState) {
+    fn restore_state(&mut self, _: Self::SavedState) {
         // TODO
     }
 }

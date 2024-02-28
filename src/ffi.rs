@@ -71,7 +71,7 @@ macro_rules! send_num {
             fn get_type_key() -> u128 {
                 unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
             }
-            fn create_type(program: &mut Program<'p>) -> TypeId {
+            fn create_type(_: &mut Program<'p>) -> TypeId {
                 TypeId::i64()
             }
 
