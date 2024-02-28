@@ -1,4 +1,16 @@
 
+## quest for an assembler friendly language (Feb 27)
+
+Bit syntax. 
+- dumb mistake of treating 0x0 as 16 bits not 16 values. 
+
+Enum constants (what java calls an enum).
+- the macro emits a pointer to the struct instead of the struct itself, 
+  becasue the interpreter guesses that it will only need one stack slot when there's no type annotation.  
+- hacky special case for addr of constant pointer where it just gives you back itself instead of its address. 
+
+// I've heard it said that quickly selfhosting leads to a language thats just good for writing compilers... that's exactly what I want. 
+
 ## spliting sema (Feb 24)
 
 I want to do a jit asm backend and use that for comptime instead of my dumb interpreter, 

@@ -1,0 +1,40 @@
+const RegI = Unique(u5);
+const RegO = Unique(u5);
+const Bits = @enum(u1) .{ W32 = 0b0, X64 = 0b1 };
+const Shift = @enum(u2) .{ LSL = 0b00, LSR = 0b01, ASR = 0b10 };
+
+// TODO: this is wrong becuase you want JumpRel(i19) === JumpRel(i19)
+fn JumpRel(Int: Type) = Unique(Int);  // measured in instructions, not bytes
+
+// TODO: resolve name collissions less painfully. 
+fn add_i(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
+    @bits(sf, 0b0001011, shift, 0b0, a, amount, b, dest) ();
+
+fn orr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) =
+    @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest) ();
+
+fn sub(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) =
+    @bits(sf, 0b1001011, shift, 0b0, a, amount, b, dest) ();
+
+fn mov(sf: Bits.T[], dest: RegO, src: RegI) = orr(sf, dest, src, 15, Shift.LSL, 0);
+
+fn cbz(sf: Bits.T[], offset: JumpRel(i19), val: RegI) =
+    @bits(sf, 0b0110100, offset, val) ();
+
+const Hw = @enum(u2) .{ Left0 = 0b00, Left16 = 0b01, Left32 = 0b10, Left48 = 0b11 };
+
+fn movz(sf: Bits.T[], dest: RegO, imm: u16, hw: Hw.T[]) u32 = {
+    assert(or(eq(sf, Bits.X64[]), or(eq(hw, Hw.Left0[]), eq(hw, Hw.Left16[]))), "OOB 32bit");
+    // TODO: allow annotation as expression statement. 
+    (@bits(sf, 0b10100101, hw, imm, dest) ())
+}
+
+// TODO: this is an alias for the one where you specify a register. 
+fn ret() u32 = 0xD65F03C0;
+
+// TODO: there's a bit of a confusing dependency where this needs to import things but everything expands to calls to these...
+//       but I think it works out because you just need to bootstrap with a different backend. 
+//       so need a way of delegating comptime calls to precompiled libs. 
+//       think about the boundary between magic generic comptime calls and normal calls that just happen to be at comptime. 
+//       and the implementation of the magic generics will include normal calls that work on TypeInfos or whatever. 
+//       should document `Type <: TypeId === Ptr(TypeInfo)` 

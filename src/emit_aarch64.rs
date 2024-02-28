@@ -299,10 +299,11 @@ impl SizeCache {
             TypeInfo::Never | TypeInfo::Slice(_) => unreachable!(),
             TypeInfo::Any
             | TypeInfo::F64
-            | TypeInfo::I64
+            | TypeInfo::Int(_) // TODO: actually different int types
             | TypeInfo::Fn(_)
             | TypeInfo::Ptr(_)
             | TypeInfo::VoidPtr
+            | TypeInfo::FnPtr(_)
             | TypeInfo::Type => 8,
             TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };

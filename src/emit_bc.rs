@@ -308,6 +308,20 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(!func.has_tag(self.program.pool, "comptime"));
                     return self.emit_runtime_call(result, f_id, arg);
                 }
+                if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
+                    let f = self.compile_expr(result, f)?;
+                    let f = result.load(self, f)?;
+                    let arg = self.compile_expr(result, arg)?;
+                    let arg = result.load(self, arg)?.0;
+                    let ret = result.reserve_slots(self, f_ty.ret)?;
+                    result.push(Bc::CallC {
+                        f: f.0.single(),
+                        arg,
+                        ret,
+                        ty: f_ty,
+                    });
+                    return Ok((ret, f_ty.ret).into());
+                }
                 unreachable!("{}", f.log(self.program.pool))
             }
             Expr::Block {
@@ -401,16 +415,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     "c_call" => {
                         if let Expr::Call(f, arg) = arg.deref().deref().deref() {
                             if let Expr::Value { value, ty: val_ty } = f.deref().deref() {
-                                if let Value::CFnPtr { ty, .. } = value.clone().single()? {
+                                if let Value::CFnPtr { ty: f_ty, .. } = value.clone().single()? {
                                     let arg = self.compile_expr(result, arg)?;
                                     let arg = result.load(self, arg)?.0;
-                                    let ret = result.reserve_slots(self, ty.ret)?;
+                                    let ret = result.reserve_slots(self, f_ty.ret)?;
                                     let (f, ty) =
                                         result.load_constant(self, value.clone(), *val_ty)?;
                                     result.push(Bc::CallC {
                                         f: f.single(),
                                         arg,
                                         ret,
+                                        ty: f_ty,
                                     });
                                     (ret, ty).into()
                                 } else {
@@ -844,14 +859,15 @@ impl SizeCache {
                     .max()
                     .expect("no empty enum")
             }
-            TypeInfo::Any
+            TypeInfo::Int(_)
+            | TypeInfo::Any
             | TypeInfo::Never
             | TypeInfo::F64
-            | TypeInfo::I64
             | TypeInfo::Bool
             | TypeInfo::Fn(_)
             | TypeInfo::Ptr(_)
             | TypeInfo::VoidPtr
+            | TypeInfo::FnPtr(_)
             | TypeInfo::Slice(_)
             | TypeInfo::Type
             | TypeInfo::Unit => 1,

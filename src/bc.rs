@@ -88,6 +88,7 @@ pub enum Bc<'p> {
         f: StackOffset,
         arg: StackRange,
         ret: StackRange,
+        ty: FnType,
     },
 }
 

@@ -1,4 +1,5 @@
 #![allow(clippy::wrong_self_convention)]
+use core::slice;
 use std::env;
 use std::mem::replace;
 use std::process::Command;
@@ -278,7 +279,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(tag, Values::One(Value::I64(value)));
                     self.bump_ip();
                 }
-                &Bc::CallC { f, ret, arg } => {
+                &Bc::CallC { f, ret, arg, ty } => {
                     self.bump_ip();
 
                     #[cfg(not(feature = "interp_c_ffi"))]
@@ -288,9 +289,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                     #[cfg(feature = "interp_c_ffi")]
                     {
                         let f = self.take_slot(f);
-                        let (ptr, f_ty) = Values::One(f).to_c_func()?;
+                        let ptr = if let Ok((ptr, _)) = Values::One(f).to_c_func() {
+                            ptr
+                        } else {
+                            u64::from_le_bytes(f.to_int()?.to_le_bytes()) as usize
+                        };
                         let arg = self.take_slots(arg);
-                        let result = ffi::c::call(program, ptr, f_ty, arg)?;
+                        let result = ffi::c::call(program, ptr, ty, arg)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     }
                 }
@@ -562,6 +567,14 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // println!("=> {}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
+            "FnPtr" => {
+                // println!("Fn: {:?}", arg);
+                let (arg, ret) = arg.to_pair()?;
+                let (arg, ret) = (program.to_type(arg.into())?, program.to_type(ret.into())?);
+                let ty = program.intern_type(TypeInfo::FnPtr(FnType { arg, ret }));
+                // println!("=> {}", self.program.log_type(ty));
+                Value::Type(ty).into()
+            }
             "add" => bin_int!(self, +, arg, Value::I64),
             "sub" => bin_int!(self, -, arg, Value::I64),
             "mul" => bin_int!(self, *, arg, Value::I64),
@@ -650,6 +663,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let ty = program.to_type(arg)?;
                 Value::I64(ty.0 as i64).into()
             }
+            "IntType" => {
+                let (bit_count, signed) = arg.to_pair()?;
+                let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
+                let ty =
+                    program.intern_type(TypeInfo::Int(crate::ast::IntType { bit_count, signed }));
+                Value::Type(ty).into()
+            }
             "clone_const" => {
                 let (ptr, first, count) = arg.to_heap_ptr()?;
                 let ptr = unsafe { &mut *ptr };
@@ -667,6 +687,30 @@ impl<'a, 'p> Interp<'a, 'p> {
                 );
                 let s = self.pool.get(arg).to_string();
                 s.serialize_one()
+            }
+            "copy_to_mmap_exec" => {
+                let (ptr, _len) = arg.to_pair()?;
+                let arg = self.deref_ptr(ptr)?;
+                let arg: Vec<_> = arg
+                    .vec()
+                    .into_iter()
+                    .map(|v| v.to_int().unwrap() as u32)
+                    .collect();
+                // TODO: emit into this thing so don't have to copy.
+                let mut map = memmap2::MmapOptions::new()
+                    .len(arg.len() * 4)
+                    .map_anon()
+                    .unwrap();
+                let bytes = arg.as_ptr() as *const u8;
+                let bytes = unsafe { slice::from_raw_parts(bytes, arg.len() * 4) };
+                map.copy_from_slice(bytes);
+                let map = Box::new(map.make_exec().unwrap());
+                let ptr = map.as_ptr();
+                let map = Box::into_raw(map);
+                Values::Many(vec![
+                    Value::I64(map as usize as i64),
+                    Value::I64(ptr as usize as i64),
+                ])
             }
             "literal_ast" => {
                 let (ty, ptr) = arg.to_pair()?;

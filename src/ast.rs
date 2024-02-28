@@ -86,9 +86,10 @@ pub enum TypeInfo<'p> {
     Any,
     Never,
     F64,
-    I64,
+    Int(IntType),
     Bool,
     Fn(FnType),
+    FnPtr(FnType),
     Tuple(Vec<TypeId>),
     Ptr(TypeId),   // One element
     Slice(TypeId), // A pointer and a length
@@ -123,6 +124,7 @@ pub struct Annotation<'p> {
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct Var<'p>(pub Ident<'p>, pub usize);
 
+// TODO: should really get an arena going because boxes make me sad.
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Value {
@@ -546,7 +548,7 @@ pub struct Program<'p> {
     pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
-    pub generics_memo: HashMap<(FuncId, Values), Values>,
+    pub generics_memo: HashMap<(FuncId, Values), (Values, TypeId)>,
     // If you're looking for a function/type name that doesn't exist, these are places you can try instantiating them.
     pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
@@ -604,7 +606,7 @@ macro_rules! safe_rec {
 
 pub(crate) use safe_rec;
 
-#[derive(Debug, Clone, Copy, Default, InterpSend)]
+#[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
 pub struct IntType {
     pub bit_count: i64,
     pub signed: bool,
@@ -620,7 +622,10 @@ impl<'p> Program<'p> {
                 TypeInfo::Any,
                 TypeInfo::Unit,
                 TypeInfo::Type,
-                TypeInfo::I64,
+                TypeInfo::Int(IntType {
+                    bit_count: 64,
+                    signed: true,
+                }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
                 TypeInfo::F64,
@@ -905,8 +910,9 @@ impl<'p> Program<'p> {
                 | TypeInfo::Unknown
                 | TypeInfo::Never
                 | TypeInfo::F64
-                | TypeInfo::I64
                 | TypeInfo::VoidPtr
+                | TypeInfo::FnPtr(_)
+                | TypeInfo::Int(_)
                 | TypeInfo::Bool => false,
                 // TODO: supply "runtime" versions of these for macros to work with
                 TypeInfo::Fn(_) => true,

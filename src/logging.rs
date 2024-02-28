@@ -228,7 +228,6 @@ impl<'p> Program<'p> {
                 TypeInfo::Any => "Any".to_owned(),
                 TypeInfo::Never => "Never".to_owned(),
                 TypeInfo::F64 => "f64".to_owned(),
-                TypeInfo::I64 => "i64".to_owned(),
                 TypeInfo::Bool => "bool".to_owned(),
                 // TODO: be careful of recursion
                 TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
@@ -254,6 +253,9 @@ impl<'p> Program<'p> {
                 TypeInfo::Unique(inner, _) => self.log_type(*inner),
                 TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
                 TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
+                TypeInfo::FnPtr(f) => {
+                    format!("&(fn({}) {})", self.log_type(f.arg), self.log_type(f.ret))
+                }
                 TypeInfo::Tuple(v) => {
                     let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
                     format!("({})", v.join(", "))
@@ -261,7 +263,11 @@ impl<'p> Program<'p> {
                 TypeInfo::Type => "Type".to_owned(),
                 TypeInfo::Unit => "Unit".to_owned(),
                 TypeInfo::VoidPtr => "(&Void)".to_owned(),
+                TypeInfo::Int(int) => {
+                    format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
+                }
             }
+            // format!("{t:?}={s}")
         })
     }
 
@@ -757,6 +763,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
                 f: func_slot,
                 ret,
                 arg,
+                ..
             } => write!(f, "{ret:?} = call({func_slot:?}, {arg:?});"),
             Bc::CallDirect { f: func, ret, arg } => {
                 write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)
@@ -937,7 +944,7 @@ impl<'p> CErr<'p> {
                 program.log_type(*expected),
                 program.log_type(*found)
             ),
-            CErr::Msg(s) => s.clone(),
+            CErr::IceFmt(s) | CErr::Msg(s) => s.clone(),
             CErr::VarNotFound(var) => format!(
                 "Resolved var not found {:?}. (forgot to make something const? ice?)",
                 var.log(pool)

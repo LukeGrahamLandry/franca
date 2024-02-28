@@ -45,7 +45,14 @@ macro_rules! stdlib {
 }
 
 // TODO: modules! This should be a thing defined in the language. Don't just jam everything on the front of every program. 
-static LIB: &[(&str, &str)] = &[stdlib!("interp"), stdlib!("collections"), stdlib!("system"), stdlib!("ast"), stdlib!("macros")];
+static LIB: &[(&str, &str)] = &[
+    stdlib!("interp"), 
+    stdlib!("collections"), 
+    stdlib!("system"), 
+    stdlib!("ast"), 
+    stdlib!("macros"), 
+    stdlib!("codegen/aarch64/instructions"),
+];
 
 macro_rules! test_file {
     ($case:ident) => {
@@ -75,6 +82,7 @@ test_file!(closures);
 test_file!(ffi);
 test_file!(collections);
 test_file!(macros);
+test_file!(aarch64_jit);
 
 pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     pool: &'a StringPool<'p>,

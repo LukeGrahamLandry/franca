@@ -518,7 +518,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         result: &mut FnWip<'p>,
         template_f: FuncId,
         arg_expr: &mut FatExpr<'p>,
-    ) -> Res<'p, Values> {
+    ) -> Res<'p, (Values, TypeId)> {
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
         // BUT... the *arguments* to the call need to be evaluated in the caller's scope.
 
@@ -633,9 +633,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         self
             .program
             .generics_memo
-            .insert(key, result.clone());
+            .insert(key, (result.clone(), ret));
 
-        Ok(result)
+        Ok((result, ret))
     }
 
     fn compile_stmt(&mut self, result: &mut FnWip<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
@@ -813,6 +813,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let id = self.add_func(mem::take(func), &result.constants)?;
                 Some(id)
             }
+            &mut Expr::GetNamed(i) => {
+                // TODO: from_bit_literal in an @enum gets here. 
+                self.lookup_unique_func(i)
+            }
             _ => None,
         })
     }
@@ -857,10 +861,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             Expr::Call(f, arg) => {
                 // self.compile_expr(result, arg, None)?; // TODO: infer arg type from fn??
+                if let Some(ty) = self.type_of(result, f)? {
+                    if let TypeInfo::FnPtr(f_ty) = self.program.types[ty.0] {
+                        f.ty = ty;
+                        self.compile_expr(result, arg, Some(f_ty.arg))?;
+                        return Ok(Structured::RuntimeOnly(f_ty.ret));
+                    }
+                }
+                
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     return self.compile_call(result, expr, f_id, requested);
                 }
-                ice!("function not declared or \nTODO: dynamic call {expr:?}")
+                ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
             }
             Expr::Block {
                 body,
@@ -964,19 +976,19 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         if let Expr::Call(f, arg) = arg.deref_mut().deref_mut().deref_mut() {
                             if let Expr::GetVar(v) = f.deref_mut().deref_mut() {
                                 let name = self.pool.get(v.0);
-                                let (func, f_ty) = unwrap!(
-                                    self.builtin_constant(name),
-                                    "undeclared ffi func: {name:?}",
-                                );
-                                assert!(matches!(func, Value::CFnPtr { .. }));
-                                f.expr = Expr::Value {
-                                    ty: f_ty,
-                                    value: func.into(),
-                                };
-                                let f_ty = unwrap!(self.program.fn_ty(f_ty), "fn");
-                                let res = self.compile_expr(result, arg, Some(f_ty.arg))?;
-                                self.type_check_arg(res.ty(), f_ty.ret, "c ret")?;
-                                Structured::RuntimeOnly(f_ty.ret)
+                                if let Some((func, f_ty)) = self.builtin_constant(name) {
+                                    assert!(matches!(func, Value::CFnPtr { .. }));
+                                    f.expr = Expr::Value {
+                                        ty: f_ty,
+                                        value: func.into(),
+                                    };
+                                    let f_ty = unwrap!(self.program.fn_ty(f_ty), "fn");
+                                    let res = self.compile_expr(result, arg, Some(f_ty.arg))?;
+                                    self.type_check_arg(res.ty(), f_ty.ret, "c ret")?;
+                                    Structured::RuntimeOnly(f_ty.ret)
+                                } else {
+                                   err!("unresolved ffi func {:?}", v.log(self.pool))
+                                }
                             } else {
                                 err!("c_call expected Expr:Call(Expr::GetVar, ...args)",)
                             }
@@ -1354,7 +1366,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 Ok(arg.serialize_one())
             }
             "get_type_int" => {
-                let arg: FatExpr = unwrap!(arg.deserialize(), "");
+                let mut arg: FatExpr = unwrap!(arg.deserialize(), "");
                 match arg.deref() {
                     Expr::Call(f, arg) => {
                         if let Some(name) = f.as_ident() {
@@ -1367,14 +1379,21 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                             signed: false,
                                         }.serialize_one());
                                     }
-                                    
                                 }
-                                todo!()
                             }
                         }
                     },
                     Expr::Value { .. } => err!("todo",),
-                    _ => {}
+                    _ => {
+                        let ty = unwrap!(self.type_of(result, &mut arg)?,"");
+                        println!("{} = {}", arg.log(self.pool), self.program.log_type(ty));
+                        let ty = self.program.raw_type(ty);
+                        if let TypeInfo::Int(int) = self.program.types[ty.0] {
+                            return Ok(int.serialize_one());
+                        } 
+                        err!("expected expr of int type not {}", self.program.log_type(ty));
+                        
+                    }
                 }
                 err!("expected binary literal not {arg:?}",);
             }
@@ -1459,7 +1478,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         };
         
         // TODO: get rid of any
-        if let Some(ty) = requested_ret{
+        if let Some(ty) = requested_ret {
             if ty.is_any() {
                 requested_ret = None
             }
@@ -1492,7 +1511,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                         let log_goal = |s: &mut Self| {
                             format!(
-                                "for fn {}({}) {:?};",
+                                "for fn {}({arg_ty:?}={}) {:?};",
                                 name.log(s.pool),
                                 s.program.log_type(arg_ty),
                                 requested_ret
@@ -1518,7 +1537,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 if let Ok(f_ty) = self.infer_types(*f) {
                                     outln!(
                                         LogTag::Generics,
-                                        "- {f:?} is {} -> {}",
+                                        "- {f:?} is {:?}={} -> {}",
+                                        f_ty.arg,
                                         self.program.log_type(f_ty.arg),
                                         self.program.log_type(f_ty.ret)
                                     );
@@ -1615,6 +1635,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
+                    if let Some(ty) = result.vars.get(i) {
+                        if let TypeInfo::FnPtr(f_ty) = self.program.types[ty.0] {
+                            return Ok(Some(f_ty.ret));
+                        }
+                    }
                     if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
                         if self.infer_types(fid).is_ok() {
                             let f_ty = self.program.funcs[fid.0].unwrap_ty();
@@ -1695,7 +1720,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 } else if let Some((_, ty)) = result.constants.get(*var) {
                     ty
                 } else {
-                    ice!("type check missing var {:?}", var.log(self.pool))
+                    // ice!("type check missing var {:?}", var.log(self.pool))
+                    return Ok(None);
                 }
             }
             Expr::String(_) => String::get_type(self.program),
@@ -1706,7 +1732,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
         use TypeInfo::*;
         let ty = match name {
-            "i64" => Some(I64),
+            "i64" => Some(TypeInfo::Int(IntType { bit_count: 64, signed: true })),
             "f64" => Some(F64),
             "Type" => Some(Type),
             "bool" => Some(Bool),
@@ -1840,7 +1866,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     // Resolve the lazy types for Arg and Ret
     fn infer_types(&mut self, func: FuncId) -> Res<'p, FnType> {
         let f = &self.program.funcs[func.0];
-        debug_assert!(!f.evil_uninit);
+        // TODO: bad things are going on. it changes behavior if this is a debug_assert. 
+        //       oh fuck its because of the type_of where you can backtrack if you couldn't infer. 
+        //       so making it work in debug with debug_assert is probably the better outcome.  
+        assert!(!f.evil_uninit, "{}", self.pool.get(f.name));
         if let Some(ty) = f.finished_type {
             return Ok(ty);
         }
@@ -2094,6 +2123,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 &self.program.types[found.0],
                 &self.program.types[expected.0],
             ) {
+                (TypeInfo::Int(a), TypeInfo::Int(b)) => {
+                    if a.bit_count == b.bit_count || a.bit_count == 64 || b.bit_count == 64 {
+                        return Ok(()); // TODO: not this!
+                    }
+                }
                 (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
                     if f.len() == e.len() {
                         let ok = f
@@ -2118,6 +2152,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     }
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => {
+                    return Ok(())
+                }
+                (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => {
                     return Ok(())
                 }
                 (TypeInfo::Tuple(_), TypeInfo::Type) | (TypeInfo::Type, TypeInfo::Tuple(_)) => {
@@ -2377,17 +2414,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let func = &self.program.funcs[original_f.0];
         let is_comptime = func.has_tag(self.pool, "comptime");
         if is_comptime {
-            let ret = self.emit_comptime_call(result, original_f, arg_expr)?;
-            let ty = if requested.unwrap_or(TypeId::any()).is_any() {
-                self.program.type_of_raw(&ret)
+            let (ret_val, ret_ty) = self.emit_comptime_call(result, original_f, arg_expr)?;
+            let req = requested.unwrap_or(TypeId::any());
+            let ty = if req.is_any() || req.is_unknown() {
+                ret_ty
             } else {
                 requested.unwrap()
             };
             expr.expr = Expr::Value {
                 ty,
-                value: ret.clone(),
+                value: ret_val.clone(),
             };
-            return Ok(Structured::Const(ty, ret));
+            return Ok(Structured::Const(ty, ret_val));
         }
         
         // Note: f will be compiled differently depending on the calling convention.

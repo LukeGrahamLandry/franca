@@ -72,7 +72,7 @@ macro_rules! send_num {
                 unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
             }
             fn create_type(program: &mut Program<'p>) -> TypeId {
-                program.intern_type(TypeInfo::I64)
+                TypeId::i64()
             }
 
             fn serialize(self, values: &mut Vec<Value>) {
@@ -520,7 +520,7 @@ pub mod c {
         pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
             Ok(match &self.types[ty.0] {
                 TypeInfo::F64 => CTy::f64(),
-                TypeInfo::I64 => CTy::i64(),
+                TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
                 TypeInfo::Bool => CTy::c_int(),
                 TypeInfo::Tuple(_) => todo!(),
                 TypeInfo::Ptr(_) => CTy::pointer(),

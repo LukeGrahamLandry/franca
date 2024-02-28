@@ -134,7 +134,7 @@ impl<'p> InterpSend<'p> for Ident<'p> {
     }
 
     fn create_type(interp: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
-        interp.intern_type(crate::ast::TypeInfo::I64) // TODO: have a unique Symbol type
+        crate::ast::TypeId::i64() // TODO: have a unique Symbol type
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
