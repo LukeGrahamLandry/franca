@@ -378,6 +378,10 @@ impl<'p> Executor<'p> for AsmExecutor {
     fn restore_state(&mut self, _: Self::SavedState) {
         // TODO
     }
+
+    fn run_with_arg<T: crate::reflect::Reflect>(&mut self, program: &mut Program<'p>, f: FuncId, arg: &mut T) -> Res<'p, ()> {
+        todo!()
+    }
 }
 
 

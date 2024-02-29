@@ -361,6 +361,9 @@ impl<'a, 'p> Interp<'a, 'p> {
                     physical_count,
                 })
             }
+            // Real raw pointers
+            // But now there's this weird thing where this is measured in bytes but the others are in stack slots.
+            Value::I64(addr) => Ok(Value::I64(addr + physical_offset as i64)),
             _ => err!("Wanted ptr found {:?}", base),
         }
     }
@@ -382,6 +385,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let values = &data.values[first..first + count];
                 Ok(values.to_vec().into())
             }
+            Value::I64(addr) => unsafe {
+                let ptr = addr as usize as *mut i64;
+                let value = *ptr;
+                Ok(Values::One(Value::I64(value)))
+            },
             _ => err!("Wanted ptr found {:?}", arg),
         }
     }
@@ -926,6 +934,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
                 Value::Unit
             }
+            Value::I64(addr) => unsafe {
+                let ptr = addr as usize as *mut i64;
+                let value = value.single()?.to_int()?;
+                *ptr = value;
+                Value::Unit
+            },
             _ => err!("Wanted ptr found {:?}", addr),
         })
     }
@@ -1045,6 +1059,19 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
     fn restore_state(&mut self, (cs, vs): Self::SavedState) {
         drops(&mut self.call_stack, cs);
         drops(&mut self.value_stack, vs);
+    }
+
+    fn run_with_arg<T: crate::reflect::Reflect>(
+        &mut self,
+        program: &mut Program<'p>,
+        f: FuncId,
+        arg: &mut T,
+    ) -> Res<'p, ()> {
+        let addr = arg as *const T as usize as i64;
+        let arg = Values::One(Value::I64(addr));
+        let ret = self.run(f, arg, ExecTime::Runtime, 1, program)?;
+        assert_eq!(ret.single()?, Value::Unit);
+        Ok(())
     }
 }
 

@@ -5,15 +5,18 @@ use std::ptr::{self, addr_of, NonNull};
 
 use interp_derive::Reflect;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct RsType<'t> {
     pub name: &'t str,
     pub align: usize,
     pub stride: usize,
     pub data: RsData<'t>,
+    // Does this type have a Drop or Clone implementation?
+    // If so, you can't just produce extra with a memcpy, and you have to give exactly as many back to the rust side as it gave you.
+    pub is_linear: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum RsData<'t> {
     Struct(&'t [RsField<'t>]),
     Enum(&'t [RsVarient<'t>]),
@@ -21,7 +24,7 @@ pub enum RsData<'t> {
     Opaque,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct RsField<'t> {
     pub name: &'t str,
     pub offset: usize,
@@ -30,7 +33,7 @@ pub struct RsField<'t> {
     pub ty: fn() -> &'t RsType<'t>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct RsVarient<'t> {
     pub name: &'t str,
     pub fields: &'t [RsField<'t>],
@@ -118,12 +121,14 @@ impl AnyReflect {
 macro_rules! field_offset {
     ($ty:ty, $name:ident) => {
         unsafe {
-            let ptr = MaybeUninit::<$ty>::uninit().as_ptr();
-            (addr_of!((*ptr).$name) as *const u8).offset_from(ptr as *const u8) as usize
+            let ptr = std::mem::MaybeUninit::<$ty>::uninit().as_ptr();
+            (std::ptr::addr_of!((*ptr).$name) as *const u8).offset_from(ptr as *const u8) as usize
         }
     };
 }
 pub(crate) use field_offset;
+
+use crate::ffi::InterpSend;
 
 fn _does_it_compile(_: &dyn VReflect) {}
 
@@ -140,6 +145,7 @@ macro_rules! opaque {
                 align: align_of::<Self>(),
                 stride: size_of::<Self>(),
                 data: RsData::Opaque,
+                is_linear: false,
             };
         }
     };
@@ -160,6 +166,7 @@ macro_rules! impl_ptr {
                 align: align_of::<Self>(),
                 stride: size_of::<Self>(),
                 data: RsData::Ptr(T::TYPE_INFO),
+                is_linear: false,
             };
         }
     };
@@ -170,8 +177,17 @@ macro_rules! impl_ptr {
     };
 }
 
-// TODO: mark that Box<T> has a destructor and is not copy.
-impl_ptr!(*const T, *mut T, NonNull<T>, Box<T>);
+impl_ptr!(*const T, *mut T, NonNull<T>);
+
+impl<T: Reflect> Reflect for Box<T> {
+    const TYPE_INFO: &'static RsType<'static> = &RsType {
+        name: stringify!($ty),
+        align: align_of::<Self>(),
+        stride: size_of::<Self>(),
+        data: RsData::Ptr(T::TYPE_INFO),
+        is_linear: true,
+    };
+}
 
 macro_rules! transparent {
     ($ty:ty) => {
@@ -208,6 +224,7 @@ macro_rules! impl_slice {
                         ty: <usize>::get_ty,
                     },
                 ]),
+                is_linear: false,
             };
         }
     };
@@ -218,7 +235,29 @@ macro_rules! impl_slice {
     };
 }
 
-impl_slice!(*const [T], *mut [T], &[T], &mut [T], Box<[T]>);
+impl_slice!(*const [T], *mut [T], &[T], &mut [T]);
+
+impl<T: Reflect> Reflect for Box<[T]> {
+    const TYPE_INFO: &'static RsType<'static> = &RsType {
+        name: "slice",
+        // TODO: not this. but lifetimes make it hard.
+        align: align_of::<(usize, usize)>(),
+        stride: size_of::<(usize, usize)>(),
+        data: RsData::Struct(&[
+            RsField {
+                name: "ptr",
+                offset: 0,
+                ty: <*const T>::get_ty,
+            },
+            RsField {
+                name: "len",
+                offset: 8,
+                ty: <usize>::get_ty,
+            },
+        ]),
+        is_linear: true,
+    };
+}
 
 fn ptr_before_len<T>() -> bool {
     let (a, b, c, d, e): (&[T], &mut [T], _, _, Box<[T]>) = (
@@ -274,11 +313,13 @@ mod test {
         b: i64,
     }
 
+    #[derive(Reflect)]
     struct Bar {
         a: Box<[u8]>,
         b: i64,
     }
 
+    #[derive(Reflect)]
     struct Baz {
         a: bool,
         b: i64,
@@ -301,6 +342,10 @@ mod test {
             // TODO: this doesnt work in release unless you force observe it with the print above.
             assert!(n_ptr.is(i64::get_ty()));
         }
+        assert!(Box::<usize>::get_ty().is_linear);
+        assert!(Bar::get_ty().is_linear);
+        assert!(!Foo::get_ty().is_linear);
+        assert!(!Baz::get_ty().is_linear);
     }
 
     #[test]
@@ -445,3 +490,25 @@ impl BitSet {
     }
 }
 */
+
+impl<'p, 't> InterpSend<'p> for &'t RsType<'t> {
+    fn get_type_key() -> u128 {
+        todo!()
+    }
+
+    fn create_type(_: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
+        todo!()
+    }
+
+    fn serialize(self, _: &mut Vec<crate::bc::Value>) {
+        todo!()
+    }
+
+    fn deserialize(_: &mut impl Iterator<Item = crate::bc::Value>) -> Option<Self> {
+        todo!()
+    }
+
+    fn size() -> usize {
+        todo!()
+    }
+}

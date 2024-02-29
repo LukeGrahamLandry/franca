@@ -147,11 +147,22 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
             //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
             assert!(func.referencable_name, "fn no body needs name");
-            result.push(Bc::CallBuiltin {
-                name: func.name,
-                ret,
-                arg: full_arg_range,
-            });
+            if let Some(Value::CFnPtr { ptr, ty }) = func.jitted_asm {
+                let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
+                let f = result.load_constant(self, Values::One(Value::I64(ptr as i64)), ptr_ty)?;
+                result.push(Bc::CallC {
+                    f: f.0.single(),
+                    arg: full_arg_range,
+                    ret,
+                    ty,
+                });
+            } else {
+                result.push(Bc::CallBuiltin {
+                    name: func.name,
+                    ret,
+                    arg: full_arg_range,
+                });
+            }
             for (var, range, _ty) in args_to_drop {
                 if let Some(var) = var {
                     let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");

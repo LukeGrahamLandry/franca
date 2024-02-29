@@ -522,7 +522,9 @@ pub mod c {
                 TypeInfo::F64 => CTy::f64(),
                 TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
                 TypeInfo::Bool => CTy::c_int(),
-                TypeInfo::Tuple(_) => todo!(),
+                TypeInfo::Tuple(parts) => {
+                    todo!()
+                }
                 TypeInfo::Ptr(_) => CTy::pointer(),
                 TypeInfo::Slice(_) => CTy::structure([CTy::pointer(), CTy::i64()]),
                 TypeInfo::Enum { .. } => todo!(),
@@ -556,6 +558,11 @@ pub mod c {
         let mut b = Builder::new();
         let args: Vec<_> = if f_ty.arg == TypeId::unit() {
             vec![]
+        } else if let TypeInfo::Tuple(fields) = &program.types[f_ty.arg.0] {
+            for ty in fields {
+                b = b.arg(program.as_c_type(*ty)?);
+            }
+            args.iter().map(crate::ffi::c::to_void_ptr).collect()
         } else {
             b = b.arg(program.as_c_type(f_ty.arg)?);
             args.iter().map(crate::ffi::c::to_void_ptr).collect()

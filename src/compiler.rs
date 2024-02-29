@@ -15,9 +15,10 @@ use std::{ops::Deref, panic::Location};
 use crate::ast::{
     garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
-use crate::bc::*;
+use crate::{bc::*, builtins};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, LogTag, PoolLog};
+use crate::reflect::Reflect;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
@@ -337,13 +338,31 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             self.pop_state(state);
             return Ok(ret);
         }
-
-        let ret_ty = self.program.funcs[f.0].unwrap_ty().ret;
+        
+        let fn_ty = self.program.funcs[f.0].unwrap_ty();
+        let ret_ty = fn_ty.ret;
         let ret_val = mut_replace!(self.program.funcs[f.0].body, |mut body: Option<
             FatExpr<'p>,
         >| {
+            let body_expr = body.as_mut().unwrap();
+            
+            #[cfg(target_arch = "aarch64")]
+            if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
+                if *name == self.pool.intern("asm") {
+                    let asm_ty = Vec::<u32>::get_type(self.program);
+                    let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
+                    let ops = unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "");
+                    let map = builtins::copy_to_mmap_exec(ops.into());
+                    let value = Value::CFnPtr { ptr: map.1 as usize, ty: fn_ty };
+                    Box::leak(map.0.into()); // TODO: dont leak
+                    self.program.funcs[f.0].jitted_asm = Some(value);
+                    let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty));
+                    return Ok((None, Structured::RuntimeOnly(ret_ty)));
+                }
+            }
+            
             let hint = if ret_ty.is_any() { None } else { Some(ret_ty) };
-            let res = self.compile_expr(result, body.as_mut().unwrap(), hint)?;
+            let res = self.compile_expr(result, body_expr, hint)?;
             Ok((body, res))
         });
 
@@ -2180,12 +2199,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             fields.push(Field {
                 name: unwrap!(name, "field name").0,
                 ty,
+                ffi_byte_offset: None
             });
         }
-        Ok(TypeInfo::Struct {
+        Ok(TypeInfo::simple_struct(
             fields,
             as_tuple,
-        })
+        ))
     }
 
     fn set_deref(
@@ -2579,6 +2599,7 @@ fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
 pub trait Executor<'p>: PoolLog<'p> {
     type SavedState;
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()>;
+    fn run_with_arg<T: Reflect>(&mut self, program: &mut Program<'p>, f: FuncId, arg: &mut T) -> Res<'p, ()>;
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values>;
     fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values>;
     fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize;

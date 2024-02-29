@@ -5,9 +5,10 @@ use crate::{
     ffi::{init_interp_send, InterpSend},
     logging::err,
     pool::{Ident, StringPool},
+    reflect::{Reflect, RsType},
 };
 use codemap::Span;
-use interp_derive::InterpSend;
+use interp_derive::{InterpSend, Reflect};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -100,6 +101,8 @@ pub enum TypeInfo<'p> {
         // You probably always have few enough that this is faster than a hash map.
         fields: Vec<Field<'p>>,
         as_tuple: TypeId,
+        ffi_byte_align: Option<usize>,
+        ffi_byte_stride: Option<usize>,
     },
     Enum {
         cases: Vec<(Ident<'p>, TypeId)>,
@@ -116,6 +119,7 @@ pub enum TypeInfo<'p> {
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
+    pub ffi_byte_offset: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, Hash, Debug, InterpSend)]
@@ -457,6 +461,9 @@ pub struct Func<'p> {
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub wip: Option<FnWip<'p>>,
     pub evil_uninit: bool,
+
+    #[cfg(target_arch = "aarch64")]
+    pub jitted_asm: Option<Value>,
 }
 
 impl<'p> Func<'p> {
@@ -485,6 +492,8 @@ impl<'p> Func<'p> {
             referencable_name: has_name,
             evil_uninit: false,
             wip: None,
+            #[cfg(target_arch = "aarch64")]
+            jitted_asm: None,
         }
     }
 
@@ -570,6 +579,12 @@ pub struct OverloadOption<'p> {
     pub func: FuncId,
 }
 
+#[derive(Debug, Reflect)]
+pub struct SuperSimple {
+    a: i64,
+    b: i64,
+}
+
 impl<'p> Stmt<'p> {
     // used for moving out of ast
     pub fn null(loc: Span) -> Stmt<'p> {
@@ -648,6 +663,7 @@ impl<'p> Program<'p> {
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
         init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
+        program.get_rs_type(SuperSimple::get_ty());
 
         program
     }
@@ -661,14 +677,68 @@ impl<'p> Program<'p> {
             let ty_final = TypeId(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Struct {
-                fields: vec![],
-                as_tuple: n,
-            });
+            self.types.push(TypeInfo::simple_struct(vec![], n));
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] =
                 TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
+            ty_final
+        })
+    }
+
+    pub fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
+        use crate::reflect::*;
+        let id = type_info as *const RsType as usize as u128;
+        self.ffi_types.get(&id).copied().unwrap_or_else(|| {
+            let n = self.intern_type(TypeInfo::Unknown);
+            // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
+            let placeholder = self.types.len();
+            let ty_final = TypeId(placeholder);
+            // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
+            // The problem manifested as wierd bugs in array stride for a few types.
+            self.types.push(TypeInfo::Struct {
+                fields: vec![],
+                as_tuple: n,
+                ffi_byte_align: Some(type_info.align),
+                ffi_byte_stride: Some(type_info.stride),
+            });
+            self.ffi_types.insert(id, ty_final);
+
+            let ty = match type_info.data {
+                RsData::Struct(data) => {
+                    let mut fields = vec![];
+                    let mut types = vec![];
+                    for f in data {
+                        let ty = self.get_rs_type((f.ty)());
+                        types.push(ty);
+                        fields.push(Field {
+                            ty,
+                            name: self.pool.intern(f.name),
+                            ffi_byte_offset: Some(f.offset),
+                        })
+                    }
+                    let as_tuple = self.tuple_of(types);
+                    self.intern_type(TypeInfo::Struct {
+                        fields,
+                        as_tuple,
+                        ffi_byte_align: Some(type_info.align),
+                        ffi_byte_stride: Some(type_info.stride),
+                    })
+                }
+                RsData::Enum(_) => todo!(),
+                RsData::Ptr(inner) => {
+                    let inner = self.get_rs_type(inner);
+                    self.ptr_type(inner)
+                }
+                RsData::Opaque => self.intern_type(TypeInfo::Int(IntType {
+                    bit_count: (type_info.stride * 8) as i64,
+                    signed: false,
+                })),
+            };
+
+            let named = self.intern_type(TypeInfo::Named(ty, self.pool.intern(type_info.name)));
+            self.types[placeholder] =
+                TypeInfo::Unique(named, (id & usize::max_value() as u128) as usize);
             ty_final
         })
     }
@@ -845,11 +915,12 @@ impl<'p> Program<'p> {
             fields.push(Field {
                 name: self.pool.intern(name),
                 ty: *ty,
+                ffi_byte_offset: None,
             });
             types.push(*ty);
         }
         let as_tuple = self.tuple_of(types);
-        let ty = TypeInfo::Struct { fields, as_tuple };
+        let ty = TypeInfo::simple_struct(fields, as_tuple);
         let ty = self.intern_type(ty);
         self.intern_type(TypeInfo::Named(ty, name))
     }
@@ -1086,6 +1157,9 @@ impl<'p> Default for Func<'p> {
             referencable_name: false,
             evil_uninit: true,
             wip: None,
+
+            #[cfg(target_arch = "aarch64")]
+            jitted_asm: None,
         }
     }
 }
@@ -1135,6 +1209,17 @@ impl<'p> Expr<'p> {
                 target.walk(f);
             }
             Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) | Expr::GetVar(_) => {}
+        }
+    }
+}
+
+impl<'p> TypeInfo<'p> {
+    pub fn simple_struct(fields: Vec<Field<'p>>, as_tuple: TypeId) -> Self {
+        TypeInfo::Struct {
+            fields,
+            as_tuple,
+            ffi_byte_align: None,
+            ffi_byte_stride: None,
         }
     }
 }
