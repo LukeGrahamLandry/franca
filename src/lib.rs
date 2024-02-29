@@ -1,4 +1,6 @@
 #![feature(allocator_api)]
+#![feature(const_refs_to_cell)]
+#![feature(ptr_metadata)]
 
 use std::fs;
 
@@ -32,6 +34,7 @@ pub mod interp_aarch64;
 pub mod aarch64;
 pub mod builtins;
 pub mod arena;
+pub mod reflect;
 #[cfg(target_arch = "aarch64")]  // TODO: fix for cross compiling on wasm
 pub mod emit_aarch64;
 
@@ -152,7 +155,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
 
     fn log_err<'p, Exec: Executor<'p>>(
         codemap: CodeMap,
-        interp: &mut Compile<'_, 'p, Exec>,
+        interp: &Compile<'_, 'p, Exec>,
         e: CompileError<'p>,
         save: Option<&str>,
     ) {
@@ -185,7 +188,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
 
     match result {
         Err(e) => {
-            log_err(codemap, &mut comp, e, save);
+            log_err(codemap, &comp, e, save);
             return false;
         }
         Ok(_toplevel) => {
@@ -207,7 +210,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                 Some(f) => {
                     match comp.compile(f, ExecTime::Runtime) {
                         Err(e) => {
-                            log_err(codemap, &mut comp, e, save);
+                            log_err(codemap, &comp, e, save);
                             return false;
                         }
                         Ok(_) => {
@@ -228,7 +231,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                             let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
-                                    log_err(codemap, &mut comp, e, save);
+                                    log_err(codemap, &comp, e, save);
                                     return false;
                                 }
                                 Ok(result) => {

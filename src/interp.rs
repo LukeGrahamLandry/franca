@@ -630,7 +630,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 )
                 .into_iter();
                 let cmd = unwrap!(arg.next(), "cmd");
-                let mut cmd = Command::new(&cmd);
+                let mut cmd = Command::new(cmd);
                 for arg in arg {
                     cmd.arg(arg);
                 }
@@ -759,7 +759,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         arg: Values,
         when: ExecTime,
 
-        program: &mut Program<'p>,
+        program: &Program<'p>,
     ) -> Res<'p, ()> {
         let func = self.ready[f.0].as_ref();
         assert!(func.is_some(), "ICE: tried to call {f:?} but not compiled.");

@@ -545,7 +545,7 @@ pub mod c {
     }
 
     pub fn call<'p>(
-        program: &mut Program<'p>,
+        program: &Program<'p>,
         ptr: usize,
         f_ty: crate::ast::FnType,
         arg: Values,

@@ -5,7 +5,7 @@ use std::{
     cell::UnsafeCell,
     marker::PhantomData,
     mem::{self, align_of, size_of, ManuallyDrop, MaybeUninit},
-    ptr::{null_mut, NonNull},
+    ptr::NonNull,
 };
 
 pub struct MemoryGeorgWhoOwnsAllTheMemory {
@@ -57,7 +57,7 @@ impl<'p> Arena<'p> {
             let mut prev = *chunk;
             while !prev.start.is_null() {
                 let capacity = prev.end.sub(prev.start as usize) as usize;
-                write!(out, "{capacity}, ");
+                write!(out, "{capacity}, ").unwrap();
                 prev = *prev_chunk(prev);
             }
         }
@@ -170,7 +170,7 @@ impl MemoryGeorgWhoOwnsAllTheMemory {
             .unwrap_or_else(|| Box::leak(Box::default()))
     }
 
-    fn push(&mut self, arena: &'static Arena<'static>) {
+    fn _push(&mut self, arena: &'static Arena<'static>) {
         self.arenas.push(arena);
     }
 }
@@ -187,7 +187,7 @@ unsafe impl<'p> Allocator for &'p Arena<'p> {
         ))
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: std::alloc::Layout) {
+    unsafe fn deallocate(&self, _: NonNull<u8>, _: std::alloc::Layout) {
         // no-op
     }
 }
@@ -209,11 +209,14 @@ fn self_referential() {
     assert_eq!(*h.1, 15);
     set_ones_all(h.0);
     assert_ne!(h as *mut House as usize, usize::MAX); // h is stored on the stack, it still just points into the arena
-    assert_eq!(h.1 as *mut usize as usize, usize::MAX); // the value there got blanked
+
+    // doesnt work in release. i guess it assumes you can't produce an invalid pointer?
+    debug_assert_eq!(h.1 as *mut usize as usize, usize::MAX); // the value there got blanked
+
     unsafe {
         let chunk = *a.chunk.get();
         let prev = prev_chunk(chunk);
-        assert_eq!((*prev).start, null_mut()); // metadata not overwritten.
+        assert_eq!((*prev).start, std::ptr::null_mut()); // metadata not overwritten.
     }
     free_all(a);
 

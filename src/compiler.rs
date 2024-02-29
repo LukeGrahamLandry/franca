@@ -792,7 +792,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
     fn maybe_direct_fn(
         &mut self,
-        result: &mut FnWip<'p>,
+        result: &FnWip<'p>,
         f: &mut FatExpr<'p>,
         arg: &mut FatExpr<'p>,
         ret: Option<TypeId>,

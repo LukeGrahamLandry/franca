@@ -2,7 +2,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::{
     parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed,
-    FieldsUnnamed, GenericParam, Generics,
+    FieldsUnnamed, GenericParam, Generics, TypeParamBound,
 };
 
 #[proc_macro_derive(InterpSend)]
@@ -10,8 +10,7 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
 
-    // Add a bound `T: HeapSize` to every type parameter T.
-    let generics = add_trait_bounds(input.generics);
+    let generics = add_trait_bounds(input.generics, parse_quote!(InterpSend));
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -369,11 +368,10 @@ fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
     }
 }
 
-// Add a bound `T: HeapSize` to every type parameter T.
-fn add_trait_bounds(mut generics: Generics) -> Generics {
+fn add_trait_bounds(mut generics: Generics, bounds: TypeParamBound) -> Generics {
     for param in &mut generics.params {
         if let GenericParam::Type(ref mut type_param) = *param {
-            type_param.bounds.push(parse_quote!(InterpSend));
+            type_param.bounds.push(bounds.clone());
         }
     }
 
@@ -381,3 +379,56 @@ fn add_trait_bounds(mut generics: Generics) -> Generics {
 }
 
 // TODO: derive debug printing with my string pool
+
+#[proc_macro_derive(Reflect)]
+pub fn derive_reflect(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let fields = get_field_data(&input.ident, &input.data);
+    let expanded = quote! {
+        impl #impl_generics crate::reflect::Reflect for #name #ty_generics #where_clause {
+            const TYPE_INFO: &'static crate::reflect::RsType<'static> = &crate::reflect::RsType {
+                name: stringify!(#name),
+                align: std::mem::align_of::<Self>(),
+                stride: std::mem::size_of::<Self>(),
+                data: #fields,
+            };
+        }
+    };
+    proc_macro::TokenStream::from(expanded)
+}
+
+fn get_field_data(name: &Ident, data: &Data) -> TokenStream {
+    match data {
+        syn::Data::Struct(data) => match data.fields {
+            syn::Fields::Named(ref fields) => {
+                let recurse = fields.named.iter().map(|f| {
+                    let f_name = &f.ident;
+                    let f_ty = &f.ty;
+                    quote_spanned! {f.span()=>
+                        RsField {
+                            name: stringify!(#f_name),
+                            offset: crate::reflect::field_offset!(#name, #f_name),
+                            ty: <#f_ty>::get_ty,
+                        }
+                    }
+                });
+                quote! {
+                    {
+                        const F: &[crate::reflect::RsField] = &[#(#recurse,)*];
+                        crate::reflect::RsData::Struct(F)
+                    }
+                }
+            }
+            syn::Fields::Unnamed(ref _fields) => {
+                todo!()
+            }
+            syn::Fields::Unit => quote!(), // dont care
+        },
+        syn::Data::Enum(_) => todo!(),
+        syn::Data::Union(_) => todo!(),
+    }
+}

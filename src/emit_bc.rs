@@ -413,7 +413,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         (ptr, ptr_ty).into()
                     }
                     "c_call" => {
-                        if let Expr::Call(f, arg) = arg.deref().deref().deref() {
+                        if let Expr::Call(f, arg) = arg.deref().deref() {
                             if let Expr::Value { value, ty: val_ty } = f.deref().deref() {
                                 if let Value::CFnPtr { ty: f_ty, .. } = value.clone().single()? {
                                     let arg = self.compile_expr(result, arg)?;
@@ -697,7 +697,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         place: &FatExpr<'p>,
         value: &FatExpr<'p>,
     ) -> Res<'p, ()> {
-        match place.deref().deref() {
+        match place.deref() {
             Expr::GetVar(var) => {
                 let slot = result.vars.get(var);
                 let (slot, _) = *unwrap!(

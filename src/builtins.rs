@@ -19,8 +19,7 @@ pub extern "C" fn copy_to_mmap_exec(code: CVec<u32>) -> Pair<CBox<memmap2::Mmap>
     Pair(Box::new(map).into(), ptr)
 }
 
-#[no_mangle]
-pub extern "C" fn intern_type<'p>(program: &mut Program<'p>, ty: TypeInfo<'p>) -> TypeId {
+pub fn intern_type<'p>(program: &mut Program<'p>, ty: TypeInfo<'p>) -> TypeId {
     program.intern_type(ty)
 }
 
