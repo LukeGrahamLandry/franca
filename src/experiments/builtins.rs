@@ -85,3 +85,10 @@ impl<T> Drop for CBox<T> {
         }
     }
 }
+
+impl<T> CBox<T> {
+    pub fn to_box(self) -> Box<T> {
+        let value = ManuallyDrop::new(self);
+        unsafe { Box::from_raw(value.ptr) }
+    }
+}

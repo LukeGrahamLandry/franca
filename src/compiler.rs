@@ -2587,43 +2587,44 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     }
     
     fn jit(&mut self, f: FuncId) -> Res<'p, ()> {
-        outln!(LogTag::Jitted, "Try Jit {f:?}");
-        let bc = self.executor.get_bc(f);
-        if bc.is_none() {
-            return Ok(());
-        }
-        let bc = bc.unwrap();
-        let func = self.lookup_unique_func(self.pool.intern("bc_to_asm"));
-        if func.is_none() {
-            return Ok(());
-        }
-        let func = func.unwrap();
-        if func == f {
-            return Ok(());
-        }
-        let ffff = &self.program.funcs[f.0];
-        let wip = ffff.wip.as_ref().unwrap();
-        let callees = wip.callees.clone();
-        for id in callees {
-            self.jit(id)?;
-        }
+        // outln!(LogTag::Jitted, "Try Jit {f:?}");
+        // let bc = self.executor.get_bc(f);
+        // if bc.is_none() {
+        //     return Ok(());
+        // }
+        // let bc = bc.unwrap();
+        // let func = self.lookup_unique_func(self.pool.intern("bc_to_asm"));
+        // if func.is_none() {
+        //     return Ok(());
+        // }
+        // let func = func.unwrap();
+        // if func == f {
+        //     return Ok(());
+        // }
+        // let ffff = &self.program.funcs[f.0];
+        // let wip = ffff.wip.as_ref().unwrap();
+        // let callees = wip.callees.clone();
+        // for id in callees {
+        //     self.jit(id)?;
+        // }
         
-        self.compile(func, ExecTime::Comptime)?;
-        let arg = bc.serialize_one();
-        let res = self.executor.run_func(self.program, func, arg)?;
-        let ops: Vec<u32> = unwrap!(res.deserialize(), "");
-        outln!(LogTag::Jitted, "=================\n {f:?}");
-        for op in &ops {
-            outln!(LogTag::Jitted, "{op}");
-        }
-        outln!(LogTag::Jitted, "\n============");
-        let map = builtins::copy_to_mmap_exec(ops.into());
-        Box::leak(map.0.into()); // TODO: dont leak
-        while self.jitted.len() <= f.0 {
-            self.jitted.push(null());
-        }
-        self.jitted[f.0] = map.1;
-        Ok(())
+        // self.compile(func, ExecTime::Comptime)?;
+        // let arg = bc.serialize_one();
+        // let res = self.executor.run_func(self.program, func, arg)?;
+        // let ops: Vec<u32> = unwrap!(res.deserialize(), "");
+        // outln!(LogTag::Jitted, "=================\n {f:?}");
+        // for op in &ops {
+        //     outln!(LogTag::Jitted, "{op}");
+        // }
+        // outln!(LogTag::Jitted, "\n============");
+        // let map = builtins::copy_to_mmap_exec(ops.into());
+        // Box::leak(map.0.into()); // TODO: dont leak
+        // while self.jitted.len() <= f.0 {
+        //     self.jitted.push(null());
+        // }
+        // self.jitted[f.0] = map.1;
+        // Ok(())
+        todo!()
     }
 }
 

@@ -96,6 +96,7 @@ pub enum Bc<'p> {
 pub struct FnBody<'p> {
     pub insts: Vec<Bc<'p>>,
     // pub debug: Vec<DebugInfo<'p>>,
+    pub arg_range: StackRange,
     pub stack_slots: usize,
     pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
     pub when: ExecTime,

@@ -34,7 +34,6 @@ pub mod pool;
 pub mod scope;
 pub mod emit_bc;
 pub mod experiments;
-pub mod bootstrap_gen;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
@@ -57,7 +56,6 @@ static LIB: &[(&str, &str)] = &[
     stdlib!("ast"), 
     stdlib!("macros"), 
     stdlib!("codegen/aarch64/instructions"),
-    stdlib!("codegen/aarch64/bc_to_asm"),
 ];
 
 macro_rules! test_file {

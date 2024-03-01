@@ -7,6 +7,19 @@
 
 
 
+struct ShiftTy {
+    LSL: i64,
+    LSR: i64,
+    ASR: i64,
+}
+
+const Shift: &ShiftTy = &ShiftTy {
+    LSL: 0b00,
+    LSR: 0b01,
+    ASR: 0b10,
+};
+
+
 #[rustfmt::skip]
 fn add_Ty402Ty4(a: i64, b: i64, ) -> i64 { 
 a + b

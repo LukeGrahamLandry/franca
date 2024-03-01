@@ -65,6 +65,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     #[track_caller]
     fn empty_fn(&mut self, func: &FnWip<'p>) -> FnBody<'p> {
         FnBody {
+            arg_range: StackRange {
+                first: StackOffset(0),
+                count: 0,
+            },
             stack_slots: 0,
             vars: Default::default(),
             when: func.when,
@@ -86,6 +90,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let mut result = self.empty_fn(wip);
         let func = &self.program.funcs[f.0];
         let arg_range = result.reserve_slots(self, func.unwrap_ty().arg)?;
+        result.arg_range = arg_range;
         let return_value = self.emit_body(&mut result, arg_range, f);
         match return_value {
             Ok(return_value) => {
@@ -214,7 +219,25 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(!func.has_tag(self.program.pool, "inline"));
         let (arg, arg_ty) = result.load(self, arg)?;
         let ret = result.reserve_slots(self, f_ty.ret)?;
-        result.push(Bc::CallDirect { f, ret, arg });
+
+        if let Some(Value::CFnPtr { ptr, ty }) = func.jitted_asm {
+            if func.has_tag(self.program.pool, "c_call") {
+                // We did emit its body as just a Bc::CallC but might as well skip the indirection.
+                let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
+                let f = result.load_constant(self, Values::One(Value::I64(ptr as i64)), ptr_ty)?;
+                result.push(Bc::CallC {
+                    f: f.0.single(),
+                    arg,
+                    ret,
+                    ty,
+                });
+            } else {
+                result.push(Bc::CallDirect { f, ret, arg });
+            }
+        } else {
+            result.push(Bc::CallDirect { f, ret, arg });
+        }
+
         assert_eq!(self.return_stack_slots(f), ret.count);
         assert_eq!(self.slot_count(f_ty.ret), ret.count);
         assert_eq!(
@@ -224,6 +247,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             self.program.log_type(arg_ty),
             self.program.log_type(f_ty.arg),
         );
+
         Ok(Structured::Emitted(f_ty.ret, ret))
     }
 

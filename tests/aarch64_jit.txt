@@ -7,6 +7,7 @@ fn copy_to_mmap_exec(insts: Slice(u32)) (BoxMmap, CodePtr);
 
 const x0: u5 = 0;
 const x1: u5 = 1;
+const sp: u5 = 31;
 
 fn call_jit(input: i64, code: Slice(u32)) i64 = {
     var map_and_ptr = copy_to_mmap_exec(code);
@@ -26,11 +27,11 @@ fn main(canary: i64) i64 = {
     // TODO: fix typecheck. 
     // { let a: u5 = 0b10101010101010; }!assert_compile_error;
     // ((fn(a: u1) u1 = 0x1)(0b11))!assert_compile_error;
-    add_i(Bits.X64[], x0, x1, x0, Shift.LSL[], 0x0000)!assert_compile_error;  // TODO: why does this one work but not the above? 
+    add_sr(Bits.X64[], x0, x1, x0, Shift.LSL[], 0x0000)!assert_compile_error;  // TODO: why does this one work but not the above? 
     
     let code = (
         movz(Bits.X64[], x1, 0b0000000000001010, Hw.Left0[]), 
-        add_i(Bits.X64[], x0, x1, x0, Shift.LSL[], 0), 
+        add_sr(Bits.X64[], x0, x1, x0, Shift.LSL[], 0), 
         ret()
     )!slice;
     assert_eq(call_jit(90, code), 100);
@@ -39,19 +40,44 @@ fn main(canary: i64) i64 = {
     // TODO: bounds checking for constants. 
     let code = (
         movz(Bits.X64[], x1, 120, Hw.Left0[]), 
-        add_i(Bits.X64[], x0, x0, x1, Shift.LSL[], 0), 
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0), 
         ret()
     )!slice;
     assert_eq(call_jit(80, code), 200);
     
     @c_call
     fn add_by_asm(a: i64, b: i64) i64 = heap((
-        add_i(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
         ret(),
     )!slice)!asm;
     
     let three = add_by_asm(1, 2);
     assert_eq(three, 3);
+    
+    @c_call
+    fn add_one(a: i64) i64 = heap((
+        add_im(Bits.X64[], x0, x0, 1, 0),
+        ret(),
+    )!slice)!asm;
+    assert_eq(add_one(9), 10);
+    
+    @c_call
+    fn sub_one(a: i64) i64 = heap((
+        sub_im(Bits.X64[], x0, x0, 1, 0),
+        ret(),
+    )!slice)!asm;
+    assert_eq(sub_one(10), 9);
+
+    @c_call
+    fn use_stack(a: i64) i64 = heap((
+        sub_im(Bits.X64[], sp, sp, 16, 0),
+        str_uo(Bits.X64[], x0, sp, 1),
+        movz(Bits.X64[], x0, 10, Hw.Left0[]), 
+        ldr_uo(Bits.X64[], x1, sp, 1),
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        ret(),
+    )!slice)!asm;
+    assert_eq(use_stack(15), 25);
     
     canary
 }
