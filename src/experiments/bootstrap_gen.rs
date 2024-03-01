@@ -19,6 +19,16 @@ const Shift: &ShiftTy = &ShiftTy {
     ASR: 0b10,
 };
 
+#[rustfmt::skip]
+pub fn br(addr: i64, ) -> i64 { 
+bit_or_Ty402Ty4(bit_or_Ty402Ty4(bit_or_Ty402Ty4(0, shift_left_Ty402Ty4(3508160, 10)), shift_left_Ty402Ty4(addr, 5)), shift_left_Ty402Ty4(0, 0))
+}
+
+#[rustfmt::skip]
+pub fn blr(addr: i64, ) -> i64 { 
+bit_or_Ty402Ty4(bit_or_Ty402Ty4(bit_or_Ty402Ty4(0, shift_left_Ty402Ty4(3510208, 10)), shift_left_Ty402Ty4(addr, 5)), shift_left_Ty402Ty4(0, 0))
+}
+
 
 #[rustfmt::skip]
 fn add_Ty402Ty4(a: i64, b: i64, ) -> i64 { 

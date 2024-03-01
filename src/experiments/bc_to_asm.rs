@@ -1,7 +1,10 @@
+//! TODO: i know this is remarkably bad codegen.
+//! @c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
+
 use std::mem;
 use std::ptr::null;
 
-use crate::ast::FuncId;
+use crate::ast::{FuncId, TypeId};
 use crate::bc::{Bc, Value};
 use crate::compiler::Res;
 use crate::experiments::bootstrap_gen::*;
@@ -26,6 +29,10 @@ const x3: i64 = 3;
 const x4: i64 = 4;
 const x5: i64 = 5;
 const x6: i64 = 6;
+const x7: i64 = 7;
+const x8: i64 = 8;
+const x9: i64 = 9;
+const x21: i64 = 21;
 const sp: i64 = 31;
 const W32: i64 = 0b0;
 const X64: i64 = 0b1;
@@ -78,13 +85,37 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 "c_call only supports 8 arguments. TODO: pass on stack"
             );
             for i in 0..func.arg_range.count {
-                self.asm.push(str_uo(X64, x0, sp, i as i64));
+                self.asm.push(str_uo(X64, i as i64, sp, i as i64));
             }
         }
         for (i, inst) in func.insts.iter().enumerate() {
             match inst {
                 Bc::CallDynamic { f, ret, arg } => todo!(),
-                Bc::CallDirect { f, ret, arg } => todo!(),
+                Bc::CallDirect { f, ret, arg } => {
+                    let target = &self.program.funcs[f.0];
+                    let target_c_call = target.has_tag(self.program.pool, "c_call");
+                    if target_c_call {
+                        assert!(
+                            arg.count <= 7,
+                            "indirect c_call only supports 7 arguments. TODO: pass on stack"
+                        );
+                        for i in 0..arg.count {
+                            self.asm
+                                .push(ldr_uo(X64, i as i64, sp, (arg.first.0 + i) as i64));
+                        }
+                        assert!(f.0 < 512);
+                        self.asm.push(ldr_uo(X64, x7, x21, f.0 as i64));
+                        // TODO: set link. dont do this. this is a tail call. !!!!!!
+                        // this symptom of not resetting sp is you get a stack overflow which is odd. 
+                        // maybe it keeps calling me in a loop because rust loses where it put its link register.  
+                        self.asm.push(add_im(X64, sp, sp, (slots * 8) as i64, 0));
+                        self.asm.push(br(x7));
+                        assert!(ret.count == 1);
+                        // self.asm.push(str_uo(X64, x0, sp, ret.first.0 as i64));
+                    } else {
+                        todo!()
+                    }
+                }
                 Bc::CallBuiltin { name, ret, arg } => todo!(),
                 Bc::LoadConstant { slot, value } => match value {
                     Value::F64(_) => todo!(),
@@ -92,15 +123,19 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(movz(X64, x0, *n, 0));
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
+                    // These only make sense during comptime execution but they're also really just numbers.
+                    Value::OverloadSet(i)
+                    | Value::GetFn(FuncId(i))
+                    | Value::Type(TypeId(i))
+                    | Value::Symbol(i) => {
+                        self.asm.push(movz(X64, x0, *i as i64, 0));
+                        self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
+                    }
                     Value::Bool(_) => todo!(),
-                    Value::Type(_) => todo!(),
-                    Value::GetFn(_) => todo!(),
-                    Value::Unit => todo!(),
+                    Value::Unit => {}
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
                     Value::Heap { .. } => todo!(),
-                    Value::Symbol(_) => todo!(),
-                    Value::OverloadSet(_) => todo!(),
                     Value::CFnPtr { ptr, ty } => todo!(),
                 },
                 Bc::JumpIf {
@@ -110,17 +145,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 } => todo!(),
                 Bc::Goto { ip } => todo!(),
                 Bc::Ret(slot) => {
-                    let slots = if func.stack_slots % 2 == 0 {
-                        func.stack_slots
-                    } else {
-                        func.stack_slots + 1
-                    };
-
                     if is_c_call {
                         match slot.count {
-                            0 => {
-                                movz(X64, x0, 1234, 0); // TODO: this is just for testing. return val is unit.
-                            }
+                            0 => {}
                             1 => {
                                 self.asm.push(ldr_uo(X64, x0, sp, slot.first.0 as i64));
                             }
@@ -176,7 +203,7 @@ mod tests {
         scope::ResolveScope,
     };
     use codemap::CodeMap;
-    use std::mem::transmute;
+    use std::{arch::asm, mem::transmute};
 
     fn jit_main<Arg, Ret>(src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'_, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
@@ -204,6 +231,14 @@ mod tests {
         let code = asm.ready[main.0];
         assert!(!code.is_null());
         let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
+        let indirect_fns = asm.ready.as_ptr();
+        // TODO!!!!!! dont just clobber shit
+        unsafe {
+            asm!(
+                "mov x21, {fns}",
+                fns = in(reg) indirect_fns
+            );
+        }
         f(code);
         Ok(())
     }
@@ -214,6 +249,18 @@ mod tests {
             let ret: i64 = f(());
             assert_eq!(ret, 42);
         })
+        .unwrap();
+    }
+
+    #[test]
+    fn trivial_indirect() {
+        jit_main(
+            "const i64; @c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }",
+            |f| {
+                let ret: i64 = f(());
+                assert_eq!(ret, 42);
+            },
+        )
         .unwrap();
     }
 }
