@@ -73,7 +73,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             last_loc: func.last_loc,
             constants: func.constants.clone(), // TODO: dont clone. can have a lighter thing live on to the interpreter.
             insts: vec![],
-            debug: vec![],
+            // debug: vec![],
             slot_types: vec![],
             to_drop: vec![],
         }
@@ -1020,12 +1020,12 @@ impl<'p> FnBody<'p> {
 
         #[cfg(feature = "some_log")]
         {
-            self.debug.push(DebugInfo {
-                internal_loc: Location::caller(),
-                src_loc: self.last_loc,
-                p: Default::default(),
-            });
-            debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
+            // self.debug.push(DebugInfo {
+            //     internal_loc: Location::caller(),
+            //     src_loc: self.last_loc,
+            //     p: Default::default(),
+            // });
+            // debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
         }
         ip
     }

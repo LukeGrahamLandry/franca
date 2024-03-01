@@ -6,16 +6,16 @@ use std::process::Command;
 use codemap::Span;
 use interp_derive::InterpSend;
 
-use crate::builtins::Pair;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res};
 use crate::emit_bc::{EmitBc, SizeCache};
+use crate::experiments::builtins::Pair;
 use crate::ffi::InterpSend;
 use crate::logging::{outln, unwrap, PoolLog};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, builtins, ffi};
+use crate::{bc::*, experiments::builtins, ffi};
 
 use crate::logging::{assert, assert_eq, bin_int, err, ice, logln, LogTag::ShowPrint};
 
@@ -886,7 +886,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             .unwrap()
             .as_ref()
             .unwrap();
-        self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
+        // self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
     }
 
     fn current_fn_body(&self) -> &FnBody {
@@ -1061,7 +1061,7 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         drops(&mut self.value_stack, vs);
     }
 
-    fn run_with_arg<T: crate::reflect::Reflect>(
+    fn run_with_arg<T: crate::experiments::reflect::Reflect>(
         &mut self,
         program: &mut Program<'p>,
         f: FuncId,
@@ -1072,6 +1072,10 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         let ret = self.run(f, arg, ExecTime::Runtime, 1, program)?;
         assert_eq!(ret.single()?, Value::Unit);
         Ok(())
+    }
+
+    fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>> {
+        self.ready[f.0].clone()
     }
 }
 

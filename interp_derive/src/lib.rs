@@ -389,8 +389,8 @@ pub fn derive_reflect(input: proc_macro::TokenStream) -> proc_macro::TokenStream
 
     let (fields, fields_copy) = get_field_data(&input.ident, &input.data);
     let expanded = quote! {
-        impl #impl_generics crate::reflect::Reflect for #name #ty_generics #where_clause {
-            const TYPE_INFO: &'static crate::reflect::RsType<'static> = &crate::reflect::RsType {
+        impl #impl_generics crate::experiments::reflect::Reflect for #name #ty_generics #where_clause {
+            const TYPE_INFO: &'static crate::experiments::reflect::RsType<'static> = &crate::experiments::reflect::RsType {
                 name: stringify!(#name),
                 align: std::mem::align_of::<Self>(),
                 stride: std::mem::size_of::<Self>(),
@@ -410,9 +410,9 @@ fn get_field_data(name: &Ident, data: &Data) -> (TokenStream, TokenStream) {
                     let f_name = &f.ident;
                     let f_ty = &f.ty;
                     quote_spanned! {f.span()=>
-                        crate::reflect::RsField {
+                        crate::experiments::reflect::RsField {
                             name: stringify!(#f_name),
-                            offset: crate::reflect::field_offset!(#name, #f_name),
+                            offset: crate::experiments::reflect::field_offset!(#name, #f_name),
                             ty: <#f_ty>::get_ty,
                         }
                     }
@@ -420,15 +420,15 @@ fn get_field_data(name: &Ident, data: &Data) -> (TokenStream, TokenStream) {
                 let linear = fields.named.iter().map(|f| {
                     let ty = &f.ty;
                     quote_spanned! {f.span()=>
-                        <#ty as crate::reflect::Reflect>::TYPE_INFO.is_linear
+                        <#ty as crate::experiments::reflect::Reflect>::TYPE_INFO.is_linear
                     }
                 });
 
                 (
                     quote! {
                         {
-                            const F: &[crate::reflect::RsField] = &[#(#recurse,)*];
-                            crate::reflect::RsData::Struct(F)
+                            const F: &[crate::experiments::reflect::RsField] = &[#(#recurse,)*];
+                            crate::experiments::reflect::RsData::Struct(F)
                         }
                     },
                     quote! {

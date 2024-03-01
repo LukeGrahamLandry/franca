@@ -293,7 +293,7 @@ pub const SP: Reg = Reg::u64(14);
 #[cfg(target_arch = "aarch64")]
 mod encoding_tests {
     use super::{Inst, Reg};
-    use crate::aarch64::{Assembler, CmpFlags, Label, Three, Two, X0};
+    use crate::experiments::aarch64::{Assembler, CmpFlags, Label, Three, Two, X0};
     use std::mem;
     const X1: Reg = Reg::u64(1);
     const X2: Reg = Reg::u64(2);

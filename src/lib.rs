@@ -30,13 +30,7 @@ pub mod parse;
 pub mod pool;
 pub mod scope;
 pub mod emit_bc;
-pub mod interp_aarch64;
-pub mod aarch64;
-pub mod builtins;
-pub mod arena;
-pub mod reflect;
-#[cfg(target_arch = "aarch64")]  // TODO: fix for cross compiling on wasm
-pub mod emit_aarch64;
+pub mod experiments;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
@@ -59,6 +53,7 @@ static LIB: &[(&str, &str)] = &[
     stdlib!("ast"), 
     stdlib!("macros"), 
     stdlib!("codegen/aarch64/instructions"),
+    stdlib!("codegen/aarch64/bc_to_asm"),
 ];
 
 macro_rules! test_file {

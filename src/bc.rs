@@ -92,10 +92,10 @@ pub enum Bc<'p> {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, InterpSend)]
 pub struct FnBody<'p> {
     pub insts: Vec<Bc<'p>>,
-    pub debug: Vec<DebugInfo<'p>>,
+    // pub debug: Vec<DebugInfo<'p>>,
     pub stack_slots: usize,
     pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
     pub when: ExecTime,

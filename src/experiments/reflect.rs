@@ -298,7 +298,7 @@ fn ptr_before_len<T>() -> bool {
 mod test {
     #![allow(unused)]
     use super::{Reflect, RsField};
-    use crate::reflect::{ptr_before_len, VReflect};
+    use crate::experiments::reflect::{ptr_before_len, VReflect};
     use core::slice;
     use std::{
         fmt::Debug,

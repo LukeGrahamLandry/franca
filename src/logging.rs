@@ -105,7 +105,9 @@ pub enum LogTag {
     ShowErr = 6,
     Macros = 7,
     Generics = 8,
-    _Last = 9,
+    Jitted = 9,
+    RtRust = 10,
+    _Last = 11,
 }
 
 pub struct LogSettings {
@@ -363,6 +365,23 @@ impl<'p> Program<'p> {
                             return None;
                         }
                         found = Some(ty);
+                    } else if let TypeInfo::Enum { cases, .. } = &self.types[ty.0] {
+                        for (_, mut ty) in cases {
+                            if let &TypeInfo::Named(inner, case_name) = &self.types[ty.0] {
+                                // TODO: ffi cases that are akreayd named types
+                                if case_name == name {
+                                    if found.is_some() {
+                                        outln!(
+                                            LogTag::ShowErr,
+                                            "duplicate ffi name {}",
+                                            self.pool.get(name)
+                                        );
+                                        return None;
+                                    }
+                                    found = Some(inner);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -737,12 +756,12 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
             let bc = format!("{i}. {}", bc.log(pool));
             writeln!(
                 f,
-                "{:width$} {}",
+                "{:width$}", // {}
                 bc,
-                self.debug
-                    .get(i)
-                    .map(|d| d.log(pool))
-                    .unwrap_or_else(|| String::from("// ???"))
+                // self.debug
+                //     .get(i)
+                //     .map(|d| d.log(pool))
+                //     .unwrap_or_else(|| String::from("// ???"))
             );
         }
         writeln!(f, "{}", self.why);

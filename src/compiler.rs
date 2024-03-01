@@ -10,15 +10,17 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem;
 use std::ops::DerefMut;
+use std::ptr::null;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
     garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
-use crate::{bc::*, builtins};
+use crate::interp::Interp;
+use crate::{bc::*, experiments::builtins};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, LogTag, PoolLog};
-use crate::reflect::Reflect;
+use crate::experiments::reflect::Reflect;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
@@ -67,7 +69,8 @@ pub struct Compile<'a, 'p, Exec: Executor<'p>> {
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     last_loc: Option<Span>,
     pub executor: Exec,
-    pub program: &'a mut Program<'p>
+    pub program: &'a mut Program<'p>,
+    pub jitted: Vec<*const u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,6 +111,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             currently_compiling: vec![],
             program,
             executor,
+            jitted: vec![],
         }
     }
 
@@ -168,7 +172,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             for id in callees {
                 self.compile(id, when)?;
             }
+            let func = &self.program.funcs[f.0];
             result = self.executor.compile_func(self.program, f);
+            if result.is_ok() && func.has_tag(self.pool, "jit") {
+                self.jit(f)?;
+            }
         }
         let result = self.tag_err(result);
         self.pop_state(state);
@@ -349,9 +357,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             #[cfg(target_arch = "aarch64")]
             if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
                 if *name == self.pool.intern("asm") {
+                    let src = arg.log(self.pool);
                     let asm_ty = Vec::<u32>::get_type(self.program);
                     let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
                     let ops = unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "");
+                    outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");
+                    for op in &ops {
+                        outln!(LogTag::Jitted, "{op}");
+                    }
+                    outln!(LogTag::Jitted, "\n=======");
                     let map = builtins::copy_to_mmap_exec(ops.into());
                     let value = Value::CFnPtr { ptr: map.1 as usize, ty: fn_ty };
                     Box::leak(map.0.into()); // TODO: dont leak
@@ -2570,7 +2584,48 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         self.compile_expr(result, expr_out, None)?;
         Ok(())
     }
+    
+    fn jit(&mut self, f: FuncId) -> Res<'p, ()> {
+        outln!(LogTag::Jitted, "Try Jit {f:?}");
+        let bc = self.executor.get_bc(f);
+        if bc.is_none() {
+            return Ok(());
+        }
+        let bc = bc.unwrap();
+        let func = self.lookup_unique_func(self.pool.intern("bc_to_asm"));
+        if func.is_none() {
+            return Ok(());
+        }
+        let func = func.unwrap();
+        if func == f {
+            return Ok(());
+        }
+        let ffff = &self.program.funcs[f.0];
+        let wip = ffff.wip.as_ref().unwrap();
+        let callees = wip.callees.clone();
+        for id in callees {
+            self.jit(id)?;
+        }
+        
+        self.compile(func, ExecTime::Comptime)?;
+        let arg = bc.serialize_one();
+        let res = self.executor.run_func(self.program, func, arg)?;
+        let ops: Vec<u32> = unwrap!(res.deserialize(), "");
+        outln!(LogTag::Jitted, "=================\n {f:?}");
+        for op in &ops {
+            outln!(LogTag::Jitted, "{op}");
+        }
+        outln!(LogTag::Jitted, "\n============");
+        let map = builtins::copy_to_mmap_exec(ops.into());
+        Box::leak(map.0.into()); // TODO: dont leak
+        while self.jitted.len() <= f.0 {
+            self.jitted.push(null());
+        }
+        self.jitted[f.0] = map.1;
+        Ok(())
+    }
 }
+
 
 pub fn insert_multi<K: Hash + Eq, V: Eq>(set: &mut HashMap<K, Vec<V>>, key: K, value: V) {
     if let Some(prev) = set.get_mut(&key) {
@@ -2609,6 +2664,7 @@ pub trait Executor<'p>: PoolLog<'p> {
     fn assertion_count(&self) -> usize;
     fn mark_state(&self) -> Self::SavedState;
     fn restore_state(&mut self, state: Self::SavedState);
+    fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>>; // asadas
 }
 
 // i like when my code is rocks not rice

@@ -1,11 +1,11 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, Constants, Structured, Value, Values},
+    bc::{Bc, Constants, FnBody, Structured, Value, Values},
     compiler::{insert_multi, CErr, FnWip, Res},
+    experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
     logging::err,
     pool::{Ident, StringPool},
-    reflect::{Reflect, RsType},
 };
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
@@ -663,6 +663,7 @@ impl<'p> Program<'p> {
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
         init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
+        init_interp_send!(&mut program, FnBody);
         program.get_rs_type(SuperSimple::get_ty());
 
         program
@@ -687,7 +688,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
-        use crate::reflect::*;
+        use crate::experiments::reflect::*;
         let id = type_info as *const RsType as usize as u128;
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             let n = self.intern_type(TypeInfo::Unknown);
