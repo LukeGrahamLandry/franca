@@ -2,6 +2,9 @@
 #![feature(const_refs_to_cell)]
 #![feature(ptr_metadata)]
 
+// bro if you can tell you could compile it more efficiently why dont you just compile it more efficiently 
+#![allow(clippy::format_collect)]
+
 use std::fs;
 
 use bc::Value;
@@ -31,6 +34,7 @@ pub mod pool;
 pub mod scope;
 pub mod emit_bc;
 pub mod experiments;
+pub mod bootstrap_gen;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope

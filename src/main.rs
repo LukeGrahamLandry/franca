@@ -1,5 +1,6 @@
 use franca::{
     bc::Value,
+    experiments::emit_rust::bootstrap,
     interp::Interp,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
@@ -9,6 +10,11 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     if let Some(name) = env::args().nth(1) {
+        if name == "bootstrap" {
+            println!("{}", bootstrap());
+            return;
+        }
+
         let pool = Box::leak(Box::<StringPool>::default());
         let path = PathBuf::from(format!("tests/{name}.txt"));
         if path.exists() {

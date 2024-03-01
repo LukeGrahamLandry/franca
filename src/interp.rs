@@ -41,6 +41,13 @@ pub struct Interp<'a, 'p> {
     pub sizes: SizeCache,
 }
 
+macro_rules! un_int {
+    ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
+        let a = $arg.single()?.to_int()?;
+        $res($op a).into()
+    }};
+}
+
 impl<'a, 'p> Interp<'a, 'p> {
     pub fn new(pool: &'a StringPool<'p>) -> Self {
         Self {
@@ -595,6 +602,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             "le" => bin_int!(self, <=, arg, Value::Bool),
             "shift_left" => bin_int!(self, <<, arg, Value::I64),
             "bit_or" => bin_int!(self, |, arg, Value::I64),
+            "bit_and" => bin_int!(self, &, arg, Value::I64),
+            "bit_not" => un_int!(self, !, arg, Value::I64),
             // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
                 if let Values::One(Value::Type(ty)) = arg {

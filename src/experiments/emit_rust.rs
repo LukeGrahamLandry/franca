@@ -1,105 +1,318 @@
 #![allow(unused)]
 
-use codemap::Span;
+use codemap::{CodeMap, Span};
 use std::collections::HashMap;
 use std::mem;
 use std::ops::Deref;
 
-use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{Expr, FatExpr, FuncId, LazyType, Name, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Var};
-use crate::bc::*;
-use crate::compiler::{Executor, Res};
+use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::emit_bc::SizeCache;
 use crate::experiments::aarch64::Three::*;
 use crate::experiments::aarch64::Two::*;
 use crate::experiments::aarch64::{Assembler, Inst, Mem, Reg, SP, X0};
-use crate::logging::PoolLog;
-use crate::logging::{assert_eq, err, ice, unwrap};
+use crate::interp::Interp;
+use crate::logging::{assert_eq, err, ice, unwrap, LogTag};
+use crate::logging::{outln, PoolLog};
+use crate::parse::Parser;
+use crate::pool::StringPool;
+use crate::scope::ResolveScope;
+use crate::{bc::*, emit_diagnostic, make_toplevel, LIB};
 
-#[derive(Default)]
-pub struct RsDone {
-    sizes: SizeCache,
-    ready: Vec<Option<String>>,
+pub fn bootstrap() -> String {
+    let pool = Box::leak(Box::<StringPool>::default());
+    let mut codemap = CodeMap::new();
+    let mut stmts = Vec::<FatStmt>::new();
+    let mut libs: Vec<_> = LIB
+        .iter()
+        .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
+        .collect();
+    let user_span = libs.last().unwrap().span;
+    for file in &libs {
+        stmts.extend(Parser::parse(file.clone(), pool).unwrap());
+    }
+
+    let mut global = make_toplevel(pool, user_span, stmts);
+    let vars = ResolveScope::of(&mut global, pool);
+    let mut program = Program::new(vars, pool);
+    let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
+    comp.add_declarations(global).unwrap();
+
+    EmitRs::emit_rs(comp).unwrap()
 }
 
-pub struct EmitRs<'z, 'p: 'z> {
-    program: &'z Program<'p>,
-    sizes: &'z mut SizeCache,
+pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
+    comp: Compile<'z, 'p, Exec>,
     last_loc: Option<Span>,
-    out: String,
+    ready: Vec<Option<String>>,
+    global_constants: HashMap<Var<'p>, (TypeId, String)>,
+    func: Option<FuncId>,
 }
 
-impl<'z, 'p: 'z> EmitRs<'z, 'p> {
-    pub fn compile(program: &'z Program<'p>, exec: &'z mut RsDone, f: FuncId) -> Res<'p, ()> {
-        while exec.ready.len() <= f.0 {
-            exec.ready.push(None);
+impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
+    pub fn emit_rs(e: Compile<'z, 'p, Exec>) -> Res<'p, String> {
+        let mut emit = EmitRs::new(e);
+
+        for f in 0..emit.comp.program.funcs.len() {
+            if emit.comp.program.funcs[f].has_tag(emit.comp.program.pool, "rs") {
+                emit.compile(FuncId(f))?;
+            }
         }
-        if exec.ready[f.0].is_some() {
+
+        let constants: String = emit
+            .global_constants
+            .clone()
+            .into_iter()
+            .map(|(name, (ty, value))| {
+                let name = emit.comp.pool.get(name.0).to_string();
+                let ty = emit.emit_type(ty).unwrap();
+                format!("const {name}: {ty} = {value};")
+            })
+            .collect();
+        let functions: String = emit.ready.into_iter().flatten().collect();
+        let hush = r##"#![allow(non_snake_case)]
+        #![allow(unused)]
+        #![allow(non_upper_case_globals)]
+        #![allow(clippy::no_effect)]
+        #![allow(clippy::explicit_auto_deref)]
+        #![allow(clippy::deref_addrof)]"##;
+
+        Ok(format!("{hush}\n\n{constants}\n\n{functions}\n"))
+    }
+
+    pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
+        while self.ready.len() <= f.0 {
+            self.ready.push(None);
+        }
+        if self.ready[f.0].is_some() {
             return Ok(());
         }
-        let emit = EmitRs::new(program, &mut exec.sizes);
-        let body = emit.compile_inner(f)?;
-        exec.ready[f.0] = Some(body);
+        self.comp.compile(f, ExecTime::Runtime)?;
+        let callees = self.comp.program.funcs[f.0]
+            .wip
+            .as_ref()
+            .unwrap()
+            .callees
+            .clone();
+        for c in callees {
+            self.compile(c)?;
+        }
+
+        self.func = Some(f);
+        let body = self.compile_inner(f)?;
+        let func = &self.comp.program.funcs[f.0];
+        let name = self.make_fn_name(f);
+        let ty = func.unwrap_ty();
+        let args = func.arg.flatten();
+        let want_export = func.has_tag(self.comp.program.pool, "rs");
+        let args: String = func
+            .arg
+            .flatten()
+            .iter()
+            .map(|(name, ty)| {
+                let name = name.map(|name| self.comp.pool.get(name.0)).unwrap_or("_");
+                let ty = self.emit_type(*ty).unwrap();
+                format!("{}: {}, ", name, ty)
+            })
+            .collect();
+        let ret = self.emit_type(ty.ret)?;
+        self.ready[f.0] = Some(format!(
+            "#[rustfmt::skip]\n{}fn {name}({args}) -> {ret} {{ \n{body}\n}}\n\n",
+            if want_export { "pub " } else { "" }
+        ));
         Ok(())
     }
 
-    fn new(program: &'z Program<'p>, sizes: &'z mut SizeCache) -> Self {
+    // If its just something we call not something we want to export, can mangle the name so overloads are allowed.
+    fn make_fn_name(&self, f: FuncId) -> String {
+        let func = &self.comp.program.funcs[f.0];
+        let name = self.comp.program.pool.get(func.name).to_string();
+        let ty = func.unwrap_ty();
+        let want_export = func.has_tag(self.comp.program.pool, "rs");
+        if want_export {
+            name
+        } else {
+            format!("{name}_{:?}{:?}", ty.arg, ty.ret)
+        }
+    }
+
+    fn new(comp: Compile<'z, 'p, Exec>) -> Self {
         Self {
             last_loc: None,
-            program,
-            sizes,
-            out: String::new(),
+            comp,
+            ready: vec![],
+            global_constants: HashMap::new(),
+            func: None,
         }
     }
 
-    fn compile_inner(mut self, f: FuncId) -> Res<'p, String> {
-        let func = &self.program.funcs[f.0];
+    fn compile_inner(&mut self, f: FuncId) -> Res<'p, String> {
+        let func = &self.comp.program.funcs[f.0];
         let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
-        let func = &self.program.funcs[f.0];
-        let mut ret = self.compile_expr(func.body.as_ref().unwrap());
-        if let Err(e) = &mut ret {
-            e.loc = self.last_loc;
+        let func = self.comp.program.funcs[f.0].clone(); // TODO: no clone
+        if let Some(body) = func.body {
+            let mut ret = self.compile_expr(&body);
+            if let Err(e) = &mut ret {
+                e.loc = self.last_loc;
+            }
+            ret
+        } else {
+            Ok(match self.comp.pool.get(func.name) {
+                "shift_left" => String::from("value << shift_amount"),
+                "bit_or" => String::from("a | b"),
+                "bit_and" => String::from("a & b"),
+                "bit_not" => String::from("!a"),
+                "sub" => String::from("a - b"),
+                "mul" => String::from("a * b"),
+                "le" => String::from("a <= b"),
+                "add" => String::from("a + b"),
+                s => todo!("builtin {s}"),
+            })
         }
-        ret
     }
 
-    fn compile_stmt(&mut self, stmt: &FatStmt<'p>) -> Res<'p, ()> {
-        match stmt.deref() {
-            Stmt::Noop => {}
+    fn emit_type(&mut self, ty: TypeId) -> Res<'p, String> {
+        let info = self.comp.program.raw_type(ty);
+        Ok(match &self.comp.program.types[info.0] {
+            TypeInfo::Unknown => todo!(),
+            TypeInfo::Any => todo!(),
+            TypeInfo::Never => todo!(),
+            TypeInfo::F64 => todo!(),
+            TypeInfo::Int(int) => String::from("i64"),
+            TypeInfo::Bool => String::from("bool"),
+            TypeInfo::Fn(_) => todo!(),
+            TypeInfo::FnPtr(_) => todo!(),
+            TypeInfo::Tuple(_) => todo!(),
+            TypeInfo::Ptr(_) => todo!(),
+            TypeInfo::Slice(_) => todo!(),
+            TypeInfo::Struct {
+                fields,
+                as_tuple,
+                ffi_byte_align,
+                ffi_byte_stride,
+            } => todo!(),
+            TypeInfo::Enum { cases } => todo!(),
+            TypeInfo::Unique(_, _) => todo!(),
+            TypeInfo::Named(_, _) => todo!(),
+            TypeInfo::Type => todo!(),
+            TypeInfo::Unit => String::from("()"),
+            TypeInfo::VoidPtr => todo!(),
+        })
+    }
+
+    fn compile_stmt(&mut self, stmt: &FatStmt<'p>) -> Res<'p, String> {
+        Ok(match stmt.deref() {
+            Stmt::Noop => String::new(),
             Stmt::Eval(expr) => {
-                self.compile_expr(expr)?;
+                format!("{};\n", self.compile_expr(expr)?)
             }
             Stmt::DeclVar { name, value, .. } => {
-                todo!()
+                let name = self.comp.pool.get(name.0);
+                let value = self.compile_expr(value.as_ref().unwrap())?;
+                format!("let mut {} = {};", name, value)
             }
-            Stmt::DeclVarPattern { .. } => todo!(),
+            Stmt::DeclVarPattern { binding, value } => {
+                // Args of inlined function.
+                if binding.bindings.len() == 1
+                    && binding.bindings[0].name == Name::None
+                    && binding.bindings[0].ty == LazyType::Finished(TypeId::unit())
+                {
+                    // Probably an if branch. But it could be a call with side-effects so should emit it anyway.
+                    let value = value
+                        .as_ref()
+                        .map(|value| self.compile_expr(value))
+                        .unwrap_or(Ok(String::new()));
+                    format!("{};", value?)
+                } else {
+                    todo!()
+                }
+            }
             Stmt::Set { place, value } => todo!(),
             Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_) => unreachable!(),
-        }
-        Ok(())
+        })
+    }
+
+    fn emit_value(&mut self, value: &Value) -> Res<'p, String> {
+        Ok(match value {
+            Value::I64(n) => format!("{n}"),
+            Value::F64(_) => todo!(),
+            Value::Bool(_) => todo!(),
+            Value::Type(_) => todo!(),
+            Value::GetFn(_) => todo!(),
+            Value::Unit => String::from("()"),
+            Value::Poison => todo!(),
+            Value::InterpAbsStackAddr(_) => todo!(),
+            Value::Heap {
+                value,
+                physical_first,
+                physical_count,
+            } => todo!(),
+            Value::Symbol(_) => todo!(),
+            Value::OverloadSet(_) => todo!(),
+            Value::CFnPtr { ptr, ty } => todo!(),
+        })
     }
 
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
-        let dest = match expr.deref() {
-            Expr::Value { value, .. } => {
-                todo!()
+        Ok(match expr.deref() {
+            Expr::Value { value, .. } => self.emit_values(value)?,
+            Expr::Call(f, arg) => {
+                if let Some(f_id) = f.as_fn() {
+                    let func = &self.comp.program.funcs[f_id.0];
+                    assert!(!func.has_tag(self.comp.program.pool, "comptime"));
+                    let name = self.make_fn_name(f_id);
+                    let args = self.compile_expr(arg)?;
+                    format!("{name}({args})")
+                } else {
+                    todo!()
+                }
             }
-            Expr::Call(_, _) => todo!(),
             Expr::Block {
                 body, result: end, ..
             } => {
-                for stmt in body {
-                    self.compile_stmt(stmt)?;
-                }
-                self.compile_expr(end)?
+                let parts: Res<'p, String> = body.iter().map(|e| self.compile_stmt(e)).collect();
+                format!("{{ {}\n {} }}", parts?, self.compile_expr(end)?)
             }
-            Expr::Tuple(_) => todo!(),
-            Expr::SuffixMacro(_, _) => todo!(),
-            Expr::FieldAccess(_, _) => todo!(),
+            Expr::Tuple(parts) => {
+                let parts: Res<'p, Vec<String>> =
+                    parts.iter().map(|e| self.compile_expr(e)).collect();
+                parts?.join(", ")
+            }
+            Expr::SuffixMacro(name, arg) => match self.comp.pool.get(*name) {
+                "deref" => format!("(*({}))", self.compile_expr(arg)?),
+                "if" => {
+                    if let Expr::Tuple(parts) = arg.deref().deref() {
+                        let cond = self.compile_expr(&parts[0])?;
+                        let if_true = self.compile_expr(&parts[1])?;
+                        let if_false = self.compile_expr(&parts[2])?;
+                        format!("(if {cond} {{ {if_true} }} else {{ {if_false} }})")
+                    } else {
+                        err!("malformed !if",)
+                    }
+                }
+                s => todo!("!{s}"),
+            },
+            Expr::FieldAccess(container, name) => {
+                format!(
+                    "&(*{}).{}",
+                    self.compile_expr(container)?,
+                    self.comp.pool.get(*name)
+                )
+            }
             Expr::StructLiteralP(_) => todo!(),
             Expr::GetVar(var) => {
-                todo!()
+                // if let Some((value, ty)) = self.comp.program.funcs[self.func.unwrap().0]
+                //     .closed_constants
+                //     .get(*var)
+                // {
+                //     if !self.global_constants.contains_key(var) {
+                //         let value = self.emit_values(&value)?;
+                //         self.global_constants.insert(*var, (ty, value));
+                //     }
+                // }
+                self.comp.pool.get(var.0).to_string()
             }
             Expr::PrefixMacro { .. }
             | Expr::ArrayLiteral(_)
@@ -108,10 +321,19 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             | Expr::Closure(_)
             | Expr::GetNamed(_)
             | Expr::String(_) => unreachable!(),
-        };
-        Ok(dest)
+        })
     }
-    pub fn slot_count(&mut self, ty: TypeId) -> usize {
-        self.sizes.byte_count(self.program, ty)
+
+    fn emit_values(&mut self, value: &Values) -> Res<'p, String> {
+        match value {
+            Values::One(v) => self.emit_value(v),
+            Values::Many(v) => {
+                if v.len() == 1 {
+                    self.emit_value(&v[0])
+                } else {
+                    todo!("{v:?}")
+                }
+            }
+        }
     }
 }

@@ -16,7 +16,7 @@ use std::{ops::Deref, panic::Location};
 use crate::ast::{
     garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
-use crate::interp::Interp;
+
 use crate::{bc::*, experiments::builtins};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, LogTag, PoolLog};
@@ -178,6 +178,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 self.jit(f)?;
             }
         }
+        
         let result = self.tag_err(result);
         self.pop_state(state);
         self.currently_compiling.retain(|check| *check != f);

@@ -7,6 +7,7 @@ use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Binding, Name, TypeId, Var};
+use crate::compiler::CompileError;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
