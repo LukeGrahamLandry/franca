@@ -2,7 +2,6 @@
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
     compiler::{ExecTime, Res},
-    emit_bc::DebugInfo,
     ffi::InterpSend,
     logging::err,
     pool::Ident,
@@ -10,6 +9,7 @@ use crate::{
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
+use crate::emit_bc::DebugInfo;
 
 #[derive(Clone, InterpSend)]
 pub enum Bc<'p> {
@@ -92,10 +92,10 @@ pub enum Bc<'p> {
     },
 }
 
-#[derive(Clone, InterpSend)]
+#[derive(Clone)]
 pub struct FnBody<'p> {
     pub insts: Vec<Bc<'p>>,
-    // pub debug: Vec<DebugInfo<'p>>,
+    pub debug: Vec<DebugInfo<'p>>,
     pub arg_range: StackRange,
     pub stack_slots: usize,
     pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec

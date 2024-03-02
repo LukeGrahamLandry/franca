@@ -756,12 +756,12 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
             let bc = format!("{i}. {}", bc.log(pool));
             writeln!(
                 f,
-                "{:width$}", // {}
+                "{:width$} {}",
                 bc,
-                // self.debug
-                //     .get(i)
-                //     .map(|d| d.log(pool))
-                //     .unwrap_or_else(|| String::from("// ???"))
+                self.debug
+                    .get(i)
+                    .map(|d| d.log(pool))
+                    .unwrap_or_else(|| String::from("// ???"))
             );
         }
         writeln!(f, "{}", self.why);

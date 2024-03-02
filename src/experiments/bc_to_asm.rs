@@ -33,6 +33,8 @@ const x7: i64 = 7;
 const x8: i64 = 8;
 const x9: i64 = 9;
 const x21: i64 = 21;
+const fp: i64 = 29;
+const lr: i64 = 30;
 const sp: i64 = 31;
 const W32: i64 = 0b0;
 const X64: i64 = 0b1;
@@ -72,25 +74,27 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         println!("{}", func.log(self.program.pool));
         let ff = &self.program.funcs[func.func.0];
         let is_c_call = ff.has_tag(self.program.pool, "c_call");
-        assert_eq!(func.arg_range.first.0, 0);
         let slots = if func.stack_slots % 2 == 0 {
-            func.stack_slots
+            func.stack_slots + 2
         } else {
-            func.stack_slots + 1
+            func.stack_slots + 1 + 2
         };
+        assert!(slots < 63, "range for stp/ldp");
         self.asm.push(sub_im(X64, sp, sp, (slots * 8) as i64, 0));
+        self.asm.push(stp_so(X64, fp, lr, sp, (slots - 2) as i64));  // save our return address
         if is_c_call {
             assert!(
                 func.arg_range.count <= 8,
                 "c_call only supports 8 arguments. TODO: pass on stack"
             );
+            assert_eq!(func.arg_range.first.0, 0);
             for i in 0..func.arg_range.count {
                 self.asm.push(str_uo(X64, i as i64, sp, i as i64));
             }
         }
         for (i, inst) in func.insts.iter().enumerate() {
             match inst {
-                Bc::CallDynamic { f, ret, arg } => todo!(),
+                Bc::CallDynamic { .. } => todo!(),
                 Bc::CallDirect { f, ret, arg } => {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
@@ -105,18 +109,16 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         }
                         assert!(f.0 < 512);
                         self.asm.push(ldr_uo(X64, x7, x21, f.0 as i64));
-                        // TODO: set link. dont do this. this is a tail call. !!!!!!
-                        // this symptom of not resetting sp is you get a stack overflow which is odd. 
-                        // maybe it keeps calling me in a loop because rust loses where it put its link register.  
-                        self.asm.push(add_im(X64, sp, sp, (slots * 8) as i64, 0));
-                        self.asm.push(br(x7));
-                        assert!(ret.count == 1);
-                        // self.asm.push(str_uo(X64, x0, sp, ret.first.0 as i64));
+                        // this symptom of not resetting sp is you get a stack overflow which is odd.
+                        // maybe it keeps calling me in a loop because rust loses where it put its link register.
+                        self.asm.push(br(x7, 1));
+                        assert_eq!(ret.count, 1);
+                        self.asm.push(str_uo(X64, x0, sp, ret.first.0 as i64));
                     } else {
                         todo!()
                     }
                 }
-                Bc::CallBuiltin { name, ret, arg } => todo!(),
+                Bc::CallBuiltin { .. } => todo!(),
                 Bc::LoadConstant { slot, value } => match value {
                     Value::F64(_) => todo!(),
                     Value::I64(n) => {
@@ -136,14 +138,10 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
                     Value::Heap { .. } => todo!(),
-                    Value::CFnPtr { ptr, ty } => todo!(),
+                    Value::CFnPtr { .. } => todo!(),
                 },
-                Bc::JumpIf {
-                    cond,
-                    true_ip,
-                    false_ip,
-                } => todo!(),
-                Bc::Goto { ip } => todo!(),
+                Bc::JumpIf { .. } => todo!(),
+                Bc::Goto { .. } => todo!(),
                 Bc::Ret(slot) => {
                     if is_c_call {
                         match slot.count {
@@ -153,13 +151,14 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                             }
                             _ => err!("c_call only supports one return value. TODO: structs",),
                         }
+                        self.asm.push(ldp_so(X64, fp, lr, sp, (slots - 2) as i64));  // get our return address
                         self.asm.push(add_im(X64, sp, sp, (slots * 8) as i64, 0));
                         self.asm.push(ret(()));
                     } else {
                         todo!()
                     }
                 }
-                Bc::AbsoluteStackAddr { of, to } => todo!(),
+                Bc::AbsoluteStackAddr { .. } => todo!(),
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
                 Bc::Clone { from, to } | Bc::Move { from, to } => {
                     self.asm.push(ldr_uo(X64, x0, sp, (from.0 + i) as i64));
@@ -172,16 +171,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(str_uo(X64, x0, sp, (to.first.0 + i) as i64));
                     }
                 }
-                Bc::SlicePtr {
-                    base,
-                    offset,
-                    count,
-                    ret,
-                } => todo!(),
-                Bc::Load { from, to } => todo!(),
-                Bc::TagCheck { enum_ptr, value } => todo!(),
-                Bc::Store { to, from } => todo!(),
-                Bc::CallC { f, arg, ret, ty } => todo!(),
+                Bc::SlicePtr { .. } => todo!(),
+                Bc::Load { .. } => todo!(),
+                Bc::TagCheck { .. } => todo!(),
+                Bc::Store { .. } => todo!(),
+                Bc::CallC { .. } => todo!(),
             }
         }
         Ok(())

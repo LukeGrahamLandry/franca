@@ -10,7 +10,6 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem;
 use std::ops::DerefMut;
-use std::ptr::null;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
@@ -2586,7 +2585,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(())
     }
     
-    fn jit(&mut self, f: FuncId) -> Res<'p, ()> {
+    fn jit(&mut self, _f: FuncId) -> Res<'p, ()> {
+        todo!()
         // outln!(LogTag::Jitted, "Try Jit {f:?}");
         // let bc = self.executor.get_bc(f);
         // if bc.is_none() {
@@ -2624,7 +2624,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         // }
         // self.jitted[f.0] = map.1;
         // Ok(())
-        todo!()
     }
 }
 

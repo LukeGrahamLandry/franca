@@ -895,7 +895,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             .unwrap()
             .as_ref()
             .unwrap();
-        // self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
+        self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
     }
 
     fn current_fn_body(&self) -> &FnBody {

@@ -663,7 +663,6 @@ impl<'p> Program<'p> {
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
         init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
-        init_interp_send!(&mut program, FnBody);
         program.get_rs_type(SuperSimple::get_ty());
 
         program
