@@ -3,6 +3,7 @@
 //! Uses the interpreter for comptime evalutation (build scripts, generics, macros, etc).
 
 #![allow(clippy::wrong_self_convention)]
+
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
@@ -70,6 +71,7 @@ pub struct Compile<'a, 'p, Exec: Executor<'p>> {
     pub executor: Exec,
     pub program: &'a mut Program<'p>,
     pub jitted: Vec<*const u8>,
+    pub save_bootstrap: Vec<FuncId>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +113,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             program,
             executor,
             jitted: vec![],
+            save_bootstrap: vec![],
         }
     }
 
@@ -359,16 +362,36 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 if *name == self.pool.intern("asm") {
                     let src = arg.log(self.pool);
                     let asm_ty = Vec::<u32>::get_type(self.program);
-                    let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
-                    let ops = unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "");
+                    let ops = if let Expr::Tuple(parts) = arg.deref_mut().deref_mut() {
+                        let ops: Res<'p, Vec<u32>> = parts.iter().map(|op| {
+                            if let Ok((ty, val)) = bit_literal(op, self.pool) {
+                                assert_eq!(ty.bit_count, 32);
+                                Ok(val as u32)
+                            } else {
+                                err!("not int",)
+                            }
+                        }).collect();
+                        // if let Ok(ops) = ops {
+                        //     ops
+                        // } else {
+                        //     let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
+                        //     unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+                        // }
+                            ops?
+                    } else {
+                        let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
+                        unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+                    };
                     outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");
                     for op in &ops {
-                        outln!(LogTag::Jitted, "{op}");
+                        outln!(LogTag::Jitted, "{op:#05x}");
                     }
                     outln!(LogTag::Jitted, "\n=======");
                     let map = builtins::copy_to_mmap_exec(ops.into());
                     let value = Value::CFnPtr { ptr: map.1 as usize, ty: fn_ty };
-                    Box::leak(map.0.into()); // TODO: dont leak
+                        let map = map.0.to_box();
+                    let map = Box::leak(map); // TODO: dont leak
+                    self.program.funcs[f.0].jitted_code = Some(map.to_vec());
                     self.program.funcs[f.0].jitted_asm = Some(value);
                     let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty));
                     return Ok((None, Structured::RuntimeOnly(ret_ty)));
@@ -775,10 +798,19 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
-                let func = mem::take(func);
+                let mut func = mem::take(func);
                 let var = func.var_name;
+                let for_bootstrap = func.has_tag(self.pool, "bs");
+                if for_bootstrap {
+                    func.referencable_name = false;
+                }
+
                 let id = self.add_func(func, &result.constants)?;
                 *stmt.deref_mut() = Stmt::DoneDeclFunc(id);
+
+                if for_bootstrap {
+                    self.save_bootstrap.push(id);
+                }
 
                 // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
                 // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
@@ -2650,6 +2682,28 @@ fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
         return true;
     }
     false
+}
+
+fn bit_literal<'p>(expr: &FatExpr<'p>, pool: &StringPool<'p>) -> Res<'p, (IntType, i64)> {
+    if let Expr::Call(f, arg) = &expr.expr {
+        if let Some(name) = f.as_ident() {
+            if name == pool.intern("from_bit_literal") {
+                if let Expr::Tuple(parts) = arg.deref().deref() {
+                    if let Expr::Value { value, .. } = parts[0].deref() {
+                        let bit_count = value.clone().single()?.to_int()?;
+                        if let Expr::Value { value, .. } = parts[1].deref() {
+                            let val = value.clone().single()?.to_int()?;
+                            return Ok((IntType {
+                                bit_count,
+                                signed: false,
+                            }, val));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    err!("not int",)
 }
 
 pub trait Executor<'p>: PoolLog<'p> {

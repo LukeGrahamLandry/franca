@@ -14,12 +14,12 @@ use crate::{ast::Program, bc::FnBody};
 
 use super::builtins;
 
-struct BcToAsm<'z, 'a, 'p> {
-    program: &'z Program<'p>,
-    interp: &'z Interp<'a, 'p>,
-    ready: Vec<*const u8>,
-    mmaps: Vec<Option<Box<memmap2::Mmap>>>,
-    asm: Vec<i64>,
+pub struct BcToAsm<'z, 'a, 'p> {
+    pub program: &'z Program<'p>,
+    pub interp: &'z Interp<'a, 'p>,
+    pub ready: Vec<*const u8>,
+    pub mmaps: Vec<Option<Box<memmap2::Mmap>>>,
+    pub asm: Vec<i64>,
 }
 
 const x0: i64 = 0;
@@ -59,6 +59,13 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         for c in callees {
             self.compile(c)?;
         }
+
+        let func = &self.program.funcs[f.0];
+        if let Some(Value::CFnPtr { ptr, .. }) = func.jitted_asm {
+            self.ready[f.0] = ptr as *const u8;
+            return Ok(())
+        }
+
         self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
         let ops: Vec<u32> = mem::take(&mut self.asm)
             .into_iter()

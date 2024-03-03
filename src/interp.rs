@@ -453,14 +453,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let result = range.iter().all(|v| v == &Value::Poison);
                 Value::Bool(result).into()
             }
-            "raw_len" => match arg {
-                Values::One(Value::InterpAbsStackAddr(addr)) => Value::I64(addr.count as i64),
-                Values::One(Value::Heap { physical_count, .. }) => {
-                    Value::I64(physical_count as i64)
-                }
-                _ => err!("Wanted ptr found {:?}", arg),
-            }
-            .into(),
             "size_of" => {
                 let ty = program.to_type(arg)?;
                 let stride = self.size_of(program, ty);
@@ -590,8 +582,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // println!("=> {}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
-            "add" => bin_int!(self, +, arg, Value::I64),
-            "sub" => bin_int!(self, -, arg, Value::I64),
+            // "add" => bin_int!(self, +, arg, Value::I64),
+            // "sub" => bin_int!(self, -, arg, Value::I64),
             "mul" => bin_int!(self, *, arg, Value::I64),
             "div" => bin_int!(self, /, arg, Value::I64),
             "eq" => bin_int!(self, ==, arg, Value::Bool),
@@ -613,7 +605,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         program.log_type(ty)
                     );
                 }
-                print!("Ty: {:?}", arg);
+                // print!("Ty: {:?}", arg);
                 let ty = program.to_type(arg)?;
                 // println!(" => {:?}", self.program.log_type(ty));
                 Value::Type(ty).into()

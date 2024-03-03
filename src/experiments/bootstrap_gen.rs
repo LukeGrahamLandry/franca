@@ -149,5 +149,14 @@ pub fn br(addr: i64, set_link: i64, ) -> i64 {
     bit_or_Ty385Ty4(bit_or_Ty385Ty4(bit_or_Ty385Ty4(bit_or_Ty385Ty4(bit_or_Ty385Ty4(0, shift_left_Ty385Ty4(856, 22)), shift_left_Ty385Ty4(set_link, 21)), shift_left_Ty385Ty4(1984, 10)), shift_left_Ty385Ty4(addr, 5)), shift_left_Ty385Ty4(0, 0))
 }
 
+pub const BOOTSTRAP: &str = r###"
 
+@c_call fn add(a: i64, b: i64, ) i64 = (
+    0x8b000020, 0xd65f03c0,
+)!asm;
 
+@c_call fn sub(a: i64, b: i64, ) i64 = (
+    0xcb010000, 0xd65f03c0,
+)!asm;
+
+"###;

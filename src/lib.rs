@@ -1,9 +1,12 @@
 #![feature(allocator_api)]
 #![feature(const_refs_to_cell)]
 #![feature(ptr_metadata)]
+#![feature(iter_array_chunks)]
 
 // bro if you can tell you could compile it more efficiently why dont you just compile it more efficiently 
 #![allow(clippy::format_collect)]
+
+extern crate core;
 
 use std::fs;
 
@@ -38,6 +41,7 @@ pub mod experiments;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
+use crate::experiments::bootstrap_gen::BOOTSTRAP;
 
 macro_rules! stdlib {
     ($name:expr) => {
@@ -50,12 +54,15 @@ macro_rules! stdlib {
 
 // TODO: modules! This should be a thing defined in the language. Don't just jam everything on the front of every program. 
 static LIB: &[(&str, &str)] = &[
+    stdlib!("core"),
+    ("bootstrapped", BOOTSTRAP),
     stdlib!("interp"), 
     stdlib!("collections"), 
     stdlib!("system"), 
     stdlib!("ast"), 
     stdlib!("macros"), 
     stdlib!("codegen/aarch64/instructions"),
+    stdlib!("codegen/aarch64/basic"),
 ];
 
 macro_rules! test_file {

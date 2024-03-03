@@ -151,7 +151,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
             //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
             //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
-            assert!(func.referencable_name, "fn no body needs name");
+
             if let Some(Value::CFnPtr { ptr, ty }) = func.jitted_asm {
                 let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
                 let f = result.load_constant(self, Values::One(Value::I64(ptr as i64)), ptr_ty)?;
@@ -162,6 +162,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     ty,
                 });
             } else {
+                assert!(func.referencable_name, "fn no body needs name");
                 result.push(Bc::CallBuiltin {
                     name: func.name,
                     ret,

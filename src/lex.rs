@@ -327,9 +327,16 @@ impl<'a, 'p> Lexer<'a, 'p> {
                     value *= 16;
                     value += self.pop() as u128 - 'A' as u128 + 10;
                 }
+                'a'..='f' => {
+                    if bit_count == 128 {
+                        return self.err(LexErr::TooManyBits);
+                    }
+                    value *= 16;
+                    value += self.pop() as u128 - 'a' as u128 + 10;
+                }
                 _ => break,
             }
-            bit_count += 5;
+            bit_count += 4;
         }
 
         self.token(

@@ -39,7 +39,54 @@ pub fn bootstrap() -> String {
     let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
     comp.add_declarations(global).unwrap();
 
-    EmitRs::emit_rs(comp).unwrap()
+    let (mut rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
+
+    let bs = comp.save_bootstrap.clone();
+    for f in &bs {
+        comp.compile(*f, ExecTime::Runtime).unwrap();
+    }
+    let mut asm = crate::experiments::bc_to_asm::BcToAsm {
+        interp: &comp.executor,
+        program: &mut program,
+        ready: vec![],
+        asm: vec![],
+        mmaps: vec![],
+    };
+    for f in &bs {
+        asm.compile(*f).unwrap();
+    }
+
+    let symbol_bs = pool.intern("bs");
+    rs += "pub const BOOTSTRAP: &str = r###\"\n";
+    for f in &bs {
+        let bytes: &[u8] = if let Some(map) = asm.mmaps[f.0].as_ref() {
+            map.as_ref()
+        } else {
+            asm.program.funcs[f.0].jitted_code.as_ref().unwrap()
+        };
+
+        let annotations: String = asm.program.funcs[f.0]
+            .annotations
+            .iter()
+            .filter(|a| a.name != symbol_bs)
+            .map(|a| {
+                assert!(a.args.is_none(), "TODO: args");
+                format!("@{}", pool.get(a.name))
+            })
+            .collect();
+
+        let sig = pool.get(asm.program.sig_str(*f).unwrap());
+        let bytes: String = bytes
+            .iter()
+            .copied()
+            .array_chunks::<4>()
+            .map(|b| format!("{:#05x}, ", u32::from_le_bytes(b)))
+            .collect();
+        rs += &format!("\n{annotations} {sig} = (\n    {bytes}\n)!asm;\n")
+    }
+    rs += "\"###;";
+
+    rs
 }
 
 pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
@@ -51,7 +98,7 @@ pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
 }
 
 impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
-    pub fn emit_rs(e: Compile<'z, 'p, Exec>) -> Res<'p, String> {
+    pub fn emit_rs(e: Compile<'z, 'p, Exec>) -> Res<'p, (String, Compile<'z, 'p, Exec>)> {
         let mut emit = EmitRs::new(e);
 
         for f in 0..emit.comp.program.funcs.len() {
@@ -78,7 +125,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         #![allow(clippy::explicit_auto_deref)]
         #![allow(clippy::deref_addrof)]"##;
 
-        Ok(format!("{hush}\n\n{constants}\n\n{functions}\n"))
+        Ok((format!("{hush}\n\n{constants}\n\n{functions}\n"), emit.comp))
     }
 
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {

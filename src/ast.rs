@@ -464,6 +464,8 @@ pub struct Func<'p> {
 
     #[cfg(target_arch = "aarch64")]
     pub jitted_asm: Option<Value>,
+    #[cfg(target_arch = "aarch64")]
+    pub jitted_code: Option<Vec<u8>>,
 }
 
 impl<'p> Func<'p> {
@@ -494,6 +496,8 @@ impl<'p> Func<'p> {
             wip: None,
             #[cfg(target_arch = "aarch64")]
             jitted_asm: None,
+            #[cfg(target_arch = "aarch64")]
+            jitted_code: None,
         }
     }
 
@@ -741,6 +745,26 @@ impl<'p> Program<'p> {
                 TypeInfo::Unique(named, (id & usize::max_value() as u128) as usize);
             ty_final
         })
+    }
+
+    pub fn sig_str(&self, f: FuncId) -> Res<'p, Ident<'p>> {
+        let func = &self.funcs[f.0];
+
+        let args: String = func
+            .arg
+            .flatten()
+            .iter()
+            .map(|(name, ty)| {
+                format!(
+                    "{}: {}, ",
+                    name.map(|n| self.pool.get(n.0)).unwrap_or("_"),
+                    self.log_type(*ty)
+                )
+            })
+            .collect();
+        let ret = self.log_type(func.ret.unwrap());
+        let out = format!("fn {}({args}) {ret}", self.pool.get(func.name));
+        Ok(self.pool.intern(&out))
     }
 
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
@@ -1160,6 +1184,8 @@ impl<'p> Default for Func<'p> {
 
             #[cfg(target_arch = "aarch64")]
             jitted_asm: None,
+            #[cfg(target_arch = "aarch64")]
+            jitted_code: None,
         }
     }
 }
