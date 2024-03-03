@@ -15,7 +15,22 @@ right now it just always skips those options unless someone else somehow caused 
 Or for now just... don't have inferred returns in generic impls. 
 But it does work, infer_types_progress no longer lies and says "we do definitely know the type, its Any!" 
 
-The other popular place that uses Any is assert_eq. 
+The other popular place that uses Any is assert_eq.
+But changing it to have a bunch of overloads breaks some places that can't infer which to call. 
+- one was my weird generics test where I was treating a tuple of types as a tuple of ints: just fix the test. 
+- !tag: easy, Ptr(i64) for now
+- `assert_eq(no.None[], unit);`, I guess that should be legal, it's an easy answer. 
+- @At macros, i guess you really need to expand them to get the type. but now we're going deeper into the territory of type_of
+  being the same as compile_expr. which really it already was, so maybe I should just stop pretending they're different things.
+  That leads to a wierd thing of do you decide which function you're calling before or after you compile the arguments. 
+  And I guess its just try one then the other and if you can't figure it out it's an error. Maybe that's fine. 
+- bit_literal. painfully special cased because I already have the function for that since its type is right there and
+  I don't want to commit to doing the comptime call right away.
+- `assert_eq(0b101, 5);` right so I guess I should lie and say i64 is the type because I don't want to deal with 
+  real subtyping or assert_eq for all eq and eq for all ints yet. 
+  and it doesnt break the bit length checking for the assembler functions so seems fine for now. 
+- `assert_eq(25, (fn(u: Unit) i64 = { 25 })(unit));`. Have to actually look through the function expr and try to see its type. 
+   Again that's unfortunate because that might mean really compiling it so would be nicer if type-checking were defined that way. 
 
 ## quest for an assembler friendly language (Feb 27)
 

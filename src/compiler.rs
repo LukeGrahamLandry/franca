@@ -840,7 +840,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
     fn maybe_direct_fn(
         &mut self,
-        result: &FnWip<'p>,
+        result: &mut FnWip<'p>,
         f: &mut FatExpr<'p>,
         arg: &mut FatExpr<'p>,
         ret: Option<TypeId>,
@@ -1368,7 +1368,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         })
     }
 
-    fn handle_macro_msg(&mut self, result: &FnWip<'p>, name: &str, arg: Values) -> Res<'p, Values> {
+    fn handle_macro_msg(&mut self, result: &mut FnWip<'p>, name: &str, arg: Values) -> Res<'p, Values> {
         match name {
             "infer_raw_deref_type" => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
@@ -1492,7 +1492,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     // TODO: better error messages
     fn resolve_function(
         &mut self,
-        result: &FnWip<'p>,
+        result: &mut FnWip<'p>,
         name: Var<'p>,
         arg: &mut FatExpr<'p>,
         mut requested_ret: Option<TypeId>,
@@ -1665,14 +1665,24 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     //       then need to be more careful about what gets put in the result
     //       cause like for blocks too, it would be nice to infer a function's return type by just compiling
     //       the function and seeing what you get.
-    fn type_of(&mut self, result: &FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+    fn type_of(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if !expr.ty.is_unknown() {
             return Ok(Some(expr.ty));
+        }
+        // TODO: this is unfortunate
+        if let Ok((_, _)) = bit_literal(expr, self.pool) {
+            return Ok(Some(TypeId::i64()))  // self.program.intern_type(TypeInfo::Int(int)) but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
+
+                if let Some(id) = f.as_fn() {
+                    return Ok(self.program.funcs[id.0].finished_ret);
+                }
+
+
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if let Some(ty) = result.vars.get(i) {
                         if let TypeInfo::FnPtr(f_ty) = self.program.types[ty.0] {
@@ -1685,7 +1695,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             return Ok(Some(f_ty.ret));
                         }
                     }
+                } else if let Ok(Some(ty)) = self.type_of(result, f) {
+                    return Ok(Some(self.program.fn_ty(ty).unwrap().ret));
                 }
+
                 return Ok(None);
             }
             Expr::Block { result: e, .. } => return self.type_of(result, e),
@@ -1714,12 +1727,20 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     ice!("TODO: closure inference failed. need to make promote_closure non-destructive")
                 }
             }
+            Expr::PrefixMacro { .. } => {
+                // TODO: if this fails you might have changed the state.
+                if let Ok(res) = self.compile_expr(result, expr, None) {
+                    res.ty()
+                } else {
+                    ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?")
+                }
+            }
             Expr::GetNamed(_)
             | Expr::StructLiteralP(_)
             | Expr::ArrayLiteral(_)
             | Expr::RefType(_)
             | Expr::EnumLiteral(_)
-            | Expr::PrefixMacro { .. } => return Ok(None),
+             => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1750,6 +1771,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         return Ok(None);
                     }
                     "symbol" => Ident::get_type(self.program),
+                    "tag" => self.program.ptr_type(TypeId::i64()),
                     _ => return Ok(None),
                 }
             }
