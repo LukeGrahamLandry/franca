@@ -20,7 +20,7 @@ use crate::pool::StringPool;
 use crate::scope::ResolveScope;
 use crate::{bc::*, emit_diagnostic, make_toplevel, LIB};
 
-pub fn bootstrap() -> String {
+pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
     let mut codemap = CodeMap::new();
     let mut stmts = Vec::<FatStmt>::new();
@@ -57,7 +57,7 @@ pub fn bootstrap() -> String {
     }
 
     let symbol_bs = pool.intern("bs");
-    rs += "pub const BOOTSTRAP: &str = r###\"\n";
+    let mut fr = String::new();
     for f in &bs {
         let bytes: &[u8] = if let Some(map) = asm.mmaps[f.0].as_ref() {
             map.as_ref()
@@ -82,11 +82,10 @@ pub fn bootstrap() -> String {
             .array_chunks::<4>()
             .map(|b| format!("{:#05x}, ", u32::from_le_bytes(b)))
             .collect();
-        rs += &format!("\n{annotations} {sig} = (\n    {bytes}\n)!asm;\n")
+        fr += &format!("\n{annotations} {sig} = (\n    {bytes}\n)!asm;\n")
     }
-    rs += "\"###;";
 
-    rs
+    (rs, fr)
 }
 
 pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
@@ -96,6 +95,27 @@ pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
     global_constants: HashMap<Var<'p>, (TypeId, String)>,
     func: Option<FuncId>,
 }
+
+const HEADER: &str =r##"
+#![allow(non_snake_case)]
+#![allow(unused)]
+#![allow(non_upper_case_globals)]
+#![allow(clippy::no_effect)]
+#![allow(clippy::explicit_auto_deref)]
+#![allow(clippy::deref_addrof)]
+
+struct ShiftTy {
+    LSL: i64,
+    LSR: i64,
+    ASR: i64
+}
+
+const Shift: &ShiftTy = &ShiftTy {
+    LSL: 0b00,
+    LSR: 0b01,
+    ASR: 0b10,
+};
+"##;
 
 impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
     pub fn emit_rs(e: Compile<'z, 'p, Exec>) -> Res<'p, (String, Compile<'z, 'p, Exec>)> {
@@ -118,14 +138,8 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             })
             .collect();
         let functions: String = emit.ready.into_iter().flatten().collect();
-        let hush = r##"#![allow(non_snake_case)]
-        #![allow(unused)]
-        #![allow(non_upper_case_globals)]
-        #![allow(clippy::no_effect)]
-        #![allow(clippy::explicit_auto_deref)]
-        #![allow(clippy::deref_addrof)]"##;
 
-        Ok((format!("{hush}\n\n{constants}\n\n{functions}\n"), emit.comp))
+        Ok((format!("{HEADER}\n\n{constants}\n\n{functions}\n"), emit.comp))
     }
 
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {

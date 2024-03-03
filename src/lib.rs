@@ -41,7 +41,6 @@ pub mod experiments;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
-use crate::experiments::bootstrap_gen::BOOTSTRAP;
 
 macro_rules! stdlib {
     ($name:expr) => {
@@ -55,7 +54,7 @@ macro_rules! stdlib {
 // TODO: modules! This should be a thing defined in the language. Don't just jam everything on the front of every program. 
 static LIB: &[(&str, &str)] = &[
     stdlib!("core"),
-    ("bootstrapped", BOOTSTRAP),
+    stdlib!("codegen/aarch64/basic.gen"),
     stdlib!("interp"), 
     stdlib!("collections"), 
     stdlib!("system"), 

@@ -11,7 +11,9 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     if let Some(name) = env::args().nth(1) {
         if name == "bootstrap" {
-            println!("{}", bootstrap());
+            let (rs, fr) = bootstrap();
+            fs::write("target/bootstrap_gen.rs", rs).unwrap();
+            fs::write("target/aarch64_basic.gen.txt", fr).unwrap();
             return;
         }
 

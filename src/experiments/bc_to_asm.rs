@@ -4,8 +4,8 @@
 use std::mem;
 use std::ptr::null;
 
-use crate::ast::{FuncId, TypeId};
-use crate::bc::{Bc, Value};
+use crate::ast::{FnType, FuncId, TypeId};
+use crate::bc::{Bc, StackRange, Value};
 use crate::compiler::Res;
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
@@ -106,21 +106,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
                     if target_c_call {
-                        assert!(
-                            arg.count <= 7,
-                            "indirect c_call only supports 7 arguments. TODO: pass on stack"
-                        );
-                        for i in 0..arg.count {
-                            self.asm
-                                .push(ldr_uo(X64, i as i64, sp, (arg.first.0 + i) as i64));
-                        }
                         assert!(f.0 < 512);
                         self.asm.push(ldr_uo(X64, x7, x21, f.0 as i64));
-                        // this symptom of not resetting sp is you get a stack overflow which is odd.
-                        // maybe it keeps calling me in a loop because rust loses where it put its link register.
-                        self.asm.push(br(x7, 1));
-                        assert_eq!(ret.count, 1);
-                        self.asm.push(str_uo(X64, x0, sp, ret.first.0 as i64));
+                        self.dyn_c_call(x7, *arg, *ret, target.unwrap_ty());
                     } else {
                         todo!()
                     }
@@ -129,6 +117,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::LoadConstant { slot, value } => match value {
                     Value::F64(_) => todo!(),
                     Value::I64(n) => {
+                        assert!(*n < 4096);
                         self.asm.push(movz(X64, x0, *n, 0));
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
@@ -182,10 +171,29 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::Load { .. } => todo!(),
                 Bc::TagCheck { .. } => todo!(),
                 Bc::Store { .. } => todo!(),
-                Bc::CallC { .. } => todo!(),
+                Bc::CallC { f, arg, ret, ty } => {
+                    self.asm.push(ldr_uo(X64, x7, sp, f.0 as i64));
+                    self.dyn_c_call(x7, *arg, *ret, *ty);
+                },
             }
         }
         Ok(())
+    }
+
+    fn dyn_c_call(&mut self, f_addr_reg: i64, arg: StackRange, ret: StackRange, _: FnType) {
+        assert!(
+            arg.count <= 7,
+            "indirect c_call only supports 7 arguments. TODO: pass on stack"
+        );
+        for i in 0..arg.count {
+            self.asm
+                .push(ldr_uo(X64, i as i64, sp, (arg.first.0 + i) as i64));
+        }
+        // this symptom of not resetting sp is you get a stack overflow which is odd.
+        // maybe it keeps calling me in a loop because rust loses where it put its link register.
+        self.asm.push(br(f_addr_reg, 1));
+        assert_eq!(ret.count, 1);
+        self.asm.push(str_uo(X64, x0, sp, ret.first.0 as i64));
     }
 }
 
@@ -193,16 +201,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 #[cfg(target_arch = "aarch64")]
 mod tests {
     use super::{BcToAsm, Value};
-    use crate::{
-        ast::{garbage_loc, FatStmt, Program},
-        compiler::{Compile, ExecTime, Res},
-        interp::Interp,
-        logging::{err, ice, unwrap},
-        make_toplevel,
-        parse::Parser,
-        pool::StringPool,
-        scope::ResolveScope,
-    };
+    use crate::{ast::{garbage_loc, FatStmt, Program}, compiler::{Compile, ExecTime, Res}, interp::Interp, LIB, logging::{err, ice, unwrap}, make_toplevel, parse::Parser, pool::StringPool, scope::ResolveScope};
     use codemap::CodeMap;
     use std::{arch::asm, mem::transmute};
 
@@ -210,7 +209,10 @@ mod tests {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut codemap = CodeMap::new();
         let file = codemap.add_file("main_file".into(), src.to_string());
-        let stmts = Parser::parse(file.clone(), pool).unwrap();
+        let mut stmts = Parser::parse(file.clone(), pool).unwrap();
+        stmts.extend(Parser::parse(codemap.add_file(LIB[0].0.to_string(), LIB[0].1.to_string()), pool).unwrap());
+        stmts.extend(Parser::parse(codemap.add_file(LIB[1].0.to_string(), LIB[1].1.to_string()), pool).unwrap());
+
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
         let mut program = Program::new(vars, pool);
@@ -246,7 +248,7 @@ mod tests {
 
     #[test]
     fn trivial() {
-        jit_main("const i64; @c_call fn main() i64 = { 42 }", |f| {
+        jit_main("@c_call fn main() i64 = { 42 }", |f| {
             let ret: i64 = f(());
             assert_eq!(ret, 42);
         })
@@ -256,7 +258,7 @@ mod tests {
     #[test]
     fn trivial_indirect() {
         jit_main(
-            "const i64; @c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }",
+            "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }",
             |f| {
                 let ret: i64 = f(());
                 assert_eq!(ret, 42);
@@ -264,4 +266,19 @@ mod tests {
         )
         .unwrap();
     }
+
+    // doesnt work because i cant encode big enough constants for the address. need to use a few movk
+    /*
+    #[test]
+    fn math() {
+        jit_main(
+            "@c_call fn main(a: i64) i64 = { add(a, 15) }",
+            |f| {
+                let ret: i64 = f(5);
+                assert_eq!(ret, 20);
+            },
+        )
+            .unwrap();
+    }
+    */
 }

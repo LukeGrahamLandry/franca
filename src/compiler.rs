@@ -371,13 +371,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 err!("not int",)
                             }
                         }).collect();
-                        // if let Ok(ops) = ops {
-                        //     ops
-                        // } else {
-                        //     let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
-                        //     unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
-                        // }
-                            ops?
+                        if let Ok(ops) = ops {
+                            ops
+                        } else {
+                            let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
+                            unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+                        }
                     } else {
                         let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
                         unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
@@ -1425,25 +1424,14 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             "get_type_int" => {
                 let mut arg: FatExpr = unwrap!(arg.deserialize(), "");
                 match arg.deref() {
-                    Expr::Call(f, arg) => {
-                        if let Some(name) = f.as_ident() {
-                            if name == self.pool.intern("from_bit_literal") {
-                                if let Expr::Tuple(parts) = arg.deref().deref() {
-                                    if let Expr::Value { value, .. } = parts[0].deref() {
-                                        let bit_count = value.clone().single()?.to_int()?;
-                                        return Ok(IntType {
-                                            bit_count,
-                                            signed: false,
-                                        }.serialize_one());
-                                    }
-                                }
-                            }
+                    Expr::Call(_, _) => {
+                        if let Ok((int, _)) = bit_literal(&arg, self.pool) {
+                            return Ok(int.serialize_one())
                         }
                     },
                     Expr::Value { .. } => err!("todo",),
                     _ => {
                         let ty = unwrap!(self.type_of(result, &mut arg)?,"");
-                        // println!("{} = {}", arg.log(self.pool), self.program.log_type(ty));
                         let ty = self.program.raw_type(ty);
                         if let TypeInfo::Int(int) = self.program.types[ty.0] {
                             return Ok(int.serialize_one());
