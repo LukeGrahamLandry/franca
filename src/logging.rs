@@ -504,6 +504,7 @@ fn collect_func_references<'p>(
         Expr::StructLiteralP(_) => {}
         Expr::ArrayLiteral(_)
         | Expr::GetNamed(_)
+        | Expr::WipFunc(_)
         | Expr::RefType(_)
         | Expr::EnumLiteral(_)
         | Expr::PrefixMacro { .. }

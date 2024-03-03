@@ -38,6 +38,10 @@ impl TypeId {
         self.0 == 1
     }
 
+    pub fn is_never(&self) -> bool {
+        *self == Self::never()
+    }
+
     // Be careful that this is in the pool correctly!
     pub fn unknown() -> TypeId {
         TypeId(0)
@@ -72,6 +76,11 @@ impl TypeId {
     // Be careful that this is in the pool correctly!
     pub fn void_ptr() -> TypeId {
         TypeId(6)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn never() -> TypeId {
+        TypeId(7)
     }
 }
 
@@ -138,6 +147,7 @@ pub enum Expr<'p> {
         ty: TypeId,
         value: Values,
     },
+    WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
         body: Vec<FatStmt<'p>>,
@@ -457,7 +467,8 @@ pub struct Func<'p> {
     pub loc: Span,
     pub capture_vars_const: Vec<Var<'p>>,
     pub closed_constants: Constants<'p>,
-    pub finished_type: Option<FnType>,
+    pub finished_arg: Option<TypeId>,
+    pub finished_ret: Option<TypeId>,
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub wip: Option<FnWip<'p>>,
     pub evil_uninit: bool,
@@ -490,7 +501,8 @@ impl<'p> Func<'p> {
             closed_constants: Constants::empty(),
             capture_vars_const: vec![],
             var_name: None,
-            finished_type: None,
+            finished_arg: None,
+            finished_ret: None,
             referencable_name: has_name,
             evil_uninit: false,
             wip: None,
@@ -519,7 +531,10 @@ impl<'p> Func<'p> {
 
     #[track_caller]
     pub fn unwrap_ty(&self) -> FnType {
-        self.finished_type.expect("fn type infered")
+        FnType {
+            arg: self.finished_arg.expect("fn type"),
+            ret: self.finished_ret.expect("fn type"),
+        }
     }
 
     pub fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {
@@ -598,10 +613,15 @@ impl<'p> Stmt<'p> {
 
 // TODO: print actual type info
 impl<'p> LazyType<'p> {
+    #[track_caller]
     pub fn unwrap(&self) -> TypeId {
+        self.ty().unwrap()
+    }
+
+    pub fn ty(&self) -> Option<TypeId> {
         match self {
-            LazyType::Finished(ty) => *ty,
-            _ => panic!("Type not ready: {:?}", self),
+            LazyType::Finished(ty) => Some(*ty),
+            _ => None,
         }
     }
 }
@@ -651,9 +671,9 @@ impl<'p> Program<'p> {
                 }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
-                TypeInfo::F64,
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
-            ],
+                TypeInfo::F64,
+               ],
             declarations: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
@@ -1132,7 +1152,7 @@ impl<'p> Expr<'p> {
             &Expr::Value {
                 value: Values::One(Value::GetFn(f)),
                 ..
-            } => Some(f),
+            } | &Expr::WipFunc(f) => Some(f),
             _ => None,
         }
     }
@@ -1177,7 +1197,8 @@ impl<'p> Default for Func<'p> {
             loc: garbage_loc(),
             capture_vars_const: vec![],
             closed_constants: Default::default(),
-            finished_type: None,
+            finished_arg: None,
+            finished_ret: None,
             referencable_name: false,
             evil_uninit: true,
             wip: None,
@@ -1234,6 +1255,7 @@ impl<'p> Expr<'p> {
                 arg.walk(f);
                 target.walk(f);
             }
+            Expr::WipFunc(_) |
             Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) | Expr::GetVar(_) => {}
         }
     }

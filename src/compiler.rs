@@ -288,20 +288,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         self.push_state(&state);
         self.eval_and_close_local_constants(f)?;
 
-        logln!(
-            "Start JIT: {:?} \n{}",
-            f,
-            self.program.funcs[f.0].log(self.pool)
-        );
         self.infer_types(f)?;
         let func = &self.program.funcs[f.0];
-        let f_ty = func.unwrap_ty();
         let mut result = self.empty_fn(when, f, func.loc, None);
-        let ret = self.emit_body(&mut result, f)?;
-        self.type_check_arg(ret.ty(), f_ty.ret, "fn ret")?;
-        let func = &mut self.program.funcs[f.0];
-        func.wip = Some(result);
-        logln!("Done JIT: {:?} {}", f, func.synth_name(self.pool));
+        self.emit_body(&mut result, f)?;
+        self.program.funcs[f.0].wip = Some(result);
         self.pop_state(state);
         Ok(())
     }
@@ -349,9 +340,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             self.pop_state(state);
             return Ok(ret);
         }
-        
-        let fn_ty = self.program.funcs[f.0].unwrap_ty();
-        let ret_ty = fn_ty.ret;
+
         let ret_val = mut_replace!(self.program.funcs[f.0].body, |mut body: Option<
             FatExpr<'p>,
         >| {
@@ -360,6 +349,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             #[cfg(target_arch = "aarch64")]
             if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
                 if *name == self.pool.intern("asm") {
+                    let fn_ty = self.program.funcs[f.0].unwrap_ty();
+                    let ret_ty = fn_ty.ret;
+
                     let src = arg.log(self.pool);
                     let asm_ty = Vec::<u32>::get_type(self.program);
                     let ops = if let Expr::Tuple(parts) = arg.deref_mut().deref_mut() {
@@ -397,13 +389,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 }
             }
             
-            let hint = if ret_ty.is_any() { None } else { Some(ret_ty) };
+            let hint = self.program.funcs[f.0].finished_ret;
             let res = self.compile_expr(result, body_expr, hint)?;
+            if self.program.funcs[f.0].finished_ret.is_none() {
+                // assert_eq!(self.program.funcs[f.0].ret, LazyType::Infer);
+                self.program.funcs[f.0].finished_ret = Some(res.ty());
+                self.program.funcs[f.0].ret = LazyType::Finished(res.ty());
+            }
             Ok((body, res))
         });
 
         let func = &self.program.funcs[f.0];
-        self.type_check_arg(ret_val.ty(), func.ret.unwrap(), "bad return value")?;
+        self.type_check_arg(ret_val.ty(), func.finished_ret.unwrap(), "bad return value")?;
         self.pop_state(state);
         Ok(ret_val)
     }
@@ -415,8 +412,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         f: FuncId,
         arg_expr: &mut FatExpr<'p>,
     ) -> Res<'p, Structured> {
-        let f_ty = self.program.funcs[f.0].unwrap_ty();
-        self.compile_expr(result, arg_expr, Some(f_ty.arg))?;
+        let arg_ty = unwrap!(self.program.funcs[f.0].finished_arg, "fn arg");
+        self.compile_expr(result, arg_expr, Some(arg_ty))?;
 
         // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
         let func = &self.program.funcs[f.0];
@@ -427,7 +424,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         assert!(!force_inline);
         add_unique(&mut result.callees, f);
         self.ensure_compiled(f, result.when)?;
-        Ok(Structured::RuntimeOnly(f_ty.ret))
+        let ret_ty = unwrap!(self.program.funcs[f.0].finished_ret, "fn ret");
+        Ok(Structured::RuntimeOnly(ret_ty))
     }
 
     // Replace a call expr with the body of the target function. 
@@ -491,8 +489,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         
         expr_out.expr = new_expr;
         self.currently_inlining.retain(|check| *check != f);
-        let f_ty = func.unwrap_ty();
-        let res = self.compile_expr(result, expr_out, Some(f_ty.ret))?;
+
+        let hint = func.finished_ret;
+        let res = self.compile_expr(result, expr_out, hint)?;
+        if hint.is_none() {
+            self.program.funcs[f.0].finished_ret = Some(res.ty());
+        }
         self.pop_state(state);
         Ok(res)
     }
@@ -527,8 +529,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             .insert(arg_name, (arg_value, arg_ty));
         new_func.arg.remove_named(arg_name);
 
-        let known_type = new_func.finished_type.is_some();
-        new_func.finished_type = None;
+        let known_type = new_func.finished_arg.is_some();
+        new_func.finished_arg = None;
         let f_id = self.program.add_func(new_func);
         // If it was fully resolved before, we can't leave the wrong answer there.
         // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
@@ -607,9 +609,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             return Ok(found.clone());
         }
 
-        let arg_ty = self.program.type_of_raw(&arg_value);
-        // TODO: self.type_check_arg(arg_ty, arg, "bad comtime arg")?;
-
         // Bind the arg into my new constants so the ret calculation can use it.
         // also the body constants for generics need this. much cleanup pls.
         // TODO: factor out from normal functions?
@@ -634,30 +633,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
         assert!(arg_values.next().is_none(), "ICE: unused arguments");
 
-        let ret = mut_replace!(
-            self.program.funcs[f.0].closed_constants,
-            |constants| {
-                let ret = mut_replace!(self.program.funcs[f.0].ret, |mut ret: LazyType<
-                    'p,
-                >| {
-                    assert!(self.infer_types_progress(&constants, &mut ret)?);
-                    let ret_ty = ret.unwrap();
-                    Ok((ret, ret_ty))
-                });
-                Ok((constants, ret))
-            }
-        );
+        // Now the args are stored in the new function's constants, so the normal infer thing should work on the return type.
+        // Note: we haven't done local constants yet, so ret can't yse them.
+        let fn_ty = unwrap!(self.infer_types(f)?, "not inferred");
+        let ret = fn_ty.ret;
 
-        self.program.funcs[f.0].finished_type = Some(FnType { arg: arg_ty, ret });
-
-        let func = &self.program.funcs[f.0];
-        logln!(
-            "eval_and_close_local_constants emit_comptime_call of {} with consts: {}",
-            func.synth_name(self.pool),
-            self
-                .program
-                .log_consts(&self.program.funcs[f.0].closed_constants)
-        );
         // TODO: I think this is the only place that relies on it being a whole function.
         self.eval_and_close_local_constants(f)?;
 
@@ -709,7 +689,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             } => {
                 let no_type = matches!(ty, LazyType::Infer);
                 self.infer_types_progress(&result.constants, ty)?;
-                let mut expected_ty = ty.unwrap();
 
                 match kind {
                     VarType::Const => {
@@ -718,12 +697,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 // You don't need to precompile, immediate_eval_expr will do it for you.
                                 // However, we want to update value.ty on our copy to use below to give constant pointers better type inference. 
                                 // This makes addr_of const for @enum work
-                                self.compile_expr(result, value, if no_type { None } else {Some(expected_ty)})?;
+                                let res = self.compile_expr(result, value, ty.ty())?;
                                 
                                 self.immediate_eval_expr(
                                 &result.constants,
                                 value.clone(),
-                                expected_ty,
+                                res.ty(),
                             )?},
                             None => {
                                 let name = self.pool.get(name.0);
@@ -736,28 +715,30 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 .into()
                             }
                         };
-                        if self.program.types[expected_ty.0] == TypeInfo::Type {
-                            // HACK. todo: general overloads for cast()
-                            val = Value::Type(self.to_type(val)?).into()
-                        }
                         let found_ty = self.program.type_of_raw(&val);
-                        if no_type {
-                            expected_ty = if let Some(value) = value {
-                                if !(value.ty.is_unknown() || value.ty.is_any()) {
-                                    // HACK This makes addr_of const for @enum work
-                                    value.ty
-                                } else {
-                                    found_ty
-                                }
+                        let final_ty = if let Some(expected_ty) = ty.ty() {
+                            if self.program.types[expected_ty.0] == TypeInfo::Type {
+                                // HACK. todo: general overloads for cast()
+                                val = Value::Type(self.to_type(val)?).into()
+                            } else {
+                                self.type_check_arg(found_ty, expected_ty, "const decl")?;
+                            }
+
+                            expected_ty
+                        } else {
+                            let found = if let Some(value) = value {
+                                assert!(!(value.ty.is_unknown() || value.ty.is_any()));
+                                // HACK This makes addr_of const for @enum work
+                                value.ty
                             } else {
                                 found_ty
                             };
-                            *ty = LazyType::Finished(expected_ty);
-                        } else {
-                            self.type_check_arg(found_ty, expected_ty, "var decl")?;
-                        }
+                            *ty = LazyType::Finished(found);
+                            found
+                        };
+
                         let val_expr = Expr::Value {
-                            ty: expected_ty,
+                            ty: final_ty,
                             value: val.clone(),
                         };
                         if let Some(e) = value {
@@ -765,27 +746,30 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         } else {
                             *value = Some(FatExpr::synthetic(val_expr, garbage_loc()));
                         }
-                        result.constants.insert(*name, (val, expected_ty));
+                        result.constants.insert(*name, (val, final_ty));
                         // println!("{}", self.program.log_consts(&result.constants));
                     }
                     VarType::Let | VarType::Var => {
-                        match value {
+                        let final_ty = match value {
                             None => {
                                 if no_type {
                                     err!("uninit vars require type hint {}", name.log(self.pool));
                                 }
+                                ty.unwrap()
                             }
                             Some(value) => {
-                                let value = self.compile_expr(result, value, Some(expected_ty))?;
-                                self.type_check_arg(value.ty(), expected_ty, "var decl")?;
+                                let value = self.compile_expr(result, value, ty.ty())?;
                                 if no_type {
                                     *ty = LazyType::Finished(value.ty());
-                                    expected_ty = value.ty();
+                                    value.ty()
+                                } else {
+                                    self.type_check_arg(value.ty(), ty.unwrap(), "var decl")?;
+                                    ty.unwrap()
                                 }
                             }
                         };
 
-                        let _prev = result.vars.insert(*name, expected_ty);
+                        let _prev = result.vars.insert(*name, final_ty);
                         // TODO: closures break this
                         // assert!(prev.is_none(), "shadow is still new var");
                     }
@@ -871,7 +855,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             &mut Expr::Value {
                 value: Values::One(Value::GetFn(id)),
                 ..
-            } => Some(id),
+            } | &mut Expr::WipFunc(id) => Some(id),
             Expr::Closure(func) => {
                 let id = self.add_func(mem::take(func), &result.constants)?;
                 Some(id)
@@ -886,9 +870,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
     #[track_caller]
     fn func_expr(&mut self, id: FuncId) -> Expr<'p> {
-        Expr::Value {
-            ty: self.program.func_type(id),
-            value: Value::GetFn(id).into(),
+        if self.program.funcs[id.0].finished_ret.is_some() {
+            Expr::Value {
+                ty: self.program.func_type(id),
+                value: Value::GetFn(id).into(),
+            }
+        } else {
+            Expr::WipFunc(id)
         }
     }
 
@@ -920,6 +908,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(match expr.deref_mut() {
             Expr::Closure(_) => {
                 let id = self.promote_closure(&result.constants, expr)?;
+                Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
+            }
+            &mut Expr::WipFunc(id) => {
+                self.infer_types(id)?;
+                expr.expr = self.func_expr(id);
                 Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
             }
             Expr::Call(f, arg) => {
@@ -1579,7 +1572,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 .filter(|f| !overloads.0.iter().any(|old| old.func == *f))
                                 .collect();
                             for f in &decls {
-                                if let Ok(f_ty) = self.infer_types(*f) {
+                                if let Ok(Some(f_ty)) = self.infer_types(*f) {
                                     outln!(
                                         LogTag::Generics,
                                         "- {f:?} is {:?}={} -> {}",
@@ -1615,7 +1608,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                     // TODO: put the message in the error so !assert_compile_error doesn't print it.
                                     outln!(ShowErr, "not found {}", log_goal(self));
                                     for f in &decls {
-                                        if let Ok(f_ty) = self.infer_types(*f) {
+                                        if let Ok(Some(f_ty)) = self.infer_types(*f) {
                                             outln!(
                                                 ShowErr,
                                                 "- found {:?} fn({}) {};",
@@ -1677,6 +1670,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             return Ok(Some(expr.ty));
         }
         Ok(Some(match expr.deref_mut() {
+            Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
@@ -1782,6 +1776,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             "Type" => Some(Type),
             "bool" => Some(Bool),
             "Any" => Some(Any),
+            "Never" => Some(TypeInfo::Never),
             "VoidPtr" => Some(VoidPtr),
             _ => None,
         };
@@ -1858,8 +1853,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             let done = match ty {
                 LazyType::EvilUnit => panic!(),
                 LazyType::Infer => {
-                    ty = LazyType::Finished(TypeId::any());
-                    true
+                    false
                 }
                 LazyType::PendingEval(e) => {
                     let value = self.immediate_eval_expr(constants, e.clone(), TypeId::ty())?;
@@ -1908,15 +1902,24 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(types)
     }
 
+    fn infer_arg(&mut self, func: FuncId) -> Res<'p, TypeId> {
+        if let Some(ty) = self.infer_types(func)? {
+            Ok(ty.arg)
+        } else {
+            Ok(unwrap!(self.program.funcs[func.0].finished_arg, "arg not inferred"))
+        }
+    }
+
     // Resolve the lazy types for Arg and Ret
-    fn infer_types(&mut self, func: FuncId) -> Res<'p, FnType> {
+    // Ok(None) means return type needs to be infered
+    fn infer_types(&mut self, func: FuncId) -> Res<'p, Option<FnType>> {
         let f = &self.program.funcs[func.0];
         // TODO: bad things are going on. it changes behavior if this is a debug_assert. 
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer. 
         //       so making it work in debug with debug_assert is probably the better outcome.  
         assert!(!f.evil_uninit, "{}", self.pool.get(f.name));
-        if let Some(ty) = f.finished_type {
-            return Ok(ty);
+        if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
+            return Ok(Some(FnType {arg, ret }));
         }
 
         Ok(mut_replace!(
@@ -1925,18 +1928,27 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let state = DebugState::ResolveFnType(func);
                 self.last_loc = Some(f.loc);
                 self.push_state(&state);
-                logln!("RESOLVE: Arg of {func:?}");
-                let types = self.infer_pattern(&f.closed_constants, &mut f.arg.bindings)?;
-                logln!("RESOLVE: Ret of {func:?}");
-                assert!(self.infer_types_progress(&f.closed_constants, &mut f.ret)?);
-                let arg = self.program.tuple_of(types);
-                let ty = FnType {
-                    arg,
-                    ret: f.ret.unwrap(),
-                };
-                f.finished_type = Some(ty);
-                self.pop_state(state);
-                Ok((f, ty))
+                if f.finished_arg.is_none() {
+                    let types = self.infer_pattern(&f.closed_constants, &mut f.arg.bindings)?;
+                    let arg = self.program.tuple_of(types);
+                    f.finished_arg = Some(arg);
+                }
+                if f.finished_ret.is_none() {
+                    if self.infer_types_progress(&f.closed_constants, &mut f.ret)? {
+                        f.finished_ret = Some(f.ret.unwrap());
+
+                        self.pop_state(state);
+                        let ty = f.unwrap_ty();
+                        Ok((f, Some(ty)))
+                    } else  {
+                        self.pop_state(state);
+                        Ok((f, None))
+                    }
+                } else {
+                    self.pop_state(state);
+                    let ty = f.unwrap_ty();
+                    Ok((f, Some(ty)))
+                }
             }
         ))
     }
@@ -2000,10 +2012,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             false,
         );
         fake_func.closed_constants = constants.clone();
-        fake_func.finished_type = Some(FnType {
-            arg: TypeId::unit(),
-            ret: ret_ty,
-        });
+        fake_func.finished_arg = Some(TypeId::unit());
+        fake_func.finished_ret = Some(ret_ty);
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
         logln!(
@@ -2067,6 +2077,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
+    fn finish_closure(&mut self, expr: &mut FatExpr<'p>) {
+        if let Expr::WipFunc(id) = expr.expr {
+            expr.expr = self.func_expr(id);
+        }
+    }
+
     fn emit_call_if(
         &mut self,
         result: &mut FnWip<'p>,
@@ -2079,26 +2095,26 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
             let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
-                let if_true =  self.promote_closure(&result.constants, &mut parts[1])?;
-                let true_ty = self.infer_types(if_true)?;
-                self.type_check_eq(true_ty.arg, unit, sig)?;
-                self.emit_call_on_unit(result, if_true, &mut parts[1])?;
-                true_ty
+                let if_true = self.promote_closure(&result.constants, &mut parts[1])?;
+                let true_arg = self.infer_arg(if_true)?;
+                self.type_check_arg(true_arg, unit, sig)?;
+                self.emit_call_on_unit(result, if_true, &mut parts[1])?
             } else {
                 ice!("if second arg must be func not {:?}", parts[1]);
             };
             if let Expr::Closure(_) = parts[2].deref_mut() {
                 let if_false = self.promote_closure(&result.constants, &mut parts[2])?;
-                let false_ty = self.infer_types(if_false)?;
-                self.type_check_eq(false_ty.arg, unit, sig)?;
-                self.type_check_eq(true_ty.ret, false_ty.ret, sig)?;
-                
-                self.emit_call_on_unit(result, if_false, &mut parts[2])?;
+                let false_arg = self.infer_arg(if_false)?;
+                self.type_check_arg(false_arg, unit, sig)?;
+                let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2])?;
+                self.type_check_arg(true_ty, false_ty, sig)?;
             } else {
                 ice!("if third arg must be func not {:?}", parts[2]);
             }
+            self.finish_closure(&mut parts[1]);
+            self.finish_closure(&mut parts[2]);
             // TODO: if the condition is const, don't emit the branch.
-            Ok(Structured::RuntimeOnly(true_ty.ret))
+            Ok(Structured::RuntimeOnly(true_ty))
         } else {
             ice!("if args must be tuple not {:?}", arg);
         }
@@ -2113,10 +2129,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         if let Expr::Tuple(parts) = arg.deref_mut() {
             if let Expr::Closure(_) = parts[0].deref_mut() {
                 let cond_fn = self.promote_closure(&result.constants, &mut parts[0])?;
-                let cond_ty = self.infer_types(cond_fn)?;
-                self.type_check_eq(cond_ty.arg, TypeId::unit(), sig)?;
-                self.type_check_eq(cond_ty.ret, TypeId::bool(), sig)?;
-                self.emit_call_on_unit(result, cond_fn, &mut parts[0])?;
+                let cond_arg = self.infer_arg(cond_fn)?;
+                self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
+                let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0])?;
+                self.type_check_arg(cond_ret, TypeId::bool(), sig)?;
             } else {
                 unwrap!(
                     parts[0].as_fn(),
@@ -2127,10 +2143,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             if let Expr::Closure(_) = parts[1].deref_mut() {
                 let body_fn = self.promote_closure(&result.constants, &mut parts[1])?;
-                let body_ty = self.infer_types(body_fn)?;
-                self.type_check_eq(body_ty.arg, TypeId::unit(), sig)?;
-                self.type_check_eq(body_ty.ret, TypeId::unit(), sig)?;
-                self.emit_call_on_unit(result, body_fn, &mut parts[1])?;
+                let body_arg = self.infer_arg(body_fn)?;
+                self.type_check_arg(body_arg, TypeId::unit(), sig)?;
+                let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1])?;
+                self.type_check_arg(body_ret, TypeId::unit(), sig)?;
+
             } else {
                 unwrap!(
                     parts[1].as_fn(),
@@ -2139,6 +2156,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 );
                 todo!("shouldnt get here twice")
             }
+            self.finish_closure(&mut parts[0]);
+            self.finish_closure(&mut parts[1]);
         } else {
             ice!("if args must be tuple not {:?}", arg);
         }
@@ -2161,7 +2180,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
 
-        if found == expected || found.is_any() || expected.is_any() {
+        if found == expected || found.is_any() || expected.is_any() || found.is_never() || expected.is_never() {
             Ok(())
         } else {
             match (
@@ -2478,19 +2497,19 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
         self.infer_types(original_f)?;
 
-        let f_ty = self.program.funcs[original_f.0].unwrap_ty();
+        let arg_ty = self.program.funcs[original_f.0].finished_arg.unwrap();
 
-        let mut arg_val = self.compile_expr(result, arg_expr, Some(f_ty.arg))?;
+        let mut arg_val = self.compile_expr(result, arg_expr, Some(arg_ty))?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
         if arg_val.is_empty() {
             arg_val = self.program.load_value(Value::Unit);
         }
-        self.type_check_arg(arg_val.ty(), f_ty.arg, "fn arg")?;
+        self.type_check_arg(arg_val.ty(), arg_ty, "fn arg")?;
 
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
         // TODO: seperate function for this
-        if self.program.is_comptime_only_type(f_ty.arg) {
+        if self.program.is_comptime_only_type(arg_ty) {
             let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
             self.push_state(&state);
             // Some part of the argument must be known at comptime.
@@ -2500,7 +2519,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             match arg_val {
                 Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!(
                     "{:?} is comptime only but {:?} is only known at runtime.",
-                    self.program.log_type(f_ty.arg),
+                    self.program.log_type(arg_ty),
                     arg_val
                 ),
                 Structured::Const(_, _) => ice!("TODO: fully const comptime arg {:?}. (should be trivial just don't need it yet)", arg_expr),
@@ -2568,7 +2587,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
 
         let func = &self.program.funcs[original_f.0];
-        // TODO: some huristic based on how many times called and how big the body is.
+        // TODO: some heuristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
         let force_inline = func.has_tag(self.pool, "inline");
         let deny_inline = func.has_tag(self.pool, "noinline");
@@ -2597,12 +2616,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
-    fn emit_call_on_unit(&mut self, result: &mut FnWip<'p>, cond_fn: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, ()> {
+    fn emit_call_on_unit(&mut self, result: &mut FnWip<'p>, cond_fn: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         let get_fn = FatExpr::synthetic(self.func_expr(cond_fn), expr_out.loc);
         let unit = FatExpr::synthetic(Expr::unit(), expr_out.loc);
         expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
-        self.compile_expr(result, expr_out, None)?;
-        Ok(())
+        let res = self.compile_expr(result, expr_out, None)?;
+        Ok(res.ty())
     }
     
     fn jit(&mut self, _f: FuncId) -> Res<'p, ()> {

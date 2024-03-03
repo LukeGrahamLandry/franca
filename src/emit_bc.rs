@@ -327,6 +327,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
+            Expr::WipFunc(_) => unreachable!(),
             Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
                 assert!(

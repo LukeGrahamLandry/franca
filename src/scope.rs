@@ -164,6 +164,7 @@ impl<'p> ResolveScope<'p> {
     fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
         let loc = expr.loc;
         match expr.deref_mut() {
+            Expr::WipFunc(_) => unreachable!(),
             Expr::Call(f, arg) => {
                 self.resolve_expr(f);
                 self.resolve_expr(arg);

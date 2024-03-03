@@ -318,6 +318,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
 
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
         Ok(match expr.deref() {
+            Expr::WipFunc(_) => unreachable!(),
             Expr::Value { value, .. } => self.emit_values(value)?,
             Expr::Call(f, arg) => {
                 if let Some(f_id) = f.as_fn() {

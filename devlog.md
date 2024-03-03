@@ -1,4 +1,22 @@
 
+## improving inference (Mar 3)
+
+Instead of LazyType::Infer just becoming Any and leaking around everywhere, 
+it needs to be legal for a function to have partially known types for longer during compilation. 
+You want to remember that we don't know the return type yet, then try to compile the body without that information 
+and stick whatever you get in as the return type. 
+So there's a few of places (like if/while) where I used to just unwrap_ty, but now I need to
+infer -> get the arg -> check it -> emit the body -> then either check ret or set it to ret. 
+It gets wierd with closures, you can't always just compile a function any time you see it, 
+have to wait as long as possible? 
+I need to fix resolving overloads so if it sees something with an inferred return type 
+it just tries to compile the function (should be since it must not be a closure),
+right now it just always skips those options unless someone else somehow caused it to get compiled already. 
+Or for now just... don't have inferred returns in generic impls. 
+But it does work, infer_types_progress no longer lies and says "we do definitely know the type, its Any!" 
+
+The other popular place that uses Any is assert_eq. 
+
 ## quest for an assembler friendly language (Feb 27)
 
 Bit syntax. 

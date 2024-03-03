@@ -139,6 +139,7 @@ impl<'z, 'p: 'z> EmitAsm<'z, 'p> {
         dest: Option<Place>,
     ) -> Res<'p, Place> {
         let dest = match expr.deref() {
+            Expr::WipFunc(_) => unreachable!(),
             Expr::Value { value, .. } => {
                 let out = match dest {
                     Some(r) => r,
