@@ -2,18 +2,14 @@
 //! @c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
 
 #![allow(non_upper_case_globals)]
-use std::{mem, slice};
-use std::ptr::{NonNull, null};
 
-use crate::ast::{FnType, Func, FuncId, TypeId};
+use crate::ast::{FnType, FuncId, TypeId};
 use crate::bc::{Bc, StackRange, Value};
 use crate::compiler::Res;
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
 use crate::logging::{err, PoolLog};
 use crate::{ast::Program, bc::FnBody};
-
-use super::aarch64;
 
 pub struct BcToAsm<'z, 'a, 'p> {
     pub program: &'z Program<'p>,
@@ -34,7 +30,7 @@ const x0: i64 = 0;
 /// c_call: "intra-procedure-call scratch register"
 const x16: i64 = 16;
 /// c_call: "intra-procedure-call scratch register"
-const x17: i64 = 17;
+const _x17: i64 = 17;
 
 const x21: i64 = 21;
 const fp: i64 = 29;
@@ -63,14 +59,15 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         }
 
         let func = &self.program.funcs[f.0];
-        if let Some(Value::CFnPtr { ptr, .. }) = func.jitted_asm {
-            // TODO: i dont like that the other guy leaked the box. i'd rather everything share the one Jitted instance.
-            //       could just have it store the vec of instructions and emit them here.
-            // self.asm.dispatch[f.0] = ptr as *const u8;
-            return Ok(())
+        if let Some(insts) = func.jitted_code.as_ref() {
+            // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
+            // TODO: this needs to be aware of the distinction between comptime and runtime target.
+            for op in insts {
+                self.asm.push(*op as i64);
+            }
+        } else {
+            self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
         }
-
-        self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
         self.asm.save_current(f);
         Ok(())
     }
@@ -97,16 +94,33 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 self.asm.push(str_uo(X64, i as i64, sp, i as i64));
             }
         }
+
+        let mut patch_cbz = vec![];
+        let mut patch_b = vec![];
+
         for (i, inst) in func.insts.iter().enumerate() {
+            self.asm.mark_next_ip();
             match inst {
                 Bc::CallDynamic { .. } => todo!(),
                 Bc::CallDirect { f, ret, arg } => {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
                     if target_c_call {
-                        assert!(f.0 < 512);
-                        self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
-                        self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty());
+                        // TODO: fix @bs !asm for bootstrap so I can get the new bl function.
+                        // if let Some(bytes) = self.asm.get_fn(*f) {
+                        //     // TODO: shoyld only do this for comptime functions. for runtime, want to be able to squash everything down.
+                        //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
+                        //     //       since need to allow that for cross compiling anyway.
+                        //     // Would be interesting to always use the indirect because then you could do super powerful things
+                        //     // for mixin patching other code. redirect any call. tho couldn't rely on that cause it might inline.
+                        //     // also feels gross. but i've kinda just invented a super heavy handed context pointer which some languages
+                        //     // do for allocators/logging anyway
+                        //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
+                        // } else {
+                            assert!(f.0 < 512);
+                            self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
+                            self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty());
+                        // }
                     } else {
                         todo!()
                     }
@@ -119,7 +133,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(movz(X64, x0, *n, 0));
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
-                    // These only make sense during comptime execution but they're also really just numbers.
+                    // These only make sense during comptime execution, but they're also really just numbers.
                     Value::OverloadSet(i)
                     | Value::GetFn(FuncId(i))
                     | Value::Type(TypeId(i))
@@ -127,15 +141,26 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(movz(X64, x0, *i as i64, 0));
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
-                    Value::Bool(_) => todo!(),
+                    &Value::Bool(b) => {
+                        self.asm.push(movz(X64, x0, b as i64, 0));
+                        self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
+                    },
                     Value::Unit => {}
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
                     Value::Heap { .. } => todo!(),
                     Value::CFnPtr { .. } => todo!(),
                 },
-                Bc::JumpIf { .. } => todo!(),
-                Bc::Goto { .. } => todo!(),
+                &Bc::JumpIf { cond, true_ip, false_ip } => {
+                    self.asm.push(ldr_uo(X64, x0, sp, cond.0 as i64));
+                    self.asm.push(brk(0));
+                    assert_eq!(true_ip, i + 1);
+                    patch_cbz.push((self.asm.prev(), false_ip));
+                },
+                &Bc::Goto { ip } => {
+                    self.asm.push(brk(0));
+                    patch_b.push((self.asm.prev(), ip));
+                },
                 Bc::Ret(slot) => {
                     if is_c_call {
                         match slot.count {
@@ -174,6 +199,15 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     self.dyn_c_call(x16, *arg, *ret, *ty);
                 },
             }
+        }
+        for (inst, false_ip) in patch_cbz {
+            let offset = self.asm.offset_words_inst_ip(inst, false_ip);
+            self.asm.patch(inst, cbz(X64, signed_truncate(offset, 19), x0));
+        }
+        for (from_inst, to_ip) in patch_b {
+            let dist = self.asm.offset_words_inst_ip(from_inst, to_ip);
+            debug_assert_ne!(dist, 0, "while(1);");
+            self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
         Ok(())
     }
@@ -261,11 +295,27 @@ mod tests {
         jit_main(
             "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }",
             |f| {
+
                 let ret: i64 = f(());
                 assert_eq!(ret, 42);
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn simple_if() {
+        jit_main(
+            "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }",
+            |f| {
+                let ret: i64 = f(true);
+                assert_eq!(ret, 123);
+                let ret: i64 = f(false);
+                assert_eq!(ret, 456);
+            },
+        )
+            .unwrap();
+
     }
 
     // doesnt work because i cant encode big enough constants for the address. need to use a few movk
@@ -286,12 +336,14 @@ mod tests {
 
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
+use crate::experiments::aarch64::signed_truncate;
 
 #[cfg(target_arch = "aarch64")]
 pub mod jit {
     use std::ptr::null;
     use std::slice;
     use crate::ast::FuncId;
+    use crate::experiments::bootstrap_gen::brk;
 
     pub struct Jitted {
         map_mut: Option<memmap2::MmapMut>,
@@ -302,6 +354,7 @@ pub mod jit {
         ranges: Vec<*const [u8]>,
         current_start: *const u8,
         next: *mut u8,
+        ip_to_inst: Vec<*const u8>,
     }
 
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
@@ -319,6 +372,7 @@ pub mod jit {
                 map_exec: None,
                 dispatch: vec![],
                 ranges: vec![],
+                ip_to_inst: vec![],
             }
         }
 
@@ -344,6 +398,32 @@ pub mod jit {
             }
         }
 
+        pub fn mark_next_ip(&mut self) {
+            self.ip_to_inst.push(self.next);
+        }
+
+        pub fn offset_words_ip_ip(&mut self, from_ip: usize, to_ip: usize) -> i64 {
+            unsafe { self.ip_to_inst[to_ip].offset_from(self.ip_to_inst[from_ip]) as i64 / 4 }
+        }
+
+        pub fn offset_words_inst_ip(&self, from_inst: usize, to_ip: usize) -> i64 {
+            unsafe { (self.ip_to_inst[to_ip].offset_from(self.current_start) as i64 / 4) - (from_inst as i64) }
+        }
+
+        pub fn prev(&self) -> usize {
+            unsafe {
+                (self.next as *const u32).offset_from(self.current_start as *const u32) as usize - 1
+            }
+        }
+
+        pub fn patch(&mut self, inst_index: usize, inst_value: i64) {
+            unsafe {
+                let ptr = (self.current_start as *mut u32).add(inst_index);
+                debug_assert_eq!(*ptr, brk(0) as u32, "unexpected patch");
+                *ptr = inst_value as u32
+            };
+        }
+
         pub fn push(&mut self, inst: i64) {
             let map = self.map_mut.as_ref().expect("No push while exec.");
             unsafe {
@@ -360,6 +440,8 @@ pub mod jit {
                 let range = slice::from_raw_parts(self.current_start, self.next.offset_from(self.current_start) as usize);
                 self.dispatch[f.0] = self.current_start;
                 self.ranges[f.0] = range as *const [u8];
+                self.ip_to_inst.clear();
+                self.current_start = self.next;
             }
         }
 

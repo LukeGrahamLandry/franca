@@ -378,11 +378,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         outln!(LogTag::Jitted, "{op:#05x}");
                     }
                     outln!(LogTag::Jitted, "\n=======");
+                    self.program.funcs[f.0].jitted_code = Some(ops.clone());
                     let map = experiments::aarch64::copy_to_mmap_exec(ops);
                     let value = Value::CFnPtr { ptr: map.1 as usize, ty: fn_ty };
                     let map = map.0;
                     let map = Box::leak(map); // TODO: dont leak
-                    self.program.funcs[f.0].jitted_code = Some(map.to_vec());
                     self.program.funcs[f.0].jitted_asm = Some(value);
                     let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty));
                     return Ok((None, Structured::RuntimeOnly(ret_ty)));
@@ -2116,8 +2116,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
+            let force_inline = self.pool.intern("inline");
             let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
                 let if_true = self.promote_closure(&result.constants, &mut parts[1])?;
+                self.program.funcs[if_true.0].add_tag(force_inline);
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
                 self.emit_call_on_unit(result, if_true, &mut parts[1])?
@@ -2126,6 +2128,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             };
             if let Expr::Closure(_) = parts[2].deref_mut() {
                 let if_false = self.promote_closure(&result.constants, &mut parts[2])?;
+                self.program.funcs[if_false.0].add_tag(force_inline);
                 let false_arg = self.infer_arg(if_false)?;
                 self.type_check_arg(false_arg, unit, sig)?;
                 let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2])?;
@@ -2149,8 +2152,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     ) -> Res<'p, Structured> {
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
         if let Expr::Tuple(parts) = arg.deref_mut() {
+            let force_inline = self.pool.intern("inline");
             if let Expr::Closure(_) = parts[0].deref_mut() {
                 let cond_fn = self.promote_closure(&result.constants, &mut parts[0])?;
+                self.program.funcs[cond_fn.0].add_tag(force_inline);
                 let cond_arg = self.infer_arg(cond_fn)?;
                 self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
                 let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0])?;
@@ -2165,6 +2170,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             if let Expr::Closure(_) = parts[1].deref_mut() {
                 let body_fn = self.promote_closure(&result.constants, &mut parts[1])?;
+                self.program.funcs[body_fn.0].add_tag(force_inline);
                 let body_arg = self.infer_arg(body_fn)?;
                 self.type_check_arg(body_arg, TypeId::unit(), sig)?;
                 let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1])?;

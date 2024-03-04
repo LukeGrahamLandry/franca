@@ -6,8 +6,20 @@ const RegI = Unique(u5);
 const RegO = Unique(u5);
 const Bits = @enum(u1) .{ W32 = 0b0, X64 = 0b1 };
 const Shift = @enum(u2) .{ LSL = 0b00, LSR = 0b01, ASR = 0b10 };
+const Cond = @enum(u4) .{
+    EQ = 0b0000, // equal
+    NE = 0b0001, // not equal
+    HS = 0b0010, // unsigned greater than or equal
+    LO = 0b0011, // unsigned less than
+    HI = 0b1000, // unsigned greater than
+    LS = 0b1001, // unsigned less than or equal
+    LT = 0b1011, // signed less than
+    GT = 0b1100, // signed greater than
+    AL = 0b1111, // Always
+};
 
 // TODO: this is wrong becuase you want JumpRel(i19) === JumpRel(i19)
+// Note: Branch instructions replace the normal ip increment. So b(1) is a no-op and b(0) is an infinite loop on that instruction.
 fn JumpRel(Int: Type) = Unique(Int);  // measured in instructions, not bytes
 
 @rs fn add_sr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
@@ -19,20 +31,33 @@ fn JumpRel(Int: Type) = Unique(Int);  // measured in instructions, not bytes
 @rs fn orr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
     @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest) ();
 
-// TODO: do i have a/b backwards
 @rs fn sub_sr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
     @bits(sf, 0b1001011, shift, 0b0, b, amount, a, dest) ();
 
 @rs fn sub_im(sf: Bits.T[], dest: RegO, src: RegI, imm: u12, lsl_12: u1) u32 =
     @bits(sf, 0b10100010, lsl_12, imm, src, dest) ();
 
+// TODO: really the sub instructions should have a set_flags: u1 = 0 and this could just call that.
+//       in general default arguments could make a lot of this neater I think, but then it gets harder for the rust code to use.
+@rs fn cmp(sf: Bits.T[], a: RegI, b: RegI) u32 =  // should be cmp_sr with more args but like who would ever want that?
+    @bits(sf, 0b1101011, Shift.LSL[], 0b0, b, 0b000000, a, 0b11111) ();
+
+@rs fn cmp_im(sf: Bits.T[], src: RegI, imm: u12, lsl_12: u1) u32 =
+    @bits(sf, 0b11100010, lsl_12, imm, src, 0b11111) ();
+
 @rs fn mov(sf: Bits.T[], dest: RegO, src: RegI) u32 = orr(sf, dest, src, 0b11111, Shift.LSL[], 0);
 
 @rs fn cbz(sf: Bits.T[], offset: JumpRel(i19), val: RegI) u32 =
     @bits(sf, 0b0110100, offset, val) ();
 
-@rs fn b(offset: JumpRel(i26)) u32 =
-    @bits(0b000101, offset) ();
+@rs fn cbnz(sf: Bits.T[], offset: JumpRel(i19), val: RegI) u32 =
+    @bits(sf, 0b0110101, offset, val) ();
+
+@rs fn b(offset: JumpRel(i26), set_link: u1) u32 =
+    @bits(set_link, 0b00101, offset) ();
+
+@rs fn b_cond(offset: JumpRel(i19), cond: Cond.T[]) u32 =
+    @bits(0b01010100, offset, 0b0, cond) ();
 
 const Hw = @enum(u2) .{ Left0 = 0b00, Left16 = 0b01, Left32 = 0b10, Left48 = 0b11 };
 
@@ -63,6 +88,10 @@ const Hw = @enum(u2) .{ Left0 = 0b00, Left16 = 0b01, Left32 = 0b10, Left48 = 0b1
 /// Branch to an address in a register. Maybe set link register to next pc (return address).
 @rs fn br(addr: RegI, set_link: u1) u32 = 
     @bits(0b1101011000, set_link, 0b11111000000, addr, 0b00000) ();
+
+/// Raise a hardware exception
+@rs fn brk(context: u16) u32 =
+    @bits(0b11010100001, context, 0b00000) ();
 
 // TODO: there's a bit of a confusing dependency where this needs to import things but everything expands to calls to these...
 //       but I think it works out because you just need to bootstrap with a different backend. 

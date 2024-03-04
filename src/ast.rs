@@ -473,10 +473,13 @@ pub struct Func<'p> {
     pub wip: Option<FnWip<'p>>,
     pub evil_uninit: bool,
 
+    /// Implies body.is_none(). For native targets this is the symbol to put in the indirect table for this forward declaration.
+    pub dynamic_import_symbol: Option<Ident<'p>>,
+
     #[cfg(target_arch = "aarch64")]
     pub jitted_asm: Option<Value>,
     #[cfg(target_arch = "aarch64")]
-    pub jitted_code: Option<Vec<u8>>,
+    pub jitted_code: Option<Vec<u32>>,
 }
 
 impl<'p> Func<'p> {
@@ -506,6 +509,7 @@ impl<'p> Func<'p> {
             referencable_name: has_name,
             evil_uninit: false,
             wip: None,
+            dynamic_import_symbol: None,
             #[cfg(target_arch = "aarch64")]
             jitted_asm: None,
             #[cfg(target_arch = "aarch64")]
@@ -527,6 +531,13 @@ impl<'p> Func<'p> {
     pub fn has_tag(&self, pool: &StringPool<'p>, name: &str) -> bool {
         let name = pool.intern(name);
         self.annotations.iter().any(|a| a.name == name)
+    }
+
+    pub fn add_tag(&mut self, name: Ident<'p>) {
+        self.annotations.push(Annotation {
+            name,
+            args: None,
+        });
     }
 
     #[track_caller]
@@ -1202,6 +1213,7 @@ impl<'p> Default for Func<'p> {
             referencable_name: false,
             evil_uninit: true,
             wip: None,
+            dynamic_import_symbol: None,
 
             #[cfg(target_arch = "aarch64")]
             jitted_asm: None,

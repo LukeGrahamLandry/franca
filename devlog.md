@@ -1,4 +1,28 @@
 
+## learning about outputting executables (Mar 4)
+
+- https://en.wikipedia.org/wiki/Mach-O
+- https://github.com/horsicq/XMachOViewer
+- https://github.com/aidansteele/osx-abi-macho-file-format-reference
+
+So there's a command for telling it which address to start at, 
+and that's like an offset into the virtual address space you've loaded the binary into? 
+You have load commands that map the bytes in the file to where you want them to be in that virtual address space. 
+Everything is relative to some base address the os chooses for you when the thing actually runs. 
+
+There's an indirect symbol table where you list the names of the functions you want the loader to give you. 
+
+Every time you want to call one of those dynamic functions, you jump to a stub like
+```
+adrp x16, #0x100004000
+ldr x16, [x16, #I]
+br x16
+```
+where I is the offset into the indirect table.
+and you carefully put those in a named __stubs section, so it can patch them in after the first call? 
+That adrp thing is the address (encoded as an offset) of the page that the loader filled in all the pointers you asked for,
+But how does it know where I expect them to be? Oh, you have a __got section, and it fills that in. 
+
 ## improving inference (Mar 3)
 
 Instead of LazyType::Infer just becoming Any and leaking around everywhere, 

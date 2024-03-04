@@ -187,11 +187,13 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         let name = self.comp.program.pool.get(func.name).to_string();
         let ty = func.unwrap_ty();
         let want_export = func.has_tag(self.comp.program.pool, "rs");
-        if want_export {
+        // TODO: doing this is bad because it means the names change every time because my typeids aren't deterministic
+        //       so since im committing this it makes the diff noisy which annoys me
+        // if want_export {
             name
-        } else {
-            format!("{name}_{:?}{:?}", ty.arg, ty.ret)
-        }
+        // } else {
+        //     format!("{name}_{:?}{:?}", ty.arg, ty.ret)
+        // }
     }
 
     fn new(comp: Compile<'z, 'p, Exec>) -> Self {

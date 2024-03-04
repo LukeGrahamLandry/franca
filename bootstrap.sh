@@ -27,6 +27,8 @@ RUST_MIN_STACK=8388608 cargo test || {
 
   diff "target/bootstrap_gen.rs.temp" "src/experiments/bootstrap_gen.rs" &> "target/bootstrap_gen.rs.diff"
   diff "target/aarch64_basic.gen.txt.temp" "lib/codegen/aarch64/basic.gen.txt" &> "target/aarch64_basic.gen.txt.diff"
+  mv "src/experiments/bootstrap_gen.rs" "target/bootstrap_gen.rs.failed"
+  mv "lib/codegen/aarch64/basic.gen.txt" "target/aarch64_basic.gen.txt.failed"
 
   mv "target/bootstrap_gen.rs.temp" "src/experiments/bootstrap_gen.rs"
   mv "target/aarch64_basic.gen.txt.temp" "lib/codegen/aarch64/basic.gen.txt"

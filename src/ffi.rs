@@ -542,6 +542,7 @@ pub mod c {
             Value::F64(v) => Arg::new(v),
             Value::I64(v) => Arg::new(v),
             Value::CFnPtr { ptr: v, .. } => Arg::new(v),
+            Value::Bool(v) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
         }
     }
@@ -579,6 +580,10 @@ pub mod c {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::I64(result).into()
+        } else if f_ty.ret == TypeId::bool() {
+            // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
+            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
+            Value::Bool(result != 0).into()
         } else {
             todo!("unsupported c ret type {}", program.log_type(f_ty.ret))
         })

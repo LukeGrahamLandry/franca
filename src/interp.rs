@@ -877,7 +877,6 @@ impl<'a, 'p> Interp<'a, 'p> {
         body.insts.get(frame.current_ip).unwrap()
     }
 
-    // TOOD: @track_caller so you don't just get an error report on the forward declare of assert_eq all the time
     fn update_debug(&mut self) {
         let frame = self.call_stack.last().unwrap();
         let body = self
@@ -886,7 +885,10 @@ impl<'a, 'p> Interp<'a, 'p> {
             .unwrap()
             .as_ref()
             .unwrap();
-        self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
+        // TOOD: @track_caller so you don't just get an error report on the forward declare of assert_eq all the time. HACK:
+        if !matches!(body.insts[frame.current_ip], Bc::CallBuiltin { .. }) {
+            self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
+        }
     }
 
     fn current_fn_body(&self) -> &FnBody {

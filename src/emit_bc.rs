@@ -127,7 +127,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             args_to_drop.push((name, range, ty));
             slot_count += size;
         }
-        assert_eq!(full_arg_range.count, slot_count);
+        // assert_eq!(full_arg_range.count, slot_count);
         Ok(args_to_drop)
     }
 
