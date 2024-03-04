@@ -8,14 +8,14 @@ use interp_derive::InterpSend;
 
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res};
 use crate::emit_bc::{EmitBc, SizeCache};
-use crate::experiments::builtins::Pair;
 use crate::ffi::InterpSend;
-use crate::logging::{outln, unwrap, PoolLog};
+use crate::logging::{outln, PoolLog, unwrap};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, experiments::builtins, ffi};
+use crate::{bc::*, ffi};
+use crate::experiments::aarch64;
 
 use crate::logging::{assert, assert_eq, bin_int, err, ice, logln, LogTag::ShowPrint};
 
@@ -675,8 +675,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "IntType" => {
                 let (bit_count, signed) = arg.to_pair()?;
                 let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
-                let ty = builtins::intern_type(
-                    program,
+                let ty = program.intern_type(
                     TypeInfo::Int(crate::ast::IntType { bit_count, signed }),
                 );
                 Value::Type(ty).into()
@@ -708,8 +707,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .into_iter()
                     .map(|v| v.to_int().unwrap() as u32)
                     .collect();
-                let Pair(map, code) = builtins::copy_to_mmap_exec(arg.into());
-                let map: usize = map.into();
+                let (map, code) = aarch64::copy_to_mmap_exec(arg);
+                let map: usize = Box::leak(map) as *const memmap2::Mmap as usize;
                 Values::Many(vec![Value::I64(map as i64), Value::I64(code as i64)])
             }
             "literal_ast" => {

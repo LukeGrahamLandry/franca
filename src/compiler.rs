@@ -17,7 +17,7 @@ use crate::ast::{
     garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
 
-use crate::{bc::*, experiments::builtins};
+use crate::{bc::*, experiments};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, LogTag, PoolLog};
 use crate::experiments::reflect::Reflect;
@@ -297,7 +297,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(())
     }
     
-    /// IMPORTANT: this pulls a little sneaky on ya so you can't access the body of the function inside the main emit handlers.
+    /// IMPORTANT: this pulls a little sneaky on ya, so you can't access the body of the function inside the main emit handlers.
     fn emit_body(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
         let state = DebugState::EmitBody(f);
         self.push_state(&state);
@@ -378,9 +378,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         outln!(LogTag::Jitted, "{op:#05x}");
                     }
                     outln!(LogTag::Jitted, "\n=======");
-                    let map = builtins::copy_to_mmap_exec(ops.into());
+                    let map = experiments::aarch64::copy_to_mmap_exec(ops);
                     let value = Value::CFnPtr { ptr: map.1 as usize, ty: fn_ty };
-                        let map = map.0.to_box();
+                    let map = map.0;
                     let map = Box::leak(map); // TODO: dont leak
                     self.program.funcs[f.0].jitted_code = Some(map.to_vec());
                     self.program.funcs[f.0].jitted_asm = Some(value);
@@ -2185,15 +2185,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
 
         Ok(Structured::RuntimeOnly(TypeId::unit()))
-    }
-
-    #[track_caller]
-    fn type_check_eq(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
-        if found == expected {
-            Ok(())
-        } else {
-            err!(CErr::TypeCheck(found, expected, msg))
-        }
     }
 
     #[track_caller]

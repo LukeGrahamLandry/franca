@@ -366,7 +366,7 @@ impl<'p> Program<'p> {
                         }
                         found = Some(ty);
                     } else if let TypeInfo::Enum { cases, .. } = &self.types[ty.0] {
-                        for (_, mut ty) in cases {
+                        for (_, ty) in cases {
                             if let &TypeInfo::Named(inner, case_name) = &self.types[ty.0] {
                                 // TODO: ffi cases that are akreayd named types
                                 if case_name == name {

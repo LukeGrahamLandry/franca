@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, Constants, FnBody, Structured, Value, Values},
+    bc::{Bc, Constants, Structured, Value, Values},
     compiler::{insert_multi, CErr, FnWip, Res},
     experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
@@ -750,7 +750,7 @@ impl<'p> Program<'p> {
                     })
                 }
                 RsData::Enum(_) => todo!(),
-                RsData::Ptr(inner) => {
+                RsData::Ptr{inner, ..} => {
                     let inner = self.get_rs_type(inner);
                     self.ptr_type(inner)
                 }

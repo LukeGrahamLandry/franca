@@ -20,7 +20,10 @@ pub struct RsType<'t> {
 pub enum RsData<'t> {
     Struct(&'t [RsField<'t>]),
     Enum(&'t [RsVarient<'t>]),
-    Ptr(&'t RsType<'t>),
+    Ptr {
+        inner: &'t RsType<'t>,
+        non_null: bool
+    },
     Opaque,
 }
 
@@ -132,7 +135,7 @@ use crate::ffi::InterpSend;
 
 fn _does_it_compile(_: &dyn VReflect) {}
 
-fn none_bytes<T>() -> &'static [u8] {
+pub fn none_bytes<T>() -> &'static [u8] {
     let none: ManuallyDrop<Option<T>> = ManuallyDrop::new(None);
     unsafe { slice::from_raw_parts(addr_of!(none) as *const u8, size_of::<Option<T>>()) }
 }
@@ -159,32 +162,38 @@ macro_rules! opaque {
 opaque!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, bool);
 
 macro_rules! impl_ptr {
-    ($ty:ty) => {
+    ($ty:ty; $nn:expr) => {
         impl<T: Reflect> Reflect for $ty {
             const TYPE_INFO: &'static RsType<'static> = &RsType {
                 name: stringify!($ty),
                 align: align_of::<Self>(),
                 stride: size_of::<Self>(),
-                data: RsData::Ptr(T::TYPE_INFO),
+                data: RsData::Ptr {
+                    inner: T::TYPE_INFO,
+                    non_null: $nn
+                },
                 is_linear: false,
             };
         }
     };
 
-    ($ty:ty, $($arg:tt)*) => {
-        impl_ptr!($ty);
+    ($ty:ty; $nn:expr, $($arg:tt)*) => {
+        impl_ptr!($ty; $nn);
         impl_ptr!($($arg)*);
     };
 }
 
-impl_ptr!(*const T, *mut T, NonNull<T>);
+impl_ptr!(*const T;false, *mut T;false, NonNull<T>;true);
 
 impl<T: Reflect> Reflect for Box<T> {
     const TYPE_INFO: &'static RsType<'static> = &RsType {
         name: stringify!($ty),
         align: align_of::<Self>(),
         stride: size_of::<Self>(),
-        data: RsData::Ptr(T::TYPE_INFO),
+        data: RsData::Ptr {
+            inner: T::TYPE_INFO,
+            non_null: true
+        },
         is_linear: true,
     };
 }
@@ -205,7 +214,7 @@ macro_rules! transparent {
 transparent!(Cell<T>, UnsafeCell<T>, ManuallyDrop<T>, MaybeUninit<T>);
 
 macro_rules! impl_slice {
-    ($ty:ty) => {
+    ($ty:ty, $ptr:ty) => {
         impl<T: Reflect> Reflect for $ty {
             const TYPE_INFO: &'static RsType<'static> = &RsType {
                 name: "slice",
@@ -216,7 +225,7 @@ macro_rules! impl_slice {
                     RsField {
                         name: "ptr",
                         offset: 0,
-                        ty: <*const T>::get_ty,
+                        ty: <$ptr>::get_ty,
                     },
                     RsField {
                         name: "len",
@@ -228,21 +237,18 @@ macro_rules! impl_slice {
             };
         }
     };
-
-    ($ty:ty, $($arg:tt)*) => {
-        impl_slice!($ty);
-        impl_slice!($($arg)*);
-    };
 }
 
-impl_slice!(*const [T], *mut [T], &[T], &mut [T]);
+impl_slice!(*const [T], *const T);
+impl_slice!(*mut [T], *mut T);
+impl_slice!(&[T], NonNull<T>);
+impl_slice!(&mut [T], NonNull<T>);
 
 impl<T: Reflect> Reflect for Box<[T]> {
     const TYPE_INFO: &'static RsType<'static> = &RsType {
         name: "slice",
-        // TODO: not this. but lifetimes make it hard.
-        align: align_of::<(usize, usize)>(),
-        stride: size_of::<(usize, usize)>(),
+        align: align_of::<Self>(),
+        stride: size_of::<Self>(),
         data: RsData::Struct(&[
             RsField {
                 name: "ptr",
@@ -252,6 +258,32 @@ impl<T: Reflect> Reflect for Box<[T]> {
             RsField {
                 name: "len",
                 offset: 8,
+                ty: <usize>::get_ty,
+            },
+        ]),
+        is_linear: true,
+    };
+}
+
+impl<T: Reflect> Reflect for Vec<T> {
+    const TYPE_INFO: &'static RsType<'static> = &RsType {
+        name: "vec",
+        align: align_of::<Self>(),
+        stride: size_of::<Self>(),
+        data: RsData::Struct(&[
+            RsField {
+                name: "ptr",
+                offset: 0,
+                ty: <*const T>::get_ty,
+            },
+            RsField {
+                name: "cap",
+                offset: 8,
+                ty: <usize>::get_ty,
+            },
+            RsField {
+                name: "len",
+                offset: 16,
                 ty: <usize>::get_ty,
             },
         ]),
@@ -289,6 +321,17 @@ fn ptr_before_len<T>() -> bool {
     ptr_first
 }
 
+fn vec_is_ptr_cap_len<T>() -> bool {
+    let mut v = Vec::<T>::new();
+    v.reserve_exact(1);  // need the allocation so you can tell len and cap apart.
+    let (ptr, cap, len): (usize, usize, usize) = unsafe { mem::transmute(v) };
+    ptr != 0 && cap == 1 && len == 0
+}
+
+pub fn is_thin_boxed<T>() -> bool {
+    size_of::<Box<T>>() == size_of::<usize>()
+}
+
 // So here's the question: when they say layout is unspecified, do they mean they're not telling you
 // and it might change next compiler version or that trying to observe it is nasal demon UB?
 // The safe answer would be use repr(C) for everything but then you have to write your own Vec and stuff.
@@ -297,7 +340,7 @@ fn ptr_before_len<T>() -> bool {
 // You just have to do the math for every type even if they two have the same fields.
 mod test {
     #![allow(unused)]
-    use super::{Reflect, RsField};
+    use super::{Reflect, RsField, vec_is_ptr_cap_len};
     use crate::experiments::reflect::{ptr_before_len, VReflect};
     use core::slice;
     use std::{
@@ -352,13 +395,16 @@ mod test {
     fn slice_layout() {
         assert!(ptr_before_len::<u8>());
         let x: &[u8] = &[];
-        let ptr = x.field_ref::<*const u8>(0).unwrap();
-        assert!(!ptr.is_null());
+        let ptr = x.field_ref::<NonNull<u8>>(0).unwrap();
+        let ptr = ptr.as_ptr() as usize;
+        assert_ne!(ptr, 0);
         let len = x.field_ref::<usize>(1).unwrap();
         assert_eq!(*len, 0);
         let x: &[u8] = &[1, 2, 3];
         let len = x.field_ref::<usize>(1).unwrap();
         assert_eq!(*len, 3);
+        assert!(vec_is_ptr_cap_len::<i64>());
+        assert!(vec_is_ptr_cap_len::<u8>());
     }
 
     #[inline(never)]

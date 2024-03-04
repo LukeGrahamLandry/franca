@@ -19,6 +19,7 @@ use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
 use crate::{bc::*, emit_diagnostic, make_toplevel, LIB};
+use crate::experiments::bc_to_asm::{BcToAsm, Jitted};
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
@@ -45,13 +46,12 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
     }
-    let mut asm = crate::experiments::bc_to_asm::BcToAsm {
+    let mut asm = BcToAsm {
         interp: &comp.executor,
         program: &mut program,
-        ready: vec![],
-        asm: vec![],
-        mmaps: vec![],
+        asm: Jitted::new(1<<26)  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
     };
+    asm.asm.reserve(asm.program.funcs.len());
     for f in &bs {
         asm.compile(*f).unwrap();
     }
@@ -59,11 +59,7 @@ pub fn bootstrap() -> (String, String) {
     let symbol_bs = pool.intern("bs");
     let mut fr = String::new();
     for f in &bs {
-        let bytes: &[u8] = if let Some(map) = asm.mmaps[f.0].as_ref() {
-            map.as_ref()
-        } else {
-            asm.program.funcs[f.0].jitted_code.as_ref().unwrap()
-        };
+        let bytes = unsafe { &*asm.asm.get_fn(*f).unwrap() };
 
         let annotations: String = asm.program.funcs[f.0]
             .annotations

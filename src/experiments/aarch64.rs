@@ -293,7 +293,7 @@ pub const SP: Reg = Reg::u64(14);
 #[cfg(target_arch = "aarch64")]
 mod encoding_tests {
     use super::{Inst, Reg};
-    use crate::experiments::aarch64::{Assembler, CmpFlags, Label, Three, Two, X0};
+    use crate::experiments::aarch64::{Assembler, Label, Three, Two, X0};
     use std::mem;
     const X1: Reg = Reg::u64(1);
     const X2: Reg = Reg::u64(2);
@@ -387,4 +387,19 @@ mod encoding_tests {
         let result: u64 = call_jit(0, i, l);
         assert_eq!(result, 15);
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn copy_to_mmap_exec(code: Vec<u32>) -> (Box<memmap2::Mmap>, *const u8) {
+    // TODO: emit into this thing so don't have to copy.
+    let mut map = memmap2::MmapOptions::new()
+        .len(code.len() * 4)
+        .map_anon()
+        .unwrap();
+    let bytes = code.as_ptr() as *const u8;
+    let bytes = unsafe { slice::from_raw_parts(bytes, code.len() * 4) };
+    map.copy_from_slice(bytes);
+    let map = map.make_exec().unwrap();
+    let ptr = map.as_ptr();
+    (Box::new(map), ptr)
 }
