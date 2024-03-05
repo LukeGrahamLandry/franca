@@ -6,7 +6,7 @@ use std::process::Command;
 use codemap::Span;
 use interp_derive::InterpSend;
 
-use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res};
+use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::{EmitBc, SizeCache};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, PoolLog, unwrap};
@@ -16,6 +16,7 @@ use crate::{
 };
 use crate::{bc::*, ffi};
 use crate::experiments::aarch64;
+
 
 use crate::logging::{assert, assert_eq, bin_int, err, ice, logln, LogTag::ShowPrint};
 
@@ -299,11 +300,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     #[cfg(feature = "interp_c_ffi")]
                     {
                         let f = self.take_slot(f);
-                        let ptr = if let Ok((ptr, _)) = Values::One(f).to_c_func() {
-                            ptr
-                        } else {
-                            u64::from_le_bytes(f.to_int()?.to_le_bytes()) as usize
-                        };
+                        let ptr = f.to_int()?.to_bytes() as usize;
+
                         let arg = self.take_slots(arg);
                         let result = ffi::c::call(program, ptr, ty, arg)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
@@ -1161,13 +1159,6 @@ impl<'p> Values {
                 Ok((a.to_int()?, b.to_int()?))
             }
             _ => err!("load_int_pair {:?}", self),
-        }
-    }
-
-    fn to_c_func(self) -> Res<'p, (usize, FnType)> {
-        match self.single()? {
-            Value::CFnPtr { ptr, ty } => Ok((ptr, ty)),
-            v => err!("to_c_func {:?}", v),
         }
     }
 }

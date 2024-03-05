@@ -894,7 +894,6 @@ impl<'p> Program<'p> {
             Value::Symbol(_) => Ident::get_type(self),
             Value::InterpAbsStackAddr(_) | Value::Heap { .. } => TypeId::void_ptr(),
             Value::OverloadSet(_) => todo!(),
-            Value::CFnPtr { ty, .. } => self.intern_type(TypeInfo::Fn(*ty)),
         }
     }
     pub fn type_of_raw(&mut self, v: &Values) -> TypeId {

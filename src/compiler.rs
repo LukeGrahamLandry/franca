@@ -1003,30 +1003,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         let ptr_ty = self.program.slice_type(expect);
                         Structured::RuntimeOnly(ptr_ty)
                     }
-                    "c_call" => {
-                        if let Expr::Call(f, arg) = arg.deref_mut().deref_mut().deref_mut() {
-                            if let Expr::GetVar(v) = f.deref_mut().deref_mut() {
-                                let name = self.pool.get(v.0);
-                                if let Some((func, f_ty)) = self.builtin_constant(name) {
-                                    assert!(matches!(func, Value::CFnPtr { .. }));
-                                    f.expr = Expr::Value {
-                                        ty: f_ty,
-                                        value: func.into(),
-                                    };
-                                    let f_ty = unwrap!(self.program.fn_ty(f_ty), "fn");
-                                    let res = self.compile_expr(result, arg, Some(f_ty.arg))?;
-                                    self.type_check_arg(res.ty(), f_ty.ret, "c ret")?;
-                                    Structured::RuntimeOnly(f_ty.ret)
-                                } else {
-                                   err!("unresolved ffi func {:?}", v.log(self.pool))
-                                }
-                            } else {
-                                err!("c_call expected Expr:Call(Expr::GetVar, ...args)",)
-                            }
-                        } else {
-                            err!("c_call expected Expr:Call",)
-                        }
-                    }
+                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
                     "deref" => {
                         let ptr = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(
@@ -1781,26 +1758,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             let ty = self.program.intern_type(ty);
             let tyty = self.program.intern_type(TypeInfo::Type);
             return Some((Value::Type(ty), tyty));
-        }
-
-        macro_rules! cfn {
-            ($fn:expr, $ty:expr) => {{
-                #[cfg(not(feature = "interp_c_ffi"))]
-                {
-                    outln!(ShowErr, "Comptime c ffi is disabled.");
-                    return None;
-                }
-                #[cfg(feature = "interp_c_ffi")]
-                {
-                    (
-                        Value::CFnPtr {
-                            ptr: $fn as usize,
-                            ty: $ty,
-                        },
-                        self.program.intern_type(TypeInfo::Fn($ty)),
-                    )
-                }
-            }};
         }
 
         macro_rules! ffi_type {
@@ -2749,7 +2706,7 @@ pub trait Executor<'p>: PoolLog<'p> {
 // i like when my code is rocks not rice
 // its a lot more challenging to eat but at least you can Find it
 
-trait ToBytes {
+pub(crate) trait ToBytes {
     fn to_bytes(self) -> u64;
 }
 

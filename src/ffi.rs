@@ -543,7 +543,6 @@ pub mod c {
         match v {
             Value::F64(v) => Arg::new(v),
             Value::I64(v) => Arg::new(v),
-            Value::CFnPtr { ptr: v, .. } => Arg::new(v),
             Value::Bool(v) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
         }

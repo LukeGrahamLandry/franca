@@ -131,10 +131,6 @@ pub enum Value {
     },
     Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(usize),
-    CFnPtr {
-        ptr: usize,
-        ty: FnType,
-    },
 }
 
 #[derive(Debug, InterpSend, Clone, Hash, PartialEq, Eq)]

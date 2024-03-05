@@ -310,7 +310,6 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             } => todo!(),
             Value::Symbol(_) => todo!(),
             Value::OverloadSet(_) => todo!(),
-            Value::CFnPtr { ptr, ty } => todo!(),
         })
     }
 

@@ -446,33 +446,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.to_drop.push((slot, container_ty));
                         (ptr, ptr_ty).into()
                     }
-                    "c_call" => {
-                        // TODO: get rid of !c_call. It should just be a normal function and the calling convention should be a part of the type (for FnPtr) or a tag on the Func struct (otherwise).
-                        if let Expr::Call(f, arg) = arg.deref().deref() {
-                            if let Expr::Value { value, ty: val_ty } = f.deref().deref() {
-                                if let Value::CFnPtr { ty: f_ty, .. } = value.clone().single()? {
-                                    let arg = self.compile_expr(result, arg)?;
-                                    let arg = result.load(self, arg)?.0;
-                                    let ret = result.reserve_slots(self, f_ty.ret)?;
-                                    let (f, ty) =
-                                        result.load_constant(self, value.clone(), *val_ty)?;
-                                    result.push(Bc::CallC {
-                                        f: f.single(),
-                                        arg,
-                                        ret,
-                                        ty: f_ty,
-                                    });
-                                    (ret, ty).into()
-                                } else {
-                                    unreachable!()
-                                }
-                            } else {
-                                err!("c_call expected Expr:Call(Expr::GetVar, ...args)",)
-                            }
-                        } else {
-                            err!("c_call expected Expr:Call",)
-                        }
-                    }
+                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
                     "deref" => {
                         let ptr = self.compile_expr(result, arg)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr.ty()), "");

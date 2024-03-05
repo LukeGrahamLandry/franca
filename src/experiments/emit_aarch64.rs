@@ -154,8 +154,6 @@ impl<'z, 'p: 'z> EmitAsm<'z, 'p> {
                     Value::Bool(b) => {
                         self.const_int(if *b {1} else {0}, out)
                     },
-                    // A function pointer address is really just a number. 
-                    Value::CFnPtr { ptr: i, .. } |
                     // These only make sense during comptime execution but they're also really just numbers.
                     Value::OverloadSet(i) |  Value::GetFn(FuncId(i)) | Value::Type(TypeId(i)) | Value::Symbol(i) => {
                         self.const_int(*i as u64, out)

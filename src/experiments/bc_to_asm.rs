@@ -137,8 +137,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::OverloadSet(i)
                     | Value::GetFn(FuncId(i))
                     | Value::Type(TypeId(i))
-                    | Value::Symbol(i)
-                    | Value::CFnPtr { ptr: i, .. } => {
+                    | Value::Symbol(i) => {
                         self.load_imm(x0, *i as u64);
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
