@@ -1,12 +1,5 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::{
-    bc::{Bc, Constants, Structured, Value, Values},
-    compiler::{insert_multi, CErr, FnWip, Res},
-    experiments::reflect::{Reflect, RsType},
-    ffi::{init_interp_send, InterpSend},
-    logging::err,
-    pool::{Ident, StringPool},
-};
+use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{insert_multi, CErr, FnWip, Res}, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, LIB, logging::err, pool::{Ident, StringPool}};
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
@@ -15,7 +8,9 @@ use std::{
     hash::Hash,
     mem,
     ops::{Deref, DerefMut},
+    fmt::Write,
 };
+use std::num::{NonZeroI64, NonZeroUsize};
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
@@ -167,11 +162,7 @@ pub enum Expr<'p> {
         arg: Box<FatExpr<'p>>,
         target: Box<FatExpr<'p>>,
     },
-
-    // Backend only
     GetVar(Var<'p>),
-
-    // Frontend only
     GetNamed(Ident<'p>),
     String(Ident<'p>),
 }
@@ -195,6 +186,15 @@ pub struct FatExpr<'p> {
     pub id: usize,
     pub ty: TypeId,
     pub known: Known,
+}
+
+impl<'p> FatExpr<'p> {
+    pub fn as_int(&self) -> Option<i64> {
+        if let Expr::Value { value: Values::One(Value::I64(v)), .. } = self.expr {
+            return Some(v)
+        }
+        None
+    }
 }
 
 impl Default for FatExpr<'_> {
@@ -474,11 +474,13 @@ pub struct Func<'p> {
     pub evil_uninit: bool,
 
     /// Implies body.is_none(). For native targets this is the symbol to put in the indirect table for this forward declaration.
+    /// This can be used for calling at runtime but not at comptime because we can't just ask the linker for the address.
     pub dynamic_import_symbol: Option<Ident<'p>>,
-
-    #[cfg(target_arch = "aarch64")]
-    pub jitted_asm: Option<Value>,
-    #[cfg(target_arch = "aarch64")]
+    /// An address to call this function. Body may be None or this could be jitted.
+    /// It might correspond to dynamic_import_symbol (for libc things that you can call at runtime or comptime).
+    pub comptime_addr: Option<u64>,
+    /// Inline assembly will be saved here.
+    // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
 }
 
@@ -510,9 +512,7 @@ impl<'p> Func<'p> {
             evil_uninit: false,
             wip: None,
             dynamic_import_symbol: None,
-            #[cfg(target_arch = "aarch64")]
-            jitted_asm: None,
-            #[cfg(target_arch = "aarch64")]
+            comptime_addr: None,
             jitted_code: None,
         }
     }
@@ -611,8 +611,8 @@ pub struct OverloadOption<'p> {
 
 #[derive(Debug, Reflect)]
 pub struct SuperSimple {
-    a: i64,
-    b: i64,
+    pub a: i64,
+    pub b: i64,
 }
 
 impl<'p> Stmt<'p> {
@@ -839,6 +839,7 @@ impl<'p> Program<'p> {
     }
 
     // aaaaa
+    #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
         let id = self.types.iter().position(|check| *check == ty).unwrap();
         TypeId(id)
@@ -1214,10 +1215,7 @@ impl<'p> Default for Func<'p> {
             evil_uninit: true,
             wip: None,
             dynamic_import_symbol: None,
-
-            #[cfg(target_arch = "aarch64")]
-            jitted_asm: None,
-            #[cfg(target_arch = "aarch64")]
+            comptime_addr: None,
             jitted_code: None,
         }
     }
@@ -1282,4 +1280,23 @@ impl<'p> TypeInfo<'p> {
             ffi_byte_stride: None,
         }
     }
+}
+
+
+// TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
+pub const LIBC: &[(&str, *const u8)] = &[
+    ("fn write(fd: i32, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
+    ("fn getchar() i32", libc::getchar as *const u8),
+    ("fn putchar(c: i32) i32", libc::putchar as *const u8),
+    ("fn exit(status: i32) Never", libc::exit as *const u8),
+    ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
+    ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
+];
+
+pub fn get_comptime_libc() -> String {
+    let mut out = String::new();
+    for (sig, ptr) in LIBC {
+        writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
+    }
+    out
 }

@@ -1,4 +1,11 @@
 
+## Cleaning up fn addrs (Mar 5)
+
+For the libc things where you need to get the addresses at comptime,
+make a list of signatures/pointers and then treat calling those pointers uniformly with inline assembly. 
+That also gives a place to put annotations saying you want to dynamically link for when I want to output real executables. 
+So you can have one FuncId with `@dyn_link` to call at runtime and `@comptime_addr(_)` to call at comptime. 
+
 ## learning about outputting executables (Mar 4)
 
 - https://en.wikipedia.org/wiki/Mach-O

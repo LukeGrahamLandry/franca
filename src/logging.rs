@@ -774,6 +774,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut f = String::new();
         match self {
+            Bc::NoCompile => write!(f, "UNREACHABLE_BODY"),
             Bc::CallDynamic {
                 f: func_slot,
                 ret,

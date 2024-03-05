@@ -130,6 +130,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
             logln!("I: {:?}", i.log(self.pool));
             match i {
+                Bc::NoCompile => err!("Ran empty function",),
                 &Bc::CallDirect { f, ret, arg } => {
                     // preincrement our ip because ret doesn't do it.
                     // this would be different if i was trying to do tail calls?

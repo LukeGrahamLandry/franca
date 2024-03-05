@@ -101,6 +101,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         for (i, inst) in func.insts.iter().enumerate() {
             self.asm.mark_next_ip();
             match inst {
+                Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
                 Bc::CallDirect { f, ret, arg } => {
                     let target = &self.program.funcs[f.0];
@@ -274,6 +275,7 @@ mod tests {
     use codemap::CodeMap;
     use std::{arch::asm, mem::transmute};
     use std::ptr::addr_of;
+    use crate::ast::SuperSimple;
 
     fn jit_main<Arg, Ret>(src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'_, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
@@ -373,6 +375,11 @@ mod tests {
             add(a.a[], 7)
         }"#
     );
+    simple!(nested, (), 91, r#"
+        @c_call fn main() i64 = {
+            add(add(add(add(add(add(add(add(add(1, 2), 3), 4), add(5, 6)), 7), 8), add(9, add(10, 11))), 12), 13)
+        }"#
+    );
 
     #[test]
     fn use_ptr() {
@@ -388,6 +395,29 @@ mod tests {
                 assert_eq!(ret, 10);
                 assert_eq!(a, 5);
                 assert_eq!(b, 6);
+            },
+        )
+            .unwrap();
+    }
+
+    #[test]
+    fn ffi_ptr() {
+        jit_main(
+            r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
+                   let c = sub(a.b[], a.a[]);
+                   a.a[] = 1;
+                   a.b[] = 2;
+                   c
+                }"#,
+            |f| {
+                let mut a = SuperSimple {
+                    a: 57,
+                    b: 77,
+                };
+                let ret: i64 = f((addr_of!(a)));
+                assert_eq!(ret, 20);
+                assert_eq!(a.a, 1);
+                assert_eq!(a.b, 2);
             },
         )
             .unwrap();

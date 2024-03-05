@@ -142,6 +142,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '&' => self.one(Amp),
             '?' => self.one(Question),
             '|' => self.one(Pipe),
+            '/' => self.one(Slash),
             '+' => self.pair('=', Error(LexErr::Unexpected('+')), PlusEq),
             '-' => self.pair('=', Error(LexErr::Unexpected('-')), MinusEq),
             c => self.err(LexErr::Unexpected(c)),
@@ -227,7 +228,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             c = self.peek_c();
         }
         let ty = match &self.src[self.start..self.current] {
-            "fn" => TokenType::Fn,
+            "fn" | "fun" => TokenType::Fn,
             "let" => TokenType::Qualifier(VarType::Let),
             "var" => TokenType::Qualifier(VarType::Var),
             "const" => TokenType::Qualifier(VarType::Const),

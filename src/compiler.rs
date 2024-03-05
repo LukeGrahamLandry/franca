@@ -317,7 +317,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         });
 
         if !has_body {
-            let ret = mut_replace!(self.program.funcs[f.0], |func: Func<'p>| {
+            let ret = mut_replace!(self.program.funcs[f.0], |mut func: Func<'p>| {
                 // Functions without a body are always builtins.
                 // It's convient to give them a FuncId so you can put them in a variable,
                 // TODO: but just force inline call.
@@ -330,6 +330,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 //     name: self.pool.intern("inline"),
                 //     args: None,
                 // });
+                let addr= self.pool.intern("comptime_addr");
+                if let Some(tag) = func.annotations.iter().find(|c| c.name == addr) {
+                    let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
+                    func.comptime_addr = Some(addr.to_bytes());
+                    let _ = self.program.intern_type(TypeInfo::FnPtr(func.unwrap_ty()));  // make sure emit_ can get the type without mutating the Program.
+                }
                 let ret_ty = func.ret.unwrap();
                 // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
                 //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
@@ -349,42 +355,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             #[cfg(target_arch = "aarch64")]
             if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
                 if *name == self.pool.intern("asm") {
+                    self.inline_asm_body(result, f, arg)?;
                     let fn_ty = self.program.funcs[f.0].unwrap_ty();
                     let ret_ty = fn_ty.ret;
-
-                    let src = arg.log(self.pool);
-                    let asm_ty = Vec::<u32>::get_type(self.program);
-                    let ops = if let Expr::Tuple(parts) = arg.deref_mut().deref_mut() {
-                        let ops: Res<'p, Vec<u32>> = parts.iter().map(|op| {
-                            if let Ok((ty, val)) = bit_literal(op, self.pool) {
-                                assert_eq!(ty.bit_count, 32);
-                                Ok(val as u32)
-                            } else {
-                                err!("not int",)
-                            }
-                        }).collect();
-                        if let Ok(ops) = ops {
-                            ops
-                        } else {
-                            let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
-                            unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
-                        }
-                    } else {
-                        let ops = self.immediate_eval_expr(&result.constants, *arg.clone(), asm_ty)?;
-                        unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
-                    };
-                    outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");
-                    for op in &ops {
-                        outln!(LogTag::Jitted, "{op:#05x}");
-                    }
-                    outln!(LogTag::Jitted, "\n=======");
-                    self.program.funcs[f.0].jitted_code = Some(ops.clone());
-                    let map = experiments::aarch64::copy_to_mmap_exec(ops);
-                    let value = Value::CFnPtr { ptr: map.1 as usize, ty: fn_ty };
-                    let map = map.0;
-                    let map = Box::leak(map); // TODO: dont leak
-                    self.program.funcs[f.0].jitted_asm = Some(value);
-                    let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty));
+                    let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty));  // make sure emit_ can get the type without mutating the Program.
                     return Ok((None, Structured::RuntimeOnly(ret_ty)));
                 }
             }
@@ -1842,20 +1816,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             "Symbol" => ffi_type!(Ident),
             "CmdResult" => ffi_type!(crate::interp::CmdResult),
             "FatExpr" => ffi_type!(FatExpr),
-            "getchar" => cfn!(
-                libc::getchar,
-                FnType {
-                    arg: TypeId::unit(),
-                    ret: TypeId::i64()
-                }
-            ),
-            "putchar" => cfn!(
-                libc::putchar,
-                FnType {
-                    arg: TypeId::i64(),
-                    ret: TypeId::i64()
-                }
-            ),
             _ => {
                 let name = self.pool.intern(name);
                 if let Some(ty) = self.program.find_ffi_type(name) {
@@ -2684,6 +2644,43 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         // self.jitted[f.0] = map.1;
         // Ok(())
     }
+
+    fn inline_asm_body(&mut self, result: &mut FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
+        let src = asm.log(self.pool);
+        let asm_ty = Vec::<u32>::get_type(self.program);
+        let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
+            let ops: Res<'p, Vec<u32>> = parts.iter().map(|op| {
+                if let Ok((ty, val)) = bit_literal(op, self.pool) {
+                    assert_eq!(ty.bit_count, 32);
+                    Ok(val as u32)
+                } else {
+                    err!("not int",)
+                }
+            }).collect();
+            if let Ok(ops) = ops {
+                ops
+            } else {
+                let ops = self.immediate_eval_expr(&result.constants, asm.clone(), asm_ty)?;
+                unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+            }
+        } else {
+            let ops = self.immediate_eval_expr(&result.constants, asm.clone(), asm_ty)?;
+            unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+        };
+        outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");
+        for op in &ops {
+            outln!(LogTag::Jitted, "{op:#05x}");
+        }
+        outln!(LogTag::Jitted, "\n=======");
+        // TODO: emit into the Jitted thing instead of this.
+        //       maybe just keep the vec, defer dealing with it and have bc_to_asm do it?
+        //       but then interp can't use it.
+        self.program.funcs[f.0].jitted_code = Some(ops.clone());
+        let map = experiments::aarch64::copy_to_mmap_exec(ops);
+        self.program.funcs[f.0].comptime_addr = Some(map.1 as u64);
+        let _ = Box::leak(map.0); // TODO: dont leak
+        Ok(())
+    }
 }
 
 
@@ -2751,3 +2748,13 @@ pub trait Executor<'p>: PoolLog<'p> {
 
 // i like when my code is rocks not rice
 // its a lot more challenging to eat but at least you can Find it
+
+trait ToBytes {
+    fn to_bytes(self) -> u64;
+}
+
+impl ToBytes for i64 {
+    fn to_bytes(self) -> u64 {
+        u64::from_le_bytes(self.to_le_bytes())
+    }
+}

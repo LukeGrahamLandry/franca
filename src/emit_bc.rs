@@ -148,20 +148,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // but just force inline call.
             let ret_ty = func.ret.unwrap();
             let ret = result.reserve_slots(self, func.ret.unwrap())?;
-            // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
-            //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
-            //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
 
-            if let Some(Value::CFnPtr { ptr, ty }) = func.jitted_asm {
-                let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
-                let f = result.load_constant(self, Values::One(Value::I64(ptr as i64)), ptr_ty)?;
-                result.push(Bc::CallC {
-                    f: f.0.single(),
-                    arg: full_arg_range,
-                    ret,
-                    ty,
-                });
+            if func.comptime_addr.is_some() {
+                // You should never actually try to run this code, the caller should have just done the call,
+                // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
+                // just too ways of emitting the call.
+                result.push(Bc::NoCompile);
             } else {
+                // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
+                //       but specializing kills the name. But before that will work anyway i need to not blindly pass on the shim args to the builtin
+                //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
                 assert!(func.referencable_name, "fn no body needs name");
                 result.push(Bc::CallBuiltin {
                     name: func.name,
@@ -221,9 +217,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let (arg, arg_ty) = result.load(self, arg)?;
         let ret = result.reserve_slots(self, f_ty.ret)?;
 
-        if let Some(Value::CFnPtr { ptr, ty }) = func.jitted_asm {
+        if let Some(ptr) = func.comptime_addr {
             if func.has_tag(self.program.pool, "c_call") {
-                // We did emit its body as just a Bc::CallC but might as well skip the indirection.
+                // We could emit its body as just a Bc::CallC but might as well skip the indirection.
+                let ty = func.unwrap_ty();
                 let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
                 let f = result.load_constant(self, Values::One(Value::I64(ptr as i64)), ptr_ty)?;
                 result.push(Bc::CallC {
@@ -450,6 +447,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         (ptr, ptr_ty).into()
                     }
                     "c_call" => {
+                        // TODO: get rid of !c_call. It should just be a normal function and the calling convention should be a part of the type (for FnPtr) or a tag on the Func struct (otherwise).
                         if let Expr::Call(f, arg) = arg.deref().deref() {
                             if let Expr::Value { value, ty: val_ty } = f.deref().deref() {
                                 if let Value::CFnPtr { ty: f_ty, .. } = value.clone().single()? {

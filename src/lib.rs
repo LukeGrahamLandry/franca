@@ -44,6 +44,7 @@ pub mod experiments;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
+use crate::ast::get_comptime_libc;
 
 macro_rules! stdlib {
     ($name:expr) => {
@@ -116,6 +117,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
         .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
         .collect();
     libs.push(codemap.add_file("main_file".into(), src.clone()));
+    libs.push(codemap.add_file("libc".into(), get_comptime_libc()));
     let user_span = libs.last().unwrap().span;
     for file in &libs {
         match Parser::parse(file.clone(), pool) {
@@ -130,9 +132,6 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
             }
         }
     }
-    
-
-   
 
     let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);

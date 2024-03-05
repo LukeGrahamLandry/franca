@@ -514,6 +514,8 @@ pub mod c {
         compiler::Res,
         logging::err,
     };
+    use crate::ast::IntType;
+
     type CTy = libffi::middle::Type;
 
     impl<'p> Program<'p> {
@@ -573,10 +575,11 @@ pub mod c {
             b = b.res(program.as_c_type(f_ty.ret)?)
         }
 
+        // TODO: this is getting deranged.
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
-        } else if f_ty.ret == TypeId::i64() {
+        } else if f_ty.ret == TypeId::i64() || f_ty.ret == program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true })) {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::I64(result).into()

@@ -90,6 +90,7 @@ pub enum Bc<'p> {
         ret: StackRange,
         ty: FnType,
     },
+    NoCompile,
 }
 
 #[derive(Clone)]
