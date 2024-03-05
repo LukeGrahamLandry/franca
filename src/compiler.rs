@@ -482,7 +482,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         // TODO: is locals supposed to be just the new ones introduced or recursivly bubbled up?
         // TODO: now vars aren't unique if you inline the same thing in multiple places. 
         //       I guess i need to walk the whole tree and rebind them but its hard to think about. have to deal with inner captures too. Feb-24
-        // TODO: can I mem::take func.body? 
+        // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
+        // TODO: dont bother if its just unit args (which most are because of !if and !while).
         let new_expr = Expr::Block { body: vec![
             FatStmt { stmt: Stmt::DeclVarPattern { binding: pattern, value: Some(mem::take(arg_expr)) }, annotations: vec![], loc }
         ], result: Box::new(func.body.as_ref().unwrap().clone()), locals: Some(locals) };

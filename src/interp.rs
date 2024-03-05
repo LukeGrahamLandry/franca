@@ -112,7 +112,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         // Sanity checks that we didn't mess anything up for the next guy.
         assert!(!result.is_poison());
         for _ in 0..ret.count {
-            assert!(self.value_stack.pop() == Some(Value::Poison));
+            assert_eq!(self.value_stack.pop(), Some(Value::Poison));
         }
         let _final_callframe = self.call_stack.pop().unwrap();
         // assert!(self, final_callframe == marker_callframe, "bad frame");
@@ -265,6 +265,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     *self.get_slot_mut(ret) = res;
                     self.bump_ip();
                 }
+                // A trivial improvement for load/store would be connecting the parts, so you don't allocate the intermediate vec,
+                // but I really don't want to bother working on this because the asm stuff is so much cooler.
                 &Bc::Load { from, to } => {
                     let arg = self.take_slot(from);
                     let value = self.deref_ptr(arg)?;
@@ -587,7 +589,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "mul" => bin_int!(self, *, arg, Value::I64),
             "div" => bin_int!(self, /, arg, Value::I64),
             "eq" => bin_int!(self, ==, arg, Value::Bool),
-            "ne" => bin_int!(self, !=, arg, Value::Bool),
+            //"ne" => bin_int!(self, !=, arg, Value::Bool),
             "gt" => bin_int!(self, >, arg, Value::Bool),
             "lt" => bin_int!(self, <, arg, Value::Bool),
             "ge" => bin_int!(self, >=, arg, Value::Bool),

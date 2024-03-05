@@ -137,8 +137,12 @@ bit_or(bit_or(bit_or(bit_or(0, shift_left(84, 24)), shift_left(signed_truncate(o
 
 #[rustfmt::skip]
 pub fn movz(sf: i64, dest: i64, imm: i64, hw: i64, ) -> i64 { 
-{ 
- bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(165, 23)), shift_left(hw, 21)), shift_left(imm, 5)), shift_left(dest, 0)) }
+bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(165, 23)), shift_left(hw, 21)), shift_left(imm, 5)), shift_left(dest, 0))
+}
+
+#[rustfmt::skip]
+pub fn movk(sf: i64, dest: i64, imm: i64, hw: i64, ) -> i64 { 
+bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(229, 23)), shift_left(hw, 21)), shift_left(imm, 5)), shift_left(dest, 0))
 }
 
 #[rustfmt::skip]
@@ -174,6 +178,11 @@ bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(856, 22)), shift_left(set_link,
 #[rustfmt::skip]
 pub fn brk(context: i64, ) -> i64 { 
 bit_or(bit_or(bit_or(0, shift_left(1697, 21)), shift_left(context, 5)), shift_left(0, 0))
+}
+
+#[rustfmt::skip]
+pub fn cset(sf: i64, dest: i64, cond: i64, ) -> i64 { 
+bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(212, 21)), shift_left(31, 16)), shift_left(cond, 12)), shift_left(1, 10)), shift_left(31, 5)), shift_left(dest, 0))
 }
 
 

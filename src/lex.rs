@@ -185,7 +185,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
         }
     }
 
-    // TODO: disallow multiline?
     // TODO: support escape characters
     fn lex_quoted(&mut self) -> Token<'p> {
         self.pop();
@@ -196,7 +195,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
                     let text = &self.src[self.start + 1..self.current - 1];
                     return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
                 }
-                '\0' => return self.err(LexErr::UnterminatedStr),
+                // I could let you have multi-line, but I don't like it because you end up with garbage indentation.
+                '\n' | '\0' => return self.err(LexErr::UnterminatedStr),
                 _ => {}
             }
         }

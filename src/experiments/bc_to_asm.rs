@@ -18,7 +18,7 @@ pub struct BcToAsm<'z, 'a, 'p> {
 }
 
 const x0: i64 = 0;
-// const x1: i64 = 1;
+const x1: i64 = 1;
 // const x2: i64 = 2;
 // const x3: i64 = 3;
 // const x4: i64 = 4;
@@ -129,16 +129,16 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::LoadConstant { slot, value } => match value {
                     Value::F64(_) => todo!(),
                     Value::I64(n) => {
-                        assert!(*n < 4096);
-                        self.asm.push(movz(X64, x0, *n, 0));
+                        self.load_imm(x0, u64::from_le_bytes(n.to_le_bytes()));
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
                     // These only make sense during comptime execution, but they're also really just numbers.
                     Value::OverloadSet(i)
                     | Value::GetFn(FuncId(i))
                     | Value::Type(TypeId(i))
-                    | Value::Symbol(i) => {
-                        self.asm.push(movz(X64, x0, *i as i64, 0));
+                    | Value::Symbol(i)
+                    | Value::CFnPtr { ptr: i, .. } => {
+                        self.load_imm(x0, *i as u64);
                         self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
                     }
                     &Value::Bool(b) => {
@@ -149,7 +149,6 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
                     Value::Heap { .. } => todo!(),
-                    Value::CFnPtr { .. } => todo!(),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
                     self.asm.push(ldr_uo(X64, x0, sp, cond.0 as i64));
@@ -177,11 +176,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         todo!()
                     }
                 }
-                Bc::AbsoluteStackAddr { .. } => todo!(),
+                // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
                 Bc::Clone { from, to } | Bc::Move { from, to } => {
-                    self.asm.push(ldr_uo(X64, x0, sp, (from.0 + i) as i64));
-                    self.asm.push(str_uo(X64, x0, sp, (to.0 + i) as i64));
+                    self.asm.push(ldr_uo(X64, x0, sp, (from.0) as i64));
+                    self.asm.push(str_uo(X64, x0, sp, (to.0) as i64));
                 }
                 Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
                     for i in 0..from.count {
@@ -190,10 +189,33 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(str_uo(X64, x0, sp, (to.first.0 + i) as i64));
                     }
                 }
-                Bc::SlicePtr { .. } => todo!(),
-                Bc::Load { .. } => todo!(),
-                Bc::TagCheck { .. } => todo!(),
-                Bc::Store { .. } => todo!(),
+                Bc::AbsoluteStackAddr { of, to } => {
+                    self.asm.push(add_im(X64, x0, sp, (of.first.0 * 8) as i64, 0));
+                    self.asm.push(str_uo(X64, x0, sp, to.0 as i64));
+                },
+                &Bc::SlicePtr { base, offset, ret, .. } => {
+                    self.asm.push(ldr_uo(X64, x0, sp, base.0 as i64));  // x0 = ptr
+                    self.asm.push(add_im(X64, x0, x0, (offset * 8) as i64, 0)); // x0 += offset * size_of(i64)
+                    self.asm.push(str_uo(X64, x0, sp, ret.0 as i64));  // out = x0
+                },
+                &Bc::Load { from, to } => {
+                    assert_eq!(to.count, 1);
+                    self.asm.push(ldr_uo(X64, x0, sp, from.0 as i64));  // x0 = ptr
+                    self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0
+                    self.asm.push(str_uo(X64, x0, sp, to.single().0 as i64));  // out = x0
+                },
+                &Bc::TagCheck { enum_ptr, value } => {
+                    self.asm.push(ldr_uo(X64, x0, sp, enum_ptr.0 as i64));  // x0 = ptr
+                    self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
+                    self.asm.push(cmp_im(X64, x0, value, 0));
+                    self.asm.push(b_cond(9999, CmpFlags::NE as i64)); // TODO: do better than just hoping to jump into garbage
+                },
+                Bc::Store { to, from } => {
+                    assert_eq!(from.count, 1);
+                    self.asm.push(ldr_uo(X64, x0, sp, from.single().0 as i64));  // x0 = val
+                    self.asm.push(ldr_uo(X64, x1, sp, to.0 as i64));  // x1 = ptr
+                    self.asm.push(str_uo(X64, x0, x1, 0));  // *x1 = x0
+                }
                 Bc::CallC { f, arg, ret, ty } => {
                     self.asm.push(ldr_uo(X64, x16, sp, f.0 as i64));
                     self.dyn_c_call(x16, *arg, *ret, *ty);
@@ -210,6 +232,21 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
         Ok(())
+    }
+
+    fn load_imm(&mut self, reg: i64, mut value: u64) {
+        let bottom = u16::MAX as u64;
+        self.asm.push(movz(X64, reg, (value & bottom) as i64, 0));
+        value >>= 16;
+        if value != 0 {
+            for shift in 1..4 {
+                self.asm.push(movk(X64, reg, (value & bottom) as i64, shift));
+                value >>= 16;
+                if value == 0 {
+                    break
+                }
+            }
+        }
     }
 
     fn dyn_c_call(&mut self, f_addr_reg: i64, arg: StackRange, ret: StackRange, _: FnType) {
@@ -236,15 +273,17 @@ mod tests {
     use crate::{ast::{garbage_loc, Program}, compiler::{Compile, ExecTime, Res}, interp::Interp, LIB, logging::{err, ice, unwrap}, make_toplevel, parse::Parser, pool::StringPool, scope::ResolveScope};
     use codemap::CodeMap;
     use std::{arch::asm, mem::transmute};
+    use std::ptr::addr_of;
 
     fn jit_main<Arg, Ret>(src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'_, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut codemap = CodeMap::new();
         let file = codemap.add_file("main_file".into(), src.to_string());
-        let mut stmts = Parser::parse(file.clone(), pool).unwrap();
-        stmts.extend(Parser::parse(codemap.add_file(LIB[0].0.to_string(), LIB[0].1.to_string()), pool).unwrap());
-        stmts.extend(Parser::parse(codemap.add_file(LIB[1].0.to_string(), LIB[1].1.to_string()), pool).unwrap());
-
+        let mut stmts = vec![];
+        stmts.extend(Parser::parse(file.clone(), pool).unwrap());
+        for (name, src) in LIB {
+            stmts.extend(Parser::parse(codemap.add_file(name.to_string(), src.to_string()), pool).unwrap());
+        }
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
         let mut program = Program::new(vars, pool);
@@ -281,62 +320,83 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn trivial() {
-        jit_main("@c_call fn main() i64 = { 42 }", |f| {
-            let ret: i64 = f(());
-            assert_eq!(ret, 42);
-        })
-        .unwrap();
+    macro_rules! simple {
+        ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
+            #[test]
+            fn $name () {
+                jit_main($src, |f| {
+                    let ret: i64 = f($arg);
+                    assert_eq!(ret, $ret);
+                })
+                .unwrap();
+            }
+        };
     }
 
-    #[test]
-    fn trivial_indirect() {
-        jit_main(
-            "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }",
-            |f| {
+    simple!(trivial, (), 42, "@c_call fn main() i64 = { 42 }");
+    simple!(trivial_indirect, (), 42, "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }");
+    simple!(simple_ifa, true, 123, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
+    simple!(simple_ifb, false, 456, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
+    simple!(math, 5, 20, "@c_call fn main(a: i64) i64 = { add(a, 15) }");
+    simple!(simple_while, 4, 10, r#"
+        @c_call fn main(n: i64) i64 = {
+            var a = 0;
+            (fn()=ne(n, 0), fn()={
+                a = add(a, n);
+                n = sub(n, 1);
+            })!while;
+            a
+        }"#
+    );
+    simple!(var_addr, 3, 10, r#"
+        @c_call fn main(n: i64) i64 = {
+            var a = n;
+            var b = 0;
+            let a_ptr = a!addr;
+            let b_ptr = b!addr;
+            b_ptr[] = add(a_ptr[], 7);
+            b
+        }"#
+    );
+    simple!(fields, 3, 10, r#"
+        @c_call fn main(n: i64) i64 = {
+            const A = .{ a: i64, b: i64 }!struct;
+            var a: A = .{ a: n, b: 0 };
+            a.b[] = add(a.a[], 7);
+            a.b[]
+        }"#
+    );
+    simple!(varient, 3, 10, r#"
+        @c_call fn main(n: i64) i64 = {
+            const A = .{ a: i64, b: i64 }!enum;
+            var a: A = .{ a: n };
+            add(a.a[], 7)
+        }"#
+    );
 
-                let ret: i64 = f(());
-                assert_eq!(ret, 42);
-            },
-        )
-        .unwrap();
-    }
-
     #[test]
-    fn simple_if() {
+    fn use_ptr() {
         jit_main(
-            "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }",
+            r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
+                   b[] = add(a[], 1);
+                   add(b[], 4)
+                }"#,
             |f| {
-                let ret: i64 = f(true);
-                assert_eq!(ret, 123);
-                let ret: i64 = f(false);
-                assert_eq!(ret, 456);
+                let mut a = 5;
+                let mut b = 0;
+                let ret: i64 = f((addr_of!(a), addr_of!(b)));
+                assert_eq!(ret, 10);
+                assert_eq!(a, 5);
+                assert_eq!(b, 6);
             },
         )
             .unwrap();
-
     }
-
-    // doesnt work because i cant encode big enough constants for the address. need to use a few movk
-    /*
-    #[test]
-    fn math() {
-        jit_main(
-            "@c_call fn main(a: i64) i64 = { add(a, 15) }",
-            |f| {
-                let ret: i64 = f(5);
-                assert_eq!(ret, 20);
-            },
-        )
-            .unwrap();
-    }
-    */
 }
 
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
-use crate::experiments::aarch64::signed_truncate;
+use crate::experiments::aarch64::{CmpFlags, signed_truncate};
 
 #[cfg(target_arch = "aarch64")]
 pub mod jit {
