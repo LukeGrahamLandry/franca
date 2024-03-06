@@ -116,8 +116,8 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
         .iter()
         .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
         .collect();
+    libs.insert(3, codemap.add_file("special".into(), get_special_functions()));  // TODO: order independent name resolution
     libs.push(codemap.add_file("main_file".into(), src.clone()));
-    libs.push(codemap.add_file("special".into(), get_special_functions()));
     let user_span = libs.last().unwrap().span;
     for file in &libs {
         match Parser::parse(file.clone(), pool) {

@@ -89,6 +89,7 @@ pub enum Bc<'p> {
         arg: StackRange,
         ret: StackRange,
         ty: FnType,
+        comp_ctx: bool
     },
     NoCompile,
 }

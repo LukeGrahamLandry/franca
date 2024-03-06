@@ -228,6 +228,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     arg,
                     ret,
                     ty,
+                    comp_ctx: func.has_tag(self.program.pool, "ct")
                 });
             } else {
                 result.push(Bc::CallDirect { f, ret, arg });
@@ -353,6 +354,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         arg,
                         ret,
                         ty: f_ty,
+                        comp_ctx: false // TODO
                     });
                     return Ok((ret, f_ty.ret).into());
                 }

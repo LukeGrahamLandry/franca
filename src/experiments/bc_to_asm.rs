@@ -217,9 +217,10 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     self.asm.push(ldr_uo(X64, x1, sp, to.0 as i64));  // x1 = ptr
                     self.asm.push(str_uo(X64, x0, x1, 0));  // *x1 = x0
                 }
-                Bc::CallC { f, arg, ret, ty } => {
+                Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                     self.asm.push(ldr_uo(X64, x16, sp, f.0 as i64));
                     self.dyn_c_call(x16, *arg, *ret, *ty);
+                    assert!(!*comp_ctx);
                 },
             }
         }

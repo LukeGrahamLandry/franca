@@ -1625,7 +1625,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
-
                 if let Some(id) = f.as_fn() {
                     return Ok(self.program.funcs[id.0].finished_ret);
                 }

@@ -1,4 +1,6 @@
 #![allow(clippy::wrong_self_convention)]
+
+use std::arch::asm;
 use std::env;
 use std::mem::replace;
 use std::process::Command;
@@ -291,7 +293,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(tag, Values::One(Value::I64(value)));
                     self.bump_ip();
                 }
-                &Bc::CallC { f, ret, arg, ty } => {
+                &Bc::CallC { f, ret, arg, ty, comp_ctx } => {
                     self.bump_ip();
 
                     #[cfg(not(feature = "interp_c_ffi"))]
@@ -304,7 +306,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         let ptr = f.to_int()?.to_bytes() as usize;
 
                         let arg = self.take_slots(arg);
-                        let result = ffi::c::call(program, ptr, ty, arg)?;
+                        let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     }
                 }
@@ -620,7 +622,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let (enum_ty, name) = arg.to_pair()?;
                 let (enum_ty, name) = (program.to_type(enum_ty.into())?, name.to_int()?);
                 let name = unwrap!(self.pool.upcast(name), "bad symbol");
-                let index = tag_value(program, enum_ty, name)?;
+                let index = tag_value(program, enum_ty, name);
                 Value::I64(index).into()
             }
             "Opaque" => {

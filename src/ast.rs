@@ -12,7 +12,7 @@ use std::{
 };
 use std::mem::{align_of, size_of};
 
-#[repr(C)]
+#[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
 pub struct TypeId(pub usize);
 
@@ -1293,15 +1293,15 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
 ];
 
-pub extern fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> Res<'p, i64> {
-    let cases = unwrap!(program.get_enum(enum_ty), "not enum");
+pub extern fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
+    let cases = program.get_enum(enum_ty).unwrap_or_else( || panic!("{} is not enum. cannot get field {}", program.log_type(enum_ty), program.pool.get(name)));
     let index = cases.iter().position(|f| f.0 == name);
-    let index = unwrap!(index, "bad case name") as i64;
-    Ok(index)
+    let index = index.expect("bad case name") as i64;
+    index
 }
 
 pub const COMPILER: &[(&str, *const u8)] = &[
-    ("fn tag_value(E: Type, case_name: Symbol) CRes.i64[]", tag_value as *const u8)
+    ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8)
 ];
 
 macro_rules! result_ffi {
@@ -1328,9 +1328,9 @@ pub fn get_special_functions() -> String {
     // result_ffi!(out, all, TypeId, "Type");
     //
     //
-    // for (sig, ptr) in COMPILER {
-    //     writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
-    // }
+    for (sig, ptr) in COMPILER {
+        writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+    }
 
     // format!("const CRes = @enum(Type) .{{ {all} }};\n{out}")
     out

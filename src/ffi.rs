@@ -506,7 +506,7 @@ fn interp_send_libs_ast() {
 #[cfg(feature = "interp_c_ffi")]
 pub mod c {
     use libc::c_void;
-    use libffi::middle::Arg;
+    use libffi::middle::{Arg, Type};
 
     use crate::{
         ast::{Program, TypeId, TypeInfo},
@@ -522,6 +522,7 @@ pub mod c {
         pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
             Ok(match &self.types[ty.0] {
                 TypeInfo::F64 => CTy::f64(),
+                TypeInfo::Type |
                 TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
                 TypeInfo::Bool => CTy::c_int(),
                 TypeInfo::Tuple(_) => {
@@ -544,6 +545,8 @@ pub mod c {
             Value::F64(v) => Arg::new(v),
             Value::I64(v) => Arg::new(v),
             Value::Bool(v) => Arg::new(v),
+            Value::Symbol(v) |
+            Value::Type(TypeId(v)) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
         }
     }
@@ -553,12 +556,19 @@ pub mod c {
         ptr: usize,
         f_ty: crate::ast::FnType,
         arg: Values,
+        comp_ctx: bool
     ) -> Res<'p, Values> {
         let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
         let mut b = Builder::new();
-        let args: Vec<_> = if f_ty.arg == TypeId::unit() {
+
+
+
+        if comp_ctx {
+            b = b.arg(Type::pointer());
+        }
+        let mut args: Vec<_> = if f_ty.arg == TypeId::unit() {
             vec![]
         } else if let TypeInfo::Tuple(fields) = &program.types[f_ty.arg.0] {
             for ty in fields {
@@ -573,12 +583,18 @@ pub mod c {
         if f_ty.ret != TypeId::unit() {
             b = b.res(program.as_c_type(f_ty.ret)?)
         }
+        let int32 = program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true }));
+
+        if comp_ctx {
+            // IMPORTANT: extra &indirection. We want a pointer to the argument, even if the argument is already a pointer.
+            args.insert(0, Arg::new(&program));
+        }
 
         // TODO: this is getting deranged.
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
-        } else if f_ty.ret == TypeId::i64() || f_ty.ret == program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true })) {
+        } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::I64(result).into()
