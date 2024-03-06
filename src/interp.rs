@@ -1,6 +1,5 @@
 #![allow(clippy::wrong_self_convention)]
 
-use std::arch::asm;
 use std::env;
 use std::mem::replace;
 use std::process::Command;
@@ -12,16 +11,9 @@ use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::{EmitBc, SizeCache};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, PoolLog, unwrap};
-use crate::{
-    ast::{FnType, FuncId, Program, TypeId, TypeInfo},
-    pool::{Ident, StringPool},
-};
+use crate::{ast::{FnType, FuncId, Program, TypeId, TypeInfo}, export_ffi, pool::{Ident, StringPool}};
 use crate::{bc::*, ffi};
-use crate::ast::{COMPILER, tag_value};
-use crate::experiments::aarch64;
-
-
-use crate::logging::{assert, assert_eq, bin_int, err, ice, logln, LogTag::ShowPrint};
+use crate::logging::{assert, assert_eq, err, ice, logln, LogTag::ShowPrint};
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'p> {
@@ -43,13 +35,6 @@ pub struct Interp<'a, 'p> {
     pub last_loc: Option<Span>,
     pub messages: Vec<StackAbsoluteRange>,
     pub sizes: SizeCache,
-}
-
-macro_rules! un_int {
-    ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
-        let a = $arg.single()?.to_int()?;
-        $res($op a).into()
-    }};
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
@@ -462,14 +447,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let stride = self.size_of(program, ty);
                 Value::I64(stride as i64).into()
             }
-            "Ptr" => {
-                let inner_ty = program.to_type(arg)?;
-                Value::Type(program.ptr_type(inner_ty)).into()
-            }
-            "Slice" => {
-                let inner_ty = program.to_type(arg)?;
-                Value::Type(program.slice_type(inner_ty)).into()
-            }
             "is_oob_stack" => {
                 let addr = arg.to_stack_addr()?;
                 Value::Bool(addr.first.0 >= self.value_stack.len()).into()
@@ -586,20 +563,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // println!("=> {}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
-            // "add" => bin_int!(self, +, arg, Value::I64),
-            // "sub" => bin_int!(self, -, arg, Value::I64),
-            "mul" => bin_int!(self, *, arg, Value::I64),
-            "div" => bin_int!(self, /, arg, Value::I64),
-            "eq" => bin_int!(self, ==, arg, Value::Bool),
-            //"ne" => bin_int!(self, !=, arg, Value::Bool),
-            "gt" => bin_int!(self, >, arg, Value::Bool),
-            "lt" => bin_int!(self, <, arg, Value::Bool),
-            "ge" => bin_int!(self, >=, arg, Value::Bool),
-            "le" => bin_int!(self, <=, arg, Value::Bool),
-            "shift_left" => bin_int!(self, <<, arg, Value::I64),
-            "bit_or" => bin_int!(self, |, arg, Value::I64),
-            "bit_and" => bin_int!(self, &, arg, Value::I64),
-            "bit_not" => un_int!(self, !, arg, Value::I64),
             // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
                 if let Values::One(Value::Type(ty)) = arg {
@@ -614,17 +577,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // println!(" => {:?}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
-            "Unique" => {
-                let ty = program.to_type(arg)?;
-                Value::Type(program.unique_ty(ty)).into()
-            }
-            "tag_value" => {
-                let (enum_ty, name) = arg.to_pair()?;
-                let (enum_ty, name) = (program.to_type(enum_ty.into())?, name.to_int()?);
-                let name = unwrap!(self.pool.upcast(name), "bad symbol");
-                let index = tag_value(program, enum_ty, name);
-                Value::I64(index).into()
-            }
             "Opaque" => {
                 // TODO: this doesn't actually do anything.
                 let (size, align) = arg.to_pair()?;
@@ -636,14 +588,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                     ffi_byte_stride: Some(size as usize),
                 };
                 Value::Type(program.intern_type(ty)).into()
-            }
-            "tag_symbol" => {
-                let (enum_ty, tag_val) = arg.to_pair()?;
-                let (enum_ty, tag_val) = (program.to_type(enum_ty.into())?, tag_val.to_int()?);
-                let cases = unwrap!(program.get_enum(enum_ty), "not enum");
-                let case = unwrap!(cases.get(tag_val as usize), "enum tag too high");
-
-                Value::Symbol(case.0 .0).into()
             }
             "system" => {
                 self.fail_on_wasm("fn system")?;
@@ -721,7 +665,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     .into_iter()
                     .map(|v| v.to_int().unwrap() as u32)
                     .collect();
-                let (map, code) = aarch64::copy_to_mmap_exec(arg);
+                let (map, code) = export_ffi::copy_to_mmap_exec(arg);
                 let map: usize = Box::leak(map) as *const memmap2::Mmap as usize;
                 Values::Many(vec![Value::I64(map as i64), Value::I64(code as i64)])
             }
@@ -1158,20 +1102,6 @@ impl<'p> Values {
             Ok((value, first, count))
         } else {
             err!(CErr::TypeError("Heap", self))
-        }
-    }
-
-    // TODO: macros for each builtin arg type cause this sucks.
-    #[track_caller]
-    fn load_int_pair(self) -> Res<'p, (i64, i64)> {
-        match self {
-            Values::Many(mut values) => {
-                assert_eq!(values.len(), 2, "load_int_pair wrong arity {:?}", values);
-                let a = replace(&mut values[0], Value::Poison);
-                let b = replace(&mut values[1], Value::Poison);
-                Ok((a.to_int()?, b.to_int()?))
-            }
-            _ => err!("load_int_pair {:?}", self),
         }
     }
 }

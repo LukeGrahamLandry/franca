@@ -6,13 +6,6 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Write};
 use std::{fs, mem};
 
-macro_rules! bin_int {
-    ($self:expr, $op:tt, $arg:expr, $res:expr) => {{
-        let (a, b) = $arg.load_int_pair()?;
-        $res(a $op b).into()
-    }};
-}
-
 macro_rules! err {
     ($payload:expr) => {{
         return Err($crate::compiler::CompileError {
@@ -202,7 +195,6 @@ pub(crate) use logln;
 
 pub(crate) use assert;
 pub(crate) use assert_eq;
-pub(crate) use bin_int;
 pub(crate) use err;
 
 use crate::ast::FatStmt;

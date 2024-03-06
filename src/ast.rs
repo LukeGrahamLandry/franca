@@ -1,5 +1,5 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{insert_multi, CErr, FnWip, Res}, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, logging::{err, ice}, pool::{Ident, StringPool}};
+use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{CErr, FnWip, insert_multi, Res}, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, logging::err, pool::{Ident, StringPool}};
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
@@ -7,10 +7,9 @@ use std::{
     collections::HashMap,
     hash::Hash,
     mem,
-    ops::{Deref, DerefMut},
-    fmt::Write,
+    ops::{Deref, DerefMut}
+    ,
 };
-use std::mem::{align_of, size_of};
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
@@ -658,7 +657,6 @@ macro_rules! safe_rec {
 }
 
 pub(crate) use safe_rec;
-use crate::logging::unwrap;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
@@ -823,7 +821,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub fn unique_ty(&mut self, ty: TypeId) -> TypeId {
+    pub extern fn unique_ty(&mut self, ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Unique(ty, self.types.len()))
     }
 
@@ -925,7 +923,7 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Fn(ty))
     }
 
-    pub fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
+    pub extern fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }
 
@@ -1280,58 +1278,4 @@ impl<'p> TypeInfo<'p> {
             ffi_byte_stride: None,
         }
     }
-}
-
-
-// TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
-pub const LIBC: &[(&str, *const u8)] = &[
-    ("fn write(fd: i32, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
-    ("fn getchar() i32", libc::getchar as *const u8),
-    ("fn putchar(c: i32) i32", libc::putchar as *const u8),
-    ("fn exit(status: i32) Never", libc::exit as *const u8),
-    ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
-    ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
-];
-
-pub extern fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
-    let cases = program.get_enum(enum_ty).unwrap_or_else( || panic!("{} is not enum. cannot get field {}", program.log_type(enum_ty), program.pool.get(name)));
-    let index = cases.iter().position(|f| f.0 == name);
-    let index = index.expect("bad case name") as i64;
-    index
-}
-
-pub const COMPILER: &[(&str, *const u8)] = &[
-    ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8)
-];
-
-macro_rules! result_ffi {
-    ($out:ident, $all:ident, $T:ty, $t_name:expr) => {{
-        extern fn is_ok(r: &mut Res<'_, $T>) -> bool {
-            r.is_ok()
-        }
-        extern fn unwrap<'a>(r: &'a mut Res<'_, $T>) -> &'a mut $T {
-            r.as_mut().unwrap()
-        }
-        writeln!($all, "{} = Opaque({}, {}),", $t_name, size_of::<$T>(), align_of::<$T>()).unwrap();
-        writeln!($out, "@comptime_addr({}) @c_call fn is_ok(r: Ptr(CRes.{}[])) bool;", is_ok as *const u8 as usize, $t_name).unwrap();
-        writeln!($out, "@comptime_addr({0}) @c_call fn unwrap(r: Ptr(CRes.{1}[])) Ptr({1});", unwrap as *const u8 as usize, $t_name).unwrap();
-    }};
-}
-
-pub fn get_special_functions() -> String {
-    let mut out = String::new();
-    for (sig, ptr) in LIBC {
-        writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
-    }
-    // let mut all = String::new();
-    // result_ffi!(out, all, i64, "i64");
-    // result_ffi!(out, all, TypeId, "Type");
-    //
-    //
-    for (sig, ptr) in COMPILER {
-        writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
-    }
-
-    // format!("const CRes = @enum(Type) .{{ {all} }};\n{out}")
-    out
 }

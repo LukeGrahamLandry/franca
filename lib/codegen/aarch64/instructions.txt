@@ -11,11 +11,18 @@ const Cond = @enum(u4) .{
     NE = 0b0001, // not equal
     HS = 0b0010, // unsigned greater than or equal
     LO = 0b0011, // unsigned less than
+    MI = 0b0100,
+    PL = 0b0101,
+    VS = 0b0110,
+    VC = 0b0111,
     HI = 0b1000, // unsigned greater than
     LS = 0b1001, // unsigned less than or equal
+    GE = 0b1010, //  signed greater than or equal
     LT = 0b1011, // signed less than
     GT = 0b1100, // signed greater than
-    AL = 0b1111, // Always
+    LE = 0b1101, // signed less than or equal
+    _AL2 = 0b1110, // Always, (yes it has two encodings).
+    _AL1 = 0b1111, // Always
 };
 
 // TODO: this is wrong becuase you want JumpRel(i19) === JumpRel(i19)
@@ -30,6 +37,13 @@ fn JumpRel(Int: Type) = Unique(Int);  // measured in instructions, not bytes
 
 @rs fn orr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
     @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest) ();
+
+/// dest = a | ~(b <shift> amount)  // TODO: make sure that order is right.
+@rs fn orn(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
+    @bits(sf, 0b0101010, shift, 0b1, a, amount, b, dest) ();
+
+@rs fn and_sr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
+    @bits(sf, 0b0001010, shift, 0b0, a, amount, b, dest) ();
 
 @rs fn sub_sr(sf: Bits.T[], dest: RegO, a: RegI, b: RegI, shift: Shift.T[], amount: u6) u32 =
     @bits(sf, 0b1001011, shift, 0b0, b, amount, a, dest) ();
@@ -46,6 +60,15 @@ fn JumpRel(Int: Type) = Unique(Int);  // measured in instructions, not bytes
     @bits(sf, 0b11100010, lsl_12, imm, src, 0b11111) ();
 
 @rs fn mov(sf: Bits.T[], dest: RegO, src: RegI) u32 = orr(sf, dest, src, 0b11111, Shift.LSL[], 0);
+
+/// dest = (x * y) + add
+/// This works with signed numbers, even though there's another instruction that says signed mul? i guess the difference matters for the ones that have multiple output registers.
+@rs fn madd(sf: Bits.T[], dest: RegO, x: RegI, y: RegI, add: RegI) u32 =
+    @bits(sf, 0b0011011000, x, 0b0, add, y, dest) ();
+
+/// dest = dividend / divisor
+@rs fn sdiv(sf: Bits.T[], dest: RegO, dividend: RegI, divisor: RegI) u32 =
+    @bits(sf, 0b0011010110, divisor, 0b000011, dividend, dest) ();
 
 @rs fn cbz(sf: Bits.T[], offset: JumpRel(i19), val: RegI) u32 =
     @bits(sf, 0b0110100, offset, val) ();
@@ -101,6 +124,9 @@ const Hw = @enum(u2) .{ Left0 = 0b00, Left16 = 0b01, Left32 = 0b10, Left48 = 0b1
 @rs fn cset(sf: Bits.T[], dest: RegI, zero_when: Cond.T[]) u32 =
     @bits(sf, 0b0011010100, 0b11111, zero_when, 0b01, 0b11111, dest) ();
 
+/// Logical Shift Left. <shift> is truncated to the bottom 5/6 bits. (1 << 64 === 1)
+@rs fn lslv(sf: Bits.T[], dest: RegI, val: RegI, shift: RegI) u32 =
+    @bits(sf, 0b0011010110, shift, 0b001000, val, dest) ();
 
 // TODO: there's a bit of a confusing dependency where this needs to import things but everything expands to calls to these...
 //       but I think it works out because you just need to bootstrap with a different backend. 

@@ -40,11 +40,12 @@ pub mod pool;
 pub mod scope;
 pub mod emit_bc;
 pub mod experiments;
+pub mod export_ffi;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
-use crate::ast::get_special_functions;
+use export_ffi::get_special_functions;
 
 macro_rules! stdlib {
     ($name:expr) => {
@@ -59,7 +60,7 @@ macro_rules! stdlib {
 static LIB: &[(&str, &str)] = &[
     stdlib!("core"),
     stdlib!("codegen/aarch64/basic.gen"),
-    stdlib!("interp"), 
+    stdlib!("interp"),
     stdlib!("collections"), 
     stdlib!("system"), 
     stdlib!("ast"), 

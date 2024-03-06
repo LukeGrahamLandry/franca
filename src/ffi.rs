@@ -515,6 +515,8 @@ pub mod c {
         logging::err,
     };
     use crate::ast::IntType;
+    use crate::ffi::InterpSend;
+    use crate::pool::Ident;
 
     type CTy = libffi::middle::Type;
 
@@ -584,6 +586,7 @@ pub mod c {
             b = b.res(program.as_c_type(f_ty.ret)?)
         }
         let int32 = program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true }));
+        let sym = *program.ffi_types.get(&Ident::get_type_key()).unwrap();
 
         if comp_ctx {
             // IMPORTANT: extra &indirection. We want a pointer to the argument, even if the argument is already a pointer.
@@ -594,6 +597,9 @@ pub mod c {
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
+        } else if f_ty.ret == TypeId::ty(){
+            let result: usize = unsafe { b.into_cif().call(ptr, &args) };
+            Value::Type(TypeId(result)).into()
         } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
@@ -602,7 +608,10 @@ pub mod c {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Bool(result != 0).into()
-        } else {
+        } else if f_ty.ret == sym {
+            let result: usize = unsafe { b.into_cif().call(ptr, &args) };
+            Value::Symbol(result).into()
+        }else {
             todo!("unsupported c ret type {}", program.log_type(f_ty.ret))
         })
     }

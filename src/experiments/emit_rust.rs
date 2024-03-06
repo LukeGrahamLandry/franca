@@ -20,6 +20,7 @@ use crate::pool::StringPool;
 use crate::scope::ResolveScope;
 use crate::{bc::*, emit_diagnostic, make_toplevel, LIB};
 use crate::experiments::bc_to_asm::{BcToAsm, Jitted};
+use crate::export_ffi::get_special_functions;
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
@@ -29,6 +30,7 @@ pub fn bootstrap() -> (String, String) {
         .iter()
         .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
         .collect();
+    libs.insert(3, codemap.add_file("special".into(), get_special_functions()));  // TODO: order independent name resolution
     let user_span = libs.last().unwrap().span;
     for file in &libs {
         stmts.extend(Parser::parse(file.clone(), pool).unwrap());
@@ -57,7 +59,7 @@ pub fn bootstrap() -> (String, String) {
     }
 
     let symbol_bs = pool.intern("bs");
-    let mut fr = String::new();
+    let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.txt\n");
     for f in &bs {
         let bytes = unsafe { &*asm.asm.get_fn(*f).unwrap() };
 

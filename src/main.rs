@@ -7,6 +7,7 @@ use franca::{
     run_main,
 };
 use std::{env, fs, path::PathBuf};
+use franca::export_ffi::get_special_functions;
 
 fn main() {
     if let Some(name) = env::args().nth(1) {
@@ -14,6 +15,10 @@ fn main() {
             let (rs, fr) = bootstrap();
             fs::write("target/bootstrap_gen.rs", rs).unwrap();
             fs::write("target/aarch64_basic.gen.txt", fr).unwrap();
+            return;
+        }
+        if name == "log_export_ffi" {
+            println!("{}", get_special_functions());
             return;
         }
 

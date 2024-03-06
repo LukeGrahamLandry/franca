@@ -17,7 +17,7 @@ use crate::ast::{
     garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
 };
 
-use crate::{bc::*, experiments};
+use crate::{bc::*};
 use crate::ffi::InterpSend;
 use crate::logging::{outln, LogTag, PoolLog};
 use crate::experiments::reflect::Reflect;
@@ -2587,7 +2587,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         //       maybe just keep the vec, defer dealing with it and have bc_to_asm do it?
         //       but then interp can't use it.
         self.program.funcs[f.0].jitted_code = Some(ops.clone());
-        let map = experiments::aarch64::copy_to_mmap_exec(ops);
+        let map = crate::export_ffi::copy_to_mmap_exec(ops);
         self.program.funcs[f.0].comptime_addr = Some(map.1 as u64);
         let _ = Box::leak(map.0); // TODO: dont leak
         Ok(())

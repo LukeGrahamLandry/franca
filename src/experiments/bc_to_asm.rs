@@ -3,7 +3,6 @@
 
 #![allow(non_upper_case_globals)]
 
-use std::env;
 use crate::ast::{FnType, FuncId, TypeId};
 use crate::bc::{Bc, StackRange, Value};
 use crate::compiler::Res;
@@ -108,7 +107,6 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
                     if target_c_call {
-                        // TODO: fix @bs !asm for bootstrap so I can get the new bl function.
                         // if let Some(bytes) = self.asm.get_fn(*f) {
                         //     // TODO: shoyld only do this for comptime functions. for runtime, want to be able to squash everything down.
                         //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
@@ -277,15 +275,20 @@ mod tests {
     use std::{arch::asm, mem::transmute};
     use std::ptr::addr_of;
     use crate::ast::SuperSimple;
+    use crate::export_ffi::get_special_functions;
 
     fn jit_main<Arg, Ret>(src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'_, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut codemap = CodeMap::new();
-        let file = codemap.add_file("main_file".into(), src.to_string());
         let mut stmts = vec![];
-        stmts.extend(Parser::parse(file.clone(), pool).unwrap());
-        for (name, src) in LIB {
-            stmts.extend(Parser::parse(codemap.add_file(name.to_string(), src.to_string()), pool).unwrap());
+        let mut libs: Vec<_> = LIB
+            .iter()
+            .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
+            .collect();
+        libs.insert(3, codemap.add_file("special".into(), get_special_functions()));  // TODO: order independent name resolution
+        libs.push(codemap.add_file("main_file".into(), src.to_string()));
+        for l in libs {
+            stmts.extend(Parser::parse(l, pool).unwrap());
         }
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
