@@ -174,11 +174,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             for id in callees {
                 self.compile(id, when)?;
             }
-            let func = &self.program.funcs[f.0];
             result = self.executor.compile_func(self.program, f);
-            if result.is_ok() && func.has_tag(self.pool, "jit") {
-                self.jit(f)?;
-            }
         }
         
         let result = self.tag_err(result);
@@ -2559,47 +2555,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
         let res = self.compile_expr(result, expr_out, None)?;
         Ok(res.ty())
-    }
-    
-    fn jit(&mut self, _f: FuncId) -> Res<'p, ()> {
-        todo!()
-        // outln!(LogTag::Jitted, "Try Jit {f:?}");
-        // let bc = self.executor.get_bc(f);
-        // if bc.is_none() {
-        //     return Ok(());
-        // }
-        // let bc = bc.unwrap();
-        // let func = self.lookup_unique_func(self.pool.intern("bc_to_asm"));
-        // if func.is_none() {
-        //     return Ok(());
-        // }
-        // let func = func.unwrap();
-        // if func == f {
-        //     return Ok(());
-        // }
-        // let ffff = &self.program.funcs[f.0];
-        // let wip = ffff.wip.as_ref().unwrap();
-        // let callees = wip.callees.clone();
-        // for id in callees {
-        //     self.jit(id)?;
-        // }
-        
-        // self.compile(func, ExecTime::Comptime)?;
-        // let arg = bc.serialize_one();
-        // let res = self.executor.run_func(self.program, func, arg)?;
-        // let ops: Vec<u32> = unwrap!(res.deserialize(), "");
-        // outln!(LogTag::Jitted, "=================\n {f:?}");
-        // for op in &ops {
-        //     outln!(LogTag::Jitted, "{op}");
-        // }
-        // outln!(LogTag::Jitted, "\n============");
-        // let map = builtins::copy_to_mmap_exec(ops.into());
-        // Box::leak(map.0.into()); // TODO: dont leak
-        // while self.jitted.len() <= f.0 {
-        //     self.jitted.push(null());
-        // }
-        // self.jitted[f.0] = map.1;
-        // Ok(())
     }
 
     fn inline_asm_body(&mut self, result: &mut FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {

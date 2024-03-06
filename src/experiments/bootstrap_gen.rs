@@ -181,8 +181,8 @@ bit_or(bit_or(bit_or(0, shift_left(1697, 21)), shift_left(context, 5)), shift_le
 }
 
 #[rustfmt::skip]
-pub fn cset(sf: i64, dest: i64, cond: i64, ) -> i64 { 
-bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(212, 21)), shift_left(31, 16)), shift_left(cond, 12)), shift_left(1, 10)), shift_left(31, 5)), shift_left(dest, 0))
+pub fn cset(sf: i64, dest: i64, zero_when: i64, ) -> i64 { 
+bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(212, 21)), shift_left(31, 16)), shift_left(zero_when, 12)), shift_left(1, 10)), shift_left(31, 5)), shift_left(dest, 0))
 }
 
 

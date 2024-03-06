@@ -19,7 +19,10 @@ pub struct RsType<'t> {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum RsData<'t> {
     Struct(&'t [RsField<'t>]),
-    Enum(&'t [RsVarient<'t>]),
+    Enum {
+        varients: &'t [RsVarient<'t>],
+        read_tag: fn(&()) -> usize,
+    },
     Ptr {
         inner: &'t RsType<'t>,
         non_null: bool
@@ -366,6 +369,16 @@ mod test {
     struct Baz {
         a: bool,
         b: i64,
+    }
+
+    enum Hello {
+        A(usize, usize),
+        B(i64),
+        C,
+        D {
+            a: u64,
+            b: i64
+        },
     }
 
     #[test]

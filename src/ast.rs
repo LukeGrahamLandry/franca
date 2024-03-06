@@ -1,5 +1,5 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{insert_multi, CErr, FnWip, Res}, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, LIB, logging::err, pool::{Ident, StringPool}};
+use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{insert_multi, CErr, FnWip, Res}, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, logging::{err, ice}, pool::{Ident, StringPool}};
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
@@ -10,7 +10,7 @@ use std::{
     ops::{Deref, DerefMut},
     fmt::Write,
 };
-use std::num::{NonZeroI64, NonZeroUsize};
+use std::mem::{align_of, size_of};
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
@@ -478,7 +478,7 @@ pub struct Func<'p> {
     pub dynamic_import_symbol: Option<Ident<'p>>,
     /// An address to call this function. Body may be None or this could be jitted.
     /// It might correspond to dynamic_import_symbol (for libc things that you can call at runtime or comptime).
-    pub comptime_addr: Option<u64>,
+    pub comptime_addr: Option<u64>,  // TODO: NonZero for niche
     /// Inline assembly will be saved here.
     // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
@@ -658,6 +658,7 @@ macro_rules! safe_rec {
 }
 
 pub(crate) use safe_rec;
+use crate::logging::unwrap;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
@@ -760,7 +761,7 @@ impl<'p> Program<'p> {
                         ffi_byte_stride: Some(type_info.stride),
                     })
                 }
-                RsData::Enum(_) => todo!(),
+                RsData::Enum { .. } => todo!(),
                 RsData::Ptr{inner, ..} => {
                     let inner = self.get_rs_type(inner);
                     self.ptr_type(inner)
@@ -1292,10 +1293,45 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
 ];
 
-pub fn get_comptime_libc() -> String {
+pub extern fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> Res<'p, i64> {
+    let cases = unwrap!(program.get_enum(enum_ty), "not enum");
+    let index = cases.iter().position(|f| f.0 == name);
+    let index = unwrap!(index, "bad case name") as i64;
+    Ok(index)
+}
+
+pub const COMPILER: &[(&str, *const u8)] = &[
+    ("fn tag_value(E: Type, case_name: Symbol) CRes.i64[]", tag_value as *const u8)
+];
+
+macro_rules! result_ffi {
+    ($out:ident, $all:ident, $T:ty, $t_name:expr) => {{
+        extern fn is_ok(r: &mut Res<'_, $T>) -> bool {
+            r.is_ok()
+        }
+        extern fn unwrap<'a>(r: &'a mut Res<'_, $T>) -> &'a mut $T {
+            r.as_mut().unwrap()
+        }
+        writeln!($all, "{} = Opaque({}, {}),", $t_name, size_of::<$T>(), align_of::<$T>()).unwrap();
+        writeln!($out, "@comptime_addr({}) @c_call fn is_ok(r: Ptr(CRes.{}[])) bool;", is_ok as *const u8 as usize, $t_name).unwrap();
+        writeln!($out, "@comptime_addr({0}) @c_call fn unwrap(r: Ptr(CRes.{1}[])) Ptr({1});", unwrap as *const u8 as usize, $t_name).unwrap();
+    }};
+}
+
+pub fn get_special_functions() -> String {
     let mut out = String::new();
     for (sig, ptr) in LIBC {
         writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
     }
+    // let mut all = String::new();
+    // result_ffi!(out, all, i64, "i64");
+    // result_ffi!(out, all, TypeId, "Type");
+    //
+    //
+    // for (sig, ptr) in COMPILER {
+    //     writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+    // }
+
+    // format!("const CRes = @enum(Type) .{{ {all} }};\n{out}")
     out
 }

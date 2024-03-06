@@ -788,7 +788,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let f = *f;
                         let ty = self.program.find_interned(TypeInfo::Ptr(f.ty));
                         let ret = result.reserve_slots(self, ty)?;
-
+                        let offset = if let Some(bytes) = f.ffi_byte_offset {
+                            assert_eq!(bytes % 8, 0);
+                            bytes / 8
+                        } else {
+                            offset
+                        };
                         result.push(Bc::SlicePtr {
                             base: container_ptr.single(),
                             offset,

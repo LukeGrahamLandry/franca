@@ -3,6 +3,7 @@
 
 #![allow(non_upper_case_globals)]
 
+use std::env;
 use crate::ast::{FnType, FuncId, TypeId};
 use crate::bc::{Bc, StackRange, Value};
 use crate::compiler::Res;

@@ -15,6 +15,7 @@ use crate::{
     pool::{Ident, StringPool},
 };
 use crate::{bc::*, ffi};
+use crate::ast::{COMPILER, tag_value};
 use crate::experiments::aarch64;
 
 
@@ -619,10 +620,20 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let (enum_ty, name) = arg.to_pair()?;
                 let (enum_ty, name) = (program.to_type(enum_ty.into())?, name.to_int()?);
                 let name = unwrap!(self.pool.upcast(name), "bad symbol");
-                let cases = unwrap!(program.get_enum(enum_ty), "not enum");
-                let index = cases.iter().position(|f| f.0 == name);
-                let index = unwrap!(index, "bad case name");
-                Value::I64(index as i64).into()
+                let index = tag_value(program, enum_ty, name)?;
+                Value::I64(index).into()
+            }
+            "Opaque" => {
+                // TODO: this doesn't actually do anything.
+                let (size, align) = arg.to_pair()?;
+                let (size, align) = (size.to_int()?, align.to_int()?);
+                let ty = TypeInfo::Struct {
+                    fields: vec![],
+                    as_tuple: TypeId::unknown(),
+                    ffi_byte_align: Some(align as usize),
+                    ffi_byte_stride: Some(size as usize),
+                };
+                Value::Type(program.intern_type(ty)).into()
             }
             "tag_symbol" => {
                 let (enum_ty, tag_val) = arg.to_pair()?;
