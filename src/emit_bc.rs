@@ -15,6 +15,7 @@ use crate::{
     ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo},
     pool::Ident,
 };
+use crate::experiments::reflect::BitSet;
 
 use crate::logging::{assert, assert_eq, err, ice, unwrap};
 
@@ -34,6 +35,7 @@ pub struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
     sizes: &'z mut SizeCache,
     last_loc: Option<Span>,
+    locals: Vec<Vec<StackRange>>
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
@@ -59,6 +61,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             last_loc: None,
             program,
             sizes,
+            locals: vec![],
         }
     }
 
@@ -80,10 +83,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             debug: vec![],
             slot_types: vec![],
             to_drop: vec![],
+            slot_is_var: BitSet::empty(),
         }
     }
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
+        self.locals.clear();
+        self.locals.push(vec![]);
         let func = &self.program.funcs[f.0];
         let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
@@ -111,6 +117,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         full_arg_range: StackRange,
         pattern: &Pattern<'p>,
     ) -> Res<'p, Vec<(Option<Var<'p>>, StackRange, TypeId)>> {
+        for i in full_arg_range {
+            result.slot_is_var.set(i);
+        }
         let mut args_to_drop = vec![];
         let arguments = pattern.flatten();
         let mut slot_count = 0;
@@ -141,6 +150,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let has_body = func.body.is_some();
 
         let mut args_to_drop = self.bind_args(result, full_arg_range, &func.arg)?;
+        self.locals.last_mut().unwrap().push(full_arg_range);
 
         if !has_body {
             // Functions without a body are always builtins.
@@ -193,6 +203,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             result.push(Bc::Drop(range));
         }
+        for slot in self.locals.pop().unwrap() {
+            result.push(Bc::LastUse(slot));
+            for i in slot {
+                assert!(result.slot_is_var.get(i));
+            }
+        }
+        assert!(self.locals.is_empty());
 
         Ok(ret_val)
     }
@@ -273,8 +290,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     None => (result.reserve_slots(self, ty)?, ty),
                     Some(value) => result.load(self, value.unchecked_cast(ty))?,
                 };
-
+                for i in value.0 {
+                    result.slot_is_var.set(i);
+                }
                 let prev = result.vars.insert(*name, value);
+                self.locals.last_mut().unwrap().push(value.0);
                 assert!(prev.is_none(), "shadow is still new var");
 
                 // TODO: what if shadow is const? that would be more consistant if did it like rust.
@@ -291,11 +311,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Stmt::DeclVarPattern { binding, value } => {
                 let full_arg_range = self.compile_expr(result, value.as_ref().unwrap())?;
                 let (full_arg_range, _) = result.load(self, full_arg_range)?;
+                for i in full_arg_range {
+                    result.slot_is_var.set(i);
+                }
+                self.locals.last_mut().unwrap().push(full_arg_range);
                 let args_to_drop = self.bind_args(result, full_arg_range, binding)?;
                 for (name, slot, _) in args_to_drop {
                     if name.is_none() {
                         result.push(Bc::Drop(slot));
-                        // result.to_drop.push((slot, ty));
                     }
                 }
             }
@@ -365,6 +388,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result: value,
                 locals,
             } => {
+                self.locals.push(vec![]);
                 for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
@@ -375,6 +399,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::Drop(slot));
                     } else if result.constants.get(*local).is_none() {
                         ice!("Missing local {local:?}")
+                    }
+                }
+
+                // TODO: redundant with ^ but i dont trust
+                let slots = self.locals.pop().unwrap();
+                for slot in slots {
+                    result.push(Bc::LastUse(slot));
+                    for i in slot {
+                        assert!(result.slot_is_var.get(i));
                     }
                 }
 
@@ -437,6 +470,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let ptr_ty = expr.ty;
                         let ptr = result.reserve_slots(self, ptr_ty)?;
                         let slot = result.load(self, container)?.0;
+                        for i in slot {
+                            result.slot_is_var.set(i);
+                        }
                         result.push(Bc::AbsoluteStackAddr {
                             of: slot,
                             to: ptr.offset(0),
@@ -586,6 +622,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             "Can only take address of vars not {kind:?} {}. TODO: allow read field.",
                             var.log(self.program.pool)
                         )
+                    }
+                    for i in stack_slot {
+                        assert!(result.slot_is_var.get(i), "addr non-var {}", var.log(self.program.pool));
                     }
 
                     let ptr_ty = self.program.find_interned(TypeInfo::Ptr(value_ty));

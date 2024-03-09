@@ -9,7 +9,9 @@ use crate::{
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
+use std::ops::Range;
 use crate::emit_bc::DebugInfo;
+use crate::experiments::reflect::BitSet;
 
 #[derive(Clone, InterpSend)]
 pub enum Bc<'p> {
@@ -91,6 +93,7 @@ pub enum Bc<'p> {
         ty: FnType,
         comp_ctx: bool
     },
+    LastUse(StackRange),
     NoCompile,
 }
 
@@ -108,6 +111,8 @@ pub struct FnBody<'p> {
     pub last_loc: Span,
     pub constants: Constants<'p>,
     pub to_drop: Vec<(StackRange, TypeId)>,
+    /// true -> we might Drop but the put a value back. false -> it's an ssa intermediate only needed once.
+    pub slot_is_var: BitSet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -412,5 +417,14 @@ impl Values {
             Values::One(_) => 1,
             Values::Many(v) => v.len(),
         }
+    }
+}
+
+impl IntoIterator for StackRange {
+    type Item = usize;
+    type IntoIter = Range<usize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.first.0..self.first.0 + self.count
     }
 }

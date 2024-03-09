@@ -119,6 +119,9 @@ impl<'a, 'p> Interp<'a, 'p> {
 
             logln!("I: {:?}", i.log(self.pool));
             match i {
+                Bc::LastUse(_) => {
+                    self.bump_ip();
+                }
                 Bc::NoCompile => err!("Ran empty function",),
                 &Bc::CallDirect { f, ret, arg } => {
                     // preincrement our ip because ret doesn't do it.

@@ -803,6 +803,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::Load { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
             Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
             Bc::Drop(i) => write!(f, "drop({:?});", i),
+            Bc::LastUse(i) => write!(f, "LastUse({:?});", i),
             Bc::SlicePtr {
                 base,
                 offset,

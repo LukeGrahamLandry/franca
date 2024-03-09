@@ -51,7 +51,8 @@ pub fn bootstrap() -> (String, String) {
     let mut asm = BcToAsm {
         interp: &comp.executor,
         program: &mut program,
-        asm: Jitted::new(1<<26)  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+        asm: Jitted::new(1<<26),  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+        slots: vec![],
     };
     asm.asm.reserve(asm.program.funcs.len());
     for f in &bs {

@@ -11,10 +11,14 @@ use crate::interp::Interp;
 use crate::logging::{err, PoolLog};
 use crate::{ast::Program, bc::FnBody};
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct SpOffset(usize);
+
 pub struct BcToAsm<'z, 'a, 'p> {
     pub program: &'z Program<'p>,
     pub interp: &'z Interp<'a, 'p>,
     pub asm: Jitted,
+    pub slots: Vec<Option<SpOffset>>,
 }
 
 const x0: i64 = 0;
@@ -101,6 +105,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         for (i, inst) in func.insts.iter().enumerate() {
             self.asm.mark_next_ip();
             match inst {
+                Bc::LastUse(slots) => {
+                    // TODO
+                }
                 Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
                 Bc::CallDirect { f, ret, arg } => {
@@ -302,7 +309,8 @@ mod tests {
         let mut asm = BcToAsm {
             interp: &comp.executor,
             program: &mut program,
-            asm: Jitted::new(1<<26)  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            asm: Jitted::new(1<<26),  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            slots: vec![],
         };
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
