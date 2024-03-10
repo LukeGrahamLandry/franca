@@ -24,6 +24,10 @@ pub struct FnType {
 }
 
 impl TypeId {
+    pub fn is_unit(&self) -> bool {
+        *self == Self::unit()
+    }
+
     pub fn is_unknown(&self) -> bool {
         self.0 == 0
     }

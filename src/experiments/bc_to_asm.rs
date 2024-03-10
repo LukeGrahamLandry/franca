@@ -11,7 +11,7 @@ use crate::interp::Interp;
 use crate::logging::{err, PoolLog};
 use crate::{ast::Program, bc::FnBody};
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct SpOffset(usize);
 
 pub struct BcToAsm<'z, 'a, 'p> {
@@ -20,7 +20,9 @@ pub struct BcToAsm<'z, 'a, 'p> {
     pub asm: Jitted,
     pub slots: Vec<Option<SpOffset>>,
     pub open_slots: Vec<(SpOffset, usize)>,
-    pub next_slot: SpOffset
+    pub next_slot: SpOffset,
+    f: FuncId,
+    slot_types: Option<&'z [TypeId]>
 }
 
 const x0: i64 = 0;
@@ -36,7 +38,7 @@ const x1: i64 = 1;
 /// c_call: "intra-procedure-call scratch register"
 const x16: i64 = 16;
 /// c_call: "intra-procedure-call scratch register"
-const _x17: i64 = 17;
+const x17: i64 = 17;
 
 const x21: i64 = 21;
 const fp: i64 = 29;
@@ -53,7 +55,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             asm: Jitted::new(1<<26),  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
             slots: vec![],
             open_slots: vec![],
-            next_slot: SpOffset(16),
+            next_slot: SpOffset(0),
+            f: FuncId(0),  // TODO: bad
+            slot_types: None
         }
     }
 
@@ -89,27 +93,39 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         Ok(())
     }
 
-    fn bc_to_asm(&mut self, func: &FnBody<'p>) -> Res<'p, ()> {
-        const SAVED_RET: i64 = 0;
+    fn bc_to_asm(&mut self, func: &'z FnBody<'p>) -> Res<'p, ()> {
         println!("{}", func.log(self.program.pool));
         let ff = &self.program.funcs[func.func.0];
+        self.slot_types = Some(&func.slot_types);
+        self.f = func.func;
+        self.next_slot = SpOffset(0);
+        self.slots.clear();
+        self.slots.extend(vec![None; func.stack_slots]);
+        self.open_slots.clear();
         let is_c_call = ff.has_tag(self.program.pool, "c_call");
         let slots = if func.stack_slots % 2 == 0 {
             func.stack_slots + 2
         } else {
             func.stack_slots + 1 + 2
         };
+        // TODO: always put this at 0 and just offset everyone else
+        let SAVED_RET: i64 = (slots - 2) as i64;
+        println!("SAVED_RET {}", SAVED_RET * 8);
         assert!(slots < 63, "range for stp/ldp");
-        self.asm.push(sub_im(X64, sp, sp, (slots * 8) as i64, 0)); // TODO: correct slot count
+        self.asm.push(brk(0));
+        let reserve_stack = self.asm.prev();
+        let mut release_stack = vec![];
         self.asm.push(stp_so(X64, fp, lr, sp, SAVED_RET));  // save our return address
         if is_c_call {
             assert!(
                 func.arg_range.count <= 8,
                 "c_call only supports 8 arguments. TODO: pass on stack"
             );
-            assert_eq!(func.arg_range.first.0, 0);
-            for i in 0..func.arg_range.count {
-                self.asm.push(str_uo(X64, i as i64, sp, i as i64));
+            for i in func.arg_range {
+                if func.slot_types[i].is_unit() {
+                    continue
+                }
+                self.set_slot((i - func.arg_range.first.0) as i64, StackOffset(i));
             }
         }
 
@@ -119,8 +135,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         for (i, inst) in func.insts.iter().enumerate() {
             self.asm.mark_next_ip();
             match inst {
-                Bc::LastUse(slots) => {
-                    // TODO
+                &Bc::LastUse(slots) => {
+                    self.release_many(slots);
                 }
                 Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
@@ -151,7 +167,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::F64(_) => todo!(),
                     Value::I64(n) => {
                         self.load_imm(x0, u64::from_le_bytes(n.to_le_bytes()));
-                        self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
+                        self.set_slot(x0, *slot);
                     }
                     // These only make sense during comptime execution, but they're also really just numbers.
                     Value::OverloadSet(i)
@@ -159,11 +175,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     | Value::Type(TypeId(i))
                     | Value::Symbol(i) => {
                         self.load_imm(x0, *i as u64);
-                        self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
+                        self.set_slot(x0, *slot);
                     }
                     &Value::Bool(b) => {
                         self.asm.push(movz(X64, x0, b as i64, 0));
-                        self.asm.push(str_uo(X64, x0, sp, slot.0 as i64));
+                        self.set_slot(x0, *slot);
                     },
                     Value::Unit => {}
                     Value::Poison => todo!(),
@@ -171,7 +187,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Heap { .. } => todo!(),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
-                    self.asm.push(ldr_uo(X64, x0, sp, cond.0 as i64));
+                    self.get_slot(x0, cond);
                     self.asm.push(brk(0));
                     assert_eq!(true_ip, i + 1);
                     patch_cbz.push((self.asm.prev(), false_ip));
@@ -185,12 +201,14 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         match slot.count {
                             0 => {}
                             1 => {
-                                self.asm.push(ldr_uo(X64, x0, sp, slot.first.0 as i64));
+                                self.get_slot(x0, slot.single());
                             }
                             _ => err!("c_call only supports one return value. TODO: structs",),
                         }
+                        dbg!(SAVED_RET);
                         self.asm.push(ldp_so(X64, fp, lr, sp, SAVED_RET));  // get our return address
-                        self.asm.push(add_im(X64, sp, sp, (slots * 8) as i64, 0));
+                        self.asm.push(brk(0));
+                        release_stack.push(self.asm.prev());
                         self.asm.push(ret(()));
                     } else {
                         todo!()
@@ -198,47 +216,56 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 }
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
-                Bc::Clone { from, to } | Bc::Move { from, to } => {
-                    self.asm.push(ldr_uo(X64, x0, sp, (from.0) as i64));
-                    self.asm.push(str_uo(X64, x0, sp, (to.0) as i64));
+                &Bc::Move { from, to } => {
+                    if !func.slot_is_var.get(from.0) && !func.slot_is_var.get(to.0) {
+                        self.slots[to.0] = self.slots[from.0].take();
+                    } else {
+                        self.get_slot(x0, from);
+                        self.set_slot(x0, to);
+                    }
+                }
+                &Bc::Clone { from, to } => {
+                    self.get_slot(x0, from);
+                    self.set_slot(x0, to);
                 }
                 Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
                     for i in 0..from.count {
-                        self.asm
-                            .push(ldr_uo(X64, x0, sp, (from.first.0 + i) as i64));
-                        self.asm.push(str_uo(X64, x0, sp, (to.first.0 + i) as i64));
+                        self.get_slot(x0, StackOffset(from.first.0 + i));
+                        self.set_slot(x0, StackOffset(to.first.0 + i));
                     }
                 }
-                Bc::AbsoluteStackAddr { of, to } => {
-                    self.asm.push(add_im(X64, x0, sp, (of.first.0 * 8) as i64, 0));
-                    self.asm.push(str_uo(X64, x0, sp, to.0 as i64));
+                &Bc::AbsoluteStackAddr { of, to } => {
+                    let offset = self.find_many(of, false);
+                    self.asm.push(add_im(X64, x0, sp, offset.0 as i64, 0));
+                    self.set_slot(x0, to);
                 },
                 &Bc::SlicePtr { base, offset, ret, .. } => {
-                    self.asm.push(ldr_uo(X64, x0, sp, base.0 as i64));  // x0 = ptr
+                    self.get_slot(x0, base);  // x0 = ptr
                     self.asm.push(add_im(X64, x0, x0, (offset * 8) as i64, 0)); // x0 += offset * size_of(i64)
-                    self.asm.push(str_uo(X64, x0, sp, ret.0 as i64));  // out = x0
+                    self.set_slot(x0, ret);
                 },
                 &Bc::Load { from, to } => {
                     assert_eq!(to.count, 1);
-                    self.asm.push(ldr_uo(X64, x0, sp, from.0 as i64));  // x0 = ptr
+                    self.get_slot(x0, from);  // x0 = ptr
                     self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0
-                    self.asm.push(str_uo(X64, x0, sp, to.single().0 as i64));  // out = x0
+                    self.set_slot(x0, to.single());  // out = x0
                 },
                 &Bc::TagCheck { enum_ptr, value } => {
-                    self.asm.push(ldr_uo(X64, x0, sp, enum_ptr.0 as i64));  // x0 = ptr
+                    self.get_slot(x0, enum_ptr);  // x0 = ptr
                     self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
                     self.asm.push(cmp_im(X64, x0, value, 0));
                     self.asm.push(b_cond(9999, CmpFlags::NE as i64)); // TODO: do better than just hoping to jump into garbage
                 },
                 Bc::Store { to, from } => {
                     assert_eq!(from.count, 1);
-                    self.asm.push(ldr_uo(X64, x0, sp, from.single().0 as i64));  // x0 = val
-                    self.asm.push(ldr_uo(X64, x1, sp, to.0 as i64));  // x1 = ptr
+                    self.get_slot(x0, from.single());  // x0 = val
+                    self.get_slot(x1, *to);  // x1 = ptr
                     self.asm.push(str_uo(X64, x0, x1, 0));  // *x1 = x0
                 }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
-                    self.asm.push(ldr_uo(X64, x16, sp, f.0 as i64));
+                    self.get_slot(x16, *f);
                     self.dyn_c_call(x16, *arg, *ret, *ty);
+                    self.release_one(*f);
                     assert!(!*comp_ctx);
                 },
             }
@@ -252,18 +279,35 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             debug_assert_ne!(dist, 0, "while(1);");
             self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
+
+        self.asm.patch(reserve_stack, sub_im(X64, sp, sp, (slots * 8) as i64, 0));
+        for inst in release_stack {
+            self.asm.patch(inst, add_im(X64, sp, sp, (slots * 8) as i64, 0));
+        }
+        // panic!();
         Ok(())
     }
 
-    fn find_many(&mut self, slot: StackRange) -> SpOffset {
+    fn set_slot(&mut self, src_reg: i64, slot: StackOffset) {
+        let offset = self.find_one(slot, true);
+        self.asm.push(str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
+    }
+
+    fn get_slot(&mut self, dest_reg: i64, slot: StackOffset) {
+        let offset = self.find_one(slot, false);
+        self.asm.push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
+    }
+
+    fn find_many(&mut self, slot: StackRange, allow_create: bool) -> SpOffset {
         if slot.count == 1 {
-            return self.find_one(slot.single());
+            return self.find_one(slot.single(), allow_create);
         }
         if let Some(slot) = self.slots[slot.first.0] {
             return slot
         }
 
-        for (i, &(check, size)) in self.open_slots.iter().enumerate().rev() {
+        debug_assert!(allow_create);
+        for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
             if size == slot.count * 8 {
                 let found = self.open_slots.remove(i);
                 self.slots[slot.first.0] = Some(found.0);
@@ -277,15 +321,24 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         made
     }
 
-    fn find_one(&mut self, slot: StackOffset) -> SpOffset {
+    fn release_many(&mut self, slot: StackRange) {
+        if let Some(r) = self.slots[slot.first.0].take() {
+            self.open_slots.push((r, slot.count * 8));
+        }
+    }
+
+    fn find_one(&mut self, slot: StackOffset, allow_create: bool) -> SpOffset {
         if let Some(slot) = self.slots[slot.0] {
             slot
-        } else if let Some((slot, size)) = self.open_slots.pop() {
-            if size > 1 {
-                self.open_slots.push((SpOffset(slot.0 + 8), size - 8));
+        } else if let Some((made, size)) = self.open_slots.pop() {
+            debug_assert!(allow_create);
+            if size > 8 {
+                self.open_slots.push((SpOffset(made.0 + 8), size - 8));
             }
-            slot
+            self.slots[slot.0] = Some(made);
+            made
         } else {
+            debug_assert!(allow_create);
             let made = self.next_slot;
             self.slots[slot.0] = Some(made);
             self.next_slot.0 += 8;
@@ -320,14 +373,20 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             "indirect c_call only supports 7 arguments. TODO: pass on stack"
         );
         for i in 0..arg.count {
-            self.asm
-                .push(ldr_uo(X64, i as i64, sp, (arg.first.0 + i) as i64));
+            if self.slot_types.unwrap()[arg.first.0 + i].is_unit() {
+                continue
+            }
+            self.get_slot(i as i64, StackOffset(arg.first.0 + i));
         }
-        // this symptom of not resetting sp is you get a stack overflow which is odd.
+        // The symptom of not resetting sp is you get a stack overflow which is odd.
         // maybe it keeps calling me in a loop because rust loses where it put its link register.
         self.asm.push(br(f_addr_reg, 1));
+        // TODO: you cant call release many because it assumes they were made in one chunk
+        for i in arg {
+            self.release_one(StackOffset(i));
+        }
         assert_eq!(ret.count, 1);
-        self.asm.push(str_uo(X64, x0, sp, ret.first.0 as i64));
+        self.set_slot(x0, ret.single());
     }
 }
 
@@ -337,12 +396,13 @@ mod tests {
     use super::{BcToAsm, Jitted};
     use crate::{ast::{garbage_loc, Program}, compiler::{Compile, ExecTime, Res}, interp::Interp, LIB, logging::{err, ice, unwrap}, make_toplevel, parse::Parser, pool::StringPool, scope::ResolveScope};
     use codemap::CodeMap;
-    use std::{arch::asm, mem::transmute};
+    use std::{arch::asm, fs, mem::transmute};
+    use std::process::Command;
     use std::ptr::addr_of;
     use crate::ast::SuperSimple;
     use crate::export_ffi::get_special_functions;
 
-    fn jit_main<Arg, Ret>(src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'_, ()> {
+    fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut codemap = CodeMap::new();
         let mut stmts = vec![];
@@ -368,6 +428,19 @@ mod tests {
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
 
+        if cfg!(feature = "llvm_dis_debug") {
+            let hex: String = asm.asm.bytes()
+                .iter()
+                .copied()
+                .array_chunks::<4>()
+                .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
+                .collect();
+            let path = format!("target/latest_log/asm/{test_name}.asm");
+            fs::write(&path, hex).unwrap();
+            let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
+            fs::write(&path, dis);
+        }
+
         asm.asm.make_exec();
         let code = asm.asm.get_fn(main).unwrap().as_ptr();
         let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
@@ -391,7 +464,7 @@ mod tests {
         ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
             #[test]
             fn $name () {
-                jit_main($src, |f| {
+                jit_main(stringify!($name), $src, |f| {
                     let ret: i64 = f($arg);
                     assert_eq!(ret, $ret);
                 })
@@ -448,7 +521,7 @@ mod tests {
 
     #[test]
     fn use_ptr() {
-        jit_main(
+        jit_main("use_ptr",
             r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
                    b[] = add(a[], 1);
                    add(b[], 4)
@@ -467,7 +540,7 @@ mod tests {
 
     #[test]
     fn ffi_ptr() {
-        jit_main(
+        jit_main("ffi_ptr",
             r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
                    let c = sub(a.b[], a.a[]);
                    a.a[] = 1;
@@ -529,6 +602,12 @@ pub mod jit {
                 ranges: vec![],
                 ip_to_inst: vec![],
             }
+        }
+
+        pub fn bytes(&self) -> &[u8] {
+            let map = self.map_mut.as_ref().unwrap();
+            let len = unsafe {self.next.offset_from(map.as_ptr())} as usize;
+            &map[0..len]
         }
 
         pub fn reserve(&mut self, func_count: usize) {

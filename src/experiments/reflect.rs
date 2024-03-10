@@ -605,6 +605,8 @@ fn bitset() {
     assert!(b.get(1), "{b:?}");
     b.set(100);
     assert!(b.get(100));
+    // b.set(500);
+    // assert!(b.get(500));
 
 }
 
