@@ -596,6 +596,7 @@ pub struct Program<'p> {
     pub overload_sets: Vec<OverloadSet<'p>>,
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
+    comptime_only: BitSet,  // Index is TypeId
 }
 
 #[derive(Clone)]
@@ -657,6 +658,7 @@ macro_rules! safe_rec {
 }
 
 pub(crate) use safe_rec;
+use crate::experiments::reflect::BitSet;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
@@ -693,6 +695,7 @@ impl<'p> Program<'p> {
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
+            comptime_only: BitSet::empty(),
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -855,6 +858,9 @@ impl<'p> Program<'p> {
             .unwrap_or_else(|| {
                 let id = self.types.len();
                 self.types.push(ty);
+                if self.calc_is_comptime_only_type(TypeId(id)) {
+                    self.comptime_only.set(id);
+                }
                 id
             });
         TypeId(id)
@@ -1028,38 +1034,38 @@ impl<'p> Program<'p> {
         }
     }
 
+    // All TypeId must have gone through intern_type, so it will always be here.
     pub fn is_comptime_only_type(&self, ty: TypeId) -> bool {
-        safe_rec!(
-            self,
-            ty,
-            false,
-            match &self.types[ty.0] {
-                TypeInfo::Unit
-                | TypeInfo::Any
-                | TypeInfo::Unknown
-                | TypeInfo::Never
-                | TypeInfo::F64
-                | TypeInfo::VoidPtr
-                | TypeInfo::FnPtr(_)
-                | TypeInfo::Int(_)
-                | TypeInfo::Bool => false,
-                // TODO: supply "runtime" versions of these for macros to work with
-                TypeInfo::Fn(_) => true,
-                // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
-                TypeInfo::Type => false,
-                TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
-                TypeInfo::Unique(ty, _)
-                | TypeInfo::Named(ty, _)
-                | TypeInfo::Ptr(ty)
-                | TypeInfo::Slice(ty) => self.is_comptime_only_type(*ty),
-                TypeInfo::Struct { fields, .. } => {
-                    fields.iter().any(|f| self.is_comptime_only_type(f.ty))
-                }
-                TypeInfo::Enum { cases, .. } => {
-                    cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
-                }
+        self.comptime_only.get(ty.0)
+    }
+
+    fn calc_is_comptime_only_type(&self, ty: TypeId) -> bool {
+        match &self.types[ty.0] {
+            TypeInfo::Unit
+            | TypeInfo::Any
+            | TypeInfo::Unknown
+            | TypeInfo::Never
+            | TypeInfo::F64
+            | TypeInfo::VoidPtr
+            | TypeInfo::FnPtr(_)
+            | TypeInfo::Int(_)
+            | TypeInfo::Bool => false,
+            // TODO: supply "runtime" versions of these for macros to work with
+            TypeInfo::Fn(_) => true,
+            // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
+            TypeInfo::Type => false,
+            TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
+            TypeInfo::Unique(ty, _)
+            | TypeInfo::Named(ty, _)
+            | TypeInfo::Ptr(ty)
+            | TypeInfo::Slice(ty) => self.is_comptime_only_type(*ty),
+            TypeInfo::Struct { fields, .. } => {
+                fields.iter().any(|f| self.is_comptime_only_type(f.ty))
             }
-        )
+            TypeInfo::Enum { cases, .. } => {
+                cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
+            }
+        }
     }
 
     #[track_caller]

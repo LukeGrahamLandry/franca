@@ -402,6 +402,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                 }
 
+                // TODO: check if you try to let an address to a variable escape from its scope.
                 // TODO: redundant with ^ but i dont trust
                 let slots = self.locals.pop().unwrap();
                 for slot in slots {

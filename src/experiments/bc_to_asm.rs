@@ -4,7 +4,7 @@
 #![allow(non_upper_case_globals)]
 
 use crate::ast::{FnType, FuncId, TypeId};
-use crate::bc::{Bc, StackRange, Value};
+use crate::bc::{Bc, StackOffset, StackRange, Value};
 use crate::compiler::Res;
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
@@ -19,6 +19,8 @@ pub struct BcToAsm<'z, 'a, 'p> {
     pub interp: &'z Interp<'a, 'p>,
     pub asm: Jitted,
     pub slots: Vec<Option<SpOffset>>,
+    pub open_slots: Vec<(SpOffset, usize)>,
+    pub next_slot: SpOffset
 }
 
 const x0: i64 = 0;
@@ -44,6 +46,17 @@ const sp: i64 = 31;
 const X64: i64 = 0b1;
 
 impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
+    pub fn new(interp: &'z Interp<'a, 'p>, program: &'z Program<'p>) -> Self {
+        Self {
+            program,
+            interp,
+            asm: Jitted::new(1<<26),  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            slots: vec![],
+            open_slots: vec![],
+            next_slot: SpOffset(16),
+        }
+    }
+
     // TODO: i cant keep copy pasting this shape. gonna cry.
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
         self.asm.reserve(f.0);
@@ -77,6 +90,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     }
 
     fn bc_to_asm(&mut self, func: &FnBody<'p>) -> Res<'p, ()> {
+        const SAVED_RET: i64 = 0;
         println!("{}", func.log(self.program.pool));
         let ff = &self.program.funcs[func.func.0];
         let is_c_call = ff.has_tag(self.program.pool, "c_call");
@@ -86,8 +100,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             func.stack_slots + 1 + 2
         };
         assert!(slots < 63, "range for stp/ldp");
-        self.asm.push(sub_im(X64, sp, sp, (slots * 8) as i64, 0));
-        self.asm.push(stp_so(X64, fp, lr, sp, (slots - 2) as i64));  // save our return address
+        self.asm.push(sub_im(X64, sp, sp, (slots * 8) as i64, 0)); // TODO: correct slot count
+        self.asm.push(stp_so(X64, fp, lr, sp, SAVED_RET));  // save our return address
         if is_c_call {
             assert!(
                 func.arg_range.count <= 8,
@@ -175,7 +189,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                             }
                             _ => err!("c_call only supports one return value. TODO: structs",),
                         }
-                        self.asm.push(ldp_so(X64, fp, lr, sp, (slots - 2) as i64));  // get our return address
+                        self.asm.push(ldp_so(X64, fp, lr, sp, SAVED_RET));  // get our return address
                         self.asm.push(add_im(X64, sp, sp, (slots * 8) as i64, 0));
                         self.asm.push(ret(()));
                     } else {
@@ -239,6 +253,50 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
         Ok(())
+    }
+
+    fn find_many(&mut self, slot: StackRange) -> SpOffset {
+        if slot.count == 1 {
+            return self.find_one(slot.single());
+        }
+        if let Some(slot) = self.slots[slot.first.0] {
+            return slot
+        }
+
+        for (i, &(check, size)) in self.open_slots.iter().enumerate().rev() {
+            if size == slot.count * 8 {
+                let found = self.open_slots.remove(i);
+                self.slots[slot.first.0] = Some(found.0);
+                return found.0;
+            }
+        }
+
+        let made = self.next_slot;
+        self.slots[slot.first.0] = Some(made);
+        self.next_slot.0 += 8;
+        made
+    }
+
+    fn find_one(&mut self, slot: StackOffset) -> SpOffset {
+        if let Some(slot) = self.slots[slot.0] {
+            slot
+        } else if let Some((slot, size)) = self.open_slots.pop() {
+            if size > 1 {
+                self.open_slots.push((SpOffset(slot.0 + 8), size - 8));
+            }
+            slot
+        } else {
+            let made = self.next_slot;
+            self.slots[slot.0] = Some(made);
+            self.next_slot.0 += 8;
+            made
+        }
+    }
+
+    fn release_one(&mut self, slot: StackOffset) {
+        if let Some(slot) = self.slots[slot.0].take() {
+            self.open_slots.push((slot, 8));
+        }
     }
 
     fn load_imm(&mut self, reg: i64, mut value: u64) {
@@ -306,12 +364,7 @@ mod tests {
         let main = unwrap!(comp.lookup_unique_func(name), "");
         comp.compile(main, ExecTime::Runtime)?;
 
-        let mut asm = BcToAsm {
-            interp: &comp.executor,
-            program: &mut program,
-            asm: Jitted::new(1<<26),  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
-            slots: vec![],
-        };
+        let mut asm = BcToAsm::new(&comp.executor, &mut program);
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
 
