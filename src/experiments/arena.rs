@@ -1,5 +1,5 @@
 use core::slice;
-use std::fmt::Write;
+use std::fmt::{Debug, Formatter, Write};
 use std::{
     alloc::Allocator,
     cell::UnsafeCell,
@@ -226,4 +226,10 @@ fn self_referential() {
         v.push(i);
     }
     assert_eq!(v[123], 123);
+}
+
+impl<'a> Debug for Arena<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<Arena>")
+    }
 }

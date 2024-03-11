@@ -7,4 +7,6 @@ pub mod emit_aarch64;
 pub mod emit_rust;
 pub mod reflect;
 pub mod macho;
+mod ir;
+mod emit_ir;
 

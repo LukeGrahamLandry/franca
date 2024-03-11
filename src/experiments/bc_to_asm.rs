@@ -3,7 +3,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use crate::ast::{FnType, FuncId, TypeId};
+use crate::ast::{FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, StackOffset, StackRange, Value};
 use crate::compiler::Res;
 use crate::experiments::bootstrap_gen::*;
@@ -22,7 +22,8 @@ pub struct BcToAsm<'z, 'a, 'p> {
     pub open_slots: Vec<(SpOffset, usize)>,
     pub next_slot: SpOffset,
     f: FuncId,
-    slot_types: Option<&'z [TypeId]>
+    slot_types: Option<&'z [TypeId]>,
+    wip: Vec<FuncId>, // make recursion work
 }
 
 const x0: i64 = 0;
@@ -57,18 +58,20 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             open_slots: vec![],
             next_slot: SpOffset(0),
             f: FuncId(0),  // TODO: bad
-            slot_types: None
+            slot_types: None,
+            wip: vec![],
         }
     }
 
     // TODO: i cant keep copy pasting this shape. gonna cry.
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
         self.asm.reserve(f.0);
-        if self.asm.get_fn(f).is_some() {
+        if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
             return Ok(());
         }
         self.asm.make_write();
 
+        self.wip.push(f);
         let callees = self.program.funcs[f.0]
             .wip
             .as_ref()
@@ -90,6 +93,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
         }
         self.asm.save_current(f);
+        self.wip.retain(|c| c != &f);
         Ok(())
     }
 
@@ -103,19 +107,14 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         self.slots.extend(vec![None; func.stack_slots]);
         self.open_slots.clear();
         let is_c_call = ff.has_tag(self.program.pool, "c_call");
-        let slots = if func.stack_slots % 2 == 0 {
-            func.stack_slots + 2
-        } else {
-            func.stack_slots + 1 + 2
-        };
-        // TODO: always put this at 0 and just offset everyone else
-        let SAVED_RET: i64 = (slots - 2) as i64;
-        println!("SAVED_RET {}", SAVED_RET * 8);
-        assert!(slots < 63, "range for stp/ldp");
+
+        self.asm.push(sub_im(X64, sp, sp, 16, 0));
+        self.asm.push(stp_so(X64, fp, lr, sp, 0));  // save our return address
+        self.asm.push(add_im(X64, fp, sp, 0, 0));  // Note: normal mov encoding can't use sp
         self.asm.push(brk(0));
         let reserve_stack = self.asm.prev();
+
         let mut release_stack = vec![];
-        self.asm.push(stp_so(X64, fp, lr, sp, SAVED_RET));  // save our return address
         if is_c_call {
             assert!(
                 func.arg_range.count <= 8,
@@ -154,9 +153,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         //     // do for allocators/logging anyway
                         //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
                         // } else {
-                            assert!(f.0 < 512);
-                            self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
-                            self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty());
+                        assert!(f.0 < 512);
+                        self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
+                        self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty());
                         // }
                     } else {
                         todo!()
@@ -205,10 +204,12 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                             }
                             _ => err!("c_call only supports one return value. TODO: structs",),
                         }
-                        dbg!(SAVED_RET);
-                        self.asm.push(ldp_so(X64, fp, lr, sp, SAVED_RET));  // get our return address
                         self.asm.push(brk(0));
-                        release_stack.push(self.asm.prev());
+                        let a = self.asm.prev();
+                        self.asm.push(brk(0));
+                        let b = self.asm.prev();
+                        self.asm.push(brk(0));
+                        release_stack.push((a, b, self.asm.prev()));
                         self.asm.push(ret(()));
                     } else {
                         todo!()
@@ -280,11 +281,16 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
 
-        self.asm.patch(reserve_stack, sub_im(X64, sp, sp, (slots * 8) as i64, 0));
-        for inst in release_stack {
-            self.asm.patch(inst, add_im(X64, sp, sp, (slots * 8) as i64, 0));
+        let mut slots = self.next_slot.0;
+        if slots % 16 != 0 {
+            slots += 16 - (slots % 16);  // play by the rules
         }
-        // panic!();
+        self.asm.patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
+        for (fst, snd, thd) in release_stack {
+            self.asm.patch(fst, add_im(X64, sp, fp, 0, 0));   // Note: normal mov encoding can't use sp
+            self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0));  // get our return address
+            self.asm.patch(thd, add_im(X64, sp, sp, 16, 0));
+        }
         Ok(())
     }
 
@@ -438,7 +444,7 @@ mod tests {
             let path = format!("target/latest_log/asm/{test_name}.asm");
             fs::write(&path, hex).unwrap();
             let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
-            fs::write(&path, dis);
+            fs::write(&path, &dis).unwrap();
         }
 
         asm.asm.make_exec();
@@ -447,13 +453,13 @@ mod tests {
         let indirect_fns = asm.asm.get_dispatch();
         unsafe {
             asm!(
-                "mov x21, {fns}",
-                fns = in(reg) indirect_fns,
-                // I'm hoping this is how I declare that I intend to clobber the register.
-                // https://doc.rust-lang.org/reference/inline-assembly.html
-                // "[...] the contents of the register to be discarded at the end of the asm code"
-                // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
-                out("x21") _
+            "mov x21, {fns}",
+            fns = in(reg) indirect_fns,
+            // I'm hoping this is how I declare that I intend to clobber the register.
+            // https://doc.rust-lang.org/reference/inline-assembly.html
+            // "[...] the contents of the register to be discarded at the end of the asm code"
+            // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
+            out("x21") _
             );
         }
         f(code);
@@ -519,21 +525,31 @@ mod tests {
         }"#
     );
 
+    simple!(recursion, 5, 8, r#"
+        @c_call fn main(n: i64) i64 = {
+            (le(n, 1),
+                fn = 1,
+                fn = add(main(sub(n, 1)), main(sub(n, 2))),
+            )!if
+        }
+        "#
+    );
+
     #[test]
     fn use_ptr() {
         jit_main("use_ptr",
-            r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
+                 r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
                    b[] = add(a[], 1);
                    add(b[], 4)
                 }"#,
-            |f| {
-                let mut a = 5;
-                let mut b = 0;
-                let ret: i64 = f((addr_of!(a), addr_of!(b)));
-                assert_eq!(ret, 10);
-                assert_eq!(a, 5);
-                assert_eq!(b, 6);
-            },
+                 |f| {
+                     let mut a = 5;
+                     let mut b = 0;
+                     let ret: i64 = f((addr_of!(a), addr_of!(b)));
+                     assert_eq!(ret, 10);
+                     assert_eq!(a, 5);
+                     assert_eq!(b, 6);
+                 },
         )
             .unwrap();
     }
@@ -541,22 +557,22 @@ mod tests {
     #[test]
     fn ffi_ptr() {
         jit_main("ffi_ptr",
-            r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
+                 r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
                    let c = sub(a.b[], a.a[]);
                    a.a[] = 1;
                    a.b[] = 2;
                    c
                 }"#,
-            |f| {
-                let mut a = SuperSimple {
-                    a: 57,
-                    b: 77,
-                };
-                let ret: i64 = f((addr_of!(a)));
-                assert_eq!(ret, 20);
-                assert_eq!(a.a, 1);
-                assert_eq!(a.b, 2);
-            },
+                 |f| {
+                     let mut a = SuperSimple {
+                         a: 57,
+                         b: 77,
+                     };
+                     let ret: i64 = f((addr_of!(a)));
+                     assert_eq!(ret, 20);
+                     assert_eq!(a.a, 1);
+                     assert_eq!(a.b, 2);
+                 },
         )
             .unwrap();
     }

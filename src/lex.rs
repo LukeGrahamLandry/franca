@@ -33,6 +33,7 @@ pub enum TokenType<'p> {
     Bang,
     Dot,
     Fn,
+    Fun,
     At,
     Comma,
     Colon,
@@ -53,6 +54,7 @@ pub enum TokenType<'p> {
     Pipe,
     // Bit count means leading zeros are observable.
     BinaryNum { bit_count: u8, value: u128 },
+    LeftArrow,
     Error(LexErr),
 }
 
@@ -145,6 +147,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '/' => self.one(Slash),
             '+' => self.pair('=', Error(LexErr::Unexpected('+')), PlusEq),
             '-' => self.pair('=', Error(LexErr::Unexpected('-')), MinusEq),
+            '<' => self.pair('-', Error(LexErr::Unexpected('<')), LeftArrow),
             c => self.err(LexErr::Unexpected(c)),
         }
     }
@@ -228,11 +231,12 @@ impl<'a, 'p> Lexer<'a, 'p> {
             c = self.peek_c();
         }
         let ty = match &self.src[self.start..self.current] {
-            "fn" | "fun" => TokenType::Fn,
-            "let" => TokenType::Qualifier(VarType::Let),
-            "var" => TokenType::Qualifier(VarType::Var),
-            "const" => TokenType::Qualifier(VarType::Const),
-            text => TokenType::Symbol(self.pool.intern(text)),
+            "fn" => Fn,
+            "fun" => Fun,
+            "let" => Qualifier(VarType::Let),
+            "var" => Qualifier(VarType::Var),
+            "const" => Qualifier(VarType::Const),
+            text => Symbol(self.pool.intern(text)),
         };
         self.token(ty, self.start, self.current)
     }

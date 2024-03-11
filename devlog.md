@@ -1,4 +1,48 @@
 
+## Thinking about continuations (Mar 11)
+
+It feels like you could get a bunch of features for free if you had a good way of 
+referring to what happens after a function call. 
+Like return is really the same as throw/panic, just you know its only going up one stack frame. 
+Generators, async, and coroutines are like that, but you can go back and forth multiple times. 
+Return is a lot like a tail-call to your caller and while loops can be trivially expressed as tail-calls. 
+I was thinking you then have to optimise out the tracking of where to return next, but normal languages already do that. 
+Really lr is a function pointer that you tail call when you return. 
+I guess you have to use fp if you want to unwind multiple frames, but you want that anyway for debuggers. 
+
+```
+const Cont = .{
+     returnAddress: VoidPtr, // lr
+     resultAddress: VoidPtr, // x8/&x0
+     stackPointer: VoidPtr,  // fp
+};
+var return: Cont;
+```
+
+If the return value is big, the caller wants to give you an address as an argument, 
+and you don't pass args to return. The normal case where you return a value in x0, 
+even matches the c calling convention where you pass the first argument in x0. 
+It fits so well, maybe this just something obvious that everyone already knows. 
+
+So you need a way to talk about stack-frames at the call-site. 
+
+- call: push a frame for the callee
+- return: pop your own frame
+- self tail call: leave frames alone
+- throw: pop frames until you hit a catch block
+- yield: pop one frame but store it somewhere for when you get called again
+
+For generators, if it's not recursive and doesn't escape, you know how much stack space it needs for itself and all internal callees,
+so you could put that space in the caller's frame so the generator's locals can live across calls. 
+Even if it does escape, there might be a statically known result address that gets passed in, so you could construct it in place. 
+Probably don't want to allow moving closures anyway because then you can't take pointers to locals. 
+
+When you call a function, you pass as an argument the function pointer to call when it's done. 
+You need to include how to adjust the stack frames, but in the common case you know statically. 
+Separate where to reset the stack pointer to when you're done from where you're allowed to grow your stack into. 
+
+
+
 ## Cleaning up fn addrs (Mar 5)
 
 For the libc things where you need to get the addresses at comptime,

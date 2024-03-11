@@ -4,6 +4,8 @@ use crate::ast::{Program, TypeId};
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::slice;
+use crate::compiler::Res;
+use crate::logging::{unwrap, ice, err};
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
@@ -49,16 +51,23 @@ pub fn get_special_functions() -> String {
 //     }};
 // }
 
+// TODO: can do some nicer reporting here? maybe this goes away once i can actually do error handling in my language.
+fn hope<'p, T>(res: impl Fn() -> Res<'p, T>) -> T {
+    res().unwrap_or_else(|e| {
+        panic!("{e:?}")
+    })
+}
+
 pub extern fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
-    let cases = program.get_enum(enum_ty).unwrap_or_else( || panic!("{} is not enum. cannot get field {}", program.log_type(enum_ty), program.pool.get(name)));
+    let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
     let index = cases.iter().position(|f| f.0 == name);
-    let index = index.expect("bad case name") as i64;
-    index
+    let index = hope(|| Ok(unwrap!(index, "bad case name")));
+    index as i64
 }
 
 pub extern fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_val: i64) -> Ident<'p> {
-    let cases = program.get_enum(enum_ty).unwrap_or_else( || panic!("{} is not enum", program.log_type(enum_ty)));
-    let case = cases.get(tag_val as usize).expect( "enum tag too high");
+    let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
+    let case =  hope(|| Ok(unwrap!(cases.get(tag_val as usize),  "enum tag too high")));
     case.0
 }
 
