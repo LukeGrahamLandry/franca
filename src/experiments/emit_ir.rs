@@ -60,10 +60,13 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
     }
 
     fn new_block(&mut self, arg_ty: TypeId) -> Ip {
+        let args = self.new_val(arg_ty, Item::Scalar);
         self.ir.blocks.push(Block {
-            args: (arg_ty, Val(0)),
+            args: (arg_ty, args),
             body: Vec::new_in(self.ir.arena),
-            end: Ret::Empty
+            end: Ret::Empty,
+            reachable: true,
+            dead: false
         });
         Ip(self.ir.blocks.len() - 1)
     }
@@ -81,8 +84,9 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         self.ir.blocks[block.0].args.1
     }
 
+    #[track_caller]
     fn end(&mut self, block: Ip, end: Ret<'a>) {
-        debug_assert!(matches!(self.ir.blocks[block.0].end, Ret::Empty), "Tried to close twice.");
+        debug_assert!(matches!(self.ir.blocks[block.0].end, Ret::Empty), "Tried to close twice {:?} -> {end:?}", self.ir.blocks[block.0].end);
         self.ir.blocks[block.0].end = end;
     }
 
@@ -94,8 +98,10 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             let entry = self.new_block(func.finished_arg.unwrap());
             self.bind_args(entry, &func.arg)?;
             let out = self.new_block(func.finished_ret.unwrap());
-            self.compile_expr(out, body)?;
-            self.end(out, Ret::Empty);
+            let start = self.compile_expr(out, body)?;
+            self.end(entry, Ret::Goto(start));
+            let ret = self.arg_of(out);
+            self.end(out, Ret::Return(ret));
         }
         Ok(())
     }
@@ -202,8 +208,14 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             }
             Stmt::Set { place, value } => self.set_deref(place, value)?,
             Stmt::DeclVarPattern { binding, value } => {
-                let ty = binding.bindings.iter().map(|b| b.ty.unwrap()).collect();
-                let ty = self.program.find_interned(TypeInfo::Tuple(ty));
+                let ty: Vec<TypeId> = binding.bindings.iter().map(|b| b.ty.unwrap()).collect();
+                let ty = if ty.is_empty() {
+                    TypeId::unit()
+                } else if ty.len() == 1 {
+                    ty[0]
+                } else {
+                    self.program.find_interned(TypeInfo::Tuple(ty))
+                };
                 let set = self.new_block(ty);
                 match value {
                     None => todo!(),
@@ -253,18 +265,22 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples");
                 let mut parts = Vec::with_capacity_in(values.len(), self.ir.arena);
-                let start = self.new_block(TypeId::unit());
-                let mut prev = start;
-                for expr in values {
+                let mut start: Option<Ip> = None;
+                let mut last: Option<Ip> = None;
+                for expr in values.iter().rev() {
                     let consume = self.new_block(expr.ty);
                     parts.push(self.arg_of(consume));
                     let create = self.compile_expr(consume, expr)?;
-                    self.end(prev, Ret::Goto(create));
-                    prev = create;
+                    if let Some(start) = start {
+                        self.end(consume, Ret::Goto(start));
+                    } else {
+                        last = Some(consume);
+                    }
+                    start = Some(create);
                 }
                 let arg = self.new_val(expr.ty, Item::Tuple(parts));
-                self.end(prev, Ret::GotoWith(output, arg));
-                start
+                self.end(last.unwrap(), Ret::GotoWith(output, arg));
+                start.unwrap()
             }
             Expr::GetVar(var) => {
                 let start = self.new_block(TypeId::unit());
@@ -289,7 +305,6 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 let name = self.program.pool.get(*macro_name);
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
-                    // Note: arg is not evalutated
                     "if" => self.emit_call_if(output, arg)?,
                     "while" => self.emit_call_while(output, arg)?,
                     "addr" => self.addr_macro(output, arg)?,
@@ -327,9 +342,13 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                         let use_ptr = self.new_block(arg.ty);
                         let start = self.compile_expr(use_ptr, arg)?;
                         let ty = unwrap!(self.program.unptr_ty(arg.ty), "");
-                        let arg = Item::Offset(self.arg_of(use_ptr), 0);
-                        let arg = self.new_val(ty, arg);
-                        self.end(use_ptr, Ret::GotoWith(output, arg));
+                        let src = self.arg_of(use_ptr);
+                        let dest = self.new_val(ty, Item::Scalar);
+                        self.push(use_ptr, Inst::Load {
+                            src,
+                            dest,
+                        });
+                        self.end(use_ptr, Ret::GotoWith(output, dest));
                         start
                     }
                     "reflect_print" => todo!(),

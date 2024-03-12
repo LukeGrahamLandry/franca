@@ -575,7 +575,7 @@ pub enum LazyType<'p> {
     Different(Vec<Self>),
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(pub usize);
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
@@ -847,7 +847,7 @@ impl<'p> Program<'p> {
     // aaaaa
     #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
-        let id = self.types.iter().position(|check| *check == ty).unwrap();
+        let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
         TypeId(id)
     }
 }

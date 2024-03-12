@@ -100,7 +100,6 @@ pub struct FnWip<'p> {
     pub callees: Vec<FuncId>,
 }
 
-
 impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>, executor: Exec) -> Self {
         Self {
@@ -739,6 +738,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 }
                             }
                         };
+                        // TODO: this is so emit_ir which can't mutate program can find it.
+                        self.program.intern_type(TypeInfo::Ptr(final_ty));
 
                         let _prev = result.vars.insert(*name, final_ty);
                         // TODO: closures break this

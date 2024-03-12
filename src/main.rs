@@ -7,7 +7,27 @@ use franca::{
     run_main,
 };
 use std::{env, fs, path::PathBuf};
+use std::io::Error;
+use std::process::Command;
+use layout::backends::svg::SVGWriter;
+use layout::core::utils::save_to_file;
+use layout::gv;
+use layout::gv::GraphBuilder;
 use franca::export_ffi::get_special_functions;
+
+
+fn graph_vis(dot_filepath: &str, svg_filepath: &str) {
+    // (&fs::read_to_string(dot_filepath)
+    // let mut parser = gv::DotParser::new(dot);
+    // let mut svg = SVGWriter::new();
+    // let g = parser.process().unwrap();
+    // let mut b = GraphBuilder::new();
+    // b.visit_graph(&g);
+    // b.get().do_it(false, false, false, &mut svg);
+    // save_to_file(svg_filepath, &svg.finalize()).unwrap();
+    let src = String::from_utf8(Command::new("dot").arg(dot_filepath).arg("-Tsvg").output().unwrap().stdout).unwrap();
+    fs::write(svg_filepath, src).unwrap();
+}
 
 fn main() {
     if let Some(name) = env::args().nth(1) {

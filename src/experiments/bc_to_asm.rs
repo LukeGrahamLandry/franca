@@ -406,6 +406,8 @@ mod tests {
     use std::process::Command;
     use std::ptr::addr_of;
     use crate::ast::SuperSimple;
+    use crate::experiments::arena::Arena;
+    use crate::experiments::emit_ir::EmitIr;
     use crate::export_ffi::get_special_functions;
 
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
@@ -430,18 +432,35 @@ mod tests {
         let main = unwrap!(comp.lookup_unique_func(name), "");
         comp.compile(main, ExecTime::Runtime)?;
 
+        let debug_path = format!("target/latest_log/asm/{test_name}");
+        fs::create_dir_all(&debug_path).unwrap();
+
+        let mut arena = Arena::default();
+        {
+            if let Ok(mut ir) = EmitIr::compile(&comp.program, &mut comp.executor, main, &arena) {
+                ir.fixup(comp.program);
+                let dot_filepath = format!("{debug_path}/flow.dot");
+                let svg_filepath = format!("{debug_path}/flow.svg");
+                fs::write(&dot_filepath, ir.log(comp.program)).unwrap();
+                let out = Command::new("dot").arg(dot_filepath).arg("-Tsvg").arg("-o").arg(svg_filepath).output().unwrap();
+                if !out.status.success() {
+                    panic!("graphviz failed {}", String::from_utf8(out.stderr).unwrap());
+                }
+            }
+        }
+
         let mut asm = BcToAsm::new(&comp.executor, &mut program);
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
 
-        if cfg!(feature = "llvm_dis_debug") {
+        if cfg!(feature = "dis_debug") {
             let hex: String = asm.asm.bytes()
                 .iter()
                 .copied()
                 .array_chunks::<4>()
                 .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
                 .collect();
-            let path = format!("target/latest_log/asm/{test_name}.asm");
+            let path = format!("{debug_path}/all.asm");
             fs::write(&path, hex).unwrap();
             let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
             fs::write(&path, &dis).unwrap();

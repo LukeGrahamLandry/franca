@@ -5,8 +5,9 @@
 #![feature(vec_into_raw_parts)]
 #![feature(slice_ptr_len)]
 #![feature(slice_ptr_get)]
+#![feature(closure_track_caller)]
 
-// bro if you can tell you could compile it more efficiently why dont you just compile it more efficiently 
+// bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 
 extern crate core;
