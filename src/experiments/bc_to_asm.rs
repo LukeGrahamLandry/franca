@@ -72,27 +72,32 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         self.asm.make_write();
 
         self.wip.push(f);
-        let callees = self.program.funcs[f.0]
-            .wip
-            .as_ref()
-            .unwrap()
-            .callees
-            .clone();
-        for c in callees {
-            self.compile(c)?;
+        if let Some(template) = self.program.funcs[f.0].any_reg_template {
+            self.compile(template)?;
+        } else {
+            let callees = self.program.funcs[f.0]
+                .wip
+                .as_ref()
+                .unwrap()
+                .callees
+                .clone();
+            for c in callees {
+                self.compile(c)?;
+            }
+
+            let func = &self.program.funcs[f.0];
+            if let Some(insts) = func.jitted_code.as_ref() {
+                // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
+                // TODO: this needs to be aware of the distinction between comptime and runtime target.
+                for op in insts {
+                    self.asm.push(*op as i64);
+                }
+            } else {
+                self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
+            }
+            self.asm.save_current(f);
         }
 
-        let func = &self.program.funcs[f.0];
-        if let Some(insts) = func.jitted_code.as_ref() {
-            // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
-            // TODO: this needs to be aware of the distinction between comptime and runtime target.
-            for op in insts {
-                self.asm.push(*op as i64);
-            }
-        } else {
-            self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
-        }
-        self.asm.save_current(f);
         self.wip.retain(|c| c != &f);
         Ok(())
     }
@@ -115,7 +120,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         let reserve_stack = self.asm.prev();
 
         let mut release_stack = vec![];
-        if is_c_call {
+        // if is_c_call {
             assert!(
                 func.arg_range.count <= 8,
                 "c_call only supports 8 arguments. TODO: pass on stack"
@@ -126,7 +131,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 }
                 self.set_slot((i - func.arg_range.first.0) as i64, StackOffset(i));
             }
-        }
+        // }
 
         let mut patch_cbz = vec![];
         let mut patch_b = vec![];
@@ -142,7 +147,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::CallDirect { f, ret, arg } => {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
-                    if target_c_call {
+                    if let Some(template) = target.any_reg_template {
+                        todo!("any_reg")
+                    } else {//if target_c_call {
                         // if let Some(bytes) = self.asm.get_fn(*f) {
                         //     // TODO: shoyld only do this for comptime functions. for runtime, want to be able to squash everything down.
                         //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
@@ -157,9 +164,10 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
                         self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty());
                         // }
-                    } else {
-                        todo!()
                     }
+                    // else {
+                    //     todo!()
+                    // }
                 }
                 Bc::CallBuiltin { .. } => todo!(),
                 Bc::LoadConstant { slot, value } => match value {
@@ -183,7 +191,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Unit => {}
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
-                    Value::Heap { .. } => todo!(),
+                    &Value::Heap { value, .. } => todo!("{:?}", unsafe {&(&*value).values}),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
                     self.get_slot(x0, cond);
@@ -196,11 +204,13 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     patch_b.push((self.asm.prev(), ip));
                 },
                 Bc::Ret(slot) => {
-                    if is_c_call {
+                    // if is_c_call {
                         match slot.count {
                             0 => {}
                             1 => {
-                                self.get_slot(x0, slot.single());
+                                if !self.slot_types.as_ref().unwrap()[slot.single().0].is_unit() {
+                                    self.get_slot(x0, slot.single());
+                                }
                             }
                             _ => err!("c_call only supports one return value. TODO: structs",),
                         }
@@ -211,9 +221,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         self.asm.push(brk(0));
                         release_stack.push((a, b, self.asm.prev()));
                         self.asm.push(ret(()));
-                    } else {
-                        todo!()
-                    }
+                    // } else {
+                    //     todo!()
+                    // }
                 }
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
@@ -299,6 +309,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         self.asm.push(str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
     }
 
+    #[track_caller]
     fn get_slot(&mut self, dest_reg: i64, slot: StackOffset) {
         let offset = self.find_one(slot, false);
         self.asm.push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
@@ -333,18 +344,19 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         }
     }
 
+    #[track_caller]
     fn find_one(&mut self, slot: StackOffset, allow_create: bool) -> SpOffset {
         if let Some(slot) = self.slots[slot.0] {
             slot
         } else if let Some((made, size)) = self.open_slots.pop() {
-            debug_assert!(allow_create);
+            debug_assert!(allow_create, "!allow_create {slot:?}");
             if size > 8 {
                 self.open_slots.push((SpOffset(made.0 + 8), size - 8));
             }
             self.slots[slot.0] = Some(made);
             made
         } else {
-            debug_assert!(allow_create);
+            debug_assert!(allow_create, "!allow_create {slot:?}");
             let made = self.next_slot;
             self.slots[slot.0] = Some(made);
             self.next_slot.0 += 8;
@@ -392,7 +404,10 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             self.release_one(StackOffset(i));
         }
         assert_eq!(ret.count, 1);
-        self.set_slot(x0, ret.single());
+
+        if !self.slot_types.unwrap()[ret.single().0].is_unit() {
+            self.set_slot(x0, ret.single());
+        }
     }
 }
 
@@ -435,19 +450,19 @@ mod tests {
         let debug_path = format!("target/latest_log/asm/{test_name}");
         fs::create_dir_all(&debug_path).unwrap();
 
-        let mut arena = Arena::default();
-        {
-            if let Ok(mut ir) = EmitIr::compile(&comp.program, &mut comp.executor, main, &arena) {
-                ir.fixup(comp.program);
-                let dot_filepath = format!("{debug_path}/flow.dot");
-                let svg_filepath = format!("{debug_path}/flow.svg");
-                fs::write(&dot_filepath, ir.log(comp.program)).unwrap();
-                let out = Command::new("dot").arg(dot_filepath).arg("-Tsvg").arg("-o").arg(svg_filepath).output().unwrap();
-                if !out.status.success() {
-                    panic!("graphviz failed {}", String::from_utf8(out.stderr).unwrap());
-                }
-            }
-        }
+        // let mut arena = Arena::default();
+        // {
+        //     if let Ok(mut ir) = EmitIr::compile(&comp.program, &mut comp.executor, main, &arena) {
+        //         ir.fixup(comp.program);
+        //         let dot_filepath = format!("{debug_path}/flow.dot");
+        //         let svg_filepath = format!("{debug_path}/flow.svg");
+        //         fs::write(&dot_filepath, ir.log(comp.program)).unwrap();
+        //         let out = Command::new("dot").arg(dot_filepath).arg("-Tsvg").arg("-o").arg(svg_filepath).output().unwrap();
+        //         if !out.status.success() {
+        //             panic!("graphviz failed {}", String::from_utf8(out.stderr).unwrap());
+        //         }
+        //     }
+        // }
 
         let mut asm = BcToAsm::new(&comp.executor, &mut program);
         asm.asm.reserve(asm.program.funcs.len());
@@ -552,6 +567,12 @@ mod tests {
             )!if
         }
         "#
+    );
+
+    simple!(use_any_reg, (5, 3), 2, r#"
+        @c_call fn main(a: i64, b: i64) i64 = {
+            sub2(a, b)
+        }"#
     );
 
     #[test]

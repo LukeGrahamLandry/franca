@@ -168,12 +168,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let mut result = self.ensure_compiled(f, when);
         if result.is_ok() {
             let func = &self.program.funcs[f.0];
-            let wip = func.wip.as_ref().unwrap();
-            let callees = wip.callees.clone();
-            for id in callees {
-                self.compile(id, when)?;
+            if let Some(wip) = func.wip.as_ref() {
+                let callees = wip.callees.clone();
+                for id in callees {
+                    self.compile(id, when)?;
+                }
+                result = self.executor.compile_func(self.program, f);
+            } else {
+                self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime)?;
             }
-            result = self.executor.compile_func(self.program, f);
         }
         
         let result = self.tag_err(result);
@@ -285,9 +288,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         self.infer_types(f)?;
         let func = &self.program.funcs[f.0];
-        let mut result = self.empty_fn(when, f, func.loc, None);
-        self.emit_body(&mut result, f)?;
-        self.program.funcs[f.0].wip = Some(result);
+        if let Some(template) = func.any_reg_template {
+            self.ensure_compiled(template, ExecTime::Comptime)?;
+        } else {
+            let mut result = self.empty_fn(when, f, func.loc, None);
+            self.emit_body(&mut result, f)?;
+            self.program.funcs[f.0].wip = Some(result);
+        }
         self.pop_state(state);
         Ok(())
     }
@@ -756,8 +763,17 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let mut func = mem::take(func);
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(self.pool, "bs");
+                let any_reg_template = func.has_tag(self.pool, "any_reg");
                 if for_bootstrap {
                     func.referencable_name = false;
+                }
+
+                let referencable_name = func.referencable_name;
+
+                if any_reg_template {
+                    let mut body = func.body.take().unwrap();
+                    self.compile_expr(result, &mut body, None)?;
+                    func.any_reg_template = Some(body.as_fn().unwrap());
                 }
 
                 let id = self.add_func(func, &result.constants)?;
@@ -770,7 +786,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
                 // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
                 if let Some(var) = var {
-                    if result.constants.get(var).is_none() {
+                    if result.constants.get(var).is_none() && referencable_name {
                         let index = self.program.overload_sets.len();
                         self.program.overload_sets.push(OverloadSet(vec![]));
                         result
@@ -896,7 +912,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         return Ok(Structured::RuntimeOnly(f_ty.ret));
                     }
                 }
-                
+
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     return self.compile_call(result, expr, f_id, requested);
                 }
@@ -1008,7 +1024,22 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             "deref not ptr: {}",
                             self.program.log_type(ptr.ty())
                         );
-                        Structured::RuntimeOnly(ty)
+
+                        if let &Structured::Const(_, Values::One(Value::Heap { value, physical_first, physical_count })) = &ptr {
+                            // this check + the const eval in field access lets me do asm enum constants without doing heap values first.
+                            if physical_count == 1 {
+                                let value = Values::One(unsafe { (&*value).values[physical_first]});
+                                expr.expr = Expr::Value {
+                                    ty,
+                                    value: value.clone(),
+                                };
+                                Structured::Const(ty, value)
+                            } else {
+                                Structured::RuntimeOnly(ty)
+                            }
+                        } else {
+                            Structured::RuntimeOnly(ty)
+                        }
                     }
                     "first" => self.tuple_access(result, arg, requested, 0),
                     "second" => self.tuple_access(result, arg, requested, 1),
@@ -1214,7 +1245,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
                         let mut the_type = Pattern::empty(loc);
                         let unique_ty = self.program.unique_ty(ty);
-                        // Note: we expand target to an anonamus struct literal, not a type. 
+                        // Note: we expand target to an anonamus struct literal, not a type.
                         for b in &mut pattern.bindings {
                             assert!(b.default.is_some());
                             assert_eq!(b.lazy(), &LazyType::Infer);
@@ -1260,7 +1291,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     let ty = self.to_type(ty)?;
                     *expr = mem::take(target);
                     return self.compile_expr(result, expr, Some(ty));
-                    
+
                 }
 
                 outln!(
@@ -2264,12 +2295,22 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let raw_container_ty = self.program.raw_type(container_ty);
         match &self.program.types[raw_container_ty.0] {
             TypeInfo::Struct { fields, .. } => {
+                let mut count = 0;
                 for f in fields {
                     if f.name == name {
                         let f = *f;
                         let ty = self.program.ptr_type(f.ty);
+                        // const eval lets me do enum fields in asm without doign heap values first.
+                        if let &Structured::Const(_, Values::One(Value::Heap { value, physical_first, physical_count })) = &container_ptr {
+                            let size = self.executor.size_of(self.program, f.ty);
+                            assert!(physical_count >= size);
+                            let value = Values::One(Value::Heap { value, physical_first: physical_first + count, physical_count: size });
+                            let s = Structured::Const(ty, value);
+                            return Ok(s);
+                        }
                         return Ok(Structured::RuntimeOnly(ty));
                     }
+                    count += self.executor.size_of(self.program, f.ty);
                 }
                 err!(
                     "unknown name {} on {:?}",

@@ -485,6 +485,7 @@ pub struct Func<'p> {
     /// Inline assembly will be saved here.
     // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
+    pub any_reg_template: Option<FuncId>,
 }
 
 impl<'p> Func<'p> {
@@ -517,6 +518,7 @@ impl<'p> Func<'p> {
             dynamic_import_symbol: None,
             comptime_addr: None,
             jitted_code: None,
+            any_reg_template: None
         }
     }
 
@@ -1225,6 +1227,7 @@ impl<'p> Default for Func<'p> {
             dynamic_import_symbol: None,
             comptime_addr: None,
             jitted_code: None,
+            any_reg_template: None,
         }
     }
 }
