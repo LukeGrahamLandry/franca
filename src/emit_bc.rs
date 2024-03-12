@@ -26,7 +26,7 @@ pub struct DebugInfo<'p> {
     pub p: PhantomData<&'p str>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SizeCache {
     pub known: Vec<Option<usize>>,
 }

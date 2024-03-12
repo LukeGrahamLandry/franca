@@ -112,7 +112,7 @@ bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(162
 
 #[rustfmt::skip]
 pub fn cmp(sf: i64, a: i64, b: i64, ) -> i64 { 
-bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(107, 24)), shift_left((*(&(*Shift).LSL)), 22)), shift_left(0, 21)), shift_left(b, 16)), shift_left(0, 10)), shift_left(a, 5)), shift_left(31, 0))
+bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(107, 24)), shift_left(0, 22)), shift_left(0, 21)), shift_left(b, 16)), shift_left(0, 10)), shift_left(a, 5)), shift_left(31, 0))
 }
 
 #[rustfmt::skip]
@@ -122,7 +122,7 @@ bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(226
 
 #[rustfmt::skip]
 pub fn mov(sf: i64, dest: i64, src: i64, ) -> i64 { 
-orr(sf, dest, src, 31, (*(&(*Shift).LSL)), 0)
+orr(sf, dest, src, 31, 0, 0)
 }
 
 #[rustfmt::skip]

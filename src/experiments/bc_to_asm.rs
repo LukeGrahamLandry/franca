@@ -3,9 +3,11 @@
 
 #![allow(non_upper_case_globals)]
 
+use std::arch::asm;
+use std::mem::transmute;
 use crate::ast::{FnType, Func, FuncId, TypeId};
-use crate::bc::{Bc, StackOffset, StackRange, Value};
-use crate::compiler::Res;
+use crate::bc::{Bc, StackOffset, StackRange, Value, Values};
+use crate::compiler::{ExecTime, Res};
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
 use crate::logging::{err, PoolLog};
@@ -15,14 +17,13 @@ use crate::{ast::Program, bc::FnBody};
 pub struct SpOffset(usize);
 
 pub struct BcToAsm<'z, 'a, 'p> {
-    pub program: &'z Program<'p>,
-    pub interp: &'z Interp<'a, 'p>,
+    pub program: &'z mut Program<'p>,
+    pub interp: &'z mut Interp<'a, 'p>,
     pub asm: Jitted,
     pub slots: Vec<Option<SpOffset>>,
     pub open_slots: Vec<(SpOffset, usize)>,
     pub next_slot: SpOffset,
     f: FuncId,
-    slot_types: Option<&'z [TypeId]>,
     wip: Vec<FuncId>, // make recursion work
 }
 
@@ -49,7 +50,7 @@ const sp: i64 = 31;
 const X64: i64 = 0b1;
 
 impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
-    pub fn new(interp: &'z Interp<'a, 'p>, program: &'z Program<'p>) -> Self {
+    pub fn new(interp: &'z mut Interp<'a, 'p>, program: &'z mut Program<'p>) -> Self {
         Self {
             program,
             interp,
@@ -58,7 +59,6 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             open_slots: vec![],
             next_slot: SpOffset(0),
             f: FuncId(0),  // TODO: bad
-            slot_types: None,
             wip: vec![],
         }
     }
@@ -73,7 +73,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 
         self.wip.push(f);
         if let Some(template) = self.program.funcs[f.0].any_reg_template {
-            self.compile(template)?;
+            // TODO: want to use asm instead of interp
+            // self.compile(template)?;
         } else {
             let callees = self.program.funcs[f.0]
                 .wip
@@ -93,7 +94,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     self.asm.push(*op as i64);
                 }
             } else {
-                self.bc_to_asm(self.interp.ready[f.0].as_ref().unwrap())?;
+                self.bc_to_asm(f)?;
             }
             self.asm.save_current(f);
         }
@@ -102,11 +103,15 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         Ok(())
     }
 
-    fn bc_to_asm(&mut self, func: &'z FnBody<'p>) -> Res<'p, ()> {
+    fn slot_type(&self, slot: StackOffset) -> TypeId {
+        self.interp.ready[self.f.0].as_ref().unwrap().slot_types[slot.0]
+    }
+
+    fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
+        let func = self.interp.ready[f.0].as_ref().unwrap();
         println!("{}", func.log(self.program.pool));
         let ff = &self.program.funcs[func.func.0];
-        self.slot_types = Some(&func.slot_types);
-        self.f = func.func;
+        self.f = f;
         self.next_slot = SpOffset(0);
         self.slots.clear();
         self.slots.extend(vec![None; func.stack_slots]);
@@ -120,23 +125,26 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         let reserve_stack = self.asm.prev();
 
         let mut release_stack = vec![];
+        let arg_range = func.arg_range;
         // if is_c_call {
             assert!(
                 func.arg_range.count <= 8,
                 "c_call only supports 8 arguments. TODO: pass on stack"
             );
-            for i in func.arg_range {
-                if func.slot_types[i].is_unit() {
+            for i in arg_range {
+                if self.slot_type(StackOffset(i)).is_unit() {
                     continue
                 }
-                self.set_slot((i - func.arg_range.first.0) as i64, StackOffset(i));
+                self.set_slot((i - arg_range.first.0) as i64, StackOffset(i));
             }
         // }
 
         let mut patch_cbz = vec![];
         let mut patch_b = vec![];
 
-        for (i, inst) in func.insts.iter().enumerate() {
+        let func = self.interp.ready[f.0].as_ref().unwrap();
+        for i in 0..func.insts.len() {
+            let inst = &(self.interp.ready[f.0].as_ref().unwrap().insts[i].clone());
             self.asm.mark_next_ip();
             match inst {
                 &Bc::LastUse(slots) => {
@@ -148,7 +156,27 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
                     if let Some(template) = target.any_reg_template {
-                        todo!("any_reg")
+                        let registers = vec![0, 1, 0];
+                        let ops = self.emit_any_reg(template, registers);
+                        for i in 0..arg.count {
+                            if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
+                                continue
+                            }
+                            self.get_slot(i as i64, StackOffset(arg.first.0 + i));
+                        }
+                        // TODO: you cant call release many because it assumes they were made in one chunk
+                        for i in *arg {
+                            self.release_one(StackOffset(i));
+                        }
+                        assert_eq!(ret.count, 1);
+                        for op in ops {
+                            println!("{op:#05x}, ");
+                            self.asm.push(op);
+                        }
+
+                        if !self.slot_type(ret.single()).is_unit() {
+                            self.set_slot(x0, ret.single());
+                        }
                     } else {//if target_c_call {
                         // if let Some(bytes) = self.asm.get_fn(*f) {
                         //     // TODO: shoyld only do this for comptime functions. for runtime, want to be able to squash everything down.
@@ -208,7 +236,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         match slot.count {
                             0 => {}
                             1 => {
-                                if !self.slot_types.as_ref().unwrap()[slot.single().0].is_unit() {
+                                if !self.slot_type(slot.single()).is_unit() {
                                     self.get_slot(x0, slot.single());
                                 }
                             }
@@ -228,7 +256,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
                 &Bc::Move { from, to } => {
-                    if !func.slot_is_var.get(from.0) && !func.slot_is_var.get(to.0) {
+                    if !self.slot_is_var(from) && !self.slot_is_var(to) {
                         self.slots[to.0] = self.slots[from.0].take();
                     } else {
                         self.get_slot(x0, from);
@@ -391,7 +419,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             "indirect c_call only supports 7 arguments. TODO: pass on stack"
         );
         for i in 0..arg.count {
-            if self.slot_types.unwrap()[arg.first.0 + i].is_unit() {
+            if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
                 continue
             }
             self.get_slot(i as i64, StackOffset(arg.first.0 + i));
@@ -405,9 +433,48 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         }
         assert_eq!(ret.count, 1);
 
-        if !self.slot_types.unwrap()[ret.single().0].is_unit() {
+        if !self.slot_type(ret.single()).is_unit() {
             self.set_slot(x0, ret.single());
         }
+    }
+
+    // TODO: i want to do this though asm but that means i need to bootstrap more stuff.
+    fn emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
+        let mut out = Vec::<i64>::new();
+        extern fn consume(ops: &mut Vec<i64>, op: i64) {
+            ops.push(op);
+        }
+        let arg = (((&mut out) as *mut Vec<i64> as usize, consume as usize), registers).serialize_one();
+        self.interp.run(template, arg, ExecTime::Comptime, 1, self.program).unwrap();
+        out
+    }
+
+    fn _emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
+        let f = self.asm.get_fn(template).unwrap().as_ptr();
+        // TODO: this relies on my slice layout. use ffi types.
+        type TemplateFn = extern fn(&mut Vec<i64>, extern fn(&mut Vec<i64>, i64), *const i64, usize);
+        let f: TemplateFn = unsafe { transmute(f) };
+        let mut out = Vec::<i64>::new();
+        extern fn consume(ops: &mut Vec<i64>, op: i64) {
+            ops.push(op);
+        }
+        self.asm.make_exec();
+        let indirect_fns = self.asm.get_dispatch();
+        unsafe {
+            asm!(
+            "mov x21, {fns}",
+            fns = in(reg) indirect_fns,
+            out("x21") _
+            );
+        }
+        f(&mut out, consume, registers.as_ptr(), registers.len());
+        self.asm.make_write();
+        // TODO: cache these so I don't have to keep doing sys-calls to toggle the permissions every call?
+        out
+    }
+
+    fn slot_is_var(&self, slot: StackOffset) -> bool {
+        self.interp.ready[self.f.0].as_ref().unwrap().slot_is_var.get(slot.0)
     }
 }
 
@@ -464,7 +531,7 @@ mod tests {
         //     }
         // }
 
-        let mut asm = BcToAsm::new(&comp.executor, &mut program);
+        let mut asm = BcToAsm::new(&mut comp.executor, &mut program);
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
 
@@ -569,9 +636,14 @@ mod tests {
         "#
     );
 
-    simple!(use_any_reg, (5, 3), 2, r#"
-        @c_call fn main(a: i64, b: i64) i64 = {
-            sub2(a, b)
+    simple!(use_any_reg, 5, 2, r#"
+        @any_reg
+        fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
+            op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0));
+        });
+        
+        @c_call fn main(a: i64) i64 = {
+            sub2(a, 3)
         }"#
     );
 
@@ -621,6 +693,7 @@ mod tests {
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
 use crate::experiments::aarch64::{CmpFlags, signed_truncate};
+use crate::ffi::InterpSend;
 
 #[cfg(target_arch = "aarch64")]
 pub mod jit {

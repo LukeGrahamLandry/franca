@@ -530,7 +530,7 @@ pub mod c {
                 TypeInfo::Tuple(_) => {
                     todo!()
                 }
-                TypeInfo::Ptr(_) => CTy::pointer(),
+                TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
                 TypeInfo::Slice(_) => CTy::structure([CTy::pointer(), CTy::i64()]),
                 TypeInfo::Enum { .. } => todo!(),
                 TypeInfo::Unique(ty, _)

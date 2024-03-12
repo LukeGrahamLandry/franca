@@ -26,6 +26,7 @@ pub struct CallFrame<'p> {
     when: ExecTime,
 }
 
+#[derive(Clone)]
 pub struct Interp<'a, 'p> {
     pub pool: &'a StringPool<'p>,
     pub value_stack: Vec<Value>,

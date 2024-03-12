@@ -48,7 +48,7 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
     }
-    let mut asm = BcToAsm::new(&comp.executor, &mut program);
+    let mut asm = BcToAsm::new(&mut comp.executor, &mut program);
     asm.asm.reserve(asm.program.funcs.len());
     for f in &bs {
         asm.compile(*f).unwrap();
