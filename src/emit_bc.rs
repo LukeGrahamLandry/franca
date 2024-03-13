@@ -131,7 +131,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             };
             if let Some(name) = name {
                 let prev = result.vars.insert(name, (range, ty));
-                assert!(prev.is_none(), "overwrite arg?");
+                assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
             }
             args_to_drop.push((name, range, ty));
             slot_count += size;

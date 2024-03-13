@@ -424,34 +424,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         );
         self.currently_inlining.push(f);
 
-        // We close them into f's Func but we need to emit into the caller's body.
+        // We close them into f's Func, but we need to emit into the caller's body.
         self.eval_and_close_local_constants(f)?;
         let func = &self.program.funcs[f.0];
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
 
-        // TODO: !quote adds a bunch of random shit to captures of the ast it returns. 
-        /* 
-        for closed in &func.capture_vars {
-            assert!(
-                result.vars.contains_key(closed) || result.constants.get(*closed).is_some(),
-                "Missing captured var {:?}. \nExisting vars: {:?}\nExisting constants:{:?}",
-                closed.log(self.pool),
-                result
-                    .vars
-                    .keys()
-                    .map(|v| v.log(self.pool))
-                    .collect::<Vec<_>>(),
-                result
-                    .constants
-                    .local
-                    .keys()
-                    .map(|v| v.log(self.pool))
-                    .collect::<Vec<_>>()
-            );
-        }
-        */
-        
         let pattern = func.arg.clone();
         let locals = func.arg.collect_vars();
         
@@ -460,11 +438,14 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         //       I guess i need to walk the whole tree and rebind them but its hard to think about. have to deal with inner captures too. Feb-24
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
         // TODO: dont bother if its just unit args (which most are because of !if and !while).
-        let new_expr = Expr::Block { body: vec![
+        let mut new_expr = Expr::Block { body: vec![
             FatStmt { stmt: Stmt::DeclVarPattern { binding: pattern, value: Some(mem::take(arg_expr)) }, annotations: vec![], loc }
         ], result: Box::new(func.body.as_ref().unwrap().clone()), locals: Some(locals) };
-        
+
         expr_out.expr = new_expr;
+        let mut mapping = HashMap::new();
+        expr_out.renumber_vars(&mut self.program.vars, &mut mapping);
+
         self.currently_inlining.retain(|check| *check != f);
 
         let hint = func.finished_ret;

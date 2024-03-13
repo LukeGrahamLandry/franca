@@ -170,6 +170,134 @@ pub enum Expr<'p> {
     String(Ident<'p>),
 }
 
+struct RenumberVars<'a, 'p> {
+    vars: &'a mut Vec<VarInfo>,
+    mapping: &'a mut HashMap<Var<'p>, Var<'p>>
+}
+
+impl<'a, 'p> RenumberVars<'a, 'p> {
+    pub fn expr(&mut self, expr: &'a mut FatExpr<'p>) {
+        match &mut expr.expr {
+            Expr::Call(f, arg) => {
+                self.expr(f);
+                self.expr(arg);
+            }
+            Expr::Block { body, result, locals } => {
+                for stmt in body {
+                    match &mut stmt.stmt {
+                        Stmt::Noop | Stmt::DeclNamed { .. } | Stmt::DoneDeclFunc(_) => {}
+                        Stmt::Eval(arg) => self.expr(arg),
+                        Stmt::DeclFunc(_) => {}  // TODO maybe?
+                        Stmt::DeclVar { name, ty, value, dropping, .. } => {
+                            self.decl(name);
+                            if let Some(dropping) = dropping {
+                                if let Some(new_d) = self.mapping.get(dropping) {
+                                    *dropping = *new_d;
+                                }
+                            }
+                            if let Some(value) = value {
+                                self.expr(value);
+                            }
+                            self.ty(ty);
+                        }
+                        Stmt::DeclVarPattern { binding, value } => {
+                            self.pattern(binding);
+                            if let Some(arg) = value {
+                                self.expr(arg);
+                            }
+                        }
+                        Stmt::Set { place, value } => {
+                            self.expr(place);
+                            self.expr(value);
+                        }
+                    }
+                }
+                self.expr(result);
+                if let Some(locals) = locals {
+                    for var in locals {
+                        if let Some(new) = self.mapping.get(var) {
+                            *var = *new
+                        } // TODO: else seems like a problem
+                    }
+                }
+            }
+            Expr::Tuple(parts) => {
+                for p in parts {
+                    self.expr(p);
+                }
+            }
+            Expr::SuffixMacro(_, arg) => self.expr(arg),
+            Expr::FieldAccess(arg, _) => self.expr(arg),
+            Expr::StructLiteralP(binding) => {
+                self.pattern(binding);
+            }
+            // TODO: idk if i want to be going into macros. maybe inlining should always happen after them.
+            Expr::PrefixMacro { name, arg, target } => {
+                if let Some(new) = self.mapping.get(name) {
+                    *name = *new;  // probably never happens?
+                }
+                self.expr(arg);
+                self.expr(target);
+            }
+            Expr::GetVar(v) => {
+                if let Some(new) = self.mapping.get(v) {
+                    *v = *new;
+                }
+            }
+            Expr::Closure(func) => {
+                self.pattern(&mut func.arg);
+                self.ty(&mut func.ret);
+                if let Some(body) = &mut func.body {
+                    self.expr(body);
+                }
+            }
+            Expr::WipFunc(_) => todo!("renamewip"),
+            Expr::EnumLiteral(_) | Expr::RefType(_) | Expr::ArrayLiteral(_) => unreachable!(),
+            Expr::Value { .. } |  Expr::GetNamed(_) | Expr::String(_) => {}
+        }
+
+    }
+
+    fn pattern(&mut self, binding: &'a mut Pattern<'p>) {
+        for b in &mut binding.bindings {
+            self.ty(&mut b.ty);
+            if let Name::Var(v) = &mut b.name {
+                self.decl(v);
+            }
+            if let Some(arg) = &mut b.default  {
+                self.expr(arg);
+            }
+        }
+    }
+
+    fn ty(&mut self, ty: &'a mut LazyType<'p>) {
+        match ty {
+            LazyType::EvilUnit | LazyType::Infer | LazyType::Finished(_) => {}
+            LazyType::PendingEval(arg) => {
+                self.expr(arg);
+            }
+            LazyType::Different(_) => {}
+        }
+    }
+
+    fn decl(&mut self, name: &'a mut Var<'p>) {
+        let new = Var(name.0, self.vars.len());
+        self.vars.push(self.vars[name.1]);
+        let stomp = self.mapping.insert(*name, new).is_none();
+        // debug_assert!(!stomp);
+        *name = new;
+    }
+}
+
+
+impl<'p> FatExpr<'p> {
+    pub fn renumber_vars(&mut self, vars: &mut Vec<VarInfo>, mapping: &mut HashMap<Var<'p>, Var<'p>>) {
+        let mut ctx = RenumberVars { vars, mapping };
+        ctx.expr(self);
+        println!("{:?}", ctx.mapping);
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, InterpSend)]
 pub enum Known {
     // Known at comptime but could be computed at runtime too.
