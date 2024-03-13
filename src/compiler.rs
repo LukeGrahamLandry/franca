@@ -895,7 +895,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         Ok(match expr.deref_mut() {
             Expr::Closure(_) => {
-                let id = self.promote_closure(&result.constants, expr)?;
+                let id = self.promote_closure(result, expr)?;
                 Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
             }
             &mut Expr::WipFunc(id) => {
@@ -1374,7 +1374,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             "promote_closure" => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
-                let id = self.promote_closure(&result.constants, &mut expr)?;
+                let id = self.promote_closure(result, &mut expr)?;
                 Ok(id.serialize_one())
             }
             "literal_ast" => {
@@ -1712,7 +1712,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 }
             }
             Expr::Closure(_) => {
-                if let Ok(id) = self.promote_closure(&result.constants, expr) {
+                if let Ok(id) = self.promote_closure(result, expr) {
                     // TODO: this unwraps.
                     self.program.func_type(id)
                 } else {
@@ -1920,7 +1920,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         self.pop_state(state);
                         let ty = f.unwrap_ty();
                         Ok((f, Some(ty)))
-                    } else  {
+                    } else {
                         self.pop_state(state);
                         Ok((f, None))
                     }
@@ -2044,12 +2044,22 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     // TODO: calling this in infer is wrong because it might fail and lose the function
     fn promote_closure(
         &mut self,
-        constants: &Constants<'p>,
+        result: &mut FnWip<'p>,
         expr: &mut FatExpr<'p>,
     ) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
-            let f = self.add_func(mem::take(func), constants)?;
-            self.infer_types(f)?;
+            let f = self.add_func(mem::take(func), &result.constants)?;
+            if self.infer_types(f)?.is_none() {
+
+                mut_replace!(self.program.funcs[f.0], |mut func: Func<'p>| {
+                    if let Some(body) = &mut func.body {
+                        if let Some(ret_ty) = self.type_of(result, body)? {
+                            func.finished_ret = Some(ret_ty);
+                        }
+                    }
+                    Ok((func, ()))
+                });
+            }
             expr.expr = self.func_expr(f);
             Ok(f)
         } else {
@@ -2076,7 +2086,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
             let force_inline = self.pool.intern("inline");
             let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
-                let if_true = self.promote_closure(&result.constants, &mut parts[1])?;
+                let if_true = self.promote_closure(result, &mut parts[1])?;
                 self.program.funcs[if_true.0].add_tag(force_inline);
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
@@ -2085,7 +2095,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 ice!("if second arg must be func not {:?}", parts[1]);
             };
             if let Expr::Closure(_) = parts[2].deref_mut() {
-                let if_false = self.promote_closure(&result.constants, &mut parts[2])?;
+                let if_false = self.promote_closure(result, &mut parts[2])?;
                 self.program.funcs[if_false.0].add_tag(force_inline);
                 let false_arg = self.infer_arg(if_false)?;
                 self.type_check_arg(false_arg, unit, sig)?;
@@ -2112,7 +2122,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let force_inline = self.pool.intern("inline");
             if let Expr::Closure(_) = parts[0].deref_mut() {
-                let cond_fn = self.promote_closure(&result.constants, &mut parts[0])?;
+                let cond_fn = self.promote_closure(result, &mut parts[0])?;
                 self.program.funcs[cond_fn.0].add_tag(force_inline);
                 let cond_arg = self.infer_arg(cond_fn)?;
                 self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
@@ -2127,7 +2137,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 todo!("shouldnt get here twice")
             }
             if let Expr::Closure(_) = parts[1].deref_mut() {
-                let body_fn = self.promote_closure(&result.constants, &mut parts[1])?;
+                let body_fn = self.promote_closure(result, &mut parts[1])?;
                 self.program.funcs[body_fn.0].add_tag(force_inline);
                 let body_arg = self.infer_arg(body_fn)?;
                 self.type_check_arg(body_arg, TypeId::unit(), sig)?;

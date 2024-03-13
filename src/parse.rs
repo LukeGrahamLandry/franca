@@ -115,33 +115,9 @@ impl<'a, 'p> Parser<'a, 'p> {
             LeftSquiggle => {
                 self.start_subexpr();
                 self.eat(LeftSquiggle)?;
-                let mut body = vec![];
-                while self.peek() != RightSquiggle {
-                    body.push(self.parse_stmt()?);
-                }
-
-                let result = if let Some(s) = body.last() {
-                    if let Stmt::Eval(_) = s.deref() {
-                        if let Stmt::Eval(e) = body.pop().unwrap().stmt {
-                            e
-                        } else {
-                            unreachable!()
-                        }
-                    } else {
-                        self.start_subexpr();
-                        self.expr(Expr::unit())
-                    }
-                } else {
-                    self.start_subexpr();
-                    self.expr(Expr::unit())
-                };
-
+                let expr = self.parse_block_until_squiggle()?;
                 self.eat(RightSquiggle)?;
-                Ok(self.expr(Expr::Block {
-                    body,
-                    result: Box::new(result),
-                    locals: None,
-                }))
+                Ok(expr)
             }
             DotLeftSquiggle => {
                 self.start_subexpr();
@@ -302,12 +278,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             Qualifier(kind) => {
                 self.pop();
                 let binding = self.parse_type_binding(false)?;
-                let value = if Equals == self.peek() {
-                    self.eat(Equals)?;
-                    Some(self.parse_expr()?)
-                } else {
-                    None
-                };
                 // TODO: allow multiple bindings
                 let (name, ty) = match binding.name {
                     Name::Ident(i) => (i, binding.ty),
@@ -315,13 +285,45 @@ impl<'a, 'p> Parser<'a, 'p> {
                     Name::None => panic!("var decl needs name. {:?}", binding.ty),
                 };
 
-                self.eat(Semicolon)?;
-                // TODO: this could just carry the pattern forward.
-                Stmt::DeclNamed {
-                    name,
-                    ty,
-                    value,
-                    kind,
+
+                match self.peek() {
+                    Equals => {
+                        self.eat(Equals)?;
+                        let value = self.parse_expr()?;
+                        Stmt::DeclNamed { name, ty, value: Some(value), kind }
+                    }
+                    Semicolon => {
+                        self.eat(Semicolon)?;
+                        Stmt::DeclNamed { name, ty, value: None, kind }
+                    }
+                    LeftArrow => {
+                        self.eat(LeftArrow)?;
+                        let mut call = self.parse_expr()?;
+                        self.start_subexpr();
+                        let mut arg = Pattern::empty(*self.spans.last().unwrap());
+                        arg.bindings.push(Binding {
+                            name: Name::Ident(name),
+                            ty,
+                            default: None,
+                        });
+                        self.eat(Semicolon)?;
+
+                        self.start_subexpr();
+                        let callback = self.parse_block_until_squiggle()?;
+                        let name = self.pool.intern("backpass");
+                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false);
+                        let callback = self.expr(Expr::Closure(Box::new(callback)));
+
+                        if let Expr::Call(_, old_arg) = &mut call.expr {
+                            if let Expr::Tuple(parts) = &mut old_arg.expr {
+                                parts.push(callback);
+                            } else {
+                                todo!("backpass non tuple")
+                            }
+                        }
+                        Stmt::Eval(call)
+                    }
+                    _ => return Err(self.expected("';' or '<-' or '=' after declaration.")),
                 }
             }
             Semicolon => {
@@ -599,5 +601,32 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn expected(&mut self, msg: &str) -> ParseErr {
         let s = format!("Expected: {msg} but found {:?}", self.peek());
         self.error_next(s)
+    }
+    fn parse_block_until_squiggle(&mut self) -> Res<FatExpr<'p>> {
+        let mut body = vec![];
+        while self.peek() != RightSquiggle {
+            body.push(self.parse_stmt()?);
+        }
+
+        let result = if let Some(s) = body.last() {
+            if let Stmt::Eval(_) = s.deref() {
+                if let Stmt::Eval(e) = body.pop().unwrap().stmt {
+                    e
+                } else {
+                    unreachable!()
+                }
+            } else {
+                self.start_subexpr();
+                self.expr(Expr::unit())
+            }
+        } else {
+            self.start_subexpr();
+            self.expr(Expr::unit())
+        };
+        Ok(self.expr(Expr::Block {
+            body,
+            result: Box::new(result),
+            locals: None,
+        }))
     }
 }
