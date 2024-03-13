@@ -603,6 +603,7 @@ pub struct Program<'p> {
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
     comptime_only: BitSet,  // Index is TypeId
+    pub assertion_count: usize,
 }
 
 #[derive(Clone)]
@@ -702,6 +703,7 @@ impl<'p> Program<'p> {
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
             comptime_only: BitSet::empty(),
+            assertion_count: 0
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);

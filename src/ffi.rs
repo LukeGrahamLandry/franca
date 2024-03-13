@@ -526,7 +526,7 @@ pub mod c {
                 TypeInfo::F64 => CTy::f64(),
                 TypeInfo::Type |
                 TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
-                TypeInfo::Bool => CTy::c_int(),
+                TypeInfo::Bool => CTy::c_uchar(),  // Not a whole word!
                 TypeInfo::Tuple(_) => {
                     todo!()
                 }

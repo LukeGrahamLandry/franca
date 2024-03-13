@@ -22,6 +22,9 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Unique(Backing: Type) Type", Program::unique_ty as *const u8),
     ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
+    ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
+    ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
+    ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
 ];
 
 pub fn get_special_functions() -> String {
@@ -69,6 +72,13 @@ pub extern fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_val: i6
     let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
     let case =  hope(|| Ok(unwrap!(cases.get(tag_val as usize),  "enum tag too high")));
     case.0
+}
+
+// Supports bool, i64, and Type which all have the same repr.
+// TODO: track call site
+pub extern fn assert_eq<'p>(program: &mut Program, a: i64, b: i64) {
+    hope(|| Ok(assert_eq!(a, b)));
+    program.assertion_count += 1;
 }
 
 #[cfg(target_arch = "aarch64")]

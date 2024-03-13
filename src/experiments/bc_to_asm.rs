@@ -73,8 +73,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 
         self.wip.push(f);
         if let Some(template) = self.program.funcs[f.0].any_reg_template {
-            // TODO: want to use asm instead of interp
+            // TODO: want to use asm instead of interp so will need to compile.
+            //       but really it would be better to have the separation of compiling for host vs target so I could cross compile once I support other architectures.
             // self.compile(template)?;
+        } else if self.program.funcs[f.0].comptime_addr.is_some() {
+            // TODO
         } else {
             let callees = self.program.funcs[f.0]
                 .wip
@@ -155,6 +158,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::CallDirect { f, ret, arg } => {
                     let target = &self.program.funcs[f.0];
                     let target_c_call = target.has_tag(self.program.pool, "c_call");
+                    let comp_ctx = target.has_tag(self.program.pool, "ct");
                     if let Some(template) = target.any_reg_template {
                         let registers = vec![0, 1, 0];
                         let ops = self.emit_any_reg(template, registers);
@@ -179,7 +183,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         }
                     } else {//if target_c_call {
                         // if let Some(bytes) = self.asm.get_fn(*f) {
-                        //     // TODO: shoyld only do this for comptime functions. for runtime, want to be able to squash everything down.
+                        //     // TODO: should only do this for comptime functions. for runtime, want to be able to squash everything down.
                         //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
                         //     //       since need to allow that for cross compiling anyway.
                         //     // Would be interesting to always use the indirect because then you could do super powerful things
@@ -190,14 +194,14 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         // } else {
                         assert!(f.0 < 512);
                         self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
-                        self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty());
+                        self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty(), comp_ctx);
                         // }
                     }
                     // else {
                     //     todo!()
                     // }
                 }
-                Bc::CallBuiltin { .. } => todo!(),
+                Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                 Bc::LoadConstant { slot, value } => match value {
                     Value::F64(_) => todo!(),
                     Value::I64(n) => {
@@ -303,9 +307,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                     self.get_slot(x16, *f);
-                    self.dyn_c_call(x16, *arg, *ret, *ty);
+                    self.dyn_c_call(x16, *arg, *ret, *ty, *comp_ctx);
                     self.release_one(*f);
-                    assert!(!*comp_ctx);
                 },
             }
         }
@@ -413,7 +416,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         }
     }
 
-    fn dyn_c_call(&mut self, f_addr_reg: i64, arg: StackRange, ret: StackRange, _: FnType) {
+    fn dyn_c_call(&mut self, f_addr_reg: i64, arg: StackRange, ret: StackRange, _: FnType, comp_ctx: bool) {
+        let reg_offset = if comp_ctx {1} else {0};  // for secret args like comp_ctx
         assert!(
             arg.count <= 7,
             "indirect c_call only supports 7 arguments. TODO: pass on stack"
@@ -422,7 +426,10 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
                 continue
             }
-            self.get_slot(i as i64, StackOffset(arg.first.0 + i));
+            self.get_slot(i as i64 + reg_offset, StackOffset(arg.first.0 + i));
+        }
+        if comp_ctx {
+            self.load_imm(x0, self.program as *const Program as u64);
         }
         // The symptom of not resetting sp is you get a stack overflow which is odd.
         // maybe it keeps calling me in a loop because rust loses where it put its link register.
@@ -641,9 +648,16 @@ mod tests {
         fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
             op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0));
         });
-        
+
         @c_call fn main(a: i64) i64 = {
             sub2(a, 3)
+        }"#
+    );
+
+    simple!(assert_eq_ffi, (), 2, r#"
+        @c_call fn main() i64 = {
+            assert_eq(1, 1);
+            2
         }"#
     );
 
@@ -688,6 +702,9 @@ mod tests {
         )
             .unwrap();
     }
+
+    // TODO: bootstrap raw_slice
+    // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
 }
 
 #[cfg(target_arch = "aarch64")]

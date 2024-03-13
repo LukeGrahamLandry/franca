@@ -1058,6 +1058,19 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         };
                         self.program.load_value(Value::Type(ty))
                     }
+                    "size_of" => {
+                        // Note: this does not evaluate the expression.
+                        // TODO: warning if it has side effects.
+
+                        let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
+                        let ty = self.to_type(ty)?;
+                        let size = self.executor.size_of(self.program, ty);
+                        expr.expr = Expr::Value {
+                            ty: TypeId::i64(),
+                            value: Value::I64(size as i64).into(),
+                        };
+                        self.program.load_value(Value::I64(size as i64))
+                    }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
                         let (saved_res, state) = (result.clone(), self.executor.mark_state());
@@ -2693,7 +2706,6 @@ pub trait Executor<'p>: PoolLog<'p> {
     fn is_ready(&self, f: FuncId) -> bool;
     fn dump_repr(&self, program: &Program<'p>, f: FuncId) -> String;
     fn tag_error(&self, err: &mut CompileError<'p>);
-    fn assertion_count(&self) -> usize;
     fn mark_state(&self) -> Self::SavedState;
     fn restore_state(&mut self, state: Self::SavedState);
     fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>>; // asadas

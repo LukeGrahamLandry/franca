@@ -253,7 +253,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                                     let assertion_count = src.split("assert_eq(").count() - 1;
                                     // debug so dont crash in web if not using my system of one run per occurance.
                                     debug_assert_eq!(
-                                        comp.executor.assertion_count(), assertion_count,
+                                        comp.program.assertion_count, assertion_count,
                                         "vm missed assertions?"
                                     );
                                     outln!(ShowPrint, 

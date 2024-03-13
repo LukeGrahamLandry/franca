@@ -365,11 +365,6 @@ impl<'p> Executor<'p> for AsmExecutor {
        // TODO
     }
 
-    fn assertion_count(&self) -> usize {
-        // TODO
-        0
-    }
-
     fn mark_state(&self) -> Self::SavedState {
         // TODO
     }

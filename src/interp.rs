@@ -32,7 +32,6 @@ pub struct Interp<'a, 'p> {
     pub value_stack: Vec<Value>,
     pub call_stack: Vec<CallFrame<'p>>,
     pub ready: Vec<Option<FnBody<'p>>>,
-    pub assertion_count: usize,
     pub last_loc: Option<Span>,
     pub messages: Vec<StackAbsoluteRange>,
     pub sizes: SizeCache,
@@ -45,7 +44,6 @@ impl<'a, 'p> Interp<'a, 'p> {
             value_stack: vec![],
             call_stack: vec![],
             ready: vec![],
-            assertion_count: 0,
             last_loc: None,
             messages: vec![],
             sizes: SizeCache { known: vec![] },
@@ -414,7 +412,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "assert_eq" => {
                 let (a, b) = arg.to_pair()?;
                 assert_eq!(a, b, "runtime_builtin:assert_eq");
-                self.assertion_count += 1; // sanity check for making sure tests actually ran
+                program.assertion_count += 1; // sanity check for making sure tests actually ran
                 Value::Unit.into()
             }
             "is_comptime" => {
@@ -1010,10 +1008,6 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         err.value_stack = self.value_stack.clone();
         err.call_stack = self.log_callstack();
         err.loc = self.last_loc.or(err.loc);
-    }
-
-    fn assertion_count(&self) -> usize {
-        self.assertion_count
     }
 
     fn mark_state(&self) -> Self::SavedState {
