@@ -99,7 +99,7 @@ test_file!(ffi);
 test_file!(collections);
 test_file!(macros);
 test_file!(aarch64_jit);
-test_file!(looping);
+test_file!(backpassing);
 
 pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     pool: &'a StringPool<'p>,

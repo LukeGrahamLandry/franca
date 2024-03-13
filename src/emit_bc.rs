@@ -593,12 +593,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             },
                         });
 
-                        // If this is a smaller varient, pad out the slot with units instead of poisons.
+                        // If this is a smaller varient, pad out the slot instead of poisons. cant be unit because then asm doesnt copy it around
                         ret.count = size;
                         for i in (value.count + 1)..ret.count {
                             result.push(Bc::LoadConstant {
                                 slot: ret.offset(i),
-                                value: Value::Unit,
+                                value: Value::I64(123),
                             });
                         }
 
@@ -975,6 +975,9 @@ impl<'p> FnBody<'p> {
             TypeInfo::Enum { .. } => {
                 let first = StackOffset(self.stack_slots);
                 self.slot_types.push(TypeId::i64());
+                for _ in 1..count {
+                    self.slot_types.push(TypeId::i64());  // TODO: more elegant thing for padding.
+                }
                 self.stack_slots += count;
                 Ok(StackRange { first, count })
             }

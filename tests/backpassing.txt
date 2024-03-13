@@ -1,0 +1,94 @@
+fn main(canary: i64) i64 = {
+
+fn range(start: i64, end: i64, yield: Fn(i64, Unit)) Unit = {
+    var i = start;
+    (fn()=lt(i, end), fn()={  // TODO: fix vm poison when no brackets.
+        yield(i);
+        i = add(i, 1);
+    })!while;
+}
+
+let zero = 0; // TODO: fully const arg
+
+// Here we pass a closure as an argument to a function.
+var sum = 0;
+range(zero, 4, fn(i: i64) = {
+    sum = add(sum, i);
+});
+assert_eq(sum, 6);
+
+// You can write the same thing using back-passing syntax.
+var sum = 0;
+{
+    // This means take the whole rest of the block as the body of a closure with the variable 'i' as its argument,
+    // and pass that as the last argument to the 'range' call.
+    let i: i64 <- range(zero, 4);
+    sum = add(sum, i);
+};
+assert_eq(sum, 6);
+
+// So you can do nested loops in an unindented style.
+var acc = 0;
+{
+    let n: i64 <- range(zero, 4);
+    let m: i64 <- range(zero, 4);
+    acc = add(acc, mul(n, m));
+};
+assert_eq(acc, 36);
+
+// Same as above but in normal syntax.
+var acc = 0;
+range(zero, 4, fn(n: i64) = {
+    range(zero, 4, fn(m: i64) = {
+        acc = add(acc, mul(n, m));
+    })
+});
+assert_eq(acc, 36);
+
+fn try() Unit = unit;
+
+@comptime
+fn Option(T: Type) Type = {
+    const Self: Type = .{ Some: T, None: Unit, }!enum;
+
+    fn try(maybe: Self, yield: Fn(T, Unit)) Unit = {
+        (eq(maybe!tag[], tag_value(Self, Some!symbol)),
+            fn() = yield(maybe.Some[]),
+            fn() = (),
+        )!if;
+        // TODO: its too easy to forget the !if. I want prefix anyway.
+        //       but why did it compile? that tuple (bool, fn(()) (), fn(()) ()) isn't unit.
+        //       and I wasn't referencing the field access.
+    }
+
+    Self
+}
+
+const _todo = Option(i64);  // TODO
+
+// TODO: pass required type from fn ret through if branches.
+fn if_multiple(i: i64, divisor: i64) Option(i64) =
+    (eq(mod(i, divisor), 0),
+        fn() Option(i64) = .{ Some: i },
+        fn() Option(i64) = .{ None: unit }
+)!if;
+
+// You can use back-passing for early returns.
+var passed = false;
+{
+    // TODO: choose an overload based on partially known argument types, so you can infer other argument types,
+    //       so it would know 'i' is the argument to yield so must be i64.
+    let n: i64 <- try(if_multiple(12, 2));
+    assert_eq(n, 12);
+    let n: i64 <- try(if_multiple(n, 3));
+    assert_eq(n, 12);
+    let n: i64 <- try(if_multiple(n, 4));
+    assert_eq(n, 12);
+    passed = true;
+    let n: i64 <- try(if_multiple(n, 5));
+    exit(1);
+};
+assert_eq(passed, true);
+
+canary
+}

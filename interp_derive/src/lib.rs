@@ -147,7 +147,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                 let payload_size = Self::size() - 1;
                 for _ in 0..(payload_size-varient_size) {
                     let unit = values.next()?;
-                    debug_assert_eq!(unit, Value::Unit);
+                    debug_assert_eq!(unit, Value::I64(123));
                 }
 
                 result
@@ -248,7 +248,7 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                 match self {  #(#recurse)* };
                 let payload_size = Self::size() - 1;
                 for _ in 0..(payload_size-varient_size) {
-                    values.push(Value::Unit);
+                    values.push(Value::I64(123));  // TODO: less dumb padding
                 }
 
             }

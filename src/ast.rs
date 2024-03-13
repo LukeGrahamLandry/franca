@@ -291,10 +291,10 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 
 
 impl<'p> FatExpr<'p> {
-    pub fn renumber_vars(&mut self, vars: &mut Vec<VarInfo>, mapping: &mut HashMap<Var<'p>, Var<'p>>) {
-        let mut ctx = RenumberVars { vars, mapping };
+    pub fn renumber_vars(&mut self, vars: &mut Vec<VarInfo>) {
+        let mut mapping = HashMap::new();
+        let mut ctx = RenumberVars { vars, mapping: &mut mapping };
         ctx.expr(self);
-        println!("{:?}", ctx.mapping);
     }
 }
 

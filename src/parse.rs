@@ -1,7 +1,7 @@
 //! Convert a stream of tokens into ASTs.
 #![deny(unused_must_use)]
 
-use std::{fmt::Debug, ops::Deref, panic::Location, sync::Arc};
+use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
@@ -285,7 +285,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                     Name::None => panic!("var decl needs name. {:?}", binding.ty),
                 };
 
-
                 match self.peek() {
                     Equals => {
                         self.eat(Equals)?;
@@ -318,7 +317,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                             if let Expr::Tuple(parts) = &mut old_arg.expr {
                                 parts.push(callback);
                             } else {
-                                todo!("backpass non tuple")
+                                old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
                             }
                         }
                         Stmt::Eval(call)

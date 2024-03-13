@@ -537,6 +537,8 @@ pub mod c {
                 | TypeInfo::Named(ty, _)
                 | TypeInfo::Struct { as_tuple: ty, .. } => self.as_c_type(*ty)?,
                 TypeInfo::Unit => todo!(),
+                // This is the return type of exit().
+                TypeInfo::Never => CTy::usize(),
                 _ => err!("No c abi for {}", self.log_type(ty)),
             })
         }
@@ -611,7 +613,10 @@ pub mod c {
         } else if f_ty.ret == sym {
             let result: usize = unsafe { b.into_cif().call(ptr, &args) };
             Value::Symbol(result).into()
-        }else {
+        } else if f_ty.ret.is_never() {
+            let _: () = unsafe { b.into_cif().call(ptr, &args) };
+            unreachable!("Called 'fn(_) Never' but it returned.")
+        } else {
             todo!("unsupported c ret type {}", program.log_type(f_ty.ret))
         })
     }

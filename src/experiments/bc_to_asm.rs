@@ -106,6 +106,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         Ok(())
     }
 
+    #[track_caller]
     fn slot_type(&self, slot: StackOffset) -> TypeId {
         self.interp.ready[self.f.0].as_ref().unwrap().slot_types[slot.0]
     }
@@ -239,12 +240,16 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     // if is_c_call {
                         match slot.count {
                             0 => {}
-                            1 => {
-                                if !self.slot_type(slot.single()).is_unit() {
-                                    self.get_slot(x0, slot.single());
+                            1..=7 => {
+                                for i in 0..slot.count {
+                                    let slot = StackOffset(slot.first.0 + i);
+                                    if self.slot_type(slot).is_unit() {
+                                        continue
+                                    }
+                                    self.get_slot(i as i64, slot);
                                 }
                             }
-                            _ => err!("c_call only supports one return value. TODO: structs",),
+                            _ => err!("c_call only supports 7 return value. TODO: structs",),
                         }
                         self.asm.push(brk(0));
                         let a = self.asm.prev();
@@ -273,6 +278,16 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 }
                 Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
                     for i in 0..from.count {
+                        let to_unit = self.slot_type(StackOffset(to.first.0 + i)).is_unit();
+                        let from_unit = self.slot_type(StackOffset(from.first.0 + i)).is_unit();
+                        if from_unit && to_unit  {
+                            continue
+                        }
+                        if from_unit && !to_unit {
+                            self.load_imm(x0, 123); // HACK for enum padding.
+                            self.set_slot(x0, StackOffset(to.first.0 + i));
+                            continue
+                        }
                         self.get_slot(x0, StackOffset(from.first.0 + i));
                         self.set_slot(x0, StackOffset(to.first.0 + i));
                     }
@@ -422,6 +437,10 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             arg.count <= 7,
             "indirect c_call only supports 7 arguments. TODO: pass on stack"
         );
+        assert!(
+            ret.count <= 7,
+            "indirect c_call only supports 7 returns. TODO: pass on stack"
+        );
         for i in 0..arg.count {
             if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
                 continue
@@ -438,10 +457,13 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         for i in arg {
             self.release_one(StackOffset(i));
         }
-        assert_eq!(ret.count, 1);
 
-        if !self.slot_type(ret.single()).is_unit() {
-            self.set_slot(x0, ret.single());
+        for i in 0..ret.count {
+            let slot = StackOffset(ret.first.0 + i);
+            if self.slot_type(slot).is_unit() {
+                continue
+            }
+            self.set_slot(i as i64, slot);
         }
     }
 
@@ -705,6 +727,8 @@ mod tests {
 
     // TODO: bootstrap raw_slice
     // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
+
+    simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.txt"));
 }
 
 #[cfg(target_arch = "aarch64")]
