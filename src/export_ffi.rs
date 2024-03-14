@@ -15,6 +15,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn exit(status: i32) Never", libc::exit as *const u8),
     ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
+    ("fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[

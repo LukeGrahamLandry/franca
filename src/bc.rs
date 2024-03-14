@@ -232,7 +232,7 @@ impl StackRange {
 
     #[track_caller]
     pub fn single(&self) -> StackOffset {
-        debug_assert_eq!(self.count, 1);
+        debug_assert_eq!(self.count, 1, "{self:?}");
         self.first
     }
 }

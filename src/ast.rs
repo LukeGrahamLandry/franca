@@ -770,6 +770,13 @@ impl<'p> LazyType<'p> {
             _ => None,
         }
     }
+
+    pub fn expr(self) -> Option<FatExpr<'p>> {
+        match self {
+            LazyType::PendingEval(e) => Some(e),
+            _ => None
+        }
+    }
 }
 
 macro_rules! safe_rec {

@@ -228,8 +228,62 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn parse_tuple(&mut self) -> Res<FatExpr<'p>> {
         self.start_subexpr();
         self.eat(LeftParen)?;
-        let args = self.comma_sep_expr()?;
+        if self.maybe(RightParen) {
+            return Ok(self.expr(Expr::unit()));
+        }
+        let mut args: Vec<FatExpr<'p>> = vec![];
+        loop {
+            args.push(self.parse_expr()?);
+            match self.peek() {
+                Comma => {
+                    self.eat(Comma)?;
+                    if RightParen == self.peek() {
+                        break;
+                    }
+                }
+                RightParen => {
+                    // No trailing comma is fine
+                    break;
+                }
+                Colon => {
+                    // The last thing was actually a name for a named argument
+                    self.eat(Colon)?;
+                    let value = self.parse_expr()?;
+                    let name = if let Expr::GetNamed(name) = args.pop().unwrap().expr {
+                        name
+                    } else {
+                        return Err(self.expected("Ident before ':' in argument pattern"));
+                    };
+                    let first = Binding {
+                        name: Name::Ident(name),
+                        ty: LazyType::PendingEval(value),
+                        default: None,
+                    };
+                    self.maybe(Comma);
+                    let mut named = if RightParen == self.peek() {
+                        // Maybe there was only one named argument.
+                        Pattern::empty(*self.spans.last().unwrap())
+                    } else {
+                        // Otherwise, switch to parsing a pattern.
+                        self.parse_args()?
+                    };
+                    // Add in the that first argument
+                    named.bindings.insert(0, first);
+                    if args.is_empty() {
+                        // All arguments were named, don't have to do anything extra.
+                        self.eat(RightParen)?;
+                        return Ok(self.expr(Expr::StructLiteralP(named)))
+                    } else {
+                        return Err(self.expected("TODO: some named some positional"));
+                    }
+                }
+                _ => {
+                    return Err(self.expected("',' or ')' or ':' after tuple element"));
+                }
+            }
+        }
         self.eat(RightParen)?;
+
         Ok(match args.len() {
             0 => self.expr(Expr::unit()),
             1 => {
@@ -361,34 +415,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             annotations.push(Annotation { name, args });
         }
         Ok(annotations)
-    }
-
-    /// `Expr, Expr, ` ends at `)`
-    fn comma_sep_expr(&mut self) -> Res<Vec<FatExpr<'p>>> {
-        let mut values: Vec<FatExpr<'p>> = vec![];
-
-        if RightParen != self.peek() {
-            loop {
-                values.push(self.parse_expr()?);
-                match self.peek() {
-                    Comma => {
-                        self.eat(Comma)?;
-                        if RightParen == self.peek() {
-                            break;
-                        }
-                    }
-                    RightParen => {
-                        // No trailing comma is fine
-                        break;
-                    }
-                    _ => {
-                        return Err(self.expected("',' or ')' after tuple element"));
-                    }
-                }
-            }
-        }
-
-        Ok(values)
     }
 
     // TODO: its a bit weird that im using a pattern for both of those.

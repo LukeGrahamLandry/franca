@@ -595,6 +595,17 @@ impl BitSet {
         }
         self.put(i, value)
     }
+
+    pub fn clear(&mut self) {
+        match self {
+            BitSet::Small(v) =>  {
+                *v = [0, 0];
+            }
+            BitSet::Big(v) => {
+                v.clear();
+            }
+        }
+    }
 }
 
 #[test]

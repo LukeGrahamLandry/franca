@@ -225,7 +225,7 @@ impl<'p> Program<'p> {
                 TypeInfo::Bool => "bool".to_owned(),
                 // TODO: be careful of recursion
                 TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
-                TypeInfo::Slice(e) => format!("([]{})", self.log_type(*e)),
+                TypeInfo::Slice(e) => unreachable!("TypeInfo::Slice is unused"),
                 TypeInfo::Struct { fields, .. } => {
                     // TODO: factor out iter().join(str), how does that not already exist
                     let v: Vec<_> = fields

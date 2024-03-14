@@ -95,6 +95,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         debug_assert!(!func.evil_uninit);
         let mut result = self.empty_fn(wip);
         let func = &self.program.funcs[f.0];
+        // println!("{} {:?}", self.program.pool.get(func.name), func.body);
         let arg_range = result.reserve_slots(self, func.unwrap_ty().arg)?;
         result.arg_range = arg_range;
         let return_value = self.emit_body(&mut result, arg_range, f);
@@ -985,6 +986,7 @@ impl<'p> FnBody<'p> {
         }
     }
 
+    #[track_caller]
     fn load_constant(
         &mut self,
         program: &mut EmitBc<'_, 'p>,
@@ -1021,6 +1023,7 @@ impl<'p> FnBody<'p> {
         }
     }
 
+    #[track_caller]
     fn load(
         &mut self,
         program: &mut EmitBc<'_, 'p>,

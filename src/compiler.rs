@@ -1171,7 +1171,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             self.type_check_arg(value.ty(), type_hint, "enum case")?;
                             Structured::RuntimeOnly(requested)
                         }
-                        _ => err!("struct literal {pattern:?} but expected {:?}", requested),
+                        _ => err!("struct literal {pattern:?} but expected {:?} = {}", requested, self.program.log_type(requested)),
                     };
                     Ok((pattern, res))
                 })
@@ -1458,6 +1458,22 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
+    fn named_args_to_tuple(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
+        if let Expr::StructLiteralP(pattern) = &mut arg.expr {
+            let expected = &self.program.funcs[f.0].arg;
+            assert_eq!(expected.bindings.len(), pattern.bindings.len());
+            let mut parts = vec![];
+            for name in expected.flatten_names() {
+                let index = unwrap!(pattern.bindings.iter().position(|p| p.name() == Some(name)), "missing named argument {name:?}");
+                let value = pattern.bindings.remove(index);
+                parts.push(unwrap!(value.ty.expr(), "named arg missing value"));
+            }
+            debug_assert!(pattern.bindings.is_empty());
+            arg.expr = Expr::Tuple(parts);
+        }
+        Ok(())
+    }
+
     // TODO: better error messages
     fn resolve_function(
         &mut self,
@@ -1468,6 +1484,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     ) -> Res<'p, FuncId> {
         // If there's only one option, we don't care what type it is.
         if let Some(f) = self.lookup_unique_func(name.0) {
+            self.named_args_to_tuple(result, arg, f)?;
             return Ok(f);
         }
 

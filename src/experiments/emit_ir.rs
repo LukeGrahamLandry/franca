@@ -1,4 +1,5 @@
 #![allow(clippy::wrong_self_convention)]
+#![allow(unused)]
 
 use std::collections::HashMap;
 use codemap::Span;
@@ -15,7 +16,8 @@ use crate::{
 };
 use crate::emit_bc::SizeCache;
 use crate::experiments::arena::Arena;
-use crate::experiments::ir::{Block, Call, Callable, Cc, Inst, Ip, IrFunc, Item, Place, Ret, Val};
+use crate::experiments::ir::{Block, Call, Callable, Cc, Inst, Ip, IrFunc, Item, Ret, Val};
+use crate::experiments::reflect::BitSet;
 
 use crate::logging::{assert, assert_eq, err, ice, unwrap};
 
@@ -53,6 +55,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 blocks: Vec::new_in(arena),
                 alloc_a: Vec::new_in(arena),
                 values: Vec::new_in(arena),
+                reachable: BitSet::empty(),
             },
             vars: Default::default(),
             func: f
@@ -65,8 +68,6 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             args: (arg_ty, args),
             body: Vec::new_in(self.ir.arena),
             end: Ret::Empty,
-            reachable: true,
-            dead: false
         });
         Ip(self.ir.blocks.len() - 1)
     }
@@ -113,16 +114,13 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         pattern: &Pattern<'p>,
     ) -> Res<'p, ()> {
         let arguments = pattern.flatten();
-        let mut running_size = 0;
-        let base = self.arg_of(block);
-        for (name, ty) in arguments {
-            let size = self.slot_count(ty);
-            let val = self.new_val(ty, Item::Offset(base, running_size));
+        let container = self.arg_of(block);
+        for (index, (name, ty)) in arguments.into_iter().enumerate() {
+            let val = self.new_val(ty, Item::Gep { container, index });
             if let Some(name) = name {
                 let prev = self.vars.insert(name, val);
                 assert!(prev.is_none(), "overwrite arg?");
             }
-            running_size += size;
         }
         Ok(())
     }
@@ -136,7 +134,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         if let Some(f) = f.as_fn() {
             let func = &self.program.funcs[f.0];
             let f_ty = func.unwrap_ty();
-            let do_call = self.new_block(f_ty.ret);
+            let do_call = self.new_block(f_ty.arg);
             let do_arg = self.compile_expr(do_call, arg_expr)?;
             let arg = self.arg_of(do_call);
             self.end(do_call, Ret::Call(Call {
@@ -148,9 +146,9 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             Ok(do_arg)
         }
         else if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
-            let do_call = self.new_block(f_ty.ret);
+            let do_call = self.new_block(f_ty.arg);
             let do_arg = self.compile_expr(do_call, arg_expr)?;
-            let do_func = self.compile_expr(do_arg, f)?;
+            let do_func = self.compile_expr(do_arg, f)?;  // TODO: wrong. 'output' arg ty needs to be the fn ptr
             let f = Callable::Ptr(self.arg_of(do_func));
             let arg = self.arg_of(do_call);
             self.end(do_call, Ret::Call(Call {

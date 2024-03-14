@@ -1,8 +1,11 @@
+#![allow(unused)]
+
 use std::fmt::{Debug, Formatter, Write};
 use std::marker::PhantomData;
 use crate::ast::{FuncId, Program, TypeId};
 use crate::bc::Value;
 use crate::experiments::arena::Arena;
+use crate::experiments::reflect::BitSet;
 
 #[derive(Debug)]
 pub struct IrFunc<'a> {
@@ -10,14 +13,22 @@ pub struct IrFunc<'a> {
     pub blocks: Vec<Block<'a>, &'a Arena<'a>>,
     pub alloc_a: Vec<TypeId, &'a Arena<'a>>,
     pub values: Vec<(TypeId, Item<'a>), &'a Arena<'a>>,
+    pub reachable: BitSet
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub enum Item<'a> {
     Value(Value),
-    Offset(Val, usize),
+    Offset {
+        ptr: Val,
+        bytes: usize
+    },
     Register(i64),
     Tuple(Vec<Val, &'a Arena<'a>>),
+    Gep {
+        container: Val,
+        index: usize
+    },
     Scalar
 }
 
@@ -26,8 +37,6 @@ pub struct Block<'a> {
     pub args: (TypeId, Val),
     pub body: Vec<Inst, &'a Arena<'a>>,
     pub end: Ret<'a>,
-    pub reachable: bool,
-    pub dead: bool
 }
 
 /// A Val could be a register, or dereference of a pointer in a register plus an offset.
@@ -35,16 +44,6 @@ pub struct Block<'a> {
 pub struct Val(pub usize);
 #[derive(Clone, Copy)]
 pub struct Ip(pub usize);
-
-#[derive(Debug)]
-pub enum Place {
-    Val(Val),
-    Deref {
-        base: Val,
-        offset: usize,
-    },
-    Lr,
-}
 
 #[derive(Debug, Clone)]
 pub struct Call {
@@ -109,6 +108,7 @@ impl<'a> IrFunc<'a> {
         loop {
             let mut dirty = false;
             for i in 0..self.blocks.len() {
+                self.reachable.set(i); // TODO: do this on create instead.
                 if let Ret::Goto(target) = self.blocks[i].end {
                     let insts: Vec<_> = self.blocks[target.0].body.iter().cloned().collect();
                     self.blocks[i].body.extend(insts.into_iter());
@@ -128,11 +128,48 @@ impl<'a> IrFunc<'a> {
                 break
             }
         }
+        self.find_reachable();
+    }
+
+    pub fn find_reachable(&mut self) {
+        let mut dirty = Vec::new_in(self.arena);
+        dirty.push(Ip(0));
+        self.reachable.clear();  // TODO: save from before since they'll never be reachable but then need to change the short circuiting.
+
+        while let Some(i) = dirty.pop() {
+            if self.reachable.get(i.0) {
+                continue
+            }
+            self.reachable.set(i.0);
+
+            match &self.blocks[i.0].end {
+                &Ret::Goto(b) => dirty.push(b),
+                &Ret::GotoWith(b, _) => dirty.push(b),
+                &Ret::If { if_true, if_false, .. } => {
+                    dirty.push(if_true);
+                    dirty.push(if_false);
+                }
+                Ret::Call(call) => {
+                    match call.f {
+                        Callable::Block(b) => dirty.push(b),
+                        _ => {}
+                    }
+                    match call.then {
+                        Callable::Block(b) => dirty.push(b),
+                        _ => {}
+                    }
+                }
+                Ret::Empty | Ret::Return(_) | Ret::Unused(_) => {}
+            }
+        }
     }
 
     pub fn log(&self, program: &Program) -> String {
         let mut out = String::from("digraph {\n");
         for (i, block) in self.blocks.iter().enumerate() {
+            if !self.reachable.get(i) {
+                continue
+            }
             let mut label = format!("B{i}");
             if !block.args.0.is_unit() {
                 write!(label, "({:?}: {})", block.args.1, program.log_type(block.args.0)).unwrap();
@@ -199,5 +236,18 @@ impl Debug for Ip {
 impl Debug for FuncId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Fn{}", self.0)
+    }
+}
+
+impl<'a> Debug for Item<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Item::Value(v) => write!(f, "{v:?}"),
+            Item::Offset { .. } => todo!(),
+            Item::Register(_) => todo!(),
+            Item::Tuple(parts) => write!(f, "{parts:?}"),
+            Item::Gep { container, index } => write!(f, "{container:?}[{index}]"),
+            Item::Scalar => write!(f, "Scalar"),
+        }
     }
 }

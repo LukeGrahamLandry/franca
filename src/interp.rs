@@ -973,9 +973,22 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         let result = EmitBc::compile(program, self, f);
         if result.is_ok() {
             let end_heights = (self.call_stack.len(), self.value_stack.len());
-            assert!(init_heights == end_heights, "bad stack size");
+            assert_eq!(init_heights, end_heights, "bad stack size");
         }
         result
+    }
+
+    fn run_with_arg<T: crate::experiments::reflect::Reflect>(
+        &mut self,
+        program: &mut Program<'p>,
+        f: FuncId,
+        arg: &mut T,
+    ) -> Res<'p, ()> {
+        let addr = arg as *const T as usize as i64;
+        let arg = Values::One(Value::I64(addr));
+        let ret = self.run(f, arg, ExecTime::Runtime, 1, program)?;
+        assert_eq!(ret.single()?, Value::Unit);
+        Ok(())
     }
 
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
@@ -1017,19 +1030,6 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
     fn restore_state(&mut self, (cs, vs): Self::SavedState) {
         drops(&mut self.call_stack, cs);
         drops(&mut self.value_stack, vs);
-    }
-
-    fn run_with_arg<T: crate::experiments::reflect::Reflect>(
-        &mut self,
-        program: &mut Program<'p>,
-        f: FuncId,
-        arg: &mut T,
-    ) -> Res<'p, ()> {
-        let addr = arg as *const T as usize as i64;
-        let arg = Values::One(Value::I64(addr));
-        let ret = self.run(f, arg, ExecTime::Runtime, 1, program)?;
-        assert_eq!(ret.single()?, Value::Unit);
-        Ok(())
     }
 
     fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>> {

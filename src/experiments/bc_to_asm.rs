@@ -2,6 +2,7 @@
 //! @c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
 
 #![allow(non_upper_case_globals)]
+#![allow(unused)]
 
 use std::arch::asm;
 use std::mem::transmute;
@@ -303,23 +304,25 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     self.set_slot(x0, ret);
                 },
                 &Bc::Load { from, to } => {
-                    assert_eq!(to.count, 1);
                     self.get_slot(x0, from);  // x0 = ptr
-                    self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0
-                    self.set_slot(x0, to.single());  // out = x0
+                    for i in 0..to.count {
+                        self.asm.push(ldr_uo(X64, x1, x0, i as i64)); // x1 = *x0[i]
+                        self.set_slot(x1, StackOffset(to.first.0 + i));  // out = x1
+                    }
                 },
+                &Bc::Store { to, from } => {
+                    self.get_slot(x0, to);  // x0 = ptr
+                    for i in 0..from.count {
+                        self.get_slot(x1, StackOffset(from.first.0 + i));  // x1 = val
+                        self.asm.push(str_uo(X64, x1, x0, i as i64)); // *x0[i] = val
+                    }
+                }
                 &Bc::TagCheck { enum_ptr, value } => {
                     self.get_slot(x0, enum_ptr);  // x0 = ptr
                     self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
                     self.asm.push(cmp_im(X64, x0, value, 0));
                     self.asm.push(b_cond(9999, CmpFlags::NE as i64)); // TODO: do better than just hoping to jump into garbage
                 },
-                Bc::Store { to, from } => {
-                    assert_eq!(from.count, 1);
-                    self.get_slot(x0, from.single());  // x0 = val
-                    self.get_slot(x1, *to);  // x1 = ptr
-                    self.asm.push(str_uo(X64, x0, x1, 0));  // *x1 = x0
-                }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                     self.get_slot(x16, *f);
                     self.dyn_c_call(x16, *arg, *ret, *ty, *comp_ctx);
@@ -370,13 +373,14 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         }
 
         debug_assert!(allow_create);
-        for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
-            if size == slot.count * 8 {
-                let found = self.open_slots.remove(i);
-                self.slots[slot.first.0] = Some(found.0);
-                return found.0;
-            }
-        }
+        // TODO: consecutive when required
+        // for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
+        //     if size == slot.count * 8 {
+        //         let found = self.open_slots.remove(i);
+        //         self.slots[slot.first.0] = Some(found.0);
+        //         return found.0;
+        //     }
+        // }
 
         let made = self.next_slot;
         self.slots[slot.first.0] = Some(made);
@@ -394,13 +398,15 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     fn find_one(&mut self, slot: StackOffset, allow_create: bool) -> SpOffset {
         if let Some(slot) = self.slots[slot.0] {
             slot
-        } else if let Some((made, size)) = self.open_slots.pop() {
-            debug_assert!(allow_create, "!allow_create {slot:?}");
-            if size > 8 {
-                self.open_slots.push((SpOffset(made.0 + 8), size - 8));
-            }
-            self.slots[slot.0] = Some(made);
-            made
+        // }
+        // TODO: consecutive when required
+        // else if let Some((made, size)) = self.open_slots.pop() {
+        //     debug_assert!(allow_create, "!allow_create {slot:?}");
+        //     if size > 8 {
+        //         self.open_slots.push((SpOffset(made.0 + 8), size - 8));
+        //     }
+        //     self.slots[slot.0] = Some(made);
+        //     made
         } else {
             debug_assert!(allow_create, "!allow_create {slot:?}");
             let made = self.next_slot;
@@ -411,9 +417,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     }
 
     fn release_one(&mut self, slot: StackOffset) {
-        if let Some(slot) = self.slots[slot.0].take() {
-            self.open_slots.push((slot, 8));
-        }
+        // if let Some(slot) = self.slots[slot.0].take() {
+        //     self.open_slots.push((slot, 8));
+        // }
     }
 
     fn load_imm(&mut self, reg: i64, mut value: u64) {
@@ -729,6 +735,11 @@ mod tests {
     // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
 
     simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.txt"));
+
+    // TODO: this relies on structs being in consecutive stack slots so had to disable reusing them.
+    simple!(structs, 5, 5, include_str!("../../tests/structs.txt"));
+    simple!(overloading, 5, 5, include_str!("../../tests/overloading.txt"));
+    simple!(closures, 5, 5, include_str!("../../tests/closures.txt"));
 }
 
 #[cfg(target_arch = "aarch64")]
