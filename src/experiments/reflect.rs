@@ -1,7 +1,6 @@
 use core::slice;
 use std::cell::{Cell, UnsafeCell};
 use std::mem::{self, align_of, size_of, ManuallyDrop, MaybeUninit};
-use std::num::NonZeroUsize;
 use std::ptr::{self, addr_of, NonNull};
 
 use interp_derive::Reflect;
@@ -527,7 +526,7 @@ pub enum BitSet {
     Big(Vec<usize>),
 }
 
-const BITS: usize = size_of::<usize>() * 8;
+const BITS: usize = usize::BITS as usize;
 impl BitSet {
     /// Whatever capacity you can get without allocating.
     pub fn empty() -> BitSet {

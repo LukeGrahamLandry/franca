@@ -419,7 +419,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 ret
             }
-            Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples");
                 let values: Res<'p, Vec<_>> = values
@@ -429,7 +428,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let values = values?;
                 result.produce_tuple(self, values, expr.ty)?
             }
-            Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
                 if let Some((from, ty)) = result.vars.get(var).cloned() {
                     debug_assert_eq!(expr.ty, ty);
@@ -452,7 +450,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::GetNamed(_) => unreachable!(),
-            Expr::EnumLiteral(_) => todo!(),
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.program.pool.get(*macro_name);
@@ -935,7 +932,6 @@ impl SizeCache {
             | TypeInfo::Ptr(_)
             | TypeInfo::VoidPtr
             | TypeInfo::FnPtr(_)
-            | TypeInfo::Slice(_)
             | TypeInfo::Type
             | TypeInfo::Unit => 1,
             TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),

@@ -53,6 +53,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         arg: &mut FatExpr<'p>,
         mut requested_ret: Option<TypeId>,
     ) -> Res<'p, FuncId> {
+        // TODO: probably don't want this here because it means you can't shadow with a const.
         // If there's only one option, we don't care what type it is.
         if let Some(f) = self.lookup_unique_func(name.0) {
             self.named_args_to_tuple(result, arg, f)?;
@@ -80,16 +81,17 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
         }
 
+        // TODO: combine this with the match up there so its less ugly.
         if let Values::One(Value::OverloadSet(i)) = value {
             self.compute_new_overloads(name.0, i)?;
             let mut overloads = self.program.overload_sets[i].clone(); // Sad
             if let Expr::StructLiteralP(pattern) = &mut arg.expr {
                 self.prune_overloads_by_named_args(&mut overloads, pattern)?;
             }
-            // TODO: you dont want to just exit because what about adding new impls to the overload set? same for if len()==1
-            // if overloads.0.is_empty() {
-            //     err!("No overload found {name:?}",);
-            // }
+
+            if overloads.0.is_empty() {
+                err!("No overload found {name:?}",);
+            }
             if overloads.0.len() == 1 {
                 let id = overloads.0[0].func;
                 self.named_args_to_tuple(result, arg, id)?;
@@ -207,7 +209,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
     fn named_args_to_tuple(
         &mut self,
-        result: &mut FnWip<'p>,
+        _result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
         f: FuncId,
     ) -> Res<'p, ()> {
@@ -236,7 +238,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     fn prune_overloads_by_named_args(
         &self,
         overload_set: &mut OverloadSet<'p>,
-        pattern: &mut Pattern<'p>,
+        pattern: &Pattern<'p>,
     ) -> Res<'p, ()> {
         let names = pattern.flatten_names();
         overload_set.0.retain(|overload| {

@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use codemap::{CodeMap, Span};
 use std::collections::HashMap;
 use std::mem;
@@ -8,10 +6,8 @@ use std::ops::Deref;
 use crate::ast::{Expr, FatExpr, FuncId, LazyType, Name, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
-use crate::emit_bc::SizeCache;
-use crate::experiments::aarch64::Three::*;
-use crate::experiments::aarch64::Two::*;
-use crate::experiments::aarch64::{Assembler, Inst, Mem, Reg, SP, X0};
+use crate::experiments::bc_to_asm::{BcToAsm, Jitted};
+use crate::export_ffi::get_special_functions;
 use crate::interp::Interp;
 use crate::logging::{assert_eq, err, ice, unwrap, LogTag};
 use crate::logging::{outln, PoolLog};
@@ -19,8 +15,6 @@ use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
 use crate::{bc::*, emit_diagnostic, make_toplevel, LIB};
-use crate::experiments::bc_to_asm::{BcToAsm, Jitted};
-use crate::export_ffi::get_special_functions;
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
@@ -30,7 +24,10 @@ pub fn bootstrap() -> (String, String) {
         .iter()
         .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
         .collect();
-    libs.insert(3, codemap.add_file("special".into(), get_special_functions()));  // TODO: order independent name resolution
+    libs.insert(
+        3,
+        codemap.add_file("special".into(), get_special_functions()),
+    ); // TODO: order independent name resolution
     let user_span = libs.last().unwrap().span;
     for file in &libs {
         stmts.extend(Parser::parse(file.clone(), pool).unwrap());
@@ -90,7 +87,7 @@ pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
     func: Option<FuncId>,
 }
 
-const HEADER: &str =r##"
+const HEADER: &str = r##"
 #![allow(non_snake_case)]
 #![allow(unused)]
 #![allow(non_upper_case_globals)]
@@ -133,7 +130,10 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             .collect();
         let functions: String = emit.ready.into_iter().flatten().collect();
 
-        Ok((format!("{HEADER}\n\n{constants}\n\n{functions}\n"), emit.comp))
+        Ok((
+            format!("{HEADER}\n\n{constants}\n\n{functions}\n"),
+            emit.comp,
+        ))
     }
 
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
@@ -188,7 +188,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         // TODO: doing this is bad because it means the names change every time because my typeids aren't deterministic
         //       so since im committing this it makes the diff noisy which annoys me
         // if want_export {
-            name
+        name
         // } else {
         //     format!("{name}_{:?}{:?}", ty.arg, ty.ret)
         // }
@@ -243,7 +243,6 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             TypeInfo::FnPtr(_) => todo!(),
             TypeInfo::Tuple(_) => todo!(),
             TypeInfo::Ptr(_) => todo!(),
-            TypeInfo::Slice(_) => todo!(),
             TypeInfo::Struct {
                 fields,
                 as_tuple,
@@ -371,13 +370,9 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
                 // }
                 self.comp.pool.get(var.0).to_string()
             }
-            Expr::PrefixMacro { .. }
-            | Expr::ArrayLiteral(_)
-            | Expr::RefType(_)
-            | Expr::EnumLiteral(_)
-            | Expr::Closure(_)
-            | Expr::GetNamed(_)
-            | Expr::String(_) => unreachable!(),
+            Expr::PrefixMacro { .. } | Expr::Closure(_) | Expr::GetNamed(_) | Expr::String(_) => {
+                unreachable!()
+            }
         })
     }
 

@@ -1,23 +1,23 @@
 #![allow(clippy::wrong_self_convention)]
 #![allow(unused)]
 
-use std::collections::HashMap;
 use codemap::Span;
+use std::collections::HashMap;
 use std::ops::Deref;
 
 use crate::ast::{FatStmt, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, Res};
+use crate::emit_bc::SizeCache;
+use crate::experiments::arena::Arena;
+use crate::experiments::ir::{Block, Call, Callable, Cc, Inst, Ip, IrFunc, Item, Ret, Val};
+use crate::experiments::reflect::BitSet;
 use crate::interp::Interp;
 use crate::logging::PoolLog;
 use crate::{
     ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo},
     pool::Ident,
 };
-use crate::emit_bc::SizeCache;
-use crate::experiments::arena::Arena;
-use crate::experiments::ir::{Block, Call, Callable, Cc, Inst, Ip, IrFunc, Item, Ret, Val};
-use crate::experiments::reflect::BitSet;
 
 use crate::logging::{assert, assert_eq, err, ice, unwrap};
 
@@ -27,7 +27,7 @@ pub struct EmitIr<'z, 'p: 'z, 'a> {
     last_loc: Option<Span>,
     ir: IrFunc<'a>,
     vars: HashMap<Var<'p>, Val>,
-    func: FuncId
+    func: FuncId,
 }
 
 impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
@@ -45,7 +45,12 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         Ok(emit.ir)
     }
 
-    fn new(program: &'z Program<'p>, sizes: &'z mut SizeCache, arena: &'a Arena<'a>, f: FuncId) -> Self {
+    fn new(
+        program: &'z Program<'p>,
+        sizes: &'z mut SizeCache,
+        arena: &'a Arena<'a>,
+        f: FuncId,
+    ) -> Self {
         Self {
             last_loc: None,
             program,
@@ -58,7 +63,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 reachable: BitSet::empty(),
             },
             vars: Default::default(),
-            func: f
+            func: f,
         }
     }
 
@@ -87,7 +92,11 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
 
     #[track_caller]
     fn end(&mut self, block: Ip, end: Ret<'a>) {
-        debug_assert!(matches!(self.ir.blocks[block.0].end, Ret::Empty), "Tried to close twice {:?} -> {end:?}", self.ir.blocks[block.0].end);
+        debug_assert!(
+            matches!(self.ir.blocks[block.0].end, Ret::Empty),
+            "Tried to close twice {:?} -> {end:?}",
+            self.ir.blocks[block.0].end
+        );
         self.ir.blocks[block.0].end = end;
     }
 
@@ -108,11 +117,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
     }
 
     // Do pattern matching to attach names to individual parts of a block's argument value.
-    fn bind_args(
-        &mut self,
-        block: Ip,
-        pattern: &Pattern<'p>,
-    ) -> Res<'p, ()> {
+    fn bind_args(&mut self, block: Ip, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let arguments = pattern.flatten();
         let container = self.arg_of(block);
         for (index, (name, ty)) in arguments.into_iter().enumerate() {
@@ -137,26 +142,31 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             let do_call = self.new_block(f_ty.arg);
             let do_arg = self.compile_expr(do_call, arg_expr)?;
             let arg = self.arg_of(do_call);
-            self.end(do_call, Ret::Call(Call {
-                convention: Cc::PushFrame,
-                f: Callable::Fn(f),
-                arg,
-                then: Callable::Block(output),
-            }));
+            self.end(
+                do_call,
+                Ret::Call(Call {
+                    convention: Cc::PushFrame,
+                    f: Callable::Fn(f),
+                    arg,
+                    then: Callable::Block(output),
+                }),
+            );
             Ok(do_arg)
-        }
-        else if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
+        } else if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
             let do_call = self.new_block(f_ty.arg);
             let do_arg = self.compile_expr(do_call, arg_expr)?;
-            let do_func = self.compile_expr(do_arg, f)?;  // TODO: wrong. 'output' arg ty needs to be the fn ptr
+            let do_func = self.compile_expr(do_arg, f)?; // TODO: wrong. 'output' arg ty needs to be the fn ptr
             let f = Callable::Ptr(self.arg_of(do_func));
             let arg = self.arg_of(do_call);
-            self.end(do_call, Ret::Call(Call {
-                convention: Cc::PushFrame,
-                f,
-                arg,
-                then: Callable::Block(output),
-            }));
+            self.end(
+                do_call,
+                Ret::Call(Call {
+                    convention: Cc::PushFrame,
+                    f,
+                    arg,
+                    then: Callable::Block(output),
+                }),
+            );
             Ok(do_func)
         } else {
             unreachable!()
@@ -180,27 +190,28 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             } => {
                 assert_ne!(VarType::Const, *kind);
                 let ty = ty.unwrap();
-                let dest = self.new_val(self.program.find_interned(TypeInfo::Ptr(ty)), Item::Scalar);
+                let dest =
+                    self.new_val(self.program.find_interned(TypeInfo::Ptr(ty)), Item::Scalar);
                 let (start, end) = match value {
                     None => {
                         let start = self.new_block(TypeId::unit());
                         (start, start)
-                    },
+                    }
                     Some(value) => {
                         let set = self.new_block(ty);
                         let start = self.compile_expr(set, value)?;
                         let src = self.arg_of(set);
-                        self.push(set, Inst::Store {
-                            src,
-                            dest_ptr: dest,
-                        });
+                        self.push(
+                            set,
+                            Inst::Store {
+                                src,
+                                dest_ptr: dest,
+                            },
+                        );
                         (start, set)
-                    },
+                    }
                 };
-                self.push(start, Inst::AllocA {
-                    ty,
-                    dest,
-                });
+                self.push(start, Inst::AllocA { ty, dest });
                 self.vars.insert(*name, dest);
                 (start, end)
             }
@@ -238,12 +249,8 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
-            Expr::ArrayLiteral(_) | Expr::RefType(_) |
-            Expr::WipFunc(_) | Expr::Closure(_) |
-            Expr::GetNamed(_) | Expr::EnumLiteral(_) => unreachable!(),
-            Expr::Call(f, arg) => {
-                self.emit_runtime_call(output, f, arg)?
-            }
+            Expr::WipFunc(_) | Expr::Closure(_) | Expr::GetNamed(_) => unreachable!(),
+            Expr::Call(f, arg) => self.emit_runtime_call(output, f, arg)?,
             Expr::Block {
                 body,
                 result: value,
@@ -284,7 +291,9 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 let start = self.new_block(TypeId::unit());
                 let val = if let Some(val) = self.vars.get(var).cloned() {
                     val
-                } else if let Some((value, ty)) = self.program.funcs[self.func.0].closed_constants.get(*var) {
+                } else if let Some((value, ty)) =
+                    self.program.funcs[self.func.0].closed_constants.get(*var)
+                {
                     debug_assert_eq!(expr.ty, ty);
                     self.new_val(ty, Item::Value(value.single()?))
                 } else {
@@ -335,17 +344,16 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                         // (ptr, ptr_ty).into()
                         todo!()
                     }
-                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
+                    "c_call" => err!(
+                        "!c_call has been removed. calling convention is part of the type now.",
+                    ),
                     "deref" => {
                         let use_ptr = self.new_block(arg.ty);
                         let start = self.compile_expr(use_ptr, arg)?;
                         let ty = unwrap!(self.program.unptr_ty(arg.ty), "");
                         let src = self.arg_of(use_ptr);
                         let dest = self.new_val(ty, Item::Scalar);
-                        self.push(use_ptr, Inst::Load {
-                            src,
-                            dest,
-                        });
+                        self.push(use_ptr, Inst::Load { src, dest });
                         self.end(use_ptr, Ret::GotoWith(output, dest));
                         start
                     }
@@ -465,11 +473,16 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 if let Some(val) = self.vars.get(var).cloned() {
                     let kind = self.program.vars[var.1].kind;
                     if kind != VarType::Var {
-                        err!("Can only take address of vars not {kind:?} {}", var.log(self.program.pool))
+                        err!(
+                            "Can only take address of vars not {kind:?} {}",
+                            var.log(self.program.pool)
+                        )
                     }
                     self.end(start, Ret::GotoWith(output, val));
-                    return Ok(start);
-                } else if let Some((value, ty)) = self.program.funcs[self.func.0].closed_constants.get(*var) {
+                    Ok(start)
+                } else if let Some((value, ty)) =
+                    self.program.funcs[self.func.0].closed_constants.get(*var)
+                {
                     // HACK: this is wrong but it makes constant structs work better.
                     if let TypeInfo::Ptr(_) = self.program.types[ty.0] {
                         let value = self.new_val(ty, Item::Value(value.single()?));
@@ -494,11 +507,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
 
     // TODO: make this not a special case.
     /// This swaps out the closures for function accesses.
-    fn emit_call_if(
-        &mut self,
-        output: Ip,
-        arg: &FatExpr<'p>,
-    ) -> Res<'p, Ip> {
+    fn emit_call_if(&mut self, output: Ip, arg: &FatExpr<'p>) -> Res<'p, Ip> {
         let do_branch = self.new_block(TypeId::bool());
         let (do_cond, if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
             let cond = self.compile_expr(do_branch, &parts[0])?;
@@ -512,15 +521,18 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         let if_true = self.compile_expr(output, if_true)?;
         let if_false = self.compile_expr(output, if_false)?;
         let cond = self.arg_of(do_branch);
-        self.end(do_branch, Ret::If { cond, if_true, if_false });
+        self.end(
+            do_branch,
+            Ret::If {
+                cond,
+                if_true,
+                if_false,
+            },
+        );
         Ok(do_cond)
     }
 
-    fn emit_call_while(
-        &mut self,
-        output: Ip,
-        arg: &FatExpr<'p>,
-    ) -> Res<'p, Ip> {
+    fn emit_call_while(&mut self, output: Ip, arg: &FatExpr<'p>) -> Res<'p, Ip> {
         let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref() {
             (&parts[0], &parts[1])
         } else {
@@ -531,19 +543,18 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         let start = self.compile_expr(do_branch, cond_fn)?;
         let do_body = self.compile_expr(start, body_fn)?;
         let cond = self.arg_of(do_branch);
-        self.end(do_branch, Ret::If {
-            cond,
-            if_true: do_body,
-            if_false: output,
-        });
+        self.end(
+            do_branch,
+            Ret::If {
+                cond,
+                if_true: do_body,
+                if_false: output,
+            },
+        );
         Ok(start)
     }
 
-    fn set_deref(
-        &mut self,
-        place: &FatExpr<'p>,
-        value: &FatExpr<'p>,
-    ) -> Res<'p, (Ip, Ip)> {
+    fn set_deref(&mut self, place: &FatExpr<'p>, value: &FatExpr<'p>) -> Res<'p, (Ip, Ip)> {
         match place.deref() {
             Expr::GetVar(var) => {
                 let set = self.new_block(value.ty);
@@ -551,7 +562,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 let dest_ptr = *unwrap!(self.vars.get(var), "undeclared");
                 let src = self.arg_of(set);
                 self.push(set, Inst::Store { src, dest_ptr });
-                return Ok((start, set))
+                Ok((start, set))
             }
             Expr::SuffixMacro(macro_name, arg) => {
                 // TODO: type checking
@@ -577,7 +588,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
 
     fn field_access_expr(
         &mut self,
-        result: &mut FnBody<'p>,
+        result: &FnBody<'p>,
         container_ptr: Structured,
         name: Ident<'p>,
     ) -> Res<'p, Structured> {

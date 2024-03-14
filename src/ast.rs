@@ -29,65 +29,6 @@ pub struct FnType {
     pub ret: TypeId,
 }
 
-impl TypeId {
-    pub fn is_unit(&self) -> bool {
-        *self == Self::unit()
-    }
-
-    pub fn is_unknown(&self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn is_any(&self) -> bool {
-        self.0 == 1
-    }
-
-    pub fn is_never(&self) -> bool {
-        *self == Self::never()
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn unknown() -> TypeId {
-        TypeId(0)
-    }
-
-    // Be careful that this is in the pool correctly!
-    /// Placeholder to use while working on typechecking.
-    pub fn any() -> TypeId {
-        TypeId(1)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn unit() -> TypeId {
-        TypeId(2)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn ty() -> TypeId {
-        TypeId(3)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn i64() -> TypeId {
-        TypeId(4)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn bool() -> TypeId {
-        TypeId(5)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn void_ptr() -> TypeId {
-        TypeId(6)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn never() -> TypeId {
-        TypeId(7)
-    }
-}
-
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
@@ -108,8 +49,7 @@ pub enum TypeInfo<'p> {
     Fn(FnType),
     FnPtr(FnType),
     Tuple(Vec<TypeId>),
-    Ptr(TypeId),   // One element
-    Slice(TypeId), // A pointer and a length
+    Ptr(TypeId), // One element
     Struct {
         // You probably always have few enough that this is faster than a hash map.
         fields: Vec<Field<'p>>,
@@ -158,10 +98,7 @@ pub enum Expr<'p> {
         result: Box<FatExpr<'p>>,
         locals: Option<Vec<Var<'p>>>, // useful information for calling drop
     },
-    ArrayLiteral(Vec<FatExpr<'p>>),
     Tuple(Vec<FatExpr<'p>>),
-    RefType(Box<FatExpr<'p>>),
-    EnumLiteral(Vec<(Ident<'p>, FatExpr<'p>)>),
     Closure(Box<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
@@ -268,7 +205,6 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
                 }
             }
             Expr::WipFunc(_) => todo!("renamewip"),
-            Expr::EnumLiteral(_) | Expr::RefType(_) | Expr::ArrayLiteral(_) => unreachable!(),
             Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
         }
     }
@@ -298,8 +234,8 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &'a mut Var<'p>) {
         let new = Var(name.0, self.vars.len());
         self.vars.push(self.vars[name.1]);
-        let stomp = self.mapping.insert(*name, new).is_none();
-        // debug_assert!(!stomp);
+        let stomp = self.mapping.insert(*name, new);
+        debug_assert!(stomp.is_none());
         *name = new;
     }
 }
@@ -1105,7 +1041,7 @@ impl<'p> Program<'p> {
 
     pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
         let ptr_ty = &self.types[ptr_ty.0];
-        if let TypeInfo::Slice(ty) | TypeInfo::Ptr(ty) = ptr_ty {
+        if let TypeInfo::Ptr(ty) = ptr_ty {
             Some(*ty)
         } else {
             None
@@ -1220,10 +1156,9 @@ impl<'p> Program<'p> {
             // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
             TypeInfo::Type => false,
             TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
-            TypeInfo::Unique(ty, _)
-            | TypeInfo::Named(ty, _)
-            | TypeInfo::Ptr(ty)
-            | TypeInfo::Slice(ty) => self.is_comptime_only_type(*ty),
+            TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Ptr(ty) => {
+                self.is_comptime_only_type(*ty)
+            }
             TypeInfo::Struct { fields, .. } => {
                 fields.iter().any(|f| self.is_comptime_only_type(f.ty))
             }
@@ -1414,14 +1349,11 @@ impl<'p> Expr<'p> {
                 // TODO: body
                 result.walk(f);
             }
-            Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(e) => {
                 for e in e {
                     e.walk(f);
                 }
             }
-            Expr::RefType(_) => todo!(),
-            Expr::EnumLiteral(_) => todo!(),
             Expr::Closure(func) => {
                 if let Some(e) = func.body.as_mut() {
                     e.walk(f)
@@ -1453,5 +1385,64 @@ impl<'p> TypeInfo<'p> {
             ffi_byte_align: None,
             ffi_byte_stride: None,
         }
+    }
+}
+
+impl TypeId {
+    pub fn is_unit(&self) -> bool {
+        *self == Self::unit()
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn is_any(&self) -> bool {
+        self.0 == 1
+    }
+
+    pub fn is_never(&self) -> bool {
+        *self == Self::never()
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn unknown() -> TypeId {
+        TypeId(0)
+    }
+
+    // Be careful that this is in the pool correctly!
+    /// Placeholder to use while working on typechecking.
+    pub fn any() -> TypeId {
+        TypeId(1)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn unit() -> TypeId {
+        TypeId(2)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn ty() -> TypeId {
+        TypeId(3)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn i64() -> TypeId {
+        TypeId(4)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn bool() -> TypeId {
+        TypeId(5)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn void_ptr() -> TypeId {
+        TypeId(6)
+    }
+
+    // Be careful that this is in the pool correctly!
+    pub fn never() -> TypeId {
+        TypeId(7)
     }
 }

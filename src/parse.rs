@@ -1,6 +1,4 @@
 //! Convert a stream of tokens into ASTs.
-#![deny(unused_must_use)]
-
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{File, Span};
@@ -54,20 +52,6 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
-        let modifiers = [
-            Amp,
-            Star,
-            Question,
-            DoubleSquare,
-            DoubleSquigle,
-            Bang,
-            UpArrow,
-        ];
-        let mut found = vec![];
-        while modifiers.contains(&self.peek()) {
-            found.push(self.pop());
-        }
-
         let prefix = self.parse_expr_inner()?;
         self.maybe_parse_suffix(prefix)
     }
@@ -75,7 +59,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn parse_expr_inner(&mut self) -> Res<FatExpr<'p>> {
         match self.peek() {
             // TODO: use no body as type expr?
-            // No name, require body, optional (args).
+            // Optional name, require body, optional (args).
             Fn => {
                 self.start_subexpr();
                 let loc = self.eat(Fn)?;
@@ -272,7 +256,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     if args.is_empty() {
                         // All arguments were named, don't have to do anything extra.
                         self.eat(RightParen)?;
-                        return Ok(self.expr(Expr::StructLiteralP(named)))
+                        return Ok(self.expr(Expr::StructLiteralP(named)));
                     } else {
                         return Err(self.expected("TODO: some named some positional"));
                     }
@@ -343,11 +327,21 @@ impl<'a, 'p> Parser<'a, 'p> {
                     Equals => {
                         self.eat(Equals)?;
                         let value = self.parse_expr()?;
-                        Stmt::DeclNamed { name, ty, value: Some(value), kind }
+                        Stmt::DeclNamed {
+                            name,
+                            ty,
+                            value: Some(value),
+                            kind,
+                        }
                     }
                     Semicolon => {
                         self.eat(Semicolon)?;
-                        Stmt::DeclNamed { name, ty, value: None, kind }
+                        Stmt::DeclNamed {
+                            name,
+                            ty,
+                            value: None,
+                            kind,
+                        }
                     }
                     LeftArrow => {
                         self.eat(LeftArrow)?;
@@ -364,7 +358,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.start_subexpr();
                         let callback = self.parse_block_until_squiggle()?;
                         let name = self.pool.intern("backpass");
-                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false);
+                        let callback = Func::new(
+                            name,
+                            arg,
+                            LazyType::Infer,
+                            Some(callback),
+                            *self.spans.last().unwrap(),
+                            false,
+                        );
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 
                         if let Expr::Call(_, old_arg) = &mut call.expr {

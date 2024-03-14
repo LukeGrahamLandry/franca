@@ -226,7 +226,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Unit => {}
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
-                    &Value::Heap { value, .. } => todo!("{:?}", unsafe { &(&*value).values }),
+                    &Value::Heap { value, .. } => todo!("{:?}", unsafe { &(*value).values }),
                 },
                 &Bc::JumpIf {
                     cond,
@@ -642,7 +642,7 @@ mod tests {
                     .stdout,
             )
             .unwrap();
-            fs::write(&path, &dis).unwrap();
+            fs::write(&path, dis).unwrap();
         }
 
         asm.asm.make_exec();
@@ -830,7 +830,7 @@ mod tests {
                 }"#,
             |f| {
                 let mut a = SuperSimple { a: 57, b: 77 };
-                let ret: i64 = f((addr_of!(a)));
+                let ret: i64 = f(addr_of!(a));
                 assert_eq!(ret, 20);
                 assert_eq!(a.a, 1);
                 assert_eq!(a.b, 2);
@@ -860,7 +860,6 @@ mod tests {
     simple!(closures, 5, 5, include_str!("../../tests/closures.txt"));
 }
 
-use crate::experiments::aarch64::{signed_truncate, CmpFlags};
 use crate::ffi::InterpSend;
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
@@ -999,4 +998,31 @@ pub mod jit {
             }
         }
     }
+}
+
+/// https://developer.arm.com/documentation/100076/0100/A32-T32-Instruction-Set-Reference/Condition-Codes/Condition-code-suffixes-and-related-flags?lang=en
+#[derive(Debug, Copy, Clone)]
+pub enum CmpFlags {
+    EQ = 0b0000, // equal
+    NE = 0b0001, // not equal
+    HS = 0b0010, // unsigned greater than or equal
+    LO = 0b0011, // unsigned less than
+    HI = 0b1000, // unsigned greater than
+    LS = 0b1001, // unsigned less than or equal
+    LT = 0b1011, // signed less than
+    GT = 0b1100, // signed greater than
+    AL = 0b1111, // Always
+}
+// There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
+/// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
+pub fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
+    debug_assert!(x > -(1 << (bit_count - 1)) && (x < (1 << (bit_count - 1))));
+    let mask = (1 << bit_count) - 1;
+    if x < 0 {
+        x *= -1;
+        x = !x;
+        x += 1;
+        x &= mask;
+    }
+    x
 }

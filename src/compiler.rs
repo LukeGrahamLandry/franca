@@ -14,10 +14,10 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadOption, OverloadSet, Pattern, Var, VarInfo, VarType
+    garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadSet, Pattern, Var, VarInfo, VarType
 };
 
-use crate::{bc::*};
+use crate::bc::*;
 use crate::ffi::InterpSend;
 use crate::logging::{outln, LogTag, PoolLog};
 use crate::experiments::reflect::Reflect;
@@ -876,7 +876,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 // TODO: insert drops for locals
                 self.compile_expr(result, value, requested)?
             }
-            Expr::ArrayLiteral(_) => todo!(),
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples");
                 let values: Res<'p, Vec<_>> = values
@@ -888,7 +887,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let ty = self.program.tuple_of(types);
                 self.produce_tuple(values, ty)?
             }
-            Expr::RefType(_) => todo!(),
             Expr::GetVar(var) => {
                 if let Some(ty) = result.vars.get(var).cloned() {
                     Structured::RuntimeOnly(ty)
@@ -925,7 +923,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     );
                 }
             }
-            Expr::EnumLiteral(_) => todo!(),
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -975,7 +972,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         if let &Structured::Const(_, Values::One(Value::Heap { value, physical_first, physical_count })) = &ptr {
                             // this check + the const eval in field access lets me do asm enum constants without doing heap values first.
                             if physical_count == 1 {
-                                let value = Values::One(unsafe { (&*value).values[physical_first]});
+                                let value = Values::One(unsafe { (*value).values[physical_first]});
                                 expr.expr = Expr::Value {
                                     ty,
                                     value: value.clone(),
@@ -1454,7 +1451,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     return Ok(self.program.funcs[id.0].finished_ret);
                 }
 
-
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if let Some(ty) = result.vars.get(i) {
                         if let TypeInfo::FnPtr(f_ty) = self.program.types[ty.0] {
@@ -1511,9 +1507,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             Expr::GetNamed(_)
             | Expr::StructLiteralP(_)
-            | Expr::ArrayLiteral(_)
-            | Expr::RefType(_)
-            | Expr::EnumLiteral(_)
              => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -1832,7 +1825,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         if let Expr::Closure(func) = expr.deref_mut() {
             let f = self.add_func(mem::take(func), &result.constants)?;
             if self.infer_types(f)?.is_none() {
-
+                // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
                 mut_replace!(self.program.funcs[f.0], |mut func: Func<'p>| {
                     if let Some(body) = &mut func.body {
                         if let Some(ret_ty) = self.type_of(result, body)? {
@@ -2403,7 +2396,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(res.ty())
     }
 
-    fn inline_asm_body(&mut self, result: &mut FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
+    fn inline_asm_body(&mut self, result: &FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         let src = asm.log(self.pool);
         let asm_ty = Vec::<u32>::get_type(self.program);
         let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {

@@ -225,7 +225,6 @@ impl<'p> Program<'p> {
                 TypeInfo::Bool => "bool".to_owned(),
                 // TODO: be careful of recursion
                 TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
-                TypeInfo::Slice(e) => unreachable!("TypeInfo::Slice is unused"),
                 TypeInfo::Struct { fields, .. } => {
                     // TODO: factor out iter().join(str), how does that not already exist
                     let v: Vec<_> = fields
@@ -494,11 +493,8 @@ fn collect_func_references<'p>(
             const_reads.insert(*v);
         }
         Expr::StructLiteralP(_) => {}
-        Expr::ArrayLiteral(_)
-        | Expr::GetNamed(_)
+        Expr::GetNamed(_)
         | Expr::WipFunc(_)
-        | Expr::RefType(_)
-        | Expr::EnumLiteral(_)
         | Expr::PrefixMacro { .. }
         | Expr::String(_)
         | Expr::Closure(_) => {} // TODO // unreachable!("finished ast contained {expr:?}"),
@@ -617,17 +613,11 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 let es = es.join(";\n");
                 format!("{{ {}; {} }}", es, result.log(pool))
             }
-            Expr::ArrayLiteral(args) => {
-                let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
-                let args: String = args.join(", ");
-                format!("array({})", args)
-            }
             Expr::Tuple(args) => {
                 let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
                 let args: String = args.join(", ");
                 format!("T[{}]", args)
             }
-            Expr::RefType(e) => format!("&({})", e.log(pool)),
             Expr::Value {
                 value: Values::One(Value::Unit),
                 ..

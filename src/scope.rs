@@ -190,12 +190,12 @@ impl<'p> ResolveScope<'p> {
                 let (vars, _) = self.pop_scope();
                 *locals = Some(vars);
             }
-            Expr::ArrayLiteral(values) | Expr::Tuple(values) => {
+            Expr::Tuple(values) => {
                 for value in values {
                     self.resolve_expr(value);
                 }
             }
-            Expr::SuffixMacro(_, e) | Expr::RefType(e) => self.resolve_expr(e),
+            Expr::SuffixMacro(_, e) => self.resolve_expr(e),
             Expr::Closure(func) => self.resolve_func(func),
             Expr::Value { .. } => {}
             Expr::GetNamed(name) => {
@@ -204,7 +204,6 @@ impl<'p> ResolveScope<'p> {
                 }
                 // else it might be a global, like a function with overloading, or undeclared. We'll find out later.
             }
-            Expr::EnumLiteral(_) => todo!(),
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(e, _) => self.resolve_expr(e),
             Expr::StructLiteralP(p) => {

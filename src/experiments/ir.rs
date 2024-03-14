@@ -1,11 +1,11 @@
 #![allow(unused)]
 
-use std::fmt::{Debug, Formatter, Write};
-use std::marker::PhantomData;
 use crate::ast::{FuncId, Program, TypeId};
 use crate::bc::Value;
 use crate::experiments::arena::Arena;
 use crate::experiments::reflect::BitSet;
+use std::fmt::{Debug, Formatter, Write};
+use std::marker::PhantomData;
 
 #[derive(Debug)]
 pub struct IrFunc<'a> {
@@ -13,23 +13,17 @@ pub struct IrFunc<'a> {
     pub blocks: Vec<Block<'a>, &'a Arena<'a>>,
     pub alloc_a: Vec<TypeId, &'a Arena<'a>>,
     pub values: Vec<(TypeId, Item<'a>), &'a Arena<'a>>,
-    pub reachable: BitSet
+    pub reachable: BitSet,
 }
 
 #[derive(Clone)]
 pub enum Item<'a> {
     Value(Value),
-    Offset {
-        ptr: Val,
-        bytes: usize
-    },
+    Offset { ptr: Val, bytes: usize },
     Register(i64),
     Tuple(Vec<Val, &'a Arena<'a>>),
-    Gep {
-        container: Val,
-        index: usize
-    },
-    Scalar
+    Gep { container: Val, index: usize },
+    Scalar,
 }
 
 #[derive(Debug)]
@@ -57,11 +51,11 @@ pub struct Call {
 
 #[derive(Debug, Copy, Clone)]
 pub enum Cc {
-    CCall,  // returnAddress=lr, resetStack=growStack=sp, fp is callee saved.
-    CRet,   // restore sp to value at CCall. jump to lr. never returns.
-    PushFrame,  // returnAddress=lr, resetStack=fp, growStack=sp
-    PopFrame, // set sp to resetStack. jump to returnAddress. never returns.
-    Local // just jump
+    CCall,     // returnAddress=lr, resetStack=growStack=sp, fp is callee saved.
+    CRet,      // restore sp to value at CCall. jump to lr. never returns.
+    PushFrame, // returnAddress=lr, resetStack=fp, growStack=sp
+    PopFrame,  // set sp to resetStack. jump to returnAddress. never returns.
+    Local,     // just jump
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -69,23 +63,14 @@ pub enum Callable {
     Ptr(Val),
     Fn(FuncId),
     Block(Ip),
-    Unreachable
+    Unreachable,
 }
 
 #[derive(Debug, Clone)]
 pub enum Inst {
-    Load {
-        src: Val,
-        dest: Val,
-    },
-    Store {
-        src: Val,
-        dest_ptr: Val,
-    },
-    AllocA {
-        ty: TypeId,
-        dest: Val,
-    }
+    Load { src: Val, dest: Val },
+    Store { src: Val, dest_ptr: Val },
+    AllocA { ty: TypeId, dest: Val },
 }
 
 #[derive(Debug, Clone)]
@@ -100,7 +85,7 @@ pub enum Ret<'a> {
     Call(Call),
     Empty,
     Return(Val),
-    Unused(PhantomData<&'a ()>)
+    Unused(PhantomData<&'a ()>),
 }
 
 impl<'a> IrFunc<'a> {
@@ -110,14 +95,14 @@ impl<'a> IrFunc<'a> {
             for i in 0..self.blocks.len() {
                 self.reachable.set(i); // TODO: do this on create instead.
                 if let Ret::Goto(target) = self.blocks[i].end {
-                    let insts: Vec<_> = self.blocks[target.0].body.iter().cloned().collect();
+                    let insts: Vec<_> = self.blocks[target.0].body.to_vec();
                     self.blocks[i].body.extend(insts.into_iter());
                     self.blocks[i].end = self.blocks[target.0].end.clone();
                     dirty = true;
                 }
                 if let Ret::GotoWith(target, arg) = self.blocks[i].end {
                     if self.values[arg.0].0.is_unit() {
-                        let insts: Vec<_> = self.blocks[target.0].body.iter().cloned().collect();
+                        let insts: Vec<_> = self.blocks[target.0].body.to_vec();
                         self.blocks[i].body.extend(insts.into_iter());
                         self.blocks[i].end = self.blocks[target.0].end.clone();
                         dirty = true;
@@ -125,7 +110,7 @@ impl<'a> IrFunc<'a> {
                 }
             }
             if !dirty {
-                break
+                break;
             }
         }
         self.find_reachable();
@@ -134,29 +119,29 @@ impl<'a> IrFunc<'a> {
     pub fn find_reachable(&mut self) {
         let mut dirty = Vec::new_in(self.arena);
         dirty.push(Ip(0));
-        self.reachable.clear();  // TODO: save from before since they'll never be reachable but then need to change the short circuiting.
+        self.reachable.clear(); // TODO: save from before since they'll never be reachable but then need to change the short circuiting.
 
         while let Some(i) = dirty.pop() {
             if self.reachable.get(i.0) {
-                continue
+                continue;
             }
             self.reachable.set(i.0);
 
             match &self.blocks[i.0].end {
                 &Ret::Goto(b) => dirty.push(b),
                 &Ret::GotoWith(b, _) => dirty.push(b),
-                &Ret::If { if_true, if_false, .. } => {
+                &Ret::If {
+                    if_true, if_false, ..
+                } => {
                     dirty.push(if_true);
                     dirty.push(if_false);
                 }
                 Ret::Call(call) => {
-                    match call.f {
-                        Callable::Block(b) => dirty.push(b),
-                        _ => {}
+                    if let Callable::Block(b) = call.f {
+                        dirty.push(b)
                     }
-                    match call.then {
-                        Callable::Block(b) => dirty.push(b),
-                        _ => {}
+                    if let Callable::Block(b) = call.then {
+                        dirty.push(b)
                     }
                 }
                 Ret::Empty | Ret::Return(_) | Ret::Unused(_) => {}
@@ -168,19 +153,30 @@ impl<'a> IrFunc<'a> {
         let mut out = String::from("digraph {\n");
         for (i, block) in self.blocks.iter().enumerate() {
             if !self.reachable.get(i) {
-                continue
+                continue;
             }
             let mut label = format!("B{i}");
             if !block.args.0.is_unit() {
-                write!(label, "({:?}: {})", block.args.1, program.log_type(block.args.0)).unwrap();
+                write!(
+                    label,
+                    "({:?}: {})",
+                    block.args.1,
+                    program.log_type(block.args.0)
+                )
+                .unwrap();
             };
             label += "\n";
             for inst in &block.body {
                 match inst {
                     Inst::Load { src, dest } => writeln!(label, "{dest:?} = load [{src:?}]"),
-                    Inst::Store { src, dest_ptr } => writeln!(label, "store [{dest_ptr:?}] = {src:?}"),
-                    Inst::AllocA { ty, dest } => writeln!(label, "{dest:?} = alloca {}", program.log_type(*ty)),
-                }.unwrap();
+                    Inst::Store { src, dest_ptr } => {
+                        writeln!(label, "store [{dest_ptr:?}] = {src:?}")
+                    }
+                    Inst::AllocA { ty, dest } => {
+                        writeln!(label, "{dest:?} = alloca {}", program.log_type(*ty))
+                    }
+                }
+                .unwrap();
             }
             writeln!(out, "B{i} [label=\"{label}\"]").unwrap();
             match &block.end {
@@ -204,9 +200,8 @@ impl<'a> IrFunc<'a> {
                     };
                     if let Callable::Block(b) = &call.then {
                         writeln!(out, "B{i} -> {b:?} [label=\"{:?} ← {} of {:?}\"]", self.blocks[b.0].args.1, show(&call.f), call.arg)
-
                     } else {
-                        writeln!(out, "CALL")
+                        writeln!(out, "TODO: TAILCALL")
                     }
                 }
                 Ret::Empty => writeln!(out, "B{i} -> ???"),

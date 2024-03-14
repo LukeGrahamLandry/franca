@@ -508,15 +508,15 @@ pub mod c {
     use libc::c_void;
     use libffi::middle::{Arg, Type};
 
+    use crate::ast::IntType;
+    use crate::ffi::InterpSend;
+    use crate::pool::Ident;
     use crate::{
         ast::{Program, TypeId, TypeInfo},
         bc::{Value, Values},
         compiler::Res,
         logging::err,
     };
-    use crate::ast::IntType;
-    use crate::ffi::InterpSend;
-    use crate::pool::Ident;
 
     type CTy = libffi::middle::Type;
 
@@ -524,14 +524,12 @@ pub mod c {
         pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
             Ok(match &self.types[ty.0] {
                 TypeInfo::F64 => CTy::f64(),
-                TypeInfo::Type |
-                TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
-                TypeInfo::Bool => CTy::c_uchar(),  // Not a whole word!
+                TypeInfo::Type | TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
+                TypeInfo::Bool => CTy::c_uchar(),                // Not a whole word!
                 TypeInfo::Tuple(_) => {
                     todo!()
                 }
                 TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
-                TypeInfo::Slice(_) => CTy::structure([CTy::pointer(), CTy::i64()]),
                 TypeInfo::Enum { .. } => todo!(),
                 TypeInfo::Unique(ty, _)
                 | TypeInfo::Named(ty, _)
@@ -549,8 +547,7 @@ pub mod c {
             Value::F64(v) => Arg::new(v),
             Value::I64(v) => Arg::new(v),
             Value::Bool(v) => Arg::new(v),
-            Value::Symbol(v) |
-            Value::Type(TypeId(v)) => Arg::new(v),
+            Value::Symbol(v) | Value::Type(TypeId(v)) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
         }
     }
@@ -560,14 +557,12 @@ pub mod c {
         ptr: usize,
         f_ty: crate::ast::FnType,
         arg: Values,
-        comp_ctx: bool
+        comp_ctx: bool,
     ) -> Res<'p, Values> {
         let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
         let mut b = Builder::new();
-
-
 
         if comp_ctx {
             b = b.arg(Type::pointer());
@@ -587,7 +582,10 @@ pub mod c {
         if f_ty.ret != TypeId::unit() {
             b = b.res(program.as_c_type(f_ty.ret)?)
         }
-        let int32 = program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true }));
+        let int32 = program.find_interned(TypeInfo::Int(IntType {
+            bit_count: 32,
+            signed: true,
+        }));
         let sym = *program.ffi_types.get(&Ident::get_type_key()).unwrap();
 
         if comp_ctx {
@@ -599,7 +597,7 @@ pub mod c {
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
-        } else if f_ty.ret == TypeId::ty(){
+        } else if f_ty.ret == TypeId::ty() {
             let result: usize = unsafe { b.into_cif().call(ptr, &args) };
             Value::Type(TypeId(result)).into()
         } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 {
