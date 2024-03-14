@@ -10,10 +10,14 @@ use interp_derive::InterpSend;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::{EmitBc, SizeCache};
 use crate::ffi::InterpSend;
-use crate::logging::{outln, PoolLog, unwrap};
-use crate::{ast::{FnType, FuncId, Program, TypeId, TypeInfo}, export_ffi, pool::{Ident, StringPool}};
-use crate::{bc::*, ffi};
 use crate::logging::{assert, assert_eq, err, ice, logln, LogTag::ShowPrint};
+use crate::logging::{outln, unwrap, PoolLog};
+use crate::{
+    ast::{FnType, FuncId, Program, TypeId, TypeInfo},
+    export_ffi,
+    pool::{Ident, StringPool},
+};
+use crate::{bc::*, ffi};
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'p> {
@@ -280,7 +284,13 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(tag, Values::One(Value::I64(value)));
                     self.bump_ip();
                 }
-                &Bc::CallC { f, ret, arg, ty, comp_ctx } => {
+                &Bc::CallC {
+                    f,
+                    ret,
+                    arg,
+                    ty,
+                    comp_ctx,
+                } => {
                     self.bump_ip();
 
                     #[cfg(not(feature = "interp_c_ffi"))]
@@ -635,9 +645,8 @@ impl<'a, 'p> Interp<'a, 'p> {
             "IntType" => {
                 let (bit_count, signed) = arg.to_pair()?;
                 let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
-                let ty = program.intern_type(
-                    TypeInfo::Int(crate::ast::IntType { bit_count, signed }),
-                );
+                let ty =
+                    program.intern_type(TypeInfo::Int(crate::ast::IntType { bit_count, signed }));
                 Value::Type(ty).into()
             }
             "clone_const" => {

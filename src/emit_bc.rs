@@ -9,13 +9,13 @@ use std::panic::Location;
 use crate::ast::{FatStmt, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
+use crate::experiments::reflect::BitSet;
 use crate::interp::Interp;
 use crate::logging::PoolLog;
 use crate::{
     ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo},
     pool::Ident,
 };
-use crate::experiments::reflect::BitSet;
 
 use crate::logging::{assert, assert_eq, err, ice, unwrap};
 
@@ -35,7 +35,7 @@ pub struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
     sizes: &'z mut SizeCache,
     last_loc: Option<Span>,
-    locals: Vec<Vec<StackRange>>
+    locals: Vec<Vec<StackRange>>,
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
@@ -132,7 +132,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             };
             if let Some(name) = name {
                 let prev = result.vars.insert(name, (range, ty));
-                assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+                assert!(
+                    prev.is_none(),
+                    "overwrite arg? {}",
+                    name.log(self.program.pool)
+                );
             }
             args_to_drop.push((name, range, ty));
             slot_count += size;
@@ -246,7 +250,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     arg,
                     ret,
                     ty,
-                    comp_ctx: func.has_tag(self.program.pool, "ct")
+                    comp_ctx: func.has_tag(self.program.pool, "ct"),
                 });
             } else {
                 result.push(Bc::CallDirect { f, ret, arg });
@@ -378,7 +382,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         arg,
                         ret,
                         ty: f_ty,
-                        comp_ctx: false // TODO
+                        comp_ctx: false, // TODO
                     });
                     return Ok((ret, f_ty.ret).into());
                 }
@@ -486,7 +490,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.to_drop.push((slot, container_ty));
                         (ptr, ptr_ty).into()
                     }
-                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
+                    "c_call" => err!(
+                        "!c_call has been removed. calling convention is part of the type now.",
+                    ),
                     "deref" => {
                         let ptr = self.compile_expr(result, arg)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr.ty()), "");
@@ -626,7 +632,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         )
                     }
                     for i in stack_slot {
-                        assert!(result.slot_is_var.get(i), "addr non-var {}", var.log(self.program.pool));
+                        assert!(
+                            result.slot_is_var.get(i),
+                            "addr non-var {}",
+                            var.log(self.program.pool)
+                        );
                     }
 
                     let ptr_ty = self.program.find_interned(TypeInfo::Ptr(value_ty));
@@ -977,7 +987,7 @@ impl<'p> FnBody<'p> {
                 let first = StackOffset(self.stack_slots);
                 self.slot_types.push(TypeId::i64());
                 for _ in 1..count {
-                    self.slot_types.push(TypeId::i64());  // TODO: more elegant thing for padding.
+                    self.slot_types.push(TypeId::i64()); // TODO: more elegant thing for padding.
                 }
                 self.stack_slots += count;
                 Ok(StackRange { first, count })

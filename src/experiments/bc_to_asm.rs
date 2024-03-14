@@ -4,8 +4,6 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
 
-use std::arch::asm;
-use std::mem::transmute;
 use crate::ast::{FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, StackOffset, StackRange, Value, Values};
 use crate::compiler::{ExecTime, Res};
@@ -13,6 +11,8 @@ use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
 use crate::logging::{err, PoolLog};
 use crate::{ast::Program, bc::FnBody};
+use std::arch::asm;
+use std::mem::transmute;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct SpOffset(usize);
@@ -55,11 +55,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         Self {
             program,
             interp,
-            asm: Jitted::new(1<<26),  // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            asm: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
             slots: vec![],
             open_slots: vec![],
             next_slot: SpOffset(0),
-            f: FuncId(0),  // TODO: bad
+            f: FuncId(0), // TODO: bad
             wip: vec![],
         }
     }
@@ -124,24 +124,24 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         let is_c_call = ff.has_tag(self.program.pool, "c_call");
 
         self.asm.push(sub_im(X64, sp, sp, 16, 0));
-        self.asm.push(stp_so(X64, fp, lr, sp, 0));  // save our return address
-        self.asm.push(add_im(X64, fp, sp, 0, 0));  // Note: normal mov encoding can't use sp
+        self.asm.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
+        self.asm.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
         self.asm.push(brk(0));
         let reserve_stack = self.asm.prev();
 
         let mut release_stack = vec![];
         let arg_range = func.arg_range;
         // if is_c_call {
-            assert!(
-                func.arg_range.count <= 8,
-                "c_call only supports 8 arguments. TODO: pass on stack"
-            );
-            for i in arg_range {
-                if self.slot_type(StackOffset(i)).is_unit() {
-                    continue
-                }
-                self.set_slot((i - arg_range.first.0) as i64, StackOffset(i));
+        assert!(
+            func.arg_range.count <= 8,
+            "c_call only supports 8 arguments. TODO: pass on stack"
+        );
+        for i in arg_range {
+            if self.slot_type(StackOffset(i)).is_unit() {
+                continue;
             }
+            self.set_slot((i - arg_range.first.0) as i64, StackOffset(i));
+        }
         // }
 
         let mut patch_cbz = vec![];
@@ -166,7 +166,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         let ops = self.emit_any_reg(template, registers);
                         for i in 0..arg.count {
                             if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
-                                continue
+                                continue;
                             }
                             self.get_slot(i as i64, StackOffset(arg.first.0 + i));
                         }
@@ -183,7 +183,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         if !self.slot_type(ret.single()).is_unit() {
                             self.set_slot(x0, ret.single());
                         }
-                    } else {//if target_c_call {
+                    } else {
+                        //if target_c_call {
                         // if let Some(bytes) = self.asm.get_fn(*f) {
                         //     // TODO: should only do this for comptime functions. for runtime, want to be able to squash everything down.
                         //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
@@ -221,44 +222,48 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     &Value::Bool(b) => {
                         self.asm.push(movz(X64, x0, b as i64, 0));
                         self.set_slot(x0, *slot);
-                    },
+                    }
                     Value::Unit => {}
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
-                    &Value::Heap { value, .. } => todo!("{:?}", unsafe {&(&*value).values}),
+                    &Value::Heap { value, .. } => todo!("{:?}", unsafe { &(&*value).values }),
                 },
-                &Bc::JumpIf { cond, true_ip, false_ip } => {
+                &Bc::JumpIf {
+                    cond,
+                    true_ip,
+                    false_ip,
+                } => {
                     self.get_slot(x0, cond);
                     self.asm.push(brk(0));
                     assert_eq!(true_ip, i + 1);
                     patch_cbz.push((self.asm.prev(), false_ip));
-                },
+                }
                 &Bc::Goto { ip } => {
                     self.asm.push(brk(0));
                     patch_b.push((self.asm.prev(), ip));
-                },
+                }
                 Bc::Ret(slot) => {
                     // if is_c_call {
-                        match slot.count {
-                            0 => {}
-                            1..=7 => {
-                                for i in 0..slot.count {
-                                    let slot = StackOffset(slot.first.0 + i);
-                                    if self.slot_type(slot).is_unit() {
-                                        continue
-                                    }
-                                    self.get_slot(i as i64, slot);
+                    match slot.count {
+                        0 => {}
+                        1..=7 => {
+                            for i in 0..slot.count {
+                                let slot = StackOffset(slot.first.0 + i);
+                                if self.slot_type(slot).is_unit() {
+                                    continue;
                                 }
+                                self.get_slot(i as i64, slot);
                             }
-                            _ => err!("c_call only supports 7 return value. TODO: structs",),
                         }
-                        self.asm.push(brk(0));
-                        let a = self.asm.prev();
-                        self.asm.push(brk(0));
-                        let b = self.asm.prev();
-                        self.asm.push(brk(0));
-                        release_stack.push((a, b, self.asm.prev()));
-                        self.asm.push(ret(()));
+                        _ => err!("c_call only supports 7 return value. TODO: structs",),
+                    }
+                    self.asm.push(brk(0));
+                    let a = self.asm.prev();
+                    self.asm.push(brk(0));
+                    let b = self.asm.prev();
+                    self.asm.push(brk(0));
+                    release_stack.push((a, b, self.asm.prev()));
+                    self.asm.push(ret(()));
                     // } else {
                     //     todo!()
                     // }
@@ -281,13 +286,13 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     for i in 0..from.count {
                         let to_unit = self.slot_type(StackOffset(to.first.0 + i)).is_unit();
                         let from_unit = self.slot_type(StackOffset(from.first.0 + i)).is_unit();
-                        if from_unit && to_unit  {
-                            continue
+                        if from_unit && to_unit {
+                            continue;
                         }
                         if from_unit && !to_unit {
                             self.load_imm(x0, 123); // HACK for enum padding.
                             self.set_slot(x0, StackOffset(to.first.0 + i));
-                            continue
+                            continue;
                         }
                         self.get_slot(x0, StackOffset(from.first.0 + i));
                         self.set_slot(x0, StackOffset(to.first.0 + i));
@@ -297,42 +302,51 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     let offset = self.find_many(of, false);
                     self.asm.push(add_im(X64, x0, sp, offset.0 as i64, 0));
                     self.set_slot(x0, to);
-                },
-                &Bc::SlicePtr { base, offset, ret, .. } => {
-                    self.get_slot(x0, base);  // x0 = ptr
+                }
+                &Bc::SlicePtr {
+                    base, offset, ret, ..
+                } => {
+                    self.get_slot(x0, base); // x0 = ptr
                     self.asm.push(add_im(X64, x0, x0, (offset * 8) as i64, 0)); // x0 += offset * size_of(i64)
                     self.set_slot(x0, ret);
-                },
+                }
                 &Bc::Load { from, to } => {
-                    self.get_slot(x0, from);  // x0 = ptr
+                    self.get_slot(x0, from); // x0 = ptr
                     for i in 0..to.count {
                         self.asm.push(ldr_uo(X64, x1, x0, i as i64)); // x1 = *x0[i]
-                        self.set_slot(x1, StackOffset(to.first.0 + i));  // out = x1
+                        self.set_slot(x1, StackOffset(to.first.0 + i)); // out = x1
                     }
-                },
+                }
                 &Bc::Store { to, from } => {
-                    self.get_slot(x0, to);  // x0 = ptr
+                    self.get_slot(x0, to); // x0 = ptr
                     for i in 0..from.count {
-                        self.get_slot(x1, StackOffset(from.first.0 + i));  // x1 = val
+                        self.get_slot(x1, StackOffset(from.first.0 + i)); // x1 = val
                         self.asm.push(str_uo(X64, x1, x0, i as i64)); // *x0[i] = val
                     }
                 }
                 &Bc::TagCheck { enum_ptr, value } => {
-                    self.get_slot(x0, enum_ptr);  // x0 = ptr
+                    self.get_slot(x0, enum_ptr); // x0 = ptr
                     self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
                     self.asm.push(cmp_im(X64, x0, value, 0));
                     self.asm.push(b_cond(9999, CmpFlags::NE as i64)); // TODO: do better than just hoping to jump into garbage
-                },
-                Bc::CallC { f, arg, ret, ty, comp_ctx } => {
+                }
+                Bc::CallC {
+                    f,
+                    arg,
+                    ret,
+                    ty,
+                    comp_ctx,
+                } => {
                     self.get_slot(x16, *f);
                     self.dyn_c_call(x16, *arg, *ret, *ty, *comp_ctx);
                     self.release_one(*f);
-                },
+                }
             }
         }
         for (inst, false_ip) in patch_cbz {
             let offset = self.asm.offset_words_inst_ip(inst, false_ip);
-            self.asm.patch(inst, cbz(X64, signed_truncate(offset, 19), x0));
+            self.asm
+                .patch(inst, cbz(X64, signed_truncate(offset, 19), x0));
         }
         for (from_inst, to_ip) in patch_b {
             let dist = self.asm.offset_words_inst_ip(from_inst, to_ip);
@@ -342,12 +356,13 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 
         let mut slots = self.next_slot.0;
         if slots % 16 != 0 {
-            slots += 16 - (slots % 16);  // play by the rules
+            slots += 16 - (slots % 16); // play by the rules
         }
-        self.asm.patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
+        self.asm
+            .patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
         for (fst, snd, thd) in release_stack {
-            self.asm.patch(fst, add_im(X64, sp, fp, 0, 0));   // Note: normal mov encoding can't use sp
-            self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0));  // get our return address
+            self.asm.patch(fst, add_im(X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
+            self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
             self.asm.patch(thd, add_im(X64, sp, sp, 16, 0));
         }
         Ok(())
@@ -361,7 +376,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     #[track_caller]
     fn get_slot(&mut self, dest_reg: i64, slot: StackOffset) {
         let offset = self.find_one(slot, false);
-        self.asm.push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
+        self.asm
+            .push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
     }
 
     fn find_many(&mut self, slot: StackRange, allow_create: bool) -> SpOffset {
@@ -369,7 +385,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             return self.find_one(slot.single(), allow_create);
         }
         if let Some(slot) = self.slots[slot.first.0] {
-            return slot
+            return slot;
         }
 
         debug_assert!(allow_create);
@@ -428,17 +444,25 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         value >>= 16;
         if value != 0 {
             for shift in 1..4 {
-                self.asm.push(movk(X64, reg, (value & bottom) as i64, shift));
+                self.asm
+                    .push(movk(X64, reg, (value & bottom) as i64, shift));
                 value >>= 16;
                 if value == 0 {
-                    break
+                    break;
                 }
             }
         }
     }
 
-    fn dyn_c_call(&mut self, f_addr_reg: i64, arg: StackRange, ret: StackRange, _: FnType, comp_ctx: bool) {
-        let reg_offset = if comp_ctx {1} else {0};  // for secret args like comp_ctx
+    fn dyn_c_call(
+        &mut self,
+        f_addr_reg: i64,
+        arg: StackRange,
+        ret: StackRange,
+        _: FnType,
+        comp_ctx: bool,
+    ) {
+        let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
         assert!(
             arg.count <= 7,
             "indirect c_call only supports 7 arguments. TODO: pass on stack"
@@ -449,7 +473,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         );
         for i in 0..arg.count {
             if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
-                continue
+                continue;
             }
             self.get_slot(i as i64 + reg_offset, StackOffset(arg.first.0 + i));
         }
@@ -467,7 +491,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         for i in 0..ret.count {
             let slot = StackOffset(ret.first.0 + i);
             if self.slot_type(slot).is_unit() {
-                continue
+                continue;
             }
             self.set_slot(i as i64, slot);
         }
@@ -476,21 +500,28 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     // TODO: i want to do this though asm but that means i need to bootstrap more stuff.
     fn emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
         let mut out = Vec::<i64>::new();
-        extern fn consume(ops: &mut Vec<i64>, op: i64) {
+        extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
             ops.push(op);
         }
-        let arg = (((&mut out) as *mut Vec<i64> as usize, consume as usize), registers).serialize_one();
-        self.interp.run(template, arg, ExecTime::Comptime, 1, self.program).unwrap();
+        let arg = (
+            ((&mut out) as *mut Vec<i64> as usize, consume as usize),
+            registers,
+        )
+            .serialize_one();
+        self.interp
+            .run(template, arg, ExecTime::Comptime, 1, self.program)
+            .unwrap();
         out
     }
 
     fn _emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
         let f = self.asm.get_fn(template).unwrap().as_ptr();
         // TODO: this relies on my slice layout. use ffi types.
-        type TemplateFn = extern fn(&mut Vec<i64>, extern fn(&mut Vec<i64>, i64), *const i64, usize);
+        type TemplateFn =
+            extern "C" fn(&mut Vec<i64>, extern "C" fn(&mut Vec<i64>, i64), *const i64, usize);
         let f: TemplateFn = unsafe { transmute(f) };
         let mut out = Vec::<i64>::new();
-        extern fn consume(ops: &mut Vec<i64>, op: i64) {
+        extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
             ops.push(op);
         }
         self.asm.make_exec();
@@ -509,7 +540,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.interp.ready[self.f.0].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.interp.ready[self.f.0]
+            .as_ref()
+            .unwrap()
+            .slot_is_var
+            .get(slot.0)
     }
 }
 
@@ -517,17 +552,31 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 #[cfg(target_arch = "aarch64")]
 mod tests {
     use super::{BcToAsm, Jitted};
-    use crate::{ast::{garbage_loc, Program}, compiler::{Compile, ExecTime, Res}, interp::Interp, LIB, logging::{err, ice, unwrap}, make_toplevel, parse::Parser, pool::StringPool, scope::ResolveScope};
-    use codemap::CodeMap;
-    use std::{arch::asm, fs, mem::transmute};
-    use std::process::Command;
-    use std::ptr::addr_of;
     use crate::ast::SuperSimple;
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::export_ffi::get_special_functions;
+    use crate::{
+        ast::{garbage_loc, Program},
+        compiler::{Compile, ExecTime, Res},
+        interp::Interp,
+        logging::{err, ice, unwrap},
+        make_toplevel,
+        parse::Parser,
+        pool::StringPool,
+        scope::ResolveScope,
+        LIB,
+    };
+    use codemap::CodeMap;
+    use std::process::Command;
+    use std::ptr::addr_of;
+    use std::{arch::asm, fs, mem::transmute};
 
-    fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
+    fn jit_main<Arg, Ret>(
+        test_name: &str,
+        src: &str,
+        f: impl FnOnce(extern "C" fn(Arg) -> Ret),
+    ) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut codemap = CodeMap::new();
         let mut stmts = vec![];
@@ -535,7 +584,10 @@ mod tests {
             .iter()
             .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
             .collect();
-        libs.insert(3, codemap.add_file("special".into(), get_special_functions()));  // TODO: order independent name resolution
+        libs.insert(
+            3,
+            codemap.add_file("special".into(), get_special_functions()),
+        ); // TODO: order independent name resolution
         libs.push(codemap.add_file("main_file".into(), src.to_string()));
         for l in libs {
             stmts.extend(Parser::parse(l, pool).unwrap());
@@ -571,7 +623,9 @@ mod tests {
         asm.compile(main)?;
 
         if cfg!(feature = "dis_debug") {
-            let hex: String = asm.asm.bytes()
+            let hex: String = asm
+                .asm
+                .bytes()
                 .iter()
                 .copied()
                 .array_chunks::<4>()
@@ -579,7 +633,15 @@ mod tests {
                 .collect();
             let path = format!("{debug_path}/all.asm");
             fs::write(&path, hex).unwrap();
-            let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
+            let dis = String::from_utf8(
+                Command::new("llvm-mc")
+                    .arg("--disassemble")
+                    .arg(&path)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
             fs::write(&path, &dis).unwrap();
         }
 
@@ -605,7 +667,7 @@ mod tests {
     macro_rules! simple {
         ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
             #[test]
-            fn $name () {
+            fn $name() {
                 jit_main(stringify!($name), $src, |f| {
                     let ret: i64 = f($arg);
                     assert_eq!(ret, $ret);
@@ -616,11 +678,30 @@ mod tests {
     }
 
     simple!(trivial, (), 42, "@c_call fn main() i64 = { 42 }");
-    simple!(trivial_indirect, (), 42, "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }");
-    simple!(simple_ifa, true, 123, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
-    simple!(simple_ifb, false, 456, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
+    simple!(
+        trivial_indirect,
+        (),
+        42,
+        "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }"
+    );
+    simple!(
+        simple_ifa,
+        true,
+        123,
+        "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }"
+    );
+    simple!(
+        simple_ifb,
+        false,
+        456,
+        "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }"
+    );
     simple!(math, 5, 20, "@c_call fn main(a: i64) i64 = { add(a, 15) }");
-    simple!(simple_while, 4, 10, r#"
+    simple!(
+        simple_while,
+        4,
+        10,
+        r#"
         @c_call fn main(n: i64) i64 = {
             var a = 0;
             (fn()=ne(n, 0), fn()={
@@ -630,7 +711,11 @@ mod tests {
             a
         }"#
     );
-    simple!(var_addr, 3, 10, r#"
+    simple!(
+        var_addr,
+        3,
+        10,
+        r#"
         @c_call fn main(n: i64) i64 = {
             var a = n;
             var b = 0;
@@ -640,7 +725,11 @@ mod tests {
             b
         }"#
     );
-    simple!(fields, 3, 10, r#"
+    simple!(
+        fields,
+        3,
+        10,
+        r#"
         @c_call fn main(n: i64) i64 = {
             const A = .{ a: i64, b: i64 }!struct;
             var a: A = .{ a: n, b: 0 };
@@ -648,20 +737,32 @@ mod tests {
             a.b[]
         }"#
     );
-    simple!(varient, 3, 10, r#"
+    simple!(
+        varient,
+        3,
+        10,
+        r#"
         @c_call fn main(n: i64) i64 = {
             const A = .{ a: i64, b: i64 }!enum;
             var a: A = .{ a: n };
             add(a.a[], 7)
         }"#
     );
-    simple!(nested, (), 91, r#"
+    simple!(
+        nested,
+        (),
+        91,
+        r#"
         @c_call fn main() i64 = {
             add(add(add(add(add(add(add(add(add(1, 2), 3), 4), add(5, 6)), 7), 8), add(9, add(10, 11))), 12), 13)
         }"#
     );
 
-    simple!(recursion, 5, 8, r#"
+    simple!(
+        recursion,
+        5,
+        8,
+        r#"
         @c_call fn main(n: i64) i64 = {
             (le(n, 1),
                 fn = 1,
@@ -671,7 +772,11 @@ mod tests {
         "#
     );
 
-    simple!(use_any_reg, 5, 2, r#"
+    simple!(
+        use_any_reg,
+        5,
+        2,
+        r#"
         @any_reg
         fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
             op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0));
@@ -682,7 +787,11 @@ mod tests {
         }"#
     );
 
-    simple!(assert_eq_ffi, (), 2, r#"
+    simple!(
+        assert_eq_ffi,
+        (),
+        2,
+        r#"
         @c_call fn main() i64 = {
             assert_eq(1, 1);
             2
@@ -691,68 +800,77 @@ mod tests {
 
     #[test]
     fn use_ptr() {
-        jit_main("use_ptr",
-                 r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
+        jit_main(
+            "use_ptr",
+            r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
                    b[] = add(a[], 1);
                    add(b[], 4)
                 }"#,
-                 |f| {
-                     let mut a = 5;
-                     let mut b = 0;
-                     let ret: i64 = f((addr_of!(a), addr_of!(b)));
-                     assert_eq!(ret, 10);
-                     assert_eq!(a, 5);
-                     assert_eq!(b, 6);
-                 },
+            |f| {
+                let mut a = 5;
+                let mut b = 0;
+                let ret: i64 = f((addr_of!(a), addr_of!(b)));
+                assert_eq!(ret, 10);
+                assert_eq!(a, 5);
+                assert_eq!(b, 6);
+            },
         )
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
     fn ffi_ptr() {
-        jit_main("ffi_ptr",
-                 r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
+        jit_main(
+            "ffi_ptr",
+            r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
                    let c = sub(a.b[], a.a[]);
                    a.a[] = 1;
                    a.b[] = 2;
                    c
                 }"#,
-                 |f| {
-                     let mut a = SuperSimple {
-                         a: 57,
-                         b: 77,
-                     };
-                     let ret: i64 = f((addr_of!(a)));
-                     assert_eq!(ret, 20);
-                     assert_eq!(a.a, 1);
-                     assert_eq!(a.b, 2);
-                 },
+            |f| {
+                let mut a = SuperSimple { a: 57, b: 77 };
+                let ret: i64 = f((addr_of!(a)));
+                assert_eq!(ret, 20);
+                assert_eq!(a.a, 1);
+                assert_eq!(a.b, 2);
+            },
         )
-            .unwrap();
+        .unwrap();
     }
 
     // TODO: bootstrap raw_slice
     // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
 
-    simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.txt"));
+    simple!(
+        backpassing,
+        5,
+        5,
+        include_str!("../../tests/backpassing.txt")
+    );
 
     // TODO: this relies on structs being in consecutive stack slots so had to disable reusing them.
     simple!(structs, 5, 5, include_str!("../../tests/structs.txt"));
-    simple!(overloading, 5, 5, include_str!("../../tests/overloading.txt"));
+    simple!(
+        overloading,
+        5,
+        5,
+        include_str!("../../tests/overloading.txt")
+    );
     simple!(closures, 5, 5, include_str!("../../tests/closures.txt"));
 }
 
+use crate::experiments::aarch64::{signed_truncate, CmpFlags};
+use crate::ffi::InterpSend;
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
-use crate::experiments::aarch64::{CmpFlags, signed_truncate};
-use crate::ffi::InterpSend;
 
 #[cfg(target_arch = "aarch64")]
 pub mod jit {
-    use std::ptr::null;
-    use std::slice;
     use crate::ast::FuncId;
     use crate::experiments::bootstrap_gen::brk;
+    use std::ptr::null;
+    use std::slice;
 
     pub struct Jitted {
         map_mut: Option<memmap2::MmapMut>,
@@ -769,10 +887,7 @@ pub mod jit {
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
     impl Jitted {
         pub fn new(bytes: usize) -> Self {
-            let mut map = memmap2::MmapOptions::new()
-                .len(bytes)
-                .map_anon()
-                .unwrap();
+            let mut map = memmap2::MmapOptions::new().len(bytes).map_anon().unwrap();
             assert_eq!(map.as_ptr() as usize % 4, 0, "alignment's fucked");
             Self {
                 current_start: map.as_ptr(),
@@ -787,12 +902,15 @@ pub mod jit {
 
         pub fn bytes(&self) -> &[u8] {
             let map = self.map_mut.as_ref().unwrap();
-            let len = unsafe {self.next.offset_from(map.as_ptr())} as usize;
+            let len = unsafe { self.next.offset_from(map.as_ptr()) } as usize;
             &map[0..len]
         }
 
         pub fn reserve(&mut self, func_count: usize) {
-            assert!(func_count < (1 << 12), "TODO: not enough bits for indirect call");
+            assert!(
+                func_count < (1 << 12),
+                "TODO: not enough bits for indirect call"
+            );
             for _ in self.dispatch.len()..func_count {
                 self.dispatch.push(null());
                 self.ranges.push(&[] as *const [u8])
@@ -800,7 +918,10 @@ pub mod jit {
         }
 
         pub fn get_dispatch(&self) -> *const *const u8 {
-            debug_assert!(self.map_exec.is_some(), "dont try to use the dispatch table while writing.");
+            debug_assert!(
+                self.map_exec.is_some(),
+                "dont try to use the dispatch table while writing."
+            );
             self.dispatch.as_ptr()
         }
 
@@ -822,7 +943,10 @@ pub mod jit {
         }
 
         pub fn offset_words_inst_ip(&self, from_inst: usize, to_ip: usize) -> i64 {
-            unsafe { (self.ip_to_inst[to_ip].offset_from(self.current_start) as i64 / 4) - (from_inst as i64) }
+            unsafe {
+                (self.ip_to_inst[to_ip].offset_from(self.current_start) as i64 / 4)
+                    - (from_inst as i64)
+            }
         }
 
         pub fn prev(&self) -> usize {
@@ -852,7 +976,10 @@ pub mod jit {
             debug_assert!(self.map_mut.is_some());
             unsafe {
                 // TODO: make sure there's not an off by one thing here.
-                let range = slice::from_raw_parts(self.current_start, self.next.offset_from(self.current_start) as usize);
+                let range = slice::from_raw_parts(
+                    self.current_start,
+                    self.next.offset_from(self.current_start) as usize,
+                );
                 self.dispatch[f.0] = self.current_start;
                 self.ranges[f.0] = range as *const [u8];
                 self.ip_to_inst.clear();

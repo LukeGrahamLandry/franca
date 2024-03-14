@@ -133,11 +133,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     }
 
     #[track_caller]
-    fn push_state(&mut self, s: &DebugState<'p>) {
+    pub(crate) fn push_state(&mut self, s: &DebugState<'p>) {
         self.debug_trace.push(s.clone());
     }
 
-    fn pop_state(&mut self, _s: DebugState<'p>) {
+    pub(crate) fn pop_state(&mut self, _s: DebugState<'p>) {
         let _found = self.debug_trace.pop().expect("state stack");
         // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
@@ -773,6 +773,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                 let func = &self.program.funcs[id.0];
                 if func.has_tag(self.pool, "impl") {
+                    // TODO: maybe this should be going into the overload set somehow instead? 
                     for stmt in &func.local_constants {
                         if let Stmt::DeclFunc(new) = &stmt.stmt {
                             if new.referencable_name {
@@ -800,36 +801,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
         }
         Ok(())
-    }
-
-    fn maybe_direct_fn(
-        &mut self,
-        result: &mut FnWip<'p>,
-        f: &mut FatExpr<'p>,
-        arg: &mut FatExpr<'p>,
-        ret: Option<TypeId>,
-    ) -> Res<'p, Option<FuncId>> {
-        // TODO: more general system for checking if its a constant known expr instead of just for functions?
-        Ok(match f.deref_mut() {
-            &mut Expr::GetVar(i) => {
-                // TODO: only grab here if its a constant, might be a function pointer.
-                let id = self.resolve_function(result, i, arg, ret)?; // TODO: error here is probably fine, just return None
-                Some(id)
-            }
-            &mut Expr::Value {
-                value: Values::One(Value::GetFn(id)),
-                ..
-            } | &mut Expr::WipFunc(id) => Some(id),
-            Expr::Closure(func) => {
-                let id = self.add_func(mem::take(func), &result.constants)?;
-                Some(id)
-            }
-            &mut Expr::GetNamed(i) => {
-                // TODO: from_bit_literal in an @enum gets here. 
-                self.lookup_unique_func(i)
-            }
-            _ => None,
-        })
     }
 
     #[track_caller]
@@ -1458,191 +1429,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
-    fn named_args_to_tuple(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
-        if let Expr::StructLiteralP(pattern) = &mut arg.expr {
-            let expected = &self.program.funcs[f.0].arg;
-            assert_eq!(expected.bindings.len(), pattern.bindings.len());
-            let mut parts = vec![];
-            for name in expected.flatten_names() {
-                let index = unwrap!(pattern.bindings.iter().position(|p| p.name() == Some(name)), "missing named argument {name:?}");
-                let value = pattern.bindings.remove(index);
-                parts.push(unwrap!(value.ty.expr(), "named arg missing value"));
-            }
-            debug_assert!(pattern.bindings.is_empty());
-            arg.expr = Expr::Tuple(parts);
-        }
-        Ok(())
-    }
-
-    // TODO: better error messages
-    fn resolve_function(
-        &mut self,
-        result: &mut FnWip<'p>,
-        name: Var<'p>,
-        arg: &mut FatExpr<'p>,
-        mut requested_ret: Option<TypeId>,
-    ) -> Res<'p, FuncId> {
-        // If there's only one option, we don't care what type it is.
-        if let Some(f) = self.lookup_unique_func(name.0) {
-            self.named_args_to_tuple(result, arg, f)?;
-            return Ok(f);
-        }
-
-        let state = DebugState::ResolveFnRef(name);
-        self.push_state(&state);
-
-        let value = if let Some((value, _)) = result.constants.get(name) {
-            if let Values::One(Value::GetFn(f)) = value {
-                self.pop_state(state);
-                return Ok(f);
-            }
-            value
-        } else {
-            err!(CErr::VarNotFound(name))
-        };
-        
-        // TODO: get rid of any
-        if let Some(ty) = requested_ret {
-            if ty.is_any() {
-                requested_ret = None
-            }
-        }
-
-        match self.type_of(result, arg) {
-            Ok(Some(arg_ty)) => {
-                match value {
-                    Values::One(Value::GetFn(f)) => Ok(f),
-                    Values::One(Value::OverloadSet(i)) => {
-                        let overloads = &self.program.overload_sets[i];
-
-                        let accept = |f_ty: FnType| {
-                            arg_ty == f_ty.arg
-                                && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret))
-                        };
-
-                        let mut found = None;
-                        for check in &overloads.0 {
-                            if accept(check.ty) {
-                                found = Some(check.func);
-                                break;
-                            }
-                        }
-
-                        if let Some(found) = found {
-                            self.pop_state(state);
-                            return Ok(found);
-                        }
-
-                        let log_goal = |s: &mut Self| {
-                            format!(
-                                "for fn {}({arg_ty:?}={}) {:?};",
-                                name.log(s.pool),
-                                s.program.log_type(arg_ty),
-                                requested_ret
-                                    .map(|t| s.program.log_type(t))
-                                    .unwrap_or_else(|| "??".to_string())
-                            )
-                        };
-
-                        // Compute overloads.
-                        if let Some(decls) = self.program.declarations.get(&name.0) {
-                            outln!(
-                                LogTag::Generics,
-                                "Compute overloads of {} = L{i}",
-                                name.log(self.pool),
-                            );
-                            let mut found = None;
-                            let decls: Vec<_> = decls
-                                .iter()
-                                .copied()
-                                .filter(|f| !overloads.0.iter().any(|old| old.func == *f))
-                                .collect();
-                            for f in &decls {
-                                if let Ok(Some(f_ty)) = self.infer_types(*f) {
-                                    outln!(
-                                        LogTag::Generics,
-                                        "- {f:?} is {:?}={} -> {}",
-                                        f_ty.arg,
-                                        self.program.log_type(f_ty.arg),
-                                        self.program.log_type(f_ty.ret)
-                                    );
-                                    // Even if it wasn't right, still keep the work.
-                                    // TODO: this is probably wrong if you use !assert_compile_error
-                                    self.program.overload_sets[i].0.push(OverloadOption {
-                                        name: name.0,
-                                        ty: f_ty,
-                                        func: *f,
-                                    });
-                                    if accept(f_ty) {
-                                        assert!(
-                                            found.is_none(),
-                                            "AmbiguousCall {:?} vs {:?} \n{}",
-                                            found,
-                                            (f, f_ty),
-                                            log_goal(self)
-                                        );
-                                        found = Some((*f, f_ty));
-                                    }
-                                }
-                            }
-                            match found {
-                                Some((func, _)) => {
-                                    self.pop_state(state);
-                                    Ok(func)
-                                }
-                                None => {
-                                    // TODO: put the message in the error so !assert_compile_error doesn't print it.
-                                    outln!(ShowErr, "not found {}", log_goal(self));
-                                    for f in &decls {
-                                        if let Ok(Some(f_ty)) = self.infer_types(*f) {
-                                            outln!(
-                                                ShowErr,
-                                                "- found {:?} fn({}) {};",
-                                                f,
-                                                self.program.log_type(f_ty.arg),
-                                                self.program.log_type(f_ty.ret),
-                                            );
-                                        }
-                                    }
-                                    outln!(
-                                        ShowErr,
-                                        "Impls: {:?}",
-                                        self.program.impls.get(&name.0)
-                                    );
-                                    outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
-
-                                    err!(CErr::AmbiguousCall)
-                                }
-                            }
-                        } else {
-                            err!(
-                                "expected declarations for overload set {:?}\n{}",
-                                name.log(self.pool),
-                                log_goal(self)
-                            )
-                        }
-                    }
-                    _ => {
-                        err!(
-                            "Expected function for {} but found {:?}",
-                            name.log(self.pool),
-                            value
-                        )
-                    }
-                }
-            }
-            Ok(None) => err!(
-                "AmbiguousCall. Unknown type for argument {}",
-                arg.log(self.pool)
-            ),
-            Err(e) => err!(
-                "AmbiguousCall. Unknown type for argument {}. {}",
-                arg.log(self.pool),
-                e.reason.log(self.program, self.pool)
-            ),
-        }
-    }
-
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
     // It's sad that this could mutate expr, but the easiest way to typecheck closures is to promote them to functions,
     // which you have to do anyway eventually so you might as well save that work.
@@ -1651,10 +1437,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     //       then need to be more careful about what gets put in the result
     //       cause like for blocks too, it would be nice to infer a function's return type by just compiling
     //       the function and seeing what you get.
-    fn type_of(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+    pub(crate) fn type_of(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if !expr.ty.is_unknown() {
             return Ok(Some(expr.ty));
         }
+
         // TODO: this is unfortunate
         if let Ok((_, _)) = bit_literal(expr, self.pool) {
             return Ok(Some(TypeId::i64()))  // self.program.intern_type(TypeInfo::Int(int)) but that breaks assert_Eq
@@ -1677,6 +1464,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
                         if self.infer_types(fid).is_ok() {
                             let f_ty = self.program.funcs[fid.0].unwrap_ty();
+                            // Need to save this because resolving overloads eats named arguments
+                            f.expr = Expr::Value { ty: self.program.func_type(fid), value: Value::GetFn(fid).into() };
                             return Ok(Some(f_ty.ret));
                         }
                     }
@@ -1885,7 +1674,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
     // Resolve the lazy types for Arg and Ret
     // Ok(None) means return type needs to be infered
-    fn infer_types(&mut self, func: FuncId) -> Res<'p, Option<FnType>> {
+    pub(crate) fn infer_types(&mut self, func: FuncId) -> Res<'p, Option<FnType>> {
         let f = &self.program.funcs[func.0];
         // TODO: bad things are going on. it changes behavior if this is a debug_assert. 
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer. 
@@ -2020,7 +1809,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
-    fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
+    pub(crate) fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
         debug_assert!(func.closed_constants.local.is_empty());
         debug_assert!(func.closed_constants.is_valid);
         func.closed_constants = constants.close(&func.capture_vars_const)?;

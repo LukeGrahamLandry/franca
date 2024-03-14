@@ -26,7 +26,7 @@ pub enum RsData<'t> {
     },
     Ptr {
         inner: &'t RsType<'t>,
-        non_null: bool
+        non_null: bool,
     },
     Opaque,
 }
@@ -196,7 +196,7 @@ impl<T: Reflect> Reflect for Box<T> {
         stride: size_of::<Self>(),
         data: RsData::Ptr {
             inner: T::TYPE_INFO,
-            non_null: true
+            non_null: true,
         },
         is_linear: true,
     };
@@ -327,7 +327,7 @@ fn ptr_before_len<T>() -> bool {
 
 fn vec_is_ptr_cap_len<T>() -> bool {
     let mut v = Vec::<T>::new();
-    v.reserve_exact(1);  // need the allocation so you can tell len and cap apart.
+    v.reserve_exact(1); // need the allocation so you can tell len and cap apart.
     let (ptr, cap, len): (usize, usize, usize) = unsafe { mem::transmute(v) };
     ptr != 0 && cap == 1 && len == 0
 }
@@ -344,7 +344,7 @@ pub fn is_thin_boxed<T>() -> bool {
 // You just have to do the math for every type even if they two have the same fields.
 mod test {
     #![allow(unused)]
-    use super::{Reflect, RsField, vec_is_ptr_cap_len};
+    use super::{vec_is_ptr_cap_len, Reflect, RsField};
     use crate::experiments::reflect::{ptr_before_len, VReflect};
     use core::slice;
     use std::{
@@ -376,10 +376,7 @@ mod test {
         A(usize, usize),
         B(i64),
         C,
-        D {
-            a: u64,
-            b: i64
-        },
+        D { a: u64, b: i64 },
     }
 
     #[test]
@@ -521,7 +518,6 @@ mod test {
     }
 }
 
-
 // Feels like this might be useful for representing padding?
 // But maybe it makes more sense to do it in chunks since its generally all at the end (when not repr(C)?).
 #[derive(Clone, Debug)]
@@ -579,7 +575,7 @@ impl BitSet {
 
     pub fn insert(&mut self, i: usize, value: bool) {
         match self {
-            BitSet::Small(v) =>  {
+            BitSet::Small(v) => {
                 if i >= 128 {
                     *self = Self::Big(v.to_vec());
                     self.insert(i, value);
@@ -598,7 +594,7 @@ impl BitSet {
 
     pub fn clear(&mut self) {
         match self {
-            BitSet::Small(v) =>  {
+            BitSet::Small(v) => {
                 *v = [0, 0];
             }
             BitSet::Big(v) => {
@@ -618,7 +614,6 @@ fn bitset() {
     assert!(b.get(100));
     // b.set(500);
     // assert!(b.get(500));
-
 }
 
 impl<'p, 't> InterpSend<'p> for &'t RsType<'t> {

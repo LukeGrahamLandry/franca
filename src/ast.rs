@@ -1,5 +1,12 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{CErr, FnWip, insert_multi, Res}, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, logging::err, pool::{Ident, StringPool}};
+use crate::{
+    bc::{Bc, Constants, Structured, Value, Values},
+    compiler::{insert_multi, CErr, FnWip, Res},
+    experiments::reflect::{Reflect, RsType},
+    ffi::{init_interp_send, InterpSend},
+    logging::err,
+    pool::{Ident, StringPool},
+};
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
@@ -7,8 +14,7 @@ use std::{
     collections::HashMap,
     hash::Hash,
     mem,
-    ops::{Deref, DerefMut}
-    ,
+    ops::{Deref, DerefMut},
 };
 
 #[repr(transparent)]
@@ -172,7 +178,7 @@ pub enum Expr<'p> {
 
 struct RenumberVars<'a, 'p> {
     vars: &'a mut Vec<VarInfo>,
-    mapping: &'a mut HashMap<Var<'p>, Var<'p>>
+    mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
 }
 
 impl<'a, 'p> RenumberVars<'a, 'p> {
@@ -182,13 +188,23 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
                 self.expr(f);
                 self.expr(arg);
             }
-            Expr::Block { body, result, locals } => {
+            Expr::Block {
+                body,
+                result,
+                locals,
+            } => {
                 for stmt in body {
                     match &mut stmt.stmt {
                         Stmt::Noop | Stmt::DeclNamed { .. } | Stmt::DoneDeclFunc(_) => {}
                         Stmt::Eval(arg) => self.expr(arg),
-                        Stmt::DeclFunc(_) => {}  // TODO maybe?
-                        Stmt::DeclVar { name, ty, value, dropping, .. } => {
+                        Stmt::DeclFunc(_) => {} // TODO maybe?
+                        Stmt::DeclVar {
+                            name,
+                            ty,
+                            value,
+                            dropping,
+                            ..
+                        } => {
                             self.decl(name);
                             if let Some(dropping) = dropping {
                                 if let Some(new_d) = self.mapping.get(dropping) {
@@ -234,7 +250,7 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
             // TODO: idk if i want to be going into macros. maybe inlining should always happen after them.
             Expr::PrefixMacro { name, arg, target } => {
                 if let Some(new) = self.mapping.get(name) {
-                    *name = *new;  // probably never happens?
+                    *name = *new; // probably never happens?
                 }
                 self.expr(arg);
                 self.expr(target);
@@ -253,9 +269,8 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
             }
             Expr::WipFunc(_) => todo!("renamewip"),
             Expr::EnumLiteral(_) | Expr::RefType(_) | Expr::ArrayLiteral(_) => unreachable!(),
-            Expr::Value { .. } |  Expr::GetNamed(_) | Expr::String(_) => {}
+            Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
         }
-
     }
 
     fn pattern(&mut self, binding: &'a mut Pattern<'p>) {
@@ -264,7 +279,7 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
             if let Name::Var(v) = &mut b.name {
                 self.decl(v);
             }
-            if let Some(arg) = &mut b.default  {
+            if let Some(arg) = &mut b.default {
                 self.expr(arg);
             }
         }
@@ -289,11 +304,13 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
     }
 }
 
-
 impl<'p> FatExpr<'p> {
     pub fn renumber_vars(&mut self, vars: &mut Vec<VarInfo>) {
         let mut mapping = HashMap::new();
-        let mut ctx = RenumberVars { vars, mapping: &mut mapping };
+        let mut ctx = RenumberVars {
+            vars,
+            mapping: &mut mapping,
+        };
         ctx.expr(self);
     }
 }
@@ -321,8 +338,12 @@ pub struct FatExpr<'p> {
 
 impl<'p> FatExpr<'p> {
     pub fn as_int(&self) -> Option<i64> {
-        if let Expr::Value { value: Values::One(Value::I64(v)), .. } = self.expr {
-            return Some(v)
+        if let Expr::Value {
+            value: Values::One(Value::I64(v)),
+            ..
+        } = self.expr
+        {
+            return Some(v);
         }
         None
     }
@@ -609,7 +630,7 @@ pub struct Func<'p> {
     pub dynamic_import_symbol: Option<Ident<'p>>,
     /// An address to call this function. Body may be None or this could be jitted.
     /// It might correspond to dynamic_import_symbol (for libc things that you can call at runtime or comptime).
-    pub comptime_addr: Option<u64>,  // TODO: NonZero for niche
+    pub comptime_addr: Option<u64>, // TODO: NonZero for niche
     /// Inline assembly will be saved here.
     // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
@@ -646,7 +667,7 @@ impl<'p> Func<'p> {
             dynamic_import_symbol: None,
             comptime_addr: None,
             jitted_code: None,
-            any_reg_template: None
+            any_reg_template: None,
         }
     }
 
@@ -667,10 +688,7 @@ impl<'p> Func<'p> {
     }
 
     pub fn add_tag(&mut self, name: Ident<'p>) {
-        self.annotations.push(Annotation {
-            name,
-            args: None,
-        });
+        self.annotations.push(Annotation { name, args: None });
     }
 
     #[track_caller]
@@ -730,16 +748,16 @@ pub struct Program<'p> {
     pub overload_sets: Vec<OverloadSet<'p>>,
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
-    comptime_only: BitSet,  // Index is TypeId
+    comptime_only: BitSet, // Index is TypeId
     pub assertion_count: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OverloadSet<'p>(pub Vec<OverloadOption<'p>>);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OverloadOption<'p> {
-    pub name: Ident<'p>,
+    pub name: Ident<'p>, // TODO: why am i storing the name again here?
     pub ty: FnType,
     pub func: FuncId,
 }
@@ -774,7 +792,7 @@ impl<'p> LazyType<'p> {
     pub fn expr(self) -> Option<FatExpr<'p>> {
         match self {
             LazyType::PendingEval(e) => Some(e),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -799,8 +817,8 @@ macro_rules! safe_rec {
     }};
 }
 
-pub(crate) use safe_rec;
 use crate::experiments::reflect::BitSet;
+pub(crate) use safe_rec;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
@@ -827,7 +845,7 @@ impl<'p> Program<'p> {
                 TypeInfo::VoidPtr,
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
                 TypeInfo::F64,
-               ],
+            ],
             declarations: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
@@ -838,7 +856,7 @@ impl<'p> Program<'p> {
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
             comptime_only: BitSet::empty(),
-            assertion_count: 0
+            assertion_count: 0,
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -906,7 +924,7 @@ impl<'p> Program<'p> {
                     })
                 }
                 RsData::Enum { .. } => todo!(),
-                RsData::Ptr{inner, ..} => {
+                RsData::Ptr { inner, .. } => {
                     let inner = self.get_rs_type(inner);
                     self.ptr_type(inner)
                 }
@@ -967,7 +985,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub extern fn unique_ty(&mut self, ty: TypeId) -> TypeId {
+    pub extern "C" fn unique_ty(&mut self, ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Unique(ty, self.types.len()))
     }
 
@@ -986,7 +1004,11 @@ impl<'p> Program<'p> {
     // aaaaa
     #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
-        let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
+        let id = self
+            .types
+            .iter()
+            .position(|check| *check == ty)
+            .expect("find_interned");
         TypeId(id)
     }
 }
@@ -1072,7 +1094,7 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Fn(ty))
     }
 
-    pub extern fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
+    pub extern "C" fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }
 
@@ -1311,7 +1333,8 @@ impl<'p> Expr<'p> {
             &Expr::Value {
                 value: Values::One(Value::GetFn(f)),
                 ..
-            } | &Expr::WipFunc(f) => Some(f),
+            }
+            | &Expr::WipFunc(f) => Some(f),
             _ => None,
         }
     }
@@ -1413,8 +1436,11 @@ impl<'p> Expr<'p> {
                 arg.walk(f);
                 target.walk(f);
             }
-            Expr::WipFunc(_) |
-            Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) | Expr::GetVar(_) => {}
+            Expr::WipFunc(_)
+            | Expr::Value { .. }
+            | Expr::GetNamed(_)
+            | Expr::String(_)
+            | Expr::GetVar(_) => {}
         }
     }
 }

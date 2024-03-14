@@ -42,6 +42,7 @@ pub mod scope;
 pub mod emit_bc;
 pub mod experiments;
 pub mod export_ffi;
+mod overloading;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope

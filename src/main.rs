@@ -1,3 +1,4 @@
+use franca::export_ffi::get_special_functions;
 use franca::{
     bc::Value,
     experiments::emit_rust::bootstrap,
@@ -7,8 +8,6 @@ use franca::{
     run_main,
 };
 use std::{env, fs, path::PathBuf};
-use franca::export_ffi::get_special_functions;
-
 
 fn main() {
     if let Some(name) = env::args().nth(1) {
