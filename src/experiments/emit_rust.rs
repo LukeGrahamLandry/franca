@@ -1,6 +1,5 @@
 use codemap::{CodeMap, Span};
 use std::collections::HashMap;
-use std::mem;
 use std::ops::Deref;
 
 use crate::ast::{Expr, FatExpr, FuncId, LazyType, Name, Program, Stmt, TypeId, TypeInfo};
@@ -9,12 +8,11 @@ use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::experiments::bc_to_asm::{BcToAsm, Jitted};
 use crate::export_ffi::get_special_functions;
 use crate::interp::Interp;
-use crate::logging::{assert_eq, err, ice, unwrap, LogTag};
-use crate::logging::{outln, PoolLog};
+use crate::logging::{err, ice, unwrap};
 use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
-use crate::{bc::*, emit_diagnostic, make_toplevel, LIB};
+use crate::{bc::*, make_toplevel, LIB};
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
@@ -233,28 +231,10 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
     fn emit_type(&mut self, ty: TypeId) -> Res<'p, String> {
         let info = self.comp.program.raw_type(ty);
         Ok(match &self.comp.program.types[info.0] {
-            TypeInfo::Unknown => todo!(),
-            TypeInfo::Any => todo!(),
-            TypeInfo::Never => todo!(),
-            TypeInfo::F64 => todo!(),
-            TypeInfo::Int(int) => String::from("i64"),
+            TypeInfo::Int(_) => String::from("i64"),
             TypeInfo::Bool => String::from("bool"),
-            TypeInfo::Fn(_) => todo!(),
-            TypeInfo::FnPtr(_) => todo!(),
-            TypeInfo::Tuple(_) => todo!(),
-            TypeInfo::Ptr(_) => todo!(),
-            TypeInfo::Struct {
-                fields,
-                as_tuple,
-                ffi_byte_align,
-                ffi_byte_stride,
-            } => todo!(),
-            TypeInfo::Enum { cases } => todo!(),
-            TypeInfo::Unique(_, _) => todo!(),
-            TypeInfo::Named(_, _) => todo!(),
-            TypeInfo::Type => todo!(),
             TypeInfo::Unit => String::from("()"),
-            TypeInfo::VoidPtr => todo!(),
+            _ => todo!(),
         })
     }
 
@@ -285,7 +265,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
                     todo!()
                 }
             }
-            Stmt::Set { place, value } => todo!(),
+            Stmt::Set { .. } => todo!(),
             Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_) => unreachable!(),
         })
     }
@@ -293,20 +273,8 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
     fn emit_value(&mut self, value: &Value) -> Res<'p, String> {
         Ok(match value {
             Value::I64(n) => format!("{n}"),
-            Value::F64(_) => todo!(),
-            Value::Bool(_) => todo!(),
-            Value::Type(_) => todo!(),
-            Value::GetFn(_) => todo!(),
             Value::Unit => String::from("()"),
-            Value::Poison => todo!(),
-            Value::InterpAbsStackAddr(_) => todo!(),
-            Value::Heap {
-                value,
-                physical_first,
-                physical_count,
-            } => todo!(),
-            Value::Symbol(_) => todo!(),
-            Value::OverloadSet(_) => todo!(),
+            _ => todo!(),
         })
     }
 
@@ -358,18 +326,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
                 )
             }
             Expr::StructLiteralP(_) => todo!(),
-            Expr::GetVar(var) => {
-                // if let Some((value, ty)) = self.comp.program.funcs[self.func.unwrap().0]
-                //     .closed_constants
-                //     .get(*var)
-                // {
-                //     if !self.global_constants.contains_key(var) {
-                //         let value = self.emit_values(&value)?;
-                //         self.global_constants.insert(*var, (ty, value));
-                //     }
-                // }
-                self.comp.pool.get(var.0).to_string()
-            }
+            Expr::GetVar(var) => self.comp.pool.get(var.0).to_string(),
             Expr::PrefixMacro { .. } | Expr::Closure(_) | Expr::GetNamed(_) | Expr::String(_) => {
                 unreachable!()
             }
