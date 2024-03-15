@@ -1564,7 +1564,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             "f64" => Some(F64),
             "Type" => Some(Type),
             "bool" => Some(Bool),
-            "Any" => Some(Any),
             "Never" => Some(TypeInfo::Never),
             "VoidPtr" => Some(VoidPtr),
             _ => None,
@@ -2252,12 +2251,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let is_comptime = func.has_tag(self.pool, "comptime");
         if is_comptime {
             let (ret_val, ret_ty) = self.emit_comptime_call(result, original_f, arg_expr)?;
-            let req = requested.unwrap_or(TypeId::any());
-            let ty = if req.is_any() || req.is_unknown() {
-                ret_ty
-            } else {
-                requested.unwrap()
-            };
+            let ty = requested.unwrap_or(ret_ty); // TODO: make sure someone else already did the typecheck. 
+            assert!(!ty.is_unknown());
             expr.expr = Expr::Value {
                 ty,
                 value: ret_val.clone(),
