@@ -54,14 +54,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         }
     }
 
-    pub fn run(
-        &mut self,
-        f: FuncId,
-        arg: Values,
-        when: ExecTime,
-        return_slot_count: usize,
-        program: &mut Program<'p>,
-    ) -> Res<'p, Values> {
+    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime, return_slot_count: usize, program: &mut Program<'p>) -> Res<'p, Values> {
         let _init_heights = (self.call_stack.len(), self.value_stack.len());
 
         // A fake callframe representing the calling rust program.
@@ -140,11 +133,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     *self.get_slot_mut(slot) = value;
                     self.bump_ip();
                 }
-                &Bc::JumpIf {
-                    cond,
-                    true_ip,
-                    false_ip,
-                } => {
+                &Bc::JumpIf { cond, true_ip, false_ip } => {
                     let cond = self.take_slot(cond);
                     let cond = Values::One(cond).to_bool()?;
                     let next_ip = if cond { true_ip } else { false_ip };
@@ -250,12 +239,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     *self.get_slot_mut(to) = Value::InterpAbsStackAddr(ptr);
                     self.bump_ip();
                 }
-                &Bc::SlicePtr {
-                    base,
-                    offset,
-                    count,
-                    ret,
-                } => {
+                &Bc::SlicePtr { base, offset, count, ret } => {
                     let base = self.take_slot(base);
                     let res = self.raw_slice_ptr(base, offset, count)?;
                     *self.get_slot_mut(ret) = res;
@@ -284,14 +268,18 @@ impl<'a, 'p> Interp<'a, 'p> {
                     assert_eq!(tag, Values::One(Value::I64(value)));
                     self.bump_ip();
                 }
-                &Bc::CallC {
-                    f,
-                    ret,
-                    arg,
-                    ty,
-                    comp_ctx,
-                } => {
-                    self.bump_ip();
+                &Bc::CallC { f, ret, arg, ty, comp_ctx } => {
+                    let f = self.take_slot(f);
+                    let arg = self.take_slots(arg);
+
+                    // TODO: HACK! just want to test function pointers dynamic dispatch. this wont work on asm!
+                    if let Some(f) = f.to_func() {
+                        self.bump_ip(); // pre-bump
+                        let when = self.call_stack.last().unwrap().when;
+                        self.push_callframe(f, ret, arg, when, program)?;
+                        // don't bump ip here, we're in a new call frame.
+                        continue;
+                    }
 
                     #[cfg(not(feature = "interp_c_ffi"))]
                     {
@@ -299,10 +287,8 @@ impl<'a, 'p> Interp<'a, 'p> {
                     }
                     #[cfg(feature = "interp_c_ffi")]
                     {
-                        let f = self.take_slot(f);
+                        self.bump_ip();
                         let ptr = f.to_int()?.to_bytes() as usize;
-
-                        let arg = self.take_slots(arg);
                         let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     }
@@ -335,12 +321,7 @@ impl<'a, 'p> Interp<'a, 'p> {
     }
 
     // I care not for your stride!
-    fn raw_slice_ptr(
-        &mut self,
-        base: Value,
-        physical_offset: usize,
-        physical_count: usize,
-    ) -> Res<'p, Value> {
+    fn raw_slice_ptr(&mut self, base: Value, physical_offset: usize, physical_count: usize) -> Res<'p, Value> {
         match base {
             Value::InterpAbsStackAddr(addr) => {
                 assert!(physical_count <= addr.count);
@@ -349,20 +330,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                     count: physical_count,
                 }))
             }
-            Value::Heap {
-                value,
-                physical_first,
-                ..
-            } => {
+            Value::Heap { value, physical_first, .. } => {
                 let abs_first = physical_first + physical_offset;
                 let abs_last = abs_first + physical_count;
                 // Slicing operations are bounds checked.
                 let data = unsafe { &*value };
-                assert!(
-                    data.references > 0
-                        && (abs_first) < data.values.len()
-                        && (abs_last) <= data.values.len()
-                );
+                assert!(data.references > 0 && (abs_first) < data.values.len() && (abs_last) <= data.values.len());
                 Ok(Value::Heap {
                     value,
                     physical_first: abs_first,
@@ -432,9 +405,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "is_uninit" => {
                 let range = match arg {
-                    Values::One(Value::InterpAbsStackAddr(addr)) => {
-                        &self.value_stack[addr.first.0..addr.first.0 + addr.count]
-                    }
+                    Values::One(Value::InterpAbsStackAddr(addr)) => &self.value_stack[addr.first.0..addr.first.0 + addr.count],
                     Values::One(Value::Heap {
                         value,
                         physical_first: first,
@@ -442,11 +413,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         ..
                     }) => {
                         let data = unsafe { &*value };
-                        assert!(
-                            data.references > 0
-                                && (first) < data.values.len()
-                                && (count) < data.values.len()
-                        );
+                        assert!(data.references > 0 && (first) < data.values.len() && (count) < data.values.len());
                         &data.values[(first)..(first + count)]
                     }
                     _ => err!("Wanted ptr found {:?}", arg),
@@ -467,15 +434,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // last is not included
                 let (addr, new_first, new_last) = arg.to_triple()?;
                 let (new_first, new_last) = (new_first.to_int()?, new_last.to_int()?);
-                assert!(
-                    new_first >= 0 && new_last >= 0 && new_first <= new_last,
-                    "{new_first}..<{new_last}"
-                );
+                assert!(new_first >= 0 && new_last >= 0 && new_first <= new_last, "{new_first}..<{new_last}");
                 match addr {
                     Value::InterpAbsStackAddr(addr) => {
-                        assert!(
-                            (new_first as usize) < addr.count && (new_last as usize) <= addr.count
-                        );
+                        assert!((new_first as usize) < addr.count && (new_last as usize) <= addr.count);
                         Value::InterpAbsStackAddr(StackAbsoluteRange {
                             first: StackAbsolute(addr.first.0 + new_first as usize),
                             count: (new_last - new_first) as usize,
@@ -531,11 +493,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             }
             "dealloc" => {
                 let (ty, ptr, count) = arg.to_triple()?;
-                let (ty, count, (ptr, ptr_first, ptr_count)) = (
-                    program.to_type(ty.into())?,
-                    count.to_int()?,
-                    Values::One(ptr).to_heap_ptr()?,
-                );
+                let (ty, count, (ptr, ptr_first, ptr_count)) = (program.to_type(ty.into())?, count.to_int()?, Values::One(ptr).to_heap_ptr()?);
                 assert_eq!(self.size_of(program, ty) * count as usize, ptr_count);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
@@ -578,11 +536,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             // TODO: remove. make sure tuple syntax always works first tho.
             "Ty" => {
                 if let Values::One(Value::Type(ty)) = arg {
-                    assert!(
-                        false,
-                        "Ty arg should be tuple of types not type {:?}",
-                        program.log_type(ty)
-                    );
+                    assert!(false, "Ty arg should be tuple of types not type {:?}", program.log_type(ty));
                 }
                 // print!("Ty: {:?}", arg);
                 let ty = program.to_type(arg)?;
@@ -624,10 +578,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                 }
             }
             "puts" => {
-                let arg = unwrap!(
-                    String::deserialize_one(arg.clone()),
-                    "expect str not {arg:?}"
-                );
+                let arg = unwrap!(String::deserialize_one(arg.clone()), "expect str not {arg:?}");
                 outln!(ShowPrint, "{arg}");
                 Value::Unit.into()
             }
@@ -645,25 +596,18 @@ impl<'a, 'p> Interp<'a, 'p> {
             "IntType" => {
                 let (bit_count, signed) = arg.to_pair()?;
                 let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
-                let ty =
-                    program.intern_type(TypeInfo::Int(crate::ast::IntType { bit_count, signed }));
+                let ty = program.intern_type(TypeInfo::Int(crate::ast::IntType { bit_count, signed }));
                 Value::Type(ty).into()
             }
             "clone_const" => {
                 let (ptr, first, count) = arg.to_heap_ptr()?;
                 let ptr = unsafe { &mut *ptr };
-                assert!(
-                    ptr.is_constant,
-                    "clone_const but not const, you could just mutate it"
-                );
+                assert!(ptr.is_constant, "clone_const but not const, you could just mutate it");
                 let values = ptr.values[first..(first + count)].to_vec();
                 Value::new_box(values, false).into()
             }
             "str" => {
-                let arg = unwrap!(
-                    Ident::deserialize_one(arg.clone()),
-                    "expected symbol found {arg:?}"
-                );
+                let arg = unwrap!(Ident::deserialize_one(arg.clone()), "expected symbol found {arg:?}");
                 let s = self.pool.get(arg).to_string();
                 s.serialize_one()
             }
@@ -671,11 +615,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             "copy_to_mmap_exec" => {
                 let (ptr, _len) = arg.to_pair()?;
                 let arg = self.deref_ptr(ptr)?;
-                let arg: Vec<_> = arg
-                    .vec()
-                    .into_iter()
-                    .map(|v| v.to_int().unwrap() as u32)
-                    .collect();
+                let arg: Vec<_> = arg.vec().into_iter().map(|v| v.to_int().unwrap() as u32).collect();
                 let (map, code) = export_ffi::copy_to_mmap_exec(arg);
                 let map: usize = Box::leak(map) as *const memmap2::Mmap as usize;
                 Values::Many(vec![Value::I64(map as i64), Value::I64(code as i64)])
@@ -688,20 +628,12 @@ impl<'a, 'p> Interp<'a, 'p> {
                 let arg = Values::Many(v);
                 // aaaaa
                 let name = self.pool.intern(name);
-                self.suspend(
-                    name,
-                    arg,
-                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
-                )?
+                self.suspend(name, arg, unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"))?
             }
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
                 let name = self.pool.intern(name);
-                self.suspend(
-                    name,
-                    arg,
-                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
-                )?
+                self.suspend(name, arg, unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"))?
             }
         };
         Ok(value)
@@ -709,35 +641,17 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     // This does not spark joy...
     // I think I'll be spending a while reading about algebreic effects.
-    fn suspend(
-        &mut self,
-        name: Ident<'p>,
-        arg: Values,
-        ret: StackAbsoluteRange,
-    ) -> Res<'p, Values> {
+    fn suspend(&mut self, name: Ident<'p>, arg: Values, ret: StackAbsoluteRange) -> Res<'p, Values> {
         self.messages.push(ret);
         err!(CErr::InterpMsgToCompiler(name, arg, ret))
     }
 
-    pub fn resume(
-        &mut self,
-        result: Values,
-        ret: StackAbsoluteRange,
-        program: &mut Program<'p>,
-    ) -> Res<'p, Values> {
+    pub fn resume(&mut self, result: Values, ret: StackAbsoluteRange, program: &mut Program<'p>) -> Res<'p, Values> {
         self.expand_maybe_tuple(result, ret)?;
         self.run_continuation(program)
     }
 
-    fn push_callframe(
-        &mut self,
-        f: FuncId,
-        ret: StackRange,
-        arg: Values,
-        when: ExecTime,
-
-        program: &Program<'p>,
-    ) -> Res<'p, ()> {
+    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, program: &Program<'p>) -> Res<'p, ()> {
         let func = self.ready[f.0].as_ref();
         assert!(func.is_some(), "ICE: tried to call {f:?} but not compiled.");
         // Calling Convention: arguments passed to a function are moved out of your stack.
@@ -837,23 +751,13 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     fn next_inst(&self) -> &Bc<'p> {
         let frame = self.call_stack.last().unwrap();
-        let body = self
-            .ready
-            .get(frame.current_func.0)
-            .unwrap()
-            .as_ref()
-            .unwrap();
+        let body = self.ready.get(frame.current_func.0).unwrap().as_ref().unwrap();
         body.insts.get(frame.current_ip).unwrap()
     }
 
     fn update_debug(&mut self) {
         let frame = self.call_stack.last().unwrap();
-        let body = self
-            .ready
-            .get(frame.current_func.0)
-            .unwrap()
-            .as_ref()
-            .unwrap();
+        let body = self.ready.get(frame.current_func.0).unwrap().as_ref().unwrap();
         // TOOD: @track_caller so you don't just get an error report on the forward declare of assert_eq all the time. HACK:
         if !matches!(body.insts[frame.current_ip], Bc::CallBuiltin { .. }) {
             self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
@@ -890,11 +794,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             } => {
                 // Slicing operations are bounds checked.
                 let ptr = unsafe { &mut *ptr_value };
-                assert!(
-                    ptr.references > 0
-                        && first < ptr.values.len()
-                        && (first + count) <= ptr.values.len()
-                );
+                assert!(ptr.references > 0 && first < ptr.values.len() && (first + count) <= ptr.values.len());
                 if ptr.is_constant {
                     err!("Illegal mutation of baked constant",)
                 }
@@ -943,12 +843,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                         physical_count: count,
                     } => {
                         let values = unsafe { &mut *value };
-                        outln!(
-                            ShowPrint,
-                            "{}{:?}",
-                            "=".repeat(depth),
-                            &values.values[first..(first + count)]
-                        );
+                        outln!(ShowPrint, "{}{:?}", "=".repeat(depth), &values.values[first..(first + count)]);
 
                         break;
                     }
@@ -987,12 +882,7 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         result
     }
 
-    fn run_with_arg<T: crate::experiments::reflect::Reflect>(
-        &mut self,
-        program: &mut Program<'p>,
-        f: FuncId,
-        arg: &mut T,
-    ) -> Res<'p, ()> {
+    fn run_with_arg<T: crate::experiments::reflect::Reflect>(&mut self, program: &mut Program<'p>, f: FuncId, arg: &mut T) -> Res<'p, ()> {
         let addr = arg as *const T as usize as i64;
         let arg = Values::One(Value::I64(addr));
         let ret = self.run(f, arg, ExecTime::Runtime, 1, program)?;

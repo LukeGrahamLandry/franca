@@ -81,7 +81,8 @@ pub extern "C" fn assert_eq(program: &mut Program, a: i64, b: i64) {
     program.assertion_count += 1;
 }
 
-// TODO: more efficient storage
+// TODO: test. need to allow indexing tuple elements for this to be usable.
+// TODO: more efficient storage. TypeInfo::Array(Type, usize) but then need to cleanup everywhere that specifically handles a tuple.
 pub extern "C" fn array_type(program: &mut Program, ty: TypeId, count: usize) -> TypeId {
     let types = vec![ty; count];
     program.intern_type(TypeInfo::Tuple(types))

@@ -1,6 +1,4 @@
-use crate::ast::{
-    Expr, FatExpr, FnType, FuncId, OverloadOption, OverloadSet, Pattern, TypeId, Var,
-};
+use crate::ast::{Expr, FatExpr, FnType, FuncId, OverloadOption, OverloadSet, Pattern, TypeId, Var};
 use crate::bc::{Value, Values};
 use crate::compiler::{CErr, Compile, DebugState, Executor, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
@@ -100,10 +98,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
             match self.type_of(result, arg) {
                 Ok(Some(arg_ty)) => {
-                    let accept = |f_ty: FnType| {
-                        arg_ty == f_ty.arg
-                            && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret))
-                    };
+                    let accept = |f_ty: FnType| arg_ty == f_ty.arg && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret));
 
                     let mut found = None;
                     for check in &overloads.0 {
@@ -123,9 +118,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             "for fn {}({arg_ty:?}={}) {:?};",
                             name.log(s.pool),
                             s.program.log_type(arg_ty),
-                            requested_ret
-                                .map(|t| s.program.log_type(t))
-                                .unwrap_or_else(|| "??".to_string())
+                            requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
                         )
                     };
 
@@ -148,10 +141,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                     err!(CErr::AmbiguousCall)
                 }
-                Ok(None) => err!(
-                    "AmbiguousCall. Unknown type for argument {}",
-                    arg.log(self.pool)
-                ),
+                Ok(None) => err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool)),
                 Err(e) => err!(
                     "AmbiguousCall. Unknown type for argument {}. {}",
                     arg.log(self.pool),
@@ -159,27 +149,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 ),
             }
         } else {
-            err!(
-                "Expected function for {} but found {:?}",
-                name.log(self.pool),
-                value
-            );
+            err!("Expected function for {} but found {:?}", name.log(self.pool), value);
         }
     }
 
-    fn compute_new_overloads(&mut self, name: Ident<'p>, i: usize) -> Res<'p, ()> {
+    pub fn compute_new_overloads(&mut self, name: Ident<'p>, i: usize) -> Res<'p, ()> {
         if let Some(decls) = self.program.declarations.get(&name) {
-            outln!(
-                LogTag::Generics,
-                "Compute overloads of {} = L{i}",
-                self.pool.get(name),
-            );
+            outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(name),);
             let overloads = &self.program.overload_sets[i];
-            let decls: Vec<_> = decls
-                .iter()
-                .copied()
-                .filter(|f| !overloads.0.iter().any(|old| old.func == *f))
-                .collect();
+            let decls: Vec<_> = decls.iter().copied().filter(|f| !overloads.0.iter().any(|old| old.func == *f)).collect();
             for f in &decls {
                 if let Ok(Some(f_ty)) = self.infer_types(*f) {
                     outln!(
@@ -190,29 +168,17 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         self.program.log_type(f_ty.ret)
                     );
                     // TODO: this is probably wrong if you use !assert_compile_error
-                    self.program.overload_sets[i].0.push(OverloadOption {
-                        name,
-                        ty: f_ty,
-                        func: *f,
-                    });
+                    self.program.overload_sets[i].0.push(OverloadOption { name, ty: f_ty, func: *f });
                 }
             }
         } else {
-            err!(
-                "expected declarations for overload set {:?} L{i}",
-                self.pool.get(name),
-            )
+            err!("expected declarations for overload set {:?} L{i}", self.pool.get(name),)
         }
 
         Ok(())
     }
 
-    fn named_args_to_tuple(
-        &mut self,
-        _result: &mut FnWip<'p>,
-        arg: &mut FatExpr<'p>,
-        f: FuncId,
-    ) -> Res<'p, ()> {
+    fn named_args_to_tuple(&mut self, _result: &mut FnWip<'p>, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             let expected = &self.program.funcs[f.0].arg;
             assert_eq!(expected.bindings.len(), pattern.bindings.len());
@@ -235,11 +201,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(())
     }
 
-    fn prune_overloads_by_named_args(
-        &self,
-        overload_set: &mut OverloadSet<'p>,
-        pattern: &Pattern<'p>,
-    ) -> Res<'p, ()> {
+    fn prune_overloads_by_named_args(&self, overload_set: &mut OverloadSet<'p>, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let names = pattern.flatten_names();
         overload_set.0.retain(|overload| {
             let mut expected = self.program.funcs[overload.func.0].arg.flatten_names();

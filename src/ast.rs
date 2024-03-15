@@ -125,22 +125,14 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
                 self.expr(f);
                 self.expr(arg);
             }
-            Expr::Block {
-                body,
-                result,
-                locals,
-            } => {
+            Expr::Block { body, result, locals } => {
                 for stmt in body {
                     match &mut stmt.stmt {
                         Stmt::Noop | Stmt::DeclNamed { .. } | Stmt::DoneDeclFunc(_) => {}
                         Stmt::Eval(arg) => self.expr(arg),
                         Stmt::DeclFunc(_) => {} // TODO maybe?
                         Stmt::DeclVar {
-                            name,
-                            ty,
-                            value,
-                            dropping,
-                            ..
+                            name, ty, value, dropping, ..
                         } => {
                             self.decl(name);
                             if let Some(dropping) = dropping {
@@ -243,10 +235,7 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 impl<'p> FatExpr<'p> {
     pub fn renumber_vars(&mut self, vars: &mut Vec<VarInfo>) {
         let mut mapping = HashMap::new();
-        let mut ctx = RenumberVars {
-            vars,
-            mapping: &mut mapping,
-        };
+        let mut ctx = RenumberVars { vars, mapping: &mut mapping };
         ctx.expr(self);
     }
 }
@@ -347,10 +336,7 @@ impl<'p> Binding<'p> {
 
 impl<'p> Pattern<'p> {
     pub fn empty(loc: Span) -> Self {
-        Self {
-            loc,
-            bindings: vec![],
-        }
+        Self { loc, bindings: vec![] }
     }
 
     // Useful for function args.
@@ -443,10 +429,7 @@ impl<'p> Pattern<'p> {
             .map(|b| &b.ty)
             .map(|t| match t {
                 LazyType::Finished(ty) => *ty,
-                LazyType::Infer
-                | LazyType::PendingEval(_)
-                | LazyType::EvilUnit
-                | LazyType::Different(_) => unreachable!(),
+                LazyType::Infer | LazyType::PendingEval(_) | LazyType::EvilUnit | LazyType::Different(_) => unreachable!(),
             })
             .collect();
         program.tuple_of(types)
@@ -574,14 +557,7 @@ pub struct Func<'p> {
 }
 
 impl<'p> Func<'p> {
-    pub fn new(
-        name: Ident<'p>,
-        arg: Pattern<'p>,
-        ret: LazyType<'p>,
-        body: Option<FatExpr<'p>>,
-        loc: Span,
-        has_name: bool,
-    ) -> Self {
+    pub fn new(name: Ident<'p>, arg: Pattern<'p>, ret: LazyType<'p>, body: Option<FatExpr<'p>>, loc: Span, has_name: bool) -> Self {
         Func {
             annotations: vec![],
             name,
@@ -748,12 +724,7 @@ macro_rules! safe_rec {
         } else {
             $self.log_type_rec.borrow_mut().push(ty);
             let res = $body;
-            let i = $self
-                .log_type_rec
-                .borrow()
-                .iter()
-                .position(|check| *check == ty)
-                .unwrap();
+            let i = $self.log_type_rec.borrow().iter().position(|check| *check == ty).unwrap();
             $self.log_type_rec.borrow_mut().remove(i);
             res
         }
@@ -780,10 +751,7 @@ impl<'p> Program<'p> {
                 TypeInfo::Any,
                 TypeInfo::Unit,
                 TypeInfo::Type,
-                TypeInfo::Int(IntType {
-                    bit_count: 64,
-                    signed: true,
-                }),
+                TypeInfo::Int(IntType { bit_count: 64, signed: true }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
@@ -821,8 +789,7 @@ impl<'p> Program<'p> {
             self.types.push(TypeInfo::simple_struct(vec![], n));
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
-            self.types[placeholder] =
-                TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
+            self.types[placeholder] = TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
             ty_final
         })
     }
@@ -878,8 +845,7 @@ impl<'p> Program<'p> {
             };
 
             let named = self.intern_type(TypeInfo::Named(ty, self.pool.intern(type_info.name)));
-            self.types[placeholder] =
-                TypeInfo::Unique(named, (id & usize::max_value() as u128) as usize);
+            self.types[placeholder] = TypeInfo::Unique(named, (id & usize::max_value() as u128) as usize);
             ty_final
         })
     }
@@ -891,13 +857,7 @@ impl<'p> Program<'p> {
             .arg
             .flatten()
             .iter()
-            .map(|(name, ty)| {
-                format!(
-                    "{}: {}, ",
-                    name.map(|n| self.pool.get(n.0)).unwrap_or("_"),
-                    self.log_type(*ty)
-                )
-            })
+            .map(|(name, ty)| format!("{}: {}, ", name.map(|n| self.pool.get(n.0)).unwrap_or("_"), self.log_type(*ty)))
             .collect();
         let ret = self.log_type(func.ret.unwrap());
         let out = format!("fn {}({args}) {ret}", self.pool.get(func.name));
@@ -947,11 +907,7 @@ impl<'p> Program<'p> {
     // aaaaa
     #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
-        let id = self
-            .types
-            .iter()
-            .position(|check| *check == ty)
-            .expect("find_interned");
+        let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
         TypeId(id)
     }
 }
@@ -959,18 +915,14 @@ impl<'p> Program<'p> {
 impl<'p> Program<'p> {
     // TODO: this is O(n), at the very least make sure the common types are at the beginning.
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
-        let id = self
-            .types
-            .iter()
-            .position(|check| check == &ty)
-            .unwrap_or_else(|| {
-                let id = self.types.len();
-                self.types.push(ty);
-                if self.calc_is_comptime_only_type(TypeId(id)) {
-                    self.comptime_only.set(id);
-                }
-                id
-            });
+        let id = self.types.iter().position(|check| check == &ty).unwrap_or_else(|| {
+            let id = self.types.len();
+            self.types.push(ty);
+            if self.calc_is_comptime_only_type(TypeId(id)) {
+                self.comptime_only.set(id);
+            }
+            id
+        });
         TypeId(id)
     }
 
@@ -1116,10 +1068,7 @@ impl<'p> Program<'p> {
             self.intern_type(ty)
         } else if let TypeInfo::Tuple(fields) = ty {
             let ty = TypeInfo::Enum {
-                cases: fields
-                    .into_iter()
-                    .map(|ty| (self.synth_name(ty), ty))
-                    .collect(),
+                cases: fields.into_iter().map(|ty| (self.synth_name(ty), ty)).collect(),
             };
             self.intern_type(ty)
         } else {
@@ -1136,9 +1085,7 @@ impl<'p> Program<'p> {
     pub fn is_comptime_only(&self, value: &Structured) -> bool {
         match value {
             Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => false, // sure hope not or we're already fucked.
-            Structured::TupleDifferent(ty, _) | Structured::Const(ty, _) => {
-                self.is_comptime_only_type(*ty)
-            }
+            Structured::TupleDifferent(ty, _) | Structured::Const(ty, _) => self.is_comptime_only_type(*ty),
         }
     }
 
@@ -1163,15 +1110,9 @@ impl<'p> Program<'p> {
             // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
             TypeInfo::Type => false,
             TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
-            TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Ptr(ty) => {
-                self.is_comptime_only_type(*ty)
-            }
-            TypeInfo::Struct { fields, .. } => {
-                fields.iter().any(|f| self.is_comptime_only_type(f.ty))
-            }
-            TypeInfo::Enum { cases, .. } => {
-                cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty))
-            }
+            TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Ptr(ty) => self.is_comptime_only_type(*ty),
+            TypeInfo::Struct { fields, .. } => fields.iter().any(|f| self.is_comptime_only_type(f.ty)),
+            TypeInfo::Enum { cases, .. } => cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty)),
         }
     }
 
@@ -1181,8 +1122,7 @@ impl<'p> Program<'p> {
             Values::One(Value::Unit) => Ok(TypeId::unit()),
             Values::One(Value::Type(id)) => Ok(id),
             Values::Many(values) => {
-                let values: Res<'_, Vec<_>> =
-                    values.into_iter().map(|v| self.to_type(v.into())).collect();
+                let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v.into())).collect();
                 Ok(self.tuple_of(values?))
             }
             _ => {
@@ -1254,10 +1194,7 @@ impl<'p> FatStmt<'p> {
 
     pub(crate) fn _get_tag_arg(&self, pool: &StringPool<'p>, name: &str) -> Option<&FatExpr<'p>> {
         let name = pool.intern(name);
-        self.annotations
-            .iter()
-            .find(|a| a.name == name)
-            .and_then(|a| a.args.as_ref())
+        self.annotations.iter().find(|a| a.name == name).and_then(|a| a.args.as_ref())
     }
 }
 
@@ -1375,11 +1312,7 @@ impl<'p> Expr<'p> {
                 arg.walk(f);
                 target.walk(f);
             }
-            Expr::WipFunc(_)
-            | Expr::Value { .. }
-            | Expr::GetNamed(_)
-            | Expr::String(_)
-            | Expr::GetVar(_) => {}
+            Expr::WipFunc(_) | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) | Expr::GetVar(_) => {}
         }
     }
 }

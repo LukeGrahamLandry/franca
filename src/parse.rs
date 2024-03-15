@@ -159,6 +159,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             // TODO: should i allow the payload to be statement too?
             // TODO: could make arg optional but then there's wierd stuff like `@no_arg (expected, target)` being seen as one thing.
             //       i dont want to make parsing depend on how the macro was declared so you could opt out of the arg and allow that.
+            // TODO: annotations on anon function exprs. Currently you can't make one @c_call because stmt and expr macros are parsed differently.
             At => {
                 self.start_subexpr();
                 self.eat(At)?;
