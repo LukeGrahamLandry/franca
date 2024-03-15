@@ -165,7 +165,15 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(At)?;
                 let name = self.ident()?;
                 let arg = Box::new(self.parse_tuple()?);
-                let target = Box::new(self.parse_expr()?);
+
+                let target = match self.peek() {
+                    Semicolon | Comma | RightParen | RightSquiggle => {
+                        // target is optional.
+                        self.start_subexpr();
+                        Box::new(self.expr(Expr::unit()))
+                    }
+                    _ => Box::new(self.parse_expr()?),
+                };
                 Ok(self.expr(Expr::PrefixMacro {
                     name: Var(name, 0),
                     arg,
