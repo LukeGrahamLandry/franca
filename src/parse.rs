@@ -5,6 +5,7 @@ use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Binding, Name, TypeId, Var};
+use crate::bc::Values;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
@@ -31,7 +32,11 @@ pub struct ParseErr {
 
 impl<'a, 'p> Parser<'a, 'p> {
     pub fn parse(file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
-        outln!(Parsing, "\n######################################\n### START FILE: {} \n######################################\n", file.name());
+        outln!(
+            Parsing,
+            "\n######################################\n### START FILE: {} \n######################################\n",
+            file.name()
+        );
 
         let mut p = Parser {
             pool,
@@ -176,7 +181,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 LeftParen => {
                     self.start_subexpr();
                     let arg = self.parse_tuple()?;
-                    self.expr(Expr::Call(Box::new(prefix), Box::new(arg)))
+                    self.expr_call(prefix, arg)
                 }
                 Bang => {
                     self.start_subexpr();
@@ -193,10 +198,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 DoubleSquare => {
                     self.start_subexpr();
                     self.eat(DoubleSquare)?;
-                    self.expr(Expr::SuffixMacro(
-                        self.pool.intern("deref"),
-                        Box::new(prefix),
-                    ))
+                    self.expr(Expr::SuffixMacro(self.pool.intern("deref"), Box::new(prefix)))
                 }
                 LeftSquare => {
                     self.eat(LeftSquare)?;
@@ -336,12 +338,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     }
                     Semicolon => {
                         self.eat(Semicolon)?;
-                        Stmt::DeclNamed {
-                            name,
-                            ty,
-                            value: None,
-                            kind,
-                        }
+                        Stmt::DeclNamed { name, ty, value: None, kind }
                     }
                     LeftArrow => {
                         self.eat(LeftArrow)?;
@@ -358,14 +355,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.start_subexpr();
                         let callback = self.parse_block_until_squiggle()?;
                         let name = self.pool.intern("backpass");
-                        let callback = Func::new(
-                            name,
-                            arg,
-                            LazyType::Infer,
-                            Some(callback),
-                            *self.spans.last().unwrap(),
-                            false,
-                        );
+                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 
                         if let Expr::Call(_, old_arg) = &mut call.expr {
@@ -408,11 +398,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         while let At = self.peek() {
             self.eat(At)?;
             let name = self.ident()?;
-            let args = if LeftParen == self.peek() {
-                Some(self.parse_tuple()?)
-            } else {
-                None
-            };
+            let args = if LeftParen == self.peek() { Some(self.parse_tuple()?) } else { None };
             annotations.push(Annotation { name, args });
         }
         Ok(annotations)
@@ -575,10 +561,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             "{}({}) STMT {:?} {}",
             "=".repeat(self.spans.len() * 2),
             self.spans.len(),
-            annotations
-                .iter()
-                .map(|a| self.pool.get(a.name))
-                .collect::<Vec<_>>(),
+            annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>(),
             stmt.log(self.pool)
         );
         FatStmt {
@@ -654,5 +637,34 @@ impl<'a, 'p> Parser<'a, 'p> {
             result: Box::new(result),
             locals: None,
         }))
+    }
+
+    fn expr_call(&mut self, prefix: FatExpr<'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+        // Dot call syntax sugar.
+        if let Expr::FieldAccess(first, name) = prefix.expr {
+            self.start_subexpr();
+            let f = self.expr(Expr::GetNamed(name));
+            match arg.expr {
+                Expr::Tuple(mut parts) => {
+                    parts.insert(0, *first);
+                    arg.expr = Expr::Tuple(parts);
+                    self.expr(Expr::Call(Box::new(f), Box::new(arg)))
+                }
+                // Parser flattened empty tuples.
+                Expr::Value {
+                    value: Values::One(Value::Unit),
+                    ..
+                } => self.expr(Expr::Call(Box::new(f), first)),
+                // Tuple parser eagerly falttened single tuples so we have to undo that here.
+                // TODO: have it work woth named arguments. Need to support mixing named and positional.
+                _ => {
+                    self.start_subexpr();
+                    let arg = self.expr(Expr::Tuple(vec![*first, arg]));
+                    self.expr(Expr::Call(Box::new(f), Box::new(arg)))
+                }
+            }
+        } else {
+            self.expr(Expr::Call(Box::new(prefix), Box::new(arg)))
+        }
     }
 }

@@ -69,6 +69,7 @@ static LIB: &[(&str, &str)] = &[
     stdlib!("macros"), 
     stdlib!("codegen/aarch64/instructions"),
     stdlib!("codegen/aarch64/basic"),
+    stdlib!("codegen/wasm/instructions"),
 ];
 
 macro_rules! test_file {

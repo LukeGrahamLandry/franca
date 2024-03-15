@@ -1650,7 +1650,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     ) -> Res<'p, Vec<TypeId>> {
         let mut types = vec![];
         for arg in bindings {
-            assert!(self.infer_binding_progress(constants, arg)?);
+            if let Some(e) = arg.ty.expr_ref() {
+                self.last_loc = Some(e.loc);
+            }
+            assert!(self.infer_binding_progress(constants, arg)?, "{arg:?}");
             types.push(arg.unwrap());
         }
         Ok(types)
