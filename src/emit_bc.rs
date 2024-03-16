@@ -363,7 +363,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     if let Some((slot, _ty)) = result.vars.remove(local) {
                         result.push(Bc::Drop(slot));
                     } else if result.constants.get(*local).is_none() {
-                        ice!("Missing local {local:?}")
+                        self.last_loc = Some(expr.loc);
+                        ice!("Missing local {}", local.log(self.program.pool))
                     }
                 }
 

@@ -113,33 +113,29 @@ pub enum Expr<'p> {
     String(Ident<'p>),
 }
 
-struct RenumberVars<'a, 'p> {
-    vars: &'a mut Vec<VarInfo>,
-    mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
-}
+trait WalkAst<'p> {
+    fn walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    fn walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
+    fn walk_func(&mut self, _: &mut Func<'p>) {}
+    fn walk_pattern(&mut self, _: &mut Pattern<'p>) {}
+    fn walk_ty(&mut self, _: &mut LazyType<'p>) {}
 
-impl<'a, 'p> RenumberVars<'a, 'p> {
-    pub fn expr(&mut self, expr: &'a mut FatExpr<'p>) {
+    fn expr(&mut self, expr: &mut FatExpr<'p>) {
+        self.walk_expr(expr);
         match &mut expr.expr {
             Expr::Call(f, arg) => {
                 self.expr(f);
                 self.expr(arg);
             }
-            Expr::Block { body, result, locals } => {
+            Expr::Block { body, result, .. } => {
                 for stmt in body {
+                    self.walk_stmt(stmt);
                     match &mut stmt.stmt {
                         Stmt::Noop | Stmt::DeclNamed { .. } | Stmt::DoneDeclFunc(_) => {}
                         Stmt::Eval(arg) => self.expr(arg),
-                        Stmt::DeclFunc(_) => {} // TODO maybe?
-                        Stmt::DeclVar {
-                            name, ty, value, dropping, ..
-                        } => {
-                            self.decl(name);
-                            if let Some(dropping) = dropping {
-                                if let Some(new_d) = self.mapping.get(dropping) {
-                                    *dropping = *new_d;
-                                }
-                            }
+                        Stmt::DeclFunc(func) => self.walk_func(func), // TODO: more maybe?
+                        Stmt::DeclVar { ty, value, .. } => {
                             if let Some(value) = value {
                                 self.expr(value);
                             }
@@ -158,13 +154,6 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
                     }
                 }
                 self.expr(result);
-                if let Some(locals) = locals {
-                    for var in locals {
-                        if let Some(new) = self.mapping.get(var) {
-                            *var = *new
-                        } // TODO: else seems like a problem
-                    }
-                }
             }
             Expr::Tuple(parts) => {
                 for p in parts {
@@ -177,53 +166,103 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
                 self.pattern(binding);
             }
             // TODO: idk if i want to be going into macros. maybe inlining should always happen after them.
-            Expr::PrefixMacro { name, arg, target } => {
-                if let Some(new) = self.mapping.get(name) {
-                    *name = *new; // probably never happens?
-                }
+            Expr::PrefixMacro { arg, target, .. } => {
                 self.expr(arg);
                 self.expr(target);
             }
-            Expr::GetVar(v) => {
-                if let Some(new) = self.mapping.get(v) {
-                    *v = *new;
-                }
-            }
+            Expr::GetVar(_) => {}
             Expr::Closure(func) => {
+                // TODO: why am i treating this differently from the other thing
                 self.pattern(&mut func.arg);
                 self.ty(&mut func.ret);
                 if let Some(body) = &mut func.body {
                     self.expr(body);
                 }
             }
-            Expr::WipFunc(_) => todo!("renamewip"),
+            Expr::WipFunc(_) => todo!("walkwip"),
             Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
         }
+        self.post_walk_expr(expr);
     }
 
-    fn pattern(&mut self, binding: &'a mut Pattern<'p>) {
+    fn pattern(&mut self, binding: &mut Pattern<'p>) {
+        self.walk_pattern(binding);
         for b in &mut binding.bindings {
             self.ty(&mut b.ty);
-            if let Name::Var(v) = &mut b.name {
-                self.decl(v);
-            }
             if let Some(arg) = &mut b.default {
                 self.expr(arg);
             }
         }
     }
 
-    fn ty(&mut self, ty: &'a mut LazyType<'p>) {
+    fn ty(&mut self, ty: &mut LazyType<'p>) {
+        self.walk_ty(ty);
         match ty {
             LazyType::EvilUnit | LazyType::Infer | LazyType::Finished(_) => {}
             LazyType::PendingEval(arg) => {
                 self.expr(arg);
             }
-            LazyType::Different(_) => {}
+            LazyType::Different(_) => {} // TODO
+        }
+    }
+}
+
+struct RenumberVars<'a, 'p> {
+    vars: &'a mut Vec<VarInfo>,
+    mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
+}
+
+impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
+    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+        match &mut expr.expr {
+            Expr::GetVar(v) => {
+                if let Some(new) = self.mapping.get(v) {
+                    *v = *new;
+                }
+            }
+            Expr::PrefixMacro { name, .. } => {
+                if let Some(new) = self.mapping.get(name) {
+                    *name = *new; // probably never happens?
+                }
+            }
+            _ => {}
         }
     }
 
-    fn decl(&mut self, name: &'a mut Var<'p>) {
+    fn post_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+        if let Expr::Block { locals, .. } = &mut expr.expr {
+            if let Some(locals) = locals {
+                for var in locals {
+                    if let Some(new) = self.mapping.get(var) {
+                        *var = *new
+                    } // TODO: else seems like a problem
+                }
+            }
+        }
+    }
+
+    fn walk_stmt(&mut self, stmt: &mut FatStmt<'p>) {
+        if let Stmt::DeclVar { name, dropping, .. } = &mut stmt.stmt {
+            self.decl(name);
+            if let Some(dropping) = dropping {
+                if let Some(new_d) = self.mapping.get(dropping) {
+                    *dropping = *new_d;
+                }
+            }
+        }
+    }
+
+    fn walk_pattern(&mut self, binding: &mut Pattern<'p>) {
+        for b in &mut binding.bindings {
+            if let Name::Var(v) = &mut b.name {
+                self.decl(v);
+            }
+        }
+    }
+}
+
+impl<'a, 'p> RenumberVars<'a, 'p> {
+    fn decl(&mut self, name: &mut Var<'p>) {
         let new = Var(name.0, self.vars.len());
         self.vars.push(self.vars[name.1]);
         let stomp = self.mapping.insert(*name, new);
