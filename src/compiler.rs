@@ -703,6 +703,30 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(self.pool, "bs");
                 let any_reg_template = func.has_tag(self.pool, "any_reg");
+                let is_struct = func.has_tag(self.pool, "struct");
+                if is_struct {
+                    let ty = self.struct_type(result, &mut func.arg)?;
+                    let ty = self.program.intern_type(ty);
+                    assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
+                    func.ret = LazyType::Finished(ty);
+                    if let Some(name) = func.var_name {
+                        result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
+                    }
+                    if func.body.is_none() {
+                        let loc = func.loc;
+                        let mut init_pattern = func.arg.clone();
+                        for b in &mut init_pattern.bindings {
+                            let name = if let Name::Var(name) = b.name { name } else { todo!() };
+                            b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
+                        }
+
+                        let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
+                        let construct = self.pool.intern("construct");
+                        func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
+                    }
+                    // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
+                    func.name = self.pool.intern("init");
+                }
                 if for_bootstrap {
                     func.referencable_name = false;
                 }
@@ -1013,6 +1037,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             err!("!fn_ptr expected const fn not {fn_val:?}",)
                         }
                     }
+                    "construct" => {
+                        if let Expr::StructLiteralP(pattern) = &mut arg.expr {
+                            let out = self.construct_struct(result, requested, pattern)?;
+                            arg.ty = requested.unwrap();
+                            out
+                        } else {
+                            err!("!construct expected map literal.",)
+                        }
+                    }
                     _ => err!(CErr::UndeclaredIdent(*macro_name)),
                 }
             }
@@ -1021,57 +1054,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 self.field_access_expr(result, container_ptr, *name)?
             }
             // TODO: replace these with a more explicit node type?
-            Expr::StructLiteralP(pattern) => {
-                let requested = unwrap!(requested, "struct literal needs type hint");
-                let names: Vec<_> = pattern.flatten_names();
-                mut_replace!(*pattern, |mut pattern: Pattern<'p>| {
-                    // TODO: why must this suck so bad
-                    let values: Option<_> = pattern.flatten_exprs_mut();
-                    let mut values: Vec<_> = values.unwrap();
-                    assert_eq!(names.len(), values.len());
-                    let raw_container_ty = self.program.raw_type(requested);
-
-                    let res = match self.program.types[raw_container_ty.0].clone() {
-                        TypeInfo::Struct { fields, .. } => {
-                            assert_eq!(
-                                fields.len(),
-                                values.len(),
-                                "Cannot assign {values:?} to type {} = {fields:?}",
-                                self.program.log_type(requested)
-                            );
-                            let all = names.into_iter().zip(values).zip(fields);
-                            let mut values = vec![];
-                            for ((name, value), field) in all {
-                                assert_eq!(name, field.name);
-                                let value = self.compile_expr(result, value, Some(field.ty))?;
-                                self.type_check_arg(value.ty(), field.ty, "struct field")?;
-                                values.push(value.unchecked_cast(field.ty));
-                            }
-
-                            Structured::RuntimeOnly(requested)
-                        }
-                        TypeInfo::Enum { cases, .. } => {
-                            assert_eq!(
-                                1,
-                                values.len(),
-                                "{} is an enum, value should have one active varient not {values:?}",
-                                self.program.log_type(requested)
-                            );
-                            let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
-                            let type_hint = cases[i].1;
-                            let value = self.compile_expr(result, values[0], Some(type_hint))?;
-                            self.type_check_arg(value.ty(), type_hint, "enum case")?;
-                            Structured::RuntimeOnly(requested)
-                        }
-                        _ => err!(
-                            "struct literal {pattern:?} but expected {:?} = {}",
-                            requested,
-                            self.program.log_type(requested)
-                        ),
-                    };
-                    Ok((pattern, res))
-                })
-            }
+            Expr::StructLiteralP(pattern) => self.construct_struct(result, requested, pattern)?,
             &mut Expr::String(i) => {
                 let bytes = self.pool.get(i).to_string();
                 let mut bytes = bytes.serialize_one();
@@ -2226,6 +2209,58 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         self.program.funcs[f.0].comptime_addr = Some(map.1 as u64);
         let _ = Box::leak(map.0); // TODO: dont leak
         Ok(())
+    }
+
+    fn construct_struct(&mut self, result: &mut FnWip<'p>, requested: Option<TypeId>, pattern: &mut Pattern<'p>) -> Res<'p, Structured> {
+        let requested = unwrap!(requested, "struct literal needs type hint");
+        let names: Vec<_> = pattern.flatten_names();
+        Ok(mut_replace!(*pattern, |mut pattern: Pattern<'p>| {
+            // TODO: why must this suck so bad
+            let values: Option<_> = pattern.flatten_exprs_mut();
+            let mut values: Vec<_> = values.unwrap();
+            assert_eq!(names.len(), values.len());
+            let raw_container_ty = self.program.raw_type(requested);
+
+            let res = match self.program.types[raw_container_ty.0].clone() {
+                TypeInfo::Struct { fields, .. } => {
+                    assert_eq!(
+                        fields.len(),
+                        values.len(),
+                        "Cannot assign {values:?} to type {} = {fields:?}",
+                        self.program.log_type(requested)
+                    );
+                    let all = names.into_iter().zip(values).zip(fields);
+                    let mut values = vec![];
+                    for ((name, value), field) in all {
+                        assert_eq!(name, field.name);
+                        let value = self.compile_expr(result, value, Some(field.ty))?;
+                        self.type_check_arg(value.ty(), field.ty, "struct field")?;
+                        values.push(value.unchecked_cast(field.ty));
+                    }
+
+                    Structured::RuntimeOnly(requested)
+                }
+                TypeInfo::Enum { cases, .. } => {
+                    assert_eq!(
+                        1,
+                        values.len(),
+                        "{} is an enum, value should have one active varient not {values:?}",
+                        self.program.log_type(requested)
+                    );
+                    let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
+                    let type_hint = cases[i].1;
+                    let value = self.compile_expr(result, values[0], Some(type_hint))?;
+                    self.type_check_arg(value.ty(), type_hint, "enum case")?;
+                    Structured::RuntimeOnly(requested)
+                }
+                _ => err!(
+                    "struct literal {pattern:?} but expected {:?} = {}",
+                    requested,
+                    self.program.log_type(requested)
+                ),
+            };
+            Ok((pattern, res))
+        }))
     }
 }
 

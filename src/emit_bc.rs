@@ -475,6 +475,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let val = self.compile_expr(result, arg)?;
                         result.load(self, val)?.into()
                     }
+                    "construct" => {
+                        if let Expr::StructLiteralP(pattern) = &arg.expr {
+                            self.construct_struct(result, pattern, arg.ty)?
+                        } else {
+                            unreachable!()
+                        }
+                    }
                     _ => err!(CErr::UndeclaredIdent(*macro_name)),
                 }
             }
@@ -484,73 +491,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::StructLiteralP(pattern) => {
                 let requested = expr.ty;
-                let names: Vec<_> = pattern.flatten_names();
-                // TODO: why must this suck so bad
-                let values: Option<_> = pattern.flatten_exprs_ref();
-                let values: Vec<_> = values.unwrap();
-                assert_eq!(names.len(), values.len());
-                let raw_container_ty = self.program.raw_type(requested);
-
-                match &self.program.types[raw_container_ty.0] {
-                    TypeInfo::Struct { fields, as_tuple, .. } => {
-                        assert_eq!(
-                            fields.len(),
-                            values.len(),
-                            "Cannot assign {values:?} to type {} = {fields:?}",
-                            self.program.log_type(requested)
-                        );
-                        let all = names.into_iter().zip(values).zip(fields);
-                        let mut values = vec![];
-                        for ((name, value), field) in all {
-                            assert_eq!(name, field.name);
-                            let value = self.compile_expr(result, value)?;
-                            values.push(value.unchecked_cast(field.ty));
-                        }
-
-                        let ret = result.produce_tuple(self, values, *as_tuple)?;
-                        ret.unchecked_cast(requested)
-                    }
-                    TypeInfo::Enum { cases } => {
-                        let size = self.slot_count(raw_container_ty);
-                        assert_eq!(
-                            1,
-                            values.len(),
-                            "{} is an enum, value should have one active varient not {values:?}",
-                            self.program.log_type(requested)
-                        );
-                        let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
-                        let value = self.compile_expr(result, values[0])?;
-                        // TODO: make this constexpr
-                        let value = result.load(self, value)?.0;
-                        if value.count >= size {
-                            ice!("Enum value won't fit.")
-                        }
-                        let mut ret = result.reserve_slots(self, raw_container_ty)?;
-                        result.push(Bc::LoadConstant {
-                            slot: ret.first,
-                            value: Value::I64(i as i64),
-                        });
-                        result.push(Bc::MoveRange {
-                            from: value,
-                            to: StackRange {
-                                first: ret.offset(1),
-                                count: value.count,
-                            },
-                        });
-
-                        // If this is a smaller varient, pad out the slot instead of poisons. cant be unit because then asm doesnt copy it around
-                        ret.count = size;
-                        for i in (value.count + 1)..ret.count {
-                            result.push(Bc::LoadConstant {
-                                slot: ret.offset(i),
-                                value: Value::I64(123),
-                            });
-                        }
-
-                        (ret, requested).into()
-                    }
-                    _ => err!("struct literal but expected {:?}", requested),
-                }
+                self.construct_struct(result, pattern, requested)?
             }
             Expr::String(_) | Expr::PrefixMacro { .. } => {
                 unreachable!("{}", expr.log(self.program.pool))
@@ -801,6 +742,76 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
     pub fn slot_count(&mut self, ty: TypeId) -> usize {
         self.sizes.slot_count(self.program, ty)
+    }
+
+    fn construct_struct(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>, requested: TypeId) -> Res<'p, Structured> {
+        let names: Vec<_> = pattern.flatten_names();
+        // TODO: why must this suck so bad
+        let values: Option<_> = pattern.flatten_exprs_ref();
+        let values: Vec<_> = values.unwrap();
+        assert_eq!(names.len(), values.len());
+        let raw_container_ty = self.program.raw_type(requested);
+
+        Ok(match &self.program.types[raw_container_ty.0] {
+            TypeInfo::Struct { fields, as_tuple, .. } => {
+                assert_eq!(
+                    fields.len(),
+                    values.len(),
+                    "Cannot assign {values:?} to type {} = {fields:?}",
+                    self.program.log_type(requested)
+                );
+                let all = names.into_iter().zip(values).zip(fields);
+                let mut values = vec![];
+                for ((name, value), field) in all {
+                    assert_eq!(name, field.name);
+                    let value = self.compile_expr(result, value)?;
+                    values.push(value.unchecked_cast(field.ty));
+                }
+
+                let ret = result.produce_tuple(self, values, *as_tuple)?;
+                ret.unchecked_cast(requested)
+            }
+            TypeInfo::Enum { cases } => {
+                let size = self.slot_count(raw_container_ty);
+                assert_eq!(
+                    1,
+                    values.len(),
+                    "{} is an enum, value should have one active varient not {values:?}",
+                    self.program.log_type(requested)
+                );
+                let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
+                let value = self.compile_expr(result, values[0])?;
+                // TODO: make this constexpr
+                let value = result.load(self, value)?.0;
+                if value.count >= size {
+                    ice!("Enum value won't fit.")
+                }
+                let mut ret = result.reserve_slots(self, raw_container_ty)?;
+                result.push(Bc::LoadConstant {
+                    slot: ret.first,
+                    value: Value::I64(i as i64),
+                });
+                result.push(Bc::MoveRange {
+                    from: value,
+                    to: StackRange {
+                        first: ret.offset(1),
+                        count: value.count,
+                    },
+                });
+
+                // If this is a smaller varient, pad out the slot instead of poisons. cant be unit because then asm doesnt copy it around
+                ret.count = size;
+                for i in (value.count + 1)..ret.count {
+                    result.push(Bc::LoadConstant {
+                        slot: ret.offset(i),
+                        value: Value::I64(123),
+                    });
+                }
+
+                (ret, requested).into()
+            }
+            _ => err!("struct literal but expected {:?}", requested),
+        })
     }
 }
 

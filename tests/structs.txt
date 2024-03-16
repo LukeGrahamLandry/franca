@@ -1,24 +1,24 @@
 fn main(_canary: i64) i64 = {
 
-const Person = (
-     age: i64,
-     gender: i64,
-)!struct;
+@struct fn Person(age: i64, gender: i64);
 assert_eq(Person!type, Type);
 
-// Create a struct from a map literal. 
-var bob: Person = (
-     age: 24,
-     gender: 42,
-);
+// The above is syntax sugar for: 
+// const Person = (age: i64, gender: i64)!struct;
+// fn init(age: i64, gender: i64) Person = (age: age, gender: gender)!construct;
+// There's nothing actually special about the init function, its just a convention that seems nice. 
+
+// Create a struct by calling the initializer. 
+// We need to specify the type so it can resolve the overload even if there are multiple with the same field names and types. (If they're unique, it can infer).
+var bob: Person = init(age: 24, gender: 42);
 assert_eq(bob!type, Person);
 
 // TODO: why bother having special struct initialization syntax.
+//       I feel like this is quite important for killing some special cases from the compiler. 
 // @struct fn Person(age: i64, gender: i64);
-// var bob: Person = init(age: 12, gender: 34);  // To instantiate the struct we need to specify the type.
+// var bob: Person = init(age: 12, gender: 34);  
 // bob = init(age: 24, gender: 42);  // Since the compiler already knows the type, we don't need to repeat it.
 // bob = (age: 24, gender: 42);  // While we're at it, this syntax is also unambiguous.
-// TODO: fn undefined(T) and fn zeroed(T) instead of allowing uninitialized variables.
 
 // dot syntax for computing field offsets. 
 // Note: it returns a ptr to the field, not the value of the field. 
@@ -31,13 +31,10 @@ assert_eq(bob.age[], 25);
 assert_eq(bob.gender[], 42);
 
 // Composition
-const Animal = (
-    owner: Person,
-    whiskers: bool,
-)!struct;
+@struct fn Animal(owner: Person, whiskers: bool);
 assert_eq(Animal!type, Type);
 
-var cat: Animal = (
+var cat: Animal = init(
     owner: bob,  // This is a copy of bob.
     whiskers: true,
 );
@@ -59,14 +56,14 @@ assert_eq(bob_part_three.age[], 5);
 assert_eq(cat.owner.age[], 99);
 
 // Structs can contain pointers. 
-const House = (
+@struct fn House(
     tax_payer: Ptr(Person),
     pet: Ptr(Animal),
-)!struct;
+);
 assert_eq(Animal!type, Type);
 
 // Note: this example aliases bob_again. Good luck compiling to rust :)
-var tent: House = (
+var tent: House = init(
     tax_payer: cat.owner,
     pet: cat!addr
 );
@@ -78,8 +75,8 @@ assert_eq(tent.tax_payer.age[], 55);
 assert_eq(bob_again.age[], 55);
 assert_eq(bob.age[], 25);  // OG bob is still just chillin
 
-var mouse: Animal = (
-    owner: (
+var mouse: Animal = init(
+    owner: init(
         age: 17,
         gender: 314,
     ),
@@ -87,25 +84,25 @@ var mouse: Animal = (
 );
 // struct 'var's can be reassigned
 // No type annotation needed because it remembers. 
-tent = (
+tent = init(
     tax_payer: bob!addr,
     pet: mouse!addr,
 );
 
 { tent = mouse; }!assert_compile_error;  // type check
 
+// Field names are type checked. 
 let a = 1;
-a.hello!assert_compile_error;  // Field names are type checked. 
+a.hello!assert_compile_error;  
+tent.hello!assert_compile_error;  
 
 // TODO: same lexical sanity check for assert_compile_error as asser t_eq (just use the word assert). 
 // TODO: Struct declarations are always const.
 // { let Thing: Type = (legs: i64)!struct; }!assert_compile_error;
 
 // TODO: assert_compile_error of consts doesnt work because they get hoisted out of the block. 
-// {  // A raw map literal is illegal if the compiler can't infer a type. 
-// const Thing = (
-//    legs: i64,
-// ); }!assert_compile_error;
+// A raw map literal is illegal if the compiler can't infer a type. 
+{   let Thing = (legs: i64);   }!assert_compile_error;
 
 // Structs are passed by copy (or probably const pointer if you don't mutate)
 fn mutate_copy(who: Person) Unit = {
@@ -131,7 +128,7 @@ mutate_real(bob)!assert_compile_error;
 
 
 // Return a struct
-fn make_someone(years: i64) Person = (
+fn make_someone(years: i64) Person = init(
      age: years,
      gender: 192741892,
 );
@@ -148,7 +145,7 @@ var no: Maybe_i64 = (None: unit);
 
 assert_eq(yes!type, no!type);  // same type even with different payloads
 
-// You can manually check the tag if you try hard enough. 
+// You can manually check the tag if you try hard enough. (eventually I want macros for nice matching)
 // It's illegal to access a non-active field. 
 assert_eq(yes!tag[], tag_value(Maybe_i64, Some!symbol));
 assert_eq(no!tag[], tag_value(Maybe_i64, None!symbol));

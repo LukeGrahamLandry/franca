@@ -167,7 +167,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let arg = Box::new(self.parse_tuple()?);
 
                 let target = match self.peek() {
-                    Semicolon | Comma | RightParen | RightSquiggle => {
+                    Semicolon | Comma | RightParen | RightSquiggle | Dot => {
                         // target is optional.
                         self.start_subexpr();
                         Box::new(self.expr(Expr::unit()))
@@ -180,7 +180,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     target,
                 }))
             }
-            _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or Num or Ident...")),
+            _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }
     }
 
@@ -439,17 +439,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
         }
 
-        while RightParen != self.peek() && RightSquiggle != self.peek() {
-            args.bindings.push(self.parse_type_binding(true)?);
-            if Comma == self.peek() {
-                // inner and optional trailing
-                self.eat(Comma)?;
-            } else {
-                // No trailing comma is fine
-                break;
-            }
-        }
-
         if args.bindings.is_empty() {
             args.bindings.push(Binding {
                 name: Name::None,
@@ -620,6 +609,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         let s = format!("Expected: {msg} but found {:?}", self.peek());
         self.error_next(s)
     }
+
     fn parse_block_until_squiggle(&mut self) -> Res<FatExpr<'p>> {
         let mut body = vec![];
         while self.peek() != RightSquiggle {
