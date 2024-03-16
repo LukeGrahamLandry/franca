@@ -22,10 +22,7 @@ pub fn bootstrap() -> (String, String) {
         .iter()
         .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
         .collect();
-    libs.insert(
-        3,
-        codemap.add_file("special".into(), get_special_functions()),
-    ); // TODO: order independent name resolution
+    libs.insert(3, codemap.add_file("special".into(), get_special_functions())); // TODO: order independent name resolution
     let user_span = libs.last().unwrap().span;
     for file in &libs {
         stmts.extend(Parser::parse(file.clone(), pool).unwrap());
@@ -128,10 +125,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             .collect();
         let functions: String = emit.ready.into_iter().flatten().collect();
 
-        Ok((
-            format!("{HEADER}\n\n{constants}\n\n{functions}\n"),
-            emit.comp,
-        ))
+        Ok((format!("{HEADER}\n\n{constants}\n\n{functions}\n"), emit.comp))
     }
 
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
@@ -142,12 +136,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             return Ok(());
         }
         self.comp.compile(f, ExecTime::Runtime)?;
-        let callees = self.comp.program.funcs[f.0]
-            .wip
-            .as_ref()
-            .unwrap()
-            .callees
-            .clone();
+        let callees = self.comp.program.funcs[f.0].wip.as_ref().unwrap().callees.clone();
         for c in callees {
             self.compile(c)?;
         }
@@ -256,10 +245,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
                     && binding.bindings[0].ty == LazyType::Finished(TypeId::unit())
                 {
                     // Probably an if branch. But it could be a call with side-effects so should emit it anyway.
-                    let value = value
-                        .as_ref()
-                        .map(|value| self.compile_expr(value))
-                        .unwrap_or(Ok(String::new()));
+                    let value = value.as_ref().map(|value| self.compile_expr(value)).unwrap_or(Ok(String::new()));
                     format!("{};", value?)
                 } else {
                     todo!()
@@ -293,15 +279,12 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
                     todo!()
                 }
             }
-            Expr::Block {
-                body, result: end, ..
-            } => {
+            Expr::Block { body, result: end, .. } => {
                 let parts: Res<'p, String> = body.iter().map(|e| self.compile_stmt(e)).collect();
                 format!("{{ {}\n {} }}", parts?, self.compile_expr(end)?)
             }
             Expr::Tuple(parts) => {
-                let parts: Res<'p, Vec<String>> =
-                    parts.iter().map(|e| self.compile_expr(e)).collect();
+                let parts: Res<'p, Vec<String>> = parts.iter().map(|e| self.compile_expr(e)).collect();
                 parts?.join(", ")
             }
             Expr::SuffixMacro(name, arg) => match self.comp.pool.get(*name) {
@@ -319,11 +302,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
                 s => todo!("!{s}"),
             },
             Expr::FieldAccess(container, name) => {
-                format!(
-                    "&(*{}).{}",
-                    self.compile_expr(container)?,
-                    self.comp.pool.get(*name)
-                )
+                format!("&(*{}).{}", self.compile_expr(container)?, self.comp.pool.get(*name))
             }
             Expr::StructLiteralP(_) => todo!(),
             Expr::GetVar(var) => self.comp.pool.get(var.0).to_string(),

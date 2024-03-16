@@ -237,9 +237,7 @@ impl<'p> Program<'p> {
                     // TODO: factor out iter().join(str), how does that not already exist
                     let v: Vec<_> = cases
                         .iter()
-                        .map(|(name, ty)| {
-                            format!("{}: {}", self.pool.get(*name), self.log_type(*ty))
-                        })
+                        .map(|(name, ty)| format!("{}: {}", self.pool.get(*name), self.log_type(*ty)))
                         .collect();
                     format!("{{ {}}}!enum", v.join(", "))
                 }
@@ -269,13 +267,7 @@ impl<'p> Program<'p> {
         let mut s = String::new();
         writeln!(s, "=== {} CACHED TYPES ===", self.types.len());
         for (i, ty) in self.types.iter().enumerate() {
-            writeln!(
-                s,
-                "- {:?} = {} = {:?};",
-                TypeId(i),
-                self.log_type(TypeId(i)),
-                ty,
-            );
+            writeln!(s, "- {:?} = {} = {:?};", TypeId(i), self.log_type(TypeId(i)), ty,);
         }
         writeln!(s, "====================");
         s
@@ -297,41 +289,24 @@ impl<'p> Program<'p> {
                 collect_func_references(body, &mut pending, &mut const_reads);
                 out += &format!(
                     "{next:?}: [fn {:?}=Name={:?} Arg={} -> Ret={}] = \nBODY: \n{}\nEND\n{}\nCONSTS:\n",
-                    if func.referencable_name {
-                        func.synth_name(self.pool)
-                    } else {
-                        "@anon@"
-                    },
+                    if func.referencable_name { func.synth_name(self.pool) } else { "@anon@" },
                     func.get_name(self.pool),
                     self.log_type(func.unwrap_ty().arg),
                     self.log_type(func.unwrap_ty().ret),
-                    func.body
-                        .as_ref()
-                        .map(|e| e.log(self.pool))
-                        .unwrap_or_else(|| "@NO_BODY@".to_owned()),
+                    func.body.as_ref().map(|e| e.log(self.pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
                     if func.capture_vars.is_empty() {
                         String::from("Raw function, no captures.")
                     } else {
                         format!(
                             "Closure capturing: {:?}.",
-                            func.capture_vars
-                                .iter()
-                                .map(|v| v.log(self.pool))
-                                .collect::<Vec<_>>()
+                            func.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
                         )
                     },
                 );
                 for c in const_reads.drain() {
                     if let Some((val, ty)) = func.closed_constants.get(c) {
-                        out += &format!(
-                            "const {:?}: {} = {:?};\n",
-                            c.log(self.pool),
-                            self.log_type(ty),
-                            val
-                        );
-                        val.vec()
-                            .iter()
-                            .for_each(|v| collect_func_references_value(v, &mut pending));
+                        out += &format!("const {:?}: {} = {:?};\n", c.log(self.pool), self.log_type(ty), val);
+                        val.vec().iter().for_each(|v| collect_func_references_value(v, &mut pending));
                     }
                 }
                 out += "=======================================\n\n\n\n";
@@ -348,11 +323,7 @@ impl<'p> Program<'p> {
                 if let &TypeInfo::Named(ty, check) = &self.types[ty.0] {
                     if name == check {
                         if found.is_some() {
-                            outln!(
-                                LogTag::ShowErr,
-                                "duplicate ffi name {}",
-                                self.pool.get(name)
-                            );
+                            outln!(LogTag::ShowErr, "duplicate ffi name {}", self.pool.get(name));
                             return None;
                         }
                         found = Some(ty);
@@ -362,11 +333,7 @@ impl<'p> Program<'p> {
                                 // TODO: ffi cases that are akreayd named types
                                 if case_name == name {
                                     if found.is_some() {
-                                        outln!(
-                                            LogTag::ShowErr,
-                                            "duplicate ffi name {}",
-                                            self.pool.get(name)
-                                        );
+                                        outln!(LogTag::ShowErr, "duplicate ffi name {}", self.pool.get(name));
                                         return None;
                                     }
                                     found = Some(inner);
@@ -393,18 +360,11 @@ impl<'p> Program<'p> {
                                 // Not unique, name is probably just name of the case.
                                 ty = inner;
                             }
-                            writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty))
-                                .unwrap();
+                            writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty)).unwrap();
                         }
                         out += "}!enum);\n"
                     } else {
-                        writeln!(
-                            out,
-                            "const {} = Unique({});",
-                            self.pool.get(name),
-                            self.log_type(ty)
-                        )
-                        .unwrap();
+                        writeln!(out, "const {} = Unique({});", self.pool.get(name), self.log_type(ty)).unwrap();
                     }
                 }
             }
@@ -413,11 +373,7 @@ impl<'p> Program<'p> {
     }
 }
 
-fn collect_func_references_stmt<'p>(
-    stmt: &Stmt<'p>,
-    refs: &mut Vec<FuncId>,
-    const_reads: &mut HashSet<Var<'p>>,
-) {
+fn collect_func_references_stmt<'p>(stmt: &Stmt<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
     match stmt {
         Stmt::DoneDeclFunc(_) | Stmt::Noop => {}
         Stmt::Eval(e) => collect_func_references(e, refs, const_reads),
@@ -459,17 +415,9 @@ fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
     }
 }
 
-fn collect_func_references<'p>(
-    expr: &Expr<'p>,
-    refs: &mut Vec<FuncId>,
-    const_reads: &mut HashSet<Var<'p>>,
-) {
+fn collect_func_references<'p>(expr: &Expr<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
     match expr {
-        Expr::Value { value, .. } => value
-            .clone()
-            .vec()
-            .iter()
-            .for_each(|v| collect_func_references_value(v, refs)),
+        Expr::Value { value, .. } => value.clone().vec().iter().for_each(|v| collect_func_references_value(v, refs)),
         Expr::Call(f, arg) => {
             collect_func_references(f, refs, const_reads);
             collect_func_references(arg, refs, const_reads);
@@ -493,11 +441,7 @@ fn collect_func_references<'p>(
             const_reads.insert(*v);
         }
         Expr::StructLiteralP(_) => {}
-        Expr::GetNamed(_)
-        | Expr::WipFunc(_)
-        | Expr::PrefixMacro { .. }
-        | Expr::String(_)
-        | Expr::Closure(_) => {} // TODO // unreachable!("finished ast contained {expr:?}"),
+        Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::PrefixMacro { .. } | Expr::String(_) | Expr::Closure(_) => {} // TODO // unreachable!("finished ast contained {expr:?}"),
     }
 }
 
@@ -531,13 +475,7 @@ impl<'p> Program<'p> {
     pub fn log_consts(&self, c: &Constants<'p>) -> String {
         let mut s = String::new();
         for (name, (v, ty)) in &c.local {
-            writeln!(
-                s,
-                "   - {} = {:?} is {}",
-                name.log(self.pool),
-                v,
-                self.log_type(*ty)
-            );
+            writeln!(s, "   - {} = {:?} is {}", name.log(self.pool), v, self.log_type(*ty));
         }
 
         s
@@ -547,30 +485,17 @@ impl<'p> Program<'p> {
 impl<'p> PoolLog<'p> for Stmt<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            Stmt::DeclNamed {
-                name,
-                ty,
-                value,
-                kind,
-            } => format!(
+            Stmt::DeclNamed { name, ty, value, kind } => format!(
                 "{kind:?} {}: {} = {};",
                 pool.get(*name),
                 ty.log(pool),
-                value
-                    .as_ref()
-                    .map(|v| v.log(pool))
-                    .unwrap_or_else(|| String::from("uninit()"))
+                value.as_ref().map(|v| v.log(pool)).unwrap_or_else(|| String::from("uninit()"))
             ),
-            Stmt::DeclVar {
-                name, ty, value, ..
-            } => format!(
+            Stmt::DeclVar { name, ty, value, .. } => format!(
                 "let {}: {} = {};",
                 name.log(pool),
                 ty.log(pool),
-                value
-                    .as_ref()
-                    .map(|v| v.log(pool))
-                    .unwrap_or_else(|| String::from("uninit()"))
+                value.as_ref().map(|v| v.log(pool)).unwrap_or_else(|| String::from("uninit()"))
             ),
             Stmt::Eval(e) => e.log(pool),
             Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
@@ -634,13 +559,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 let body: String = pattern
                     .bindings
                     .iter()
-                    .map(|b| {
-                        format!(
-                            "{}: ({}), ",
-                            b.name().map_or("_", |n| pool.get(n)),
-                            b.lazy().log(pool)
-                        )
-                    })
+                    .map(|b| format!("{}: ({}), ", b.name().map_or("_", |n| pool.get(n)), b.lazy().log(pool)))
                     .collect();
 
                 format!(".{{ {body} }}")
@@ -648,12 +567,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
             Expr::FieldAccess(container, name) => {
                 format!("{}.{}", container.log(pool), pool.get(*name))
             }
-            Expr::PrefixMacro { name, arg, target } => format!(
-                "[@{}({}) {}]",
-                name.log(pool),
-                arg.log(pool),
-                target.log(pool)
-            ),
+            Expr::PrefixMacro { name, arg, target } => format!("[@{}({}) {}]", name.log(pool), arg.log(pool), target.log(pool)),
             _ => format!("{:?}", self),
         }
     }
@@ -682,15 +596,8 @@ impl<'p> PoolLog<'p> for Func<'p> {
             self.synth_name(pool),
             self.get_name(pool),
             self.ret.log(pool),
-            self.local_constants
-                .iter()
-                .map(|e| e.log(pool))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            self.body
-                .as_ref()
-                .map(|e| e.log(pool))
-                .unwrap_or_else(|| "@NO_BODY@".to_owned()),
+            self.local_constants.iter().map(|e| e.log(pool)).collect::<Vec<_>>().join("\n"),
+            self.body.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
             self.arg, // TODO: better formatting.
             self.annotations.iter().map(|i| pool.get(i.name)),
             if self.capture_vars.is_empty() {
@@ -698,10 +605,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
             } else {
                 format!(
                     "Closure capturing: {:?}.",
-                    self.capture_vars
-                        .iter()
-                        .map(|v| v.log(pool))
-                        .collect::<Vec<_>>()
+                    self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
                 )
             },
             if self.capture_vars_const.is_empty() {
@@ -709,10 +613,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
             } else {
                 format!(
                     "Const capturing: {:?}.",
-                    self.capture_vars_const
-                        .iter()
-                        .map(|v| v.log(pool))
-                        .collect::<Vec<_>>()
+                    self.capture_vars_const.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
                 )
             }
         )
@@ -741,10 +642,7 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
                 f,
                 "{:width$} {}",
                 bc,
-                self.debug
-                    .get(i)
-                    .map(|d| d.log(pool))
-                    .unwrap_or_else(|| String::from("// ???"))
+                self.debug.get(i).map(|d| d.log(pool)).unwrap_or_else(|| String::from("// ???"))
             );
         }
         writeln!(f, "{}", self.why);
@@ -757,17 +655,9 @@ impl<'p> PoolLog<'p> for Bc<'p> {
         let mut f = String::new();
         match self {
             Bc::NoCompile => write!(f, "UNREACHABLE_BODY"),
-            Bc::CallDynamic {
-                f: func_slot,
-                ret,
-                arg,
+            Bc::CallDynamic { f: func_slot, ret, arg } | Bc::CallC { f: func_slot, ret, arg, .. } => {
+                write!(f, "{ret:?} = call({func_slot:?}, {arg:?});")
             }
-            | Bc::CallC {
-                f: func_slot,
-                ret,
-                arg,
-                ..
-            } => write!(f, "{ret:?} = call({func_slot:?}, {arg:?});"),
             Bc::CallDirect { f: func, ret, arg } => {
                 write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)
             }
@@ -775,15 +665,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
                 write!(f, "{ret:?} = builtin(S{}, {arg:?});", name.0)
             }
             Bc::LoadConstant { slot, value } => write!(f, "{:?} = {:?};", slot, value),
-            Bc::JumpIf {
-                cond,
-                true_ip,
-                false_ip,
-            } => write!(
-                f,
-                "if ({:?}) goto {} else goto {};",
-                cond, true_ip, false_ip
-            ),
+            Bc::JumpIf { cond, true_ip, false_ip } => write!(f, "if ({:?}) goto {} else goto {};", cond, true_ip, false_ip),
             Bc::Goto { ip } => write!(f, "goto {ip};",),
             Bc::Ret(i) => write!(f, "return {i:?};"),
             Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
@@ -794,16 +676,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
             Bc::Drop(i) => write!(f, "drop({:?});", i),
             Bc::LastUse(i) => write!(f, "LastUse({:?});", i),
-            Bc::SlicePtr {
-                base,
-                offset,
-                count,
-                ret,
-            } => write!(
-                f,
-                "{:?} = slice({:?}, first={}, count={});",
-                ret, base, offset, count
-            ),
+            Bc::SlicePtr { base, offset, count, ret } => write!(f, "{:?} = slice({:?}, first={}, count={});", ret, base, offset, count),
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
             Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
             Bc::DebugLine(loc) => write!(f, "debug({:?});", loc),
@@ -821,9 +694,7 @@ impl Debug for StackOffset {
 
 impl Debug for StackRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let args: Vec<_> = (self.first.0..(self.first.0 + self.count))
-            .map(|i| format!("${}", i))
-            .collect();
+        let args: Vec<_> = (self.first.0..(self.first.0 + self.count)).map(|i| format!("${}", i)).collect();
         let args = args.join(", ");
         write!(f, "({args})")
     }
@@ -949,10 +820,7 @@ impl<'p> CErr<'p> {
                 program.log_type(*found)
             ),
             CErr::IceFmt(s) | CErr::Msg(s) => s.clone(),
-            CErr::VarNotFound(var) => format!(
-                "Resolved var not found {:?}. (forgot to make something const? ice?)",
-                var.log(pool)
-            ),
+            CErr::VarNotFound(var) => format!("Resolved var not found {:?}. (forgot to make something const? ice?)", var.log(pool)),
             _ => format!("{:?}", self),
         }
     }
@@ -972,20 +840,14 @@ impl<'p> Func<'p> {
             writeln!(
                 s,
                 "- Runtime captures: {:?}",
-                self.capture_vars
-                    .iter()
-                    .map(|v| v.log(pool))
-                    .collect::<Vec<String>>()
+                self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<String>>()
             );
         }
         if !self.capture_vars_const.is_empty() {
             writeln!(
                 s,
                 "- Const captures: {:?}",
-                self.capture_vars_const
-                    .iter()
-                    .map(|v| v.log(pool))
-                    .collect::<Vec<String>>()
+                self.capture_vars_const.iter().map(|v| v.log(pool)).collect::<Vec<String>>()
             );
         }
 
@@ -1004,13 +866,16 @@ pub fn log_tag_info() {
     use LogTag::*;
     let info = |tag: LogTag, msg: &str| outln!(tag, "{msg}\n###################################");
 
-    info(Parsing, "The parser uncovers the structure of your program without any understanding of its semantics.");
-    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation. \nOverloads have been resolved, types are explicit, macros have been applied.");
     info(
-        Macros,
-        "Macros are functions, written in this language, that transform the AST.",
+        Parsing,
+        "The parser uncovers the structure of your program without any understanding of its semantics.",
     );
-    info(Scope, "As part of resolving variable shadowing, we find out if any functions are actually closures that capture part of thier environment.");
+    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation. \nOverloads have been resolved, types are explicit, macros have been applied.");
+    info(Macros, "Macros are functions, written in this language, that transform the AST.");
+    info(
+        Scope,
+        "As part of resolving variable shadowing, we find out if any functions are actually closures that capture part of thier environment.",
+    );
     info(
         Bytecode,
         "Your program broken down into simple instructions. This is the format understood by the comptime interpreter. It's also the only backend that exists so far.",

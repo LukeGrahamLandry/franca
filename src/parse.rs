@@ -108,14 +108,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(RightSquiggle)?;
                 Ok(expr)
             }
-            DotLeftSquiggle => {
-                self.start_subexpr();
-                self.eat(DotLeftSquiggle)?;
-                let pattern = self.parse_args()?;
-                self.eat(RightSquiggle)?;
-
-                Ok(self.expr(Expr::StructLiteralP(pattern)))
-            }
+            DotLeftSquiggle => Err(self.error_next(String::from("Use '(Name: Value)' instead of '.{ Name: Value }'"))),
             LeftParen => self.parse_tuple(),
             Number(f) => {
                 self.start_subexpr();
@@ -240,19 +233,24 @@ impl<'a, 'p> Parser<'a, 'p> {
                     // No trailing comma is fine
                     break;
                 }
-                Colon => {
+                Colon | Equals => {
                     // The last thing was actually a name for a named argument
-                    self.eat(Colon)?;
-                    let value = self.parse_expr()?;
+                    let value = if self.maybe(Colon) {
+                        LazyType::PendingEval(self.parse_expr()?)
+                    } else {
+                        // It's gonna be Name = Value like for @enum(T) S
+                        LazyType::Infer
+                    };
                     let name = if let Expr::GetNamed(name) = args.pop().unwrap().expr {
                         name
                     } else {
                         return Err(self.expected("Ident before ':' in argument pattern"));
                     };
+                    let default = if self.maybe(Equals) { Some(self.parse_expr()?) } else { None };
                     let first = Binding {
                         name: Name::Ident(name),
-                        ty: LazyType::PendingEval(value),
-                        default: None,
+                        ty: value,
+                        default,
                     };
                     self.maybe(Comma);
                     let mut named = if RightParen == self.peek() {

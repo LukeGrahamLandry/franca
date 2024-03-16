@@ -704,14 +704,19 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let for_bootstrap = func.has_tag(self.pool, "bs");
                 let any_reg_template = func.has_tag(self.pool, "any_reg");
                 let is_struct = func.has_tag(self.pool, "struct");
+                let is_enum = func.has_tag(self.pool, "enum");
+                assert!(!(is_struct && is_enum));
                 if is_struct {
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.intern_type(ty);
                     assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
                     func.ret = LazyType::Finished(ty);
+                    func.finished_ret = Some(ty);
                     if let Some(name) = func.var_name {
                         result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
                     }
+                    // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
+                    func.name = self.pool.intern("init");
                     if func.body.is_none() {
                         let loc = func.loc;
                         let mut init_pattern = func.arg.clone();
@@ -724,8 +729,36 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         let construct = self.pool.intern("construct");
                         func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
                     }
+                }
+                if is_enum {
+                    let ty = self.struct_type(result, &mut func.arg)?;
+                    let ty = self.program.to_enum(ty);
+                    assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
+                    func.ret = LazyType::Finished(ty);
+                    func.finished_ret = Some(ty);
+                    if let Some(name) = func.var_name {
+                        result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
+                    }
                     // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
                     func.name = self.pool.intern("init");
+                    if func.body.is_none() {
+                        let loc = func.loc;
+                        let init_pattern = func.arg.clone();
+                        let construct = self.pool.intern("construct");
+                        let ident_enum = self.pool.intern("enum");
+                        for mut b in init_pattern.bindings {
+                            let mut new_func = func.clone();
+                            new_func.arg.bindings = vec![b.clone()];
+                            let name = if let Name::Var(name) = b.name { name } else { todo!() };
+                            b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
+                            let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
+                            new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
+                            new_func.annotations.retain(|a| a.name != ident_enum);
+                            self.add_func(new_func, &result.constants)?;
+                        }
+                    }
+                    // TODO: unfortunate that I have to short circuit, not handle extra annotations, and leave the garbage function there because i split them
+                    return Ok(());
                 }
                 if for_bootstrap {
                     func.referencable_name = false;
@@ -1055,6 +1088,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => self.construct_struct(result, requested, pattern)?,
+            // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
                 let bytes = self.pool.get(i).to_string();
                 let mut bytes = bytes.serialize_one();
@@ -1136,7 +1170,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         let the_type = self.immediate_eval_expr(&result.constants, the_type, TypeId::ty())?;
                         let the_type = self.to_type(the_type)?;
                         // *expr = FatExpr::synthetic(Expr::PrefixMacro { name: var, arg, target: mem::take(target) }, loc);
-                        let value = self.immediate_eval_expr(&result.constants, mem::take(target), the_type)?;
+
+                        let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("construct"), mem::take(target)), loc);
+                        let value = self.immediate_eval_expr(&result.constants, construct_expr, the_type)?;
                         let value = Value::new_box(value.vec(), true).into();
                         let ty = self.program.ptr_type(the_type);
                         *expr = FatExpr::synthetic(Expr::Value { ty, value }, loc);
