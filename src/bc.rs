@@ -1,4 +1,6 @@
 //! Low level instructions that the interpreter can execute.
+use crate::emit_bc::DebugInfo;
+use crate::experiments::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
     compiler::{ExecTime, Res},
@@ -10,8 +12,6 @@ use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
 use std::ops::Range;
-use crate::emit_bc::DebugInfo;
-use crate::experiments::reflect::BitSet;
 
 #[derive(Clone, InterpSend)]
 pub enum Bc<'p> {
@@ -91,7 +91,7 @@ pub enum Bc<'p> {
         arg: StackRange,
         ret: StackRange,
         ty: FnType,
-        comp_ctx: bool
+        comp_ctx: bool,
     },
     LastUse(StackRange),
     NoCompile,
@@ -113,6 +113,7 @@ pub struct FnBody<'p> {
     pub to_drop: Vec<(StackRange, TypeId)>,
     /// true -> we might Drop but the put a value back. false -> it's an ssa intermediate only needed once.
     pub slot_is_var: BitSet,
+    pub jump_targets: BitSet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -156,18 +157,13 @@ pub enum Structured {
 impl Structured {
     pub fn ty(&self) -> TypeId {
         match self {
-            Structured::Emitted(ty, _)
-            | Structured::Const(ty, _)
-            | Structured::TupleDifferent(ty, _)
-            | Structured::RuntimeOnly(ty) => *ty,
+            Structured::Emitted(ty, _) | Structured::Const(ty, _) | Structured::TupleDifferent(ty, _) | Structured::RuntimeOnly(ty) => *ty,
         }
     }
 
     pub fn get<'p>(self) -> Res<'p, Values> {
         match self {
-            Structured::Emitted(_, _)
-            | Structured::TupleDifferent(_, _)
-            | Structured::RuntimeOnly(_) => {
+            Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) | Structured::RuntimeOnly(_) => {
                 err!("not const {self:?}",)
             }
             Structured::Const(_, v) => Ok(v),

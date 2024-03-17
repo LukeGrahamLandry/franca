@@ -13,7 +13,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     hash::Hash,
-    mem,
+    mem::{self, transmute},
     ops::{Deref, DerefMut},
 };
 
@@ -1398,7 +1398,7 @@ impl TypeId {
 }
 
 /// I don't require the order be stable, it just needs to be fixed within one run of the compiler so I can avoid a billion hash lookups.
-/// They're converted to lowercase so you can't have an uppercase one.
+/// They're converted to lowercase which means you can't express an uppercase one.
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 #[repr(u8)]
@@ -1434,5 +1434,26 @@ pub enum Flag {
     Main,
     Builtin_If,
     Builtin_While,
+    If,
+    While,
+    Addr,
+    Tag,
+    Reflect_Print,
+    Fn_Ptr,
     _Reserved_Count_,
+}
+
+impl<'p> TryFrom<Ident<'p>> for Flag {
+    type Error = ();
+
+    fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
+        // # Safety
+        // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
+        // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
+        if value.0 > Flag::_Reserved_Null_ as usize && value.0 < Flag::_Reserved_Count_ as usize {
+            Ok(unsafe { transmute(value.0 as u8) })
+        } else {
+            Err(())
+        }
+    }
 }

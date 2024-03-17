@@ -5,6 +5,7 @@ use codemap::Span;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::Location;
+use std::usize;
 
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
@@ -63,7 +64,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     #[track_caller]
     fn empty_fn(&mut self, func: &FnWip<'p>) -> FnBody<'p> {
+        let mut jump_targets = BitSet::empty();
+        jump_targets.set(0); // entry is the first instruction
         FnBody {
+            jump_targets,
             arg_range: StackRange {
                 first: StackOffset(0),
                 count: 0,
@@ -410,15 +414,19 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::GetNamed(_) => unreachable!(),
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
             Expr::SuffixMacro(macro_name, arg) => {
-                let name = self.program.pool.get(*macro_name);
+                let name = if let Ok(f) = Flag::try_from(*macro_name) {
+                    f
+                } else {
+                    err!(CErr::UndeclaredIdent(*macro_name))
+                };
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    "if" => self.emit_call_if(result, arg, expr.ty)?,
-                    "while" => self.emit_call_while(result, arg)?,
-                    "addr" => self.addr_macro(result, arg)?,
-                    "quote" => unreachable!(),
-                    "slice" => {
+                    Flag::If => self.emit_call_if(result, arg, expr.ty)?,
+                    Flag::While => self.emit_call_while(result, arg)?,
+                    Flag::Addr => self.addr_macro(result, arg)?,
+                    Flag::Quote => unreachable!(),
+                    Flag::Slice => {
                         let container = self.compile_expr(result, arg)?;
                         let container_ty = container.ty();
                         let ty = self.program.tuple_types(container.ty());
@@ -442,8 +450,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.to_drop.push((slot, container_ty));
                         (ptr, ptr_ty).into()
                     }
-                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
-                    "deref" => {
+                    Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
+                    Flag::Deref => {
                         let ptr = self.compile_expr(result, arg)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr.ty()), "");
                         let to = result.reserve_slots(self, ty)?;
@@ -451,15 +459,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::Load { from: from.single(), to });
                         (to, ty).into()
                     }
-                    "reflect_print" => {
+                    Flag::Reflect_Print => {
                         let arg = self.compile_expr(result, arg)?;
                         let arg = result.load(self, arg)?.0;
                         let ret = result.reserve_slots(self, TypeId::unit())?;
                         result.push(Bc::CallBuiltin { name: *macro_name, ret, arg });
                         (ret, TypeId::unit()).into()
                     }
-                    "type" | "assert_compile_error" | "comptime_print" | "symbol" | "struct" | "enum" => unreachable!(),
-                    "tag" => {
+                    Flag::Tag => {
                         // TODO: auto deref and typecheking
                         let addr = self.addr_macro(result, arg)?;
                         let ty = self.program.find_interned(TypeInfo::Ptr(TypeId::i64()));
@@ -473,18 +480,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         });
                         (ret, ty).into()
                     }
-                    "fn_ptr" => {
+                    Flag::Fn_Ptr => {
                         let val = self.compile_expr(result, arg)?;
                         result.load(self, val)?.into()
                     }
-                    "construct" => {
+                    Flag::Construct => {
                         if let Expr::StructLiteralP(pattern) = &arg.expr {
                             self.construct_struct(result, pattern, arg.ty)?
                         } else {
                             unreachable!()
                         }
                     }
-                    _ => err!(CErr::UndeclaredIdent(*macro_name)),
+                    name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
             Expr::FieldAccess(e, name) => {
@@ -578,6 +585,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             false_ip,
         };
         result.insts[jump_over_false] = Bc::Goto { ip: result.insts.len() };
+        result.jump_targets.set(result.insts.len());
+        result.jump_targets.set(true_ip);
+        result.jump_targets.set(false_ip);
 
         Ok((ret, arg.ty).into())
     }
@@ -607,6 +617,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             true_ip: body_ip,
             false_ip: end_ip,
         };
+        result.jump_targets.set(cond_ip);
+        result.jump_targets.set(branch_ip);
+        result.jump_targets.set(end_ip);
 
         Ok(Structured::Const(TypeId::unit(), Value::Unit.into()))
     }
