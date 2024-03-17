@@ -67,7 +67,8 @@ pub fn bootstrap() -> (String, String) {
             .array_chunks::<4>()
             .map(|b| format!("{:#05x}, ", u32::from_le_bytes(b)))
             .collect();
-        fr += &format!("\n{annotations} {sig} = (\n    {bytes}\n)!asm;\n")
+        fr += &format!("\n{annotations} @aarch64 {sig} = (\n    {bytes}\n)!asm;\n")
+        // TODO dont hardcode arch
     }
 
     (rs, fr)

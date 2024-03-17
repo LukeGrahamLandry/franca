@@ -709,6 +709,7 @@ pub struct Program<'p> {
     pub assertion_count: usize,
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
+    pub inline_llvm_ir: Vec<FuncId>,
 }
 
 #[derive(Clone, Debug)]
@@ -816,6 +817,7 @@ impl<'p> Program<'p> {
             assertion_count: 0,
             runtime_arch,
             comptime_arch,
+            inline_llvm_ir: vec![],
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -957,6 +959,44 @@ impl<'p> Program<'p> {
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
         let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
         TypeId(id)
+    }
+
+    pub fn emit_inline_llvm_ir(&mut self) -> String {
+        let mut out = String::new();
+
+        for f in self.inline_llvm_ir.clone() {
+            let arg = self.funcs[f.0].arg.clone();
+            let ret = self.funcs[f.0].finished_ret.unwrap();
+            let body = self.funcs[f.0]
+                .llvm_ir
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|n| self.pool.get(*n).to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let args = arg
+                .flatten()
+                .into_iter()
+                .map(|(name, ty)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().0)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out += &format!("define {} @FN{}({args}) {{ {body} }}\n\n", self.for_llvm_ir(ret), f.0);
+        }
+
+        out
+    }
+
+    pub fn for_llvm_ir(&self, ty: TypeId) -> &str {
+        match &self.types[ty.0] {
+            TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!(),
+            // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
+            TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
+            TypeInfo::Bool => "i1",
+            TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
+            TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Enum { .. } => todo!(),
+            &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
+        }
     }
 }
 

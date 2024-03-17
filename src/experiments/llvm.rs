@@ -10,12 +10,13 @@ use std::{
 
 use llvm_sys::{
     core::{
-        LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildBr, LLVMBuildCondBr, LLVMBuildLoad2, LLVMBuildRet, LLVMBuildStore,
-        LLVMConstInt, LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext, LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType,
-        LLVMGetParam, LLVMInt1TypeInContext, LLVMInt64TypeInContext, LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext,
-        LLVMPositionBuilderAtEnd, LLVMStructType,
+        LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildBr, LLVMBuildCall2, LLVMBuildCondBr, LLVMBuildLoad2, LLVMBuildRet,
+        LLVMBuildStore, LLVMConstInt, LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext, LLVMCreateMemoryBufferWithMemoryRange,
+        LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType, LLVMGetNamedGlobal, LLVMGetParam, LLVMInt1TypeInContext, LLVMInt64TypeInContext,
+        LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd, LLVMStructType,
     },
     execution_engine::{LLVMCreateJITCompilerForModule, LLVMDisposeExecutionEngine, LLVMExecutionEngineRef, LLVMGetFunctionAddress, LLVMLinkInMCJIT},
+    ir_reader::LLVMParseIRInContext,
     prelude::*,
     target::{LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget},
 };
@@ -39,14 +40,30 @@ pub struct JittedLlvm {
 }
 
 impl JittedLlvm {
-    pub fn new(name: &str) -> JittedLlvm {
+    pub fn new(name: &str, program: &mut Program) -> JittedLlvm {
         unsafe {
             let context = LLVMContextCreate();
             let name = null_terminate(name);
-            let module = LLVMModuleCreateWithNameInContext(name.as_ptr(), context);
+            let mut llvm_ir = std::convert::Into::<Vec<u8>>::into(program.emit_inline_llvm_ir());
+            let len = llvm_ir.len(); // TODO: include the null?
+            llvm_ir.push(0); // why the fuck isnt this a function bro
+            let llvm_ir = CString::from_vec_with_nul(llvm_ir).unwrap();
+
+            let llvm_ir = LLVMCreateMemoryBufferWithMemoryRange(llvm_ir.as_ptr(), len, name.as_ptr(), LLVMBool::from(false));
+
+            let mut err = MaybeUninit::uninit();
+            let mut module = MaybeUninit::uninit();
+
+            let failed = LLVMParseIRInContext(context, llvm_ir, module.as_mut_ptr(), err.as_mut_ptr());
+            if failed != 0 {
+                let err = err.assume_init();
+                let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
+                LLVMDisposeMessage(err);
+                panic!("{}", msg);
+            }
+            let module = module.assume_init();
 
             let mut execution_engine = MaybeUninit::uninit();
-            let mut err = MaybeUninit::uninit();
 
             // Fixes: Unable to find target for this triple (no targets are registered)
             assert_eq!(LLVM_InitializeNativeTarget(), 0);
@@ -57,6 +74,7 @@ impl JittedLlvm {
             let failed = LLVMCreateJITCompilerForModule(execution_engine.as_mut_ptr(), module, 0, err.as_mut_ptr());
 
             if failed != 0 {
+                // TODO: factor out
                 let err = err.assume_init();
                 let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
                 LLVMDisposeMessage(err);
@@ -111,7 +129,7 @@ impl JittedLlvm {
 
         let result = unsafe {
             match &program.types[ty.0] {
-                TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!(),
+                TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!("llvm type: {}", program.log_type(ty)),
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
                 TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
@@ -163,9 +181,9 @@ pub struct BcToLlvm<'z, 'a, 'p> {
 impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
     pub fn new(interp: &'z mut Interp<'a, 'p>, program: &'z mut Program<'p>) -> Self {
         Self {
+            llvm: JittedLlvm::new("franca", program),
             program,
             interp,
-            llvm: JittedLlvm::new("franca"),
             f: FuncId(0), // TODO: bad
             wip: vec![],
             slots: vec![],
@@ -211,6 +229,12 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
         unsafe {
             self.f = f;
             let ff = &self.program.funcs[f.0];
+            if ff.llvm_ir.is_some() {
+                let name = null_terminate(&format!("FN{}", f.0));
+                let value = LLVMGetNamedGlobal(self.llvm.module, name.as_ptr());
+                self.llvm.functions[f.0] = Some((value, true));
+                return Ok(());
+            }
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
             let func = self.interp.ready[f.0].as_ref().unwrap();
@@ -269,7 +293,15 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                 match inst {
                     Bc::NoCompile => unreachable!(),
                     Bc::CallDynamic { .. } => todo!(),
-                    Bc::CallDirect { f, ret, arg } => todo!(),
+                    &Bc::CallDirect { f, ret, arg } => {
+                        let ty = self.program.func_type(f);
+                        let ty = self.llvm.get_type(self.program, ty);
+                        let function = self.llvm.get_fn(f).unwrap();
+                        let empty = CString::from(vec![]); // TODO: hoist
+                        let mut args = arg.into_iter().map(|i| self.read_slot(StackOffset(i))).collect::<Vec<_>>();
+                        let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, empty.as_ptr());
+                        self.write_slot(ret.single(), value);
+                    }
                     Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                     &Bc::LoadConstant { slot, value } => {
                         let ty = self.slot_type(slot);

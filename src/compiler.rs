@@ -780,6 +780,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     return Ok(());
                 }
                 if for_bootstrap {
+                    func.add_tag(Flag::Aarch64); // TODO: could do for llvm too once i support eval body
                     func.referencable_name = false;
                 }
 
@@ -2307,6 +2308,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             if llvm_ir.is_some() {
                 self.program.funcs[f.0].add_tag(Flag::Llvm);
                 self.program.funcs[f.0].llvm_ir = llvm_ir;
+                self.program.inline_llvm_ir.push(f);
                 return Ok(());
             }
             let asm_bytes: Res<'p, Vec<u32>> = parts

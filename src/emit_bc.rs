@@ -155,7 +155,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             let ret_ty = func.ret.unwrap();
             let ret = result.reserve_slots(self, func.ret.unwrap())?;
 
-            if func.comptime_addr.is_some() {
+            if func.comptime_addr.is_some() || func.llvm_ir.is_some() {
                 // You should never actually try to run this code, the caller should have just done the call,
                 // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
                 // just too ways of emitting the call.
@@ -925,7 +925,7 @@ impl<'p> FnBody<'p> {
                 let start = self.stack_slots;
                 let count = values.len();
                 for value in values {
-                    let to = self.reserve_slots(program, TypeId::any())?;
+                    let to = self.reserve_slots(program, TypeId::any())?; // TODO: this breaks llvm. for tuples of int literals
                     self.push(Bc::LoadConstant { slot: to.single(), value });
                 }
                 Ok((
