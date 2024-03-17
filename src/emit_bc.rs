@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::Location;
 
-use crate::ast::{FatStmt, Pattern, Var, VarType};
+use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
 use crate::experiments::reflect::BitSet;
@@ -183,7 +183,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let func = &self.program.funcs[f.0];
         // We're done with our arguments, get rid of them. Same for other vars.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        result.push(Bc::DebugMarker(self.program.pool.intern("drop_args"), func.get_name(self.program.pool)));
+        result.push(Bc::DebugMarker(Flag::Drop_Args.ident(), func.get_name(self.program.pool)));
         args_to_drop.extend(result.to_drop.drain(0..).map(|(s, ty)| (None, s, ty)));
         for (var, range, _ty) in args_to_drop {
             if let Some(var) = var {
@@ -210,12 +210,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(!self.program.is_comptime_only_type(f_ty.arg), "{}", arg_expr.log(self.program.pool));
         let func = &self.program.funcs[f.0];
         assert!(func.capture_vars.is_empty());
-        assert!(!func.has_tag(self.program.pool, "inline"));
+        assert!(!func.has_tag(Flag::Inline));
         let (arg, arg_ty) = result.load(self, arg)?;
         let ret = result.reserve_slots(self, f_ty.ret)?;
 
         if let Some(ptr) = func.comptime_addr {
-            if func.has_tag(self.program.pool, "c_call") {
+            if func.has_tag(Flag::C_Call) {
                 // We could emit its body as just a Bc::CallC but might as well skip the indirection.
                 let ty = func.unwrap_ty();
                 let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
@@ -225,7 +225,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     arg,
                     ret,
                     ty,
-                    comp_ctx: func.has_tag(self.program.pool, "ct"),
+                    comp_ctx: func.has_tag(Flag::Ct),
                 });
             } else {
                 result.push(Bc::CallDirect { f, ret, arg });
@@ -324,6 +324,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
+            Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
@@ -331,7 +332,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 assert!(!arg.ty.is_unknown(), "Not typechecked: {}", arg.log(self.program.pool));
                 if let Some(f_id) = f.as_fn() {
                     let func = &self.program.funcs[f_id.0];
-                    assert!(!func.has_tag(self.program.pool, "comptime"));
+                    assert!(!func.has_tag(Flag::Comptime));
                     return self.emit_runtime_call(result, f_id, arg);
                 }
                 if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
@@ -559,13 +560,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         let ret = result.reserve_slots(self, out_ty)?;
 
-        let name = self.program.pool.intern("builtin:if");
-        let branch_ip = result.push(Bc::DebugMarker(self.program.pool.intern("patch"), name));
+        let branch_ip = result.push(Bc::DebugMarker(Flag::Patch.ident(), Flag::Builtin_If.ident()));
         let true_ip = result.insts.len();
         let true_ret = self.compile_expr(result, if_true)?;
         let true_ret = result.load(self, true_ret)?.0;
         result.push(Bc::MoveRange { from: true_ret, to: ret });
-        let jump_over_false = result.push(Bc::DebugMarker(self.program.pool.intern("patch"), name));
+        let jump_over_false = result.push(Bc::DebugMarker(Flag::Patch.ident(), Flag::Builtin_If.ident()));
         let false_ip = result.insts.len();
         let false_ret = self.compile_expr(result, if_false)?;
         let false_ret = result.load(self, false_ret)?.0;
@@ -589,10 +589,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             ice!("if args must be tuple not {:?}", arg);
         };
 
-        let name = self.program.pool.intern("builtin:while");
         let cond_ip = result.insts.len();
         let cond_ret = self.compile_expr(result, cond_fn)?;
-        let branch_ip = result.push(Bc::DebugMarker(self.program.pool.intern("patch"), name));
+        let branch_ip = result.push(Bc::DebugMarker(Flag::Patch.ident(), Flag::Builtin_While.ident()));
 
         let body_ip = result.insts.len();
         let body_ret = self.compile_expr(result, body_fn)?;

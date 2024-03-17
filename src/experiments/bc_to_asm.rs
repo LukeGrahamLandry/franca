@@ -4,7 +4,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
 
-use crate::ast::{FnType, Func, FuncId, TypeId};
+use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, StackOffset, StackRange, Value, Values};
 use crate::compiler::{ExecTime, Res};
 use crate::experiments::bootstrap_gen::*;
@@ -116,7 +116,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         self.slots.clear();
         self.slots.extend(vec![None; func.stack_slots]);
         self.open_slots.clear();
-        let is_c_call = ff.has_tag(self.program.pool, "c_call");
+        let is_c_call = ff.has_tag(Flag::C_Call);
 
         self.asm.push(sub_im(X64, sp, sp, 16, 0));
         self.asm.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
@@ -153,8 +153,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::CallDynamic { .. } => todo!(),
                 Bc::CallDirect { f, ret, arg } => {
                     let target = &self.program.funcs[f.0];
-                    let target_c_call = target.has_tag(self.program.pool, "c_call");
-                    let comp_ctx = target.has_tag(self.program.pool, "ct");
+                    let target_c_call = target.has_tag(Flag::C_Call);
+                    let comp_ctx = target.has_tag(Flag::Ct);
                     if let Some(template) = target.any_reg_template {
                         let registers = vec![0, 1, 0];
                         let ops = self.emit_any_reg(template, registers);
@@ -503,7 +503,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 #[cfg(target_arch = "aarch64")]
 mod tests {
     use super::{BcToAsm, Jitted};
-    use crate::ast::SuperSimple;
+    use crate::ast::{Flag, SuperSimple};
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::export_ffi::get_special_functions;
@@ -541,8 +541,7 @@ mod tests {
         let mut program = Program::new(vars, pool);
         let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
         comp.add_declarations(global)?;
-        let name = pool.intern("main");
-        let main = unwrap!(comp.lookup_unique_func(name), "");
+        let main = unwrap!(comp.lookup_unique_func(Flag::Main.ident()), "");
         comp.compile(main, ExecTime::Runtime)?;
 
         let debug_path = format!("target/latest_log/asm/{test_name}");

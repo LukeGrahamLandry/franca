@@ -81,7 +81,6 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     var enum_type: TypeId = intern_type(enum_type);
     
     // Declaring variables is weird because name resolution has already run.
-    var handler = clone_ast((@with_var(arg_var, arg_init) @with_var(tag_val, arg_var!tag!deref) body_placeholder)!quote);
     var body = (if_false)!quote;
     
     foreach(stmts, fn(stmt: Ptr(FatStmt)) Unit = {
@@ -91,36 +90,23 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             var name: Symbol = handler_body.expr.Closure.name[];
             
             // TODO: infer output type instead of just forcing int. 
-            var new_branch = clone_ast((eq(tag_val, tag_value(enum_type_placeholder, case_tag_name)), 
-                fn() i64 = (case_handler)(case_access_placeholder!deref), 
-                fn() i64 = if_false_temp
-            )!if!quote);
-            
             var case_access: FatExpr = clone_ast((arg_var.___)!quote);
             let name_ptr: Ptr(Symbol) = raw_slice(case_access.expr.FieldAccess, size_of(i64), add(size_of(i64), size_of(Symbol)));  // TODO: destructure by reference so this isnt as suck
             name_ptr[] = name;
             
-            /* // TODO: giving in an having unquote syntax is probably worth it. is $(expr) that much better than expr!unquote? 
-            var new_branch = clone_ast((eq(tag_val, tag_value(literal_ast(Type, enum_type!addr)!unquote, literal_ast(Symbol, name!addr)!unquote)), 
+            // TODO: giving in an having unquote syntax is probably worth it. is $(expr) that much better than expr!unquote? this is a bit illegable. 
+            // TODO: its too hacky that you only have to call clone_ast when there's no placeholders
+            var cond = eq(tag_val, tag_value(
+                literal_ast(Type, enum_type!addr)!unquote, 
+                literal_ast(Symbol, name!addr)!unquote
+            ))!quote;
+            var new_branch = (cond!unquote,
                 fn() i64 = (handler_body!unquote)(case_access!unquote!deref), 
                 fn() i64 = if_false_temp
-            )!if!quote);
-            */
+            )!if!quote;
             
-            let new_rep = (
-                (case_tag_name!symbol, literal_ast(Symbol, name!addr)),
-                (case_handler!symbol, handler_body),
-                (enum_type_placeholder!symbol, literal_ast(Type, enum_type!addr)),
-                (case_access_placeholder!symbol, case_access)
-            )!slice;
-            apply_placeholders(new_branch!addr, new_rep);
-            
-            // TODO: single element slice. really just want to addr rvalue?
-            let body_rep = (
-                (if_false!symbol, new_branch),
-                (asklsaklsalk!symbol, new_branch),
-            )!slice;
-            apply_placeholders(body!addr, body_rep);
+            var body_rep = (if_false!symbol, new_branch);
+            apply_placeholders(body!addr, body_rep!addr.slice());
             
             let body_rep = (
                 (if_false_temp!symbol, clone_ast(if_false!quote)),
@@ -136,14 +122,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     )!slice;
     apply_placeholders(body!addr, body_rep);
     
-    let handler_rep = (
-        (arg_init!symbol, arg),
-        (body_placeholder!symbol, body),
-        (enum_type_placeholder!symbol, literal_ast(Type, enum_type!addr))
-    )!slice;
-    apply_placeholders(handler!addr, handler_rep);
-    
-    handler
+    (@with_var(arg_var, arg!unquote) @with_var(tag_val, arg_var!tag!deref) body!unquote)!quote
 }
 
 // TODO: support annotations without a target (just an arg). 
@@ -176,6 +155,7 @@ fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
         )!if;
         let next = new_call_ast(fn_shift, new_pair_ast(next, literal_ast(i64, shift!addr)));
         expr = new_call_ast(fn_or, new_pair_ast(expr, next));
+        
     });
     assert(eq(shift, 0), concat(str(shift), " != 0; expected 32 bits. TODO: other sizes."));
     expr

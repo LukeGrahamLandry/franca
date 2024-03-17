@@ -45,7 +45,7 @@ pub mod export_ffi;
 mod overloading;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
+    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
 use export_ffi::get_special_functions;
 
@@ -148,8 +148,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     // damn turns out defer would maybe be a good idea
     fn log_dbg<'a, 'p, Exec: Executor<'p>>(comp: &Compile<'a, 'p, Exec>, save: Option<&str>) {
         outln!(Bytecode, "{}", comp.executor.log(comp.pool));
-        let name = comp.pool.intern("main");
-        if let Some(id) = comp.lookup_unique_func(name) {
+        if let Some(id) = comp.lookup_unique_func(Flag::Main.ident()) {
             outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
         }
         

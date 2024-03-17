@@ -2,10 +2,10 @@ use codemap::{CodeMap, Span};
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use crate::ast::{Expr, FatExpr, FuncId, LazyType, Name, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
-use crate::experiments::bc_to_asm::{BcToAsm, Jitted};
+use crate::experiments::bc_to_asm::BcToAsm;
 use crate::export_ffi::get_special_functions;
 use crate::interp::Interp;
 use crate::logging::{err, ice, unwrap};
@@ -46,7 +46,6 @@ pub fn bootstrap() -> (String, String) {
         asm.compile(*f).unwrap();
     }
 
-    let symbol_bs = pool.intern("bs");
     let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.txt\n");
     for f in &bs {
         let bytes = unsafe { &*asm.asm.get_fn(*f).unwrap() };
@@ -54,7 +53,7 @@ pub fn bootstrap() -> (String, String) {
         let annotations: String = asm.program.funcs[f.0]
             .annotations
             .iter()
-            .filter(|a| a.name != symbol_bs)
+            .filter(|a| a.name != Flag::Bs.ident())
             .map(|a| {
                 assert!(a.args.is_none(), "TODO: args");
                 format!("@{}", pool.get(a.name))
@@ -108,7 +107,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         let mut emit = EmitRs::new(e);
 
         for f in 0..emit.comp.program.funcs.len() {
-            if emit.comp.program.funcs[f].has_tag(emit.comp.program.pool, "rs") {
+            if emit.comp.program.funcs[f].has_tag(Flag::Rs) {
                 emit.compile(FuncId(f))?;
             }
         }
@@ -147,7 +146,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         let name = self.make_fn_name(f);
         let ty = func.unwrap_ty();
         let args = func.arg.flatten();
-        let want_export = func.has_tag(self.comp.program.pool, "rs");
+        let want_export = func.has_tag(Flag::Rs);
         let args: String = func
             .arg
             .flatten()
@@ -171,7 +170,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         let func = &self.comp.program.funcs[f.0];
         let name = self.comp.program.pool.get(func.name).to_string();
         let ty = func.unwrap_ty();
-        let want_export = func.has_tag(self.comp.program.pool, "rs");
+        let want_export = func.has_tag(Flag::Rs);
         // TODO: doing this is bad because it means the names change every time because my typeids aren't deterministic
         //       so since im committing this it makes the diff noisy which annoys me
         // if want_export {
@@ -266,12 +265,13 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
 
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
         Ok(match expr.deref() {
+            Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Value { value, .. } => self.emit_values(value)?,
             Expr::Call(f, arg) => {
                 if let Some(f_id) = f.as_fn() {
                     let func = &self.comp.program.funcs[f_id.0];
-                    assert!(!func.has_tag(self.comp.program.pool, "comptime"));
+                    assert!(!func.has_tag(Flag::Comptime));
                     let name = self.make_fn_name(f_id);
                     let args = self.compile_expr(arg)?;
                     format!("{name}({args})")

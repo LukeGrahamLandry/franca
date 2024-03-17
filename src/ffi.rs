@@ -500,7 +500,6 @@ pub mod c {
 
     use crate::ast::IntType;
     use crate::ffi::InterpSend;
-    use crate::interp::Interp;
     use crate::pool::Ident;
     use crate::{
         ast::{Program, TypeId, TypeInfo},

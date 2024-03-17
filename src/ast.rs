@@ -111,6 +111,7 @@ pub enum Expr<'p> {
     GetVar(Var<'p>),
     GetNamed(Ident<'p>),
     String(Ident<'p>),
+    Index(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
 }
 
 pub trait WalkAst<'p> {
@@ -124,9 +125,9 @@ pub trait WalkAst<'p> {
     fn expr(&mut self, expr: &mut FatExpr<'p>) {
         self.walk_expr(expr);
         match &mut expr.expr {
-            Expr::Call(f, arg) => {
-                self.expr(f);
-                self.expr(arg);
+            Expr::Call(fst, snd) | Expr::Index(fst, snd) => {
+                self.expr(fst);
+                self.expr(snd);
             }
             Expr::Block { body, result, .. } => {
                 for stmt in body {
@@ -634,13 +635,15 @@ impl<'p> Func<'p> {
     }
 
     /// Find annotation ignoring arguments
-    pub fn has_tag(&self, pool: &StringPool<'p>, name: &str) -> bool {
-        let name = pool.intern(name);
-        self.annotations.iter().any(|a| a.name == name)
+    pub fn has_tag(&self, flag: Flag) -> bool {
+        self.annotations.iter().any(|a| a.name == flag.ident())
     }
 
-    pub fn add_tag(&mut self, name: Ident<'p>) {
-        self.annotations.push(Annotation { name, args: None });
+    pub fn add_tag(&mut self, name: Flag) {
+        self.annotations.push(Annotation {
+            name: name.ident(),
+            args: None,
+        });
     }
 
     #[track_caller]
@@ -1316,44 +1319,11 @@ pub fn garbage_loc() -> Span {
     unsafe { mem::zeroed() }
 }
 
-impl<'p> Expr<'p> {
-    pub fn walk<M: FnMut(&mut Expr<'p>)>(&mut self, f: &mut M) {
-        f(self);
-        match self {
-            Expr::Call(a, b) => {
-                a.walk(f);
-                b.walk(f);
-            }
-            Expr::Block { result, body, .. } => {
-                for stmt in body {
-                    if let Stmt::Eval(e) = stmt.deref_mut() {
-                        e.walk(f)
-                    }
-                }
-                // TODO: body
-                result.walk(f);
-            }
-            Expr::Tuple(e) => {
-                for e in e {
-                    e.walk(f);
-                }
-            }
-            Expr::Closure(func) => {
-                if let Some(e) = func.body.as_mut() {
-                    e.walk(f)
-                }
-            }
-            Expr::SuffixMacro(_, arg) => {
-                arg.walk(f);
-            }
-            Expr::FieldAccess(e, _) => e.walk(f),
-            Expr::StructLiteralP(_) => todo!(),
-            Expr::PrefixMacro { arg, target, .. } => {
-                arg.walk(f);
-                target.walk(f);
-            }
-            Expr::WipFunc(_) | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) | Expr::GetVar(_) => {}
-        }
+// TODO: replace with new walk
+
+impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
+    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+        self(&mut expr.expr)
     }
 }
 
@@ -1425,4 +1395,44 @@ impl TypeId {
     pub fn never() -> TypeId {
         TypeId(7)
     }
+}
+
+/// I don't require the order be stable, it just needs to be fixed within one run of the compiler so I can avoid a billion hash lookups.
+/// They're converted to lowercase so you can't have an uppercase one.
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
+#[repr(u8)]
+pub enum Flag {
+    _Reserved_Null_,
+    Comptime,
+    Inline,
+    NoInline,
+    Struct,
+    Enum,
+    Asm,
+    C_Call,
+    Annotation,
+    Placeholder,
+    Comptime_Addr,
+    Init,
+    Construct,
+    Slice,
+    Unquote_Macro_Apply_Placeholders,
+    From_Bit_Literal,
+    Quote,
+    Unquote,
+    Deref,
+    Patch,
+    Drop_Args,
+    Backpass,
+    Ct,
+    Bs,
+    Rs,
+    Any_Reg,
+    Impl,
+    Literal_Ast,
+    Main,
+    Builtin_If,
+    Builtin_While,
+    _Reserved_Count_,
 }

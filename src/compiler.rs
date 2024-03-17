@@ -13,7 +13,7 @@ use std::mem;
 use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadSet, Pattern, Var, VarInfo, VarType, WalkAst};
+use crate::ast::{garbage_loc, Binding, FatStmt, Field, Flag, IntType, Name, OverloadSet, Pattern, Var, VarInfo, VarType, WalkAst};
 
 use crate::bc::*;
 use crate::experiments::reflect::Reflect;
@@ -292,7 +292,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         debug_assert!(!self.program.funcs[f.0].evil_uninit);
 
         mut_replace!(self.program.funcs[f.0], |func: Func<'p>| {
-            assert!(result.when == ExecTime::Comptime || !func.has_tag(self.pool, "comptime"));
+            assert!(result.when == ExecTime::Comptime || !func.has_tag(Flag::Comptime));
             let arguments = func.arg.flatten();
             for (name, ty) in arguments {
                 if let Some(name) = name {
@@ -317,8 +317,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 //     name: self.pool.intern("inline"),
                 //     args: None,
                 // });
-                let addr = self.pool.intern("comptime_addr");
-                if let Some(tag) = func.annotations.iter().find(|c| c.name == addr) {
+                if let Some(tag) = func.annotations.iter().find(|c| c.name == Flag::Comptime_Addr.ident()) {
                     let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
                     func.comptime_addr = Some(addr.to_bytes());
                     let _ = self.program.intern_type(TypeInfo::FnPtr(func.unwrap_ty()));
@@ -340,7 +339,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
             #[cfg(target_arch = "aarch64")]
             if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
-                if *name == self.pool.intern("asm") {
+                if *name == Flag::Asm.ident() {
                     self.inline_asm_body(result, f, arg)?;
                     let fn_ty = self.program.funcs[f.0].unwrap_ty();
                     let ret_ty = fn_ty.ret;
@@ -374,7 +373,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let func = &self.program.funcs[f.0];
         // TODO: some huristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
-        let force_inline = func.has_tag(self.pool, "inline");
+        let force_inline = func.has_tag(Flag::Inline);
         assert!(func.capture_vars.is_empty());
         assert!(!force_inline);
         add_unique(&mut result.callees, f);
@@ -701,10 +700,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Stmt::DeclFunc(func) => {
                 let mut func = mem::take(func);
                 let var = func.var_name;
-                let for_bootstrap = func.has_tag(self.pool, "bs");
-                let any_reg_template = func.has_tag(self.pool, "any_reg");
-                let is_struct = func.has_tag(self.pool, "struct");
-                let is_enum = func.has_tag(self.pool, "enum");
+                let for_bootstrap = func.has_tag(Flag::Bs);
+                let any_reg_template = func.has_tag(Flag::Any_Reg);
+                let is_struct = func.has_tag(Flag::Struct);
+                let is_enum = func.has_tag(Flag::Enum);
                 assert!(!(is_struct && is_enum));
                 if is_struct {
                     let ty = self.struct_type(result, &mut func.arg)?;
@@ -716,7 +715,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
                     }
                     // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
-                    func.name = self.pool.intern("init");
+                    func.name = Flag::Init.ident();
                     if func.body.is_none() {
                         let loc = func.loc;
                         let mut init_pattern = func.arg.clone();
@@ -726,7 +725,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         }
 
                         let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
-                        let construct = self.pool.intern("construct");
+                        let construct = Flag::Construct.ident();
                         func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
                     }
                 }
@@ -740,20 +739,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
                     }
                     // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
-                    func.name = self.pool.intern("init");
+                    func.name = Flag::Init.ident();
                     if func.body.is_none() {
                         let loc = func.loc;
                         let init_pattern = func.arg.clone();
-                        let construct = self.pool.intern("construct");
-                        let ident_enum = self.pool.intern("enum");
                         for mut b in init_pattern.bindings {
                             let mut new_func = func.clone();
                             new_func.arg.bindings = vec![b.clone()];
                             let name = if let Name::Var(name) = b.name { name } else { todo!() };
                             b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
                             let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
-                            new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
-                            new_func.annotations.retain(|a| a.name != ident_enum);
+                            new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), init_expr), loc));
+                            new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
                             self.add_func(new_func, &result.constants)?;
                         }
                     }
@@ -790,7 +787,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 }
 
                 let func = &self.program.funcs[id.0];
-                if func.has_tag(self.pool, "impl") {
+                if func.has_tag(Flag::Impl) {
                     // TODO: maybe this should be going into the overload set somehow instead?
                     for stmt in &func.local_constants {
                         if let Stmt::DeclFunc(new) = &stmt.stmt {
@@ -849,6 +846,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
+            Expr::Index(_, _) => todo!(),
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, expr)?;
                 Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
@@ -943,8 +941,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         } else {
                             placeholders.push(mem::take(expr));
                             let arg = Box::new(FatExpr::synthetic(Expr::Tuple(placeholders), loc));
-                            let arg = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("slice"), arg), loc);
-                            let f = FatExpr::synthetic(Expr::GetNamed(self.pool.intern("unquote_macro_apply_placeholders")), loc);
+                            let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), arg), loc);
+                            let f = FatExpr::synthetic(Expr::GetNamed(Flag::Unquote_Macro_Apply_Placeholders.ident()), loc);
                             *expr = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(arg)), loc);
                             println!("{:?}", expr.log(self.pool));
                             self.compile_expr(result, expr, requested)?
@@ -1131,13 +1129,14 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                             let mut res = mem::take(target);
                             let value = mem::take(&mut exprs[1]);
-                            res.walk(&mut |expr| {
+                            let mut f = |expr: &mut Expr<'p>| {
                                 if let Expr::GetNamed(n) = expr {
                                     if *n == name.0 {
                                         *expr = Expr::GetVar(name);
                                     }
                                 }
-                            });
+                            };
+                            f.expr(&mut res);
                             expr.expr = Expr::Block {
                                 body: vec![FatStmt {
                                     stmt: Stmt::DeclVar {
@@ -1188,12 +1187,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             default: None,
                         });
                         let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
-                        let the_type = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("struct"), the_type), loc);
+                        let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
                         let the_type = self.immediate_eval_expr(&result.constants, the_type, TypeId::ty())?;
                         let the_type = self.to_type(the_type)?;
                         // *expr = FatExpr::synthetic(Expr::PrefixMacro { name: var, arg, target: mem::take(target) }, loc);
 
-                        let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("construct"), mem::take(target)), loc);
+                        let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), mem::take(target)), loc);
                         let value = self.immediate_eval_expr(&result.constants, construct_expr, the_type)?;
                         let value = Value::new_box(value.vec(), true).into();
                         let ty = self.program.ptr_type(the_type);
@@ -1230,7 +1229,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 };
                 let mut full_arg = FatExpr::synthetic(full_arg, loc);
                 let f = self.resolve_function(result, *name, &mut full_arg, Some(want))?;
-                assert!(self.program.funcs[f.0].has_tag(self.pool, "annotation"));
+                assert!(self.program.funcs[f.0].has_tag(Flag::Annotation));
                 self.infer_types(f)?;
                 let get_func = FatExpr::synthetic(self.func_expr(f), loc);
                 let full_call = FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
@@ -1417,6 +1416,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             return Ok(Some(TypeId::i64())); // self.program.intern_type(TypeInfo::Int(int)) but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
+            Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
@@ -1795,10 +1795,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
-            let force_inline = self.pool.intern("inline");
             let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
                 let if_true = self.promote_closure(result, &mut parts[1])?;
-                self.program.funcs[if_true.0].add_tag(force_inline);
+                self.program.funcs[if_true.0].add_tag(Flag::Inline);
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
                 self.emit_call_on_unit(result, if_true, &mut parts[1])?
@@ -1807,7 +1806,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             };
             if let Expr::Closure(_) = parts[2].deref_mut() {
                 let if_false = self.promote_closure(result, &mut parts[2])?;
-                self.program.funcs[if_false.0].add_tag(force_inline);
+                self.program.funcs[if_false.0].add_tag(Flag::Inline);
                 let false_arg = self.infer_arg(if_false)?;
                 self.type_check_arg(false_arg, unit, sig)?;
                 let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2])?;
@@ -1830,7 +1829,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             let force_inline = self.pool.intern("inline");
             if let Expr::Closure(_) = parts[0].deref_mut() {
                 let cond_fn = self.promote_closure(result, &mut parts[0])?;
-                self.program.funcs[cond_fn.0].add_tag(force_inline);
+                self.program.funcs[cond_fn.0].add_tag(Flag::Inline);
                 let cond_arg = self.infer_arg(cond_fn)?;
                 self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
                 let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0])?;
@@ -1841,7 +1840,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             if let Expr::Closure(_) = parts[1].deref_mut() {
                 let body_fn = self.promote_closure(result, &mut parts[1])?;
-                self.program.funcs[body_fn.0].add_tag(force_inline);
+                self.program.funcs[body_fn.0].add_tag(Flag::Inline);
                 let body_arg = self.infer_arg(body_fn)?;
                 self.type_check_arg(body_arg, TypeId::unit(), sig)?;
                 let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1])?;
@@ -2108,7 +2107,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     fn compile_call(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, original_f: FuncId, requested: Option<TypeId>) -> Res<'p, Structured> {
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         let func = &self.program.funcs[original_f.0];
-        let is_comptime = func.has_tag(self.pool, "comptime");
+        let is_comptime = func.has_tag(Flag::Comptime);
         if is_comptime {
             let (ret_val, ret_ty) = self.emit_comptime_call(result, original_f, arg_expr)?;
             let ty = requested.unwrap_or(ret_ty); // TODO: make sure someone else already did the typecheck.
@@ -2216,8 +2215,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let func = &self.program.funcs[original_f.0];
         // TODO: some heuristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
-        let force_inline = func.has_tag(self.pool, "inline");
-        let deny_inline = func.has_tag(self.pool, "noinline");
+        let force_inline = func.has_tag(Flag::Inline);
+        let deny_inline = func.has_tag(Flag::NoInline);
         assert!(!(force_inline && deny_inline), "{original_f:?} is both @inline and @noinline");
 
         let will_inline = force_inline;
@@ -2422,11 +2421,8 @@ pub struct Unquote<'z, 'a, 'p, Exec: Executor<'p>> {
 impl<'z, 'a, 'p, Exec: Executor<'p>> WalkAst<'p> for Unquote<'z, 'a, 'p, Exec> {
     // TODO: track if we're in unquote mode or placeholder mode.
     fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
-        println!("{expr:?}");
         if let Expr::SuffixMacro(name, arg) = &mut expr.expr {
-            let unquote = self.compiler.pool.intern("unquote");
-            let placeholder_name = self.compiler.pool.intern("placeholder");
-            if *name == unquote {
+            if *name == Flag::Unquote.ident() {
                 let expr_ty = FatExpr::get_type(self.compiler.program);
                 self.compiler.compile_expr(self.result, arg, Some(expr_ty)).unwrap(); // TODO
                 let loc = arg.loc;
@@ -2435,17 +2431,15 @@ impl<'z, 'a, 'p, Exec: Executor<'p>> WalkAst<'p> for Unquote<'z, 'a, 'p, Exec> {
                     value: Value::I64(self.placeholders.len() as i64).into(),
                 };
                 let placeholder = FatExpr::synthetic(placeholder, loc);
-                let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(placeholder_name, Box::new(placeholder)), loc);
+                let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(Flag::Placeholder.ident(), Box::new(placeholder)), loc);
                 placeholder.ty = expr_ty;
                 // Note: take <arg> but replace the whole <expr>
                 self.placeholders.push(mem::take(arg.deref_mut()));
                 *expr = placeholder;
-            } else if *name == placeholder_name {
-                println!("replace");
+            } else if *name == Flag::Placeholder.ident() {
                 let index = arg.as_int().expect("!placeholder expected int") as usize;
                 let value = mem::take(&mut self.placeholders[index]); // TODO: make it more obvious that its only one use and the slot is empty.
                 *expr = value;
-                println!("{:?}", expr.log(self.compiler.pool));
             }
         }
     }

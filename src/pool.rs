@@ -1,9 +1,15 @@
-use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, sync::RwLock};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, mem, sync::RwLock};
 
-use crate::{bc::Value, ffi::InterpSend};
+use crate::{ast::Flag, bc::Value, ffi::InterpSend};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
+
+impl Flag {
+    pub const fn ident<'p>(self) -> Ident<'p> {
+        Ident(self as usize, PhantomData)
+    }
+}
 
 impl<'p> Ident<'p> {
     pub fn null() -> Ident<'p> {
@@ -20,7 +26,6 @@ impl Debug for Ident<'_> {
 /// A raw pointer that uses the reference's Hash/PartialEq implementations.
 struct Ptr<T: ?Sized>(*mut T);
 
-#[derive(Default)]
 pub struct StringPool<'pool> {
     lookup: RwLock<HashMap<Ptr<str>, Ident<'pool>>>,
     values: RwLock<Vec<Ptr<str>>>,
@@ -80,6 +85,25 @@ impl Drop for StringPool<'_> {
                 drop(Box::from_raw(s.0));
             }
         }
+    }
+}
+
+impl<'p> Default for StringPool<'p> {
+    fn default() -> Self {
+        let len = Flag::_Reserved_Count_ as usize;
+        let this = Self {
+            lookup: RwLock::new(HashMap::with_capacity(len)),
+            values: RwLock::new(Vec::with_capacity(len)),
+        };
+        for i in 0..len {
+            let flag: Flag = unsafe { mem::transmute(i as u8) };
+            let mut name = format!("{flag:?}");
+            debug_assert!(!name.contains("::") && !name.contains("Flag") && !name.contains('{')); // TODO: debug formating is unspecified but happens to be what I want
+            name.make_ascii_lowercase();
+            let name = this.intern(&name);
+            assert_eq!(i, name.0);
+        }
+        this
     }
 }
 

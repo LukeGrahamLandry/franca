@@ -221,6 +221,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
+            Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) | Expr::Closure(_) | Expr::GetNamed(_) => unreachable!(),
             Expr::Call(f, arg) => self.emit_runtime_call(output, f, arg)?,
             Expr::Block { body, result: value, .. } => {

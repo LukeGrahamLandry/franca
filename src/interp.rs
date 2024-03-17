@@ -7,6 +7,7 @@ use std::process::Command;
 use codemap::Span;
 use interp_derive::InterpSend;
 
+use crate::ast::Flag;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::{EmitBc, SizeCache};
 use crate::ffi::InterpSend;
@@ -629,8 +630,11 @@ impl<'a, 'p> Interp<'a, 'p> {
                 v.insert(0, ty); // aaaaaa
                 let arg = Values::Many(v);
                 // aaaaa
-                let name = self.pool.intern(name);
-                self.suspend(name, arg, unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"))?
+                self.suspend(
+                    Flag::Literal_Ast.ident(),
+                    arg,
+                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
+                )?
             }
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.

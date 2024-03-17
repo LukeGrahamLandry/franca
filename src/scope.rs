@@ -88,12 +88,7 @@ impl<'p> ResolveScope<'p> {
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
-            Stmt::DeclNamed {
-                name,
-                ty,
-                value,
-                kind,
-            } => {
+            Stmt::DeclNamed { name, ty, value, kind } => {
                 self.resolve_type(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value);
@@ -161,13 +156,14 @@ impl<'p> ResolveScope<'p> {
         }
     }
 
+    // TODO: this could use walk_whatever()
     fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
         let loc = expr.loc;
         match expr.deref_mut() {
             Expr::WipFunc(_) => unreachable!(),
-            Expr::Call(f, arg) => {
-                self.resolve_expr(f);
-                self.resolve_expr(arg);
+            Expr::Call(fst, snd) | Expr::Index(fst, snd) => {
+                self.resolve_expr(fst);
+                self.resolve_expr(snd);
             }
             Expr::PrefixMacro { name, arg, target } => {
                 if let Some(var) = self.find_var(&name.0) {
@@ -176,11 +172,7 @@ impl<'p> ResolveScope<'p> {
                 self.resolve_expr(arg);
                 self.resolve_expr(target);
             }
-            Expr::Block {
-                body,
-                result,
-                locals,
-            } => {
+            Expr::Block { body, result, locals } => {
                 assert!(locals.is_none());
                 self.push_scope(false);
                 for stmt in body {
@@ -284,10 +276,7 @@ impl<'p> ResolveScope<'p> {
                 self.resolve_type(&mut binding.ty);
                 if declaring {
                     let (_old, var) = self.decl_var(&name);
-                    self.info.push(VarInfo {
-                        kind: VarType::Var,
-                        loc,
-                    });
+                    self.info.push(VarInfo { kind: VarType::Var, loc });
                     *binding = Binding {
                         name: Name::Var(var),
                         ty: mem::replace(&mut binding.ty, LazyType::Infer),

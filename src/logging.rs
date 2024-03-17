@@ -415,12 +415,13 @@ fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
     }
 }
 
+// TODO: this could use walk_whatever()
 fn collect_func_references<'p>(expr: &Expr<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
     match expr {
         Expr::Value { value, .. } => value.clone().vec().iter().for_each(|v| collect_func_references_value(v, refs)),
-        Expr::Call(f, arg) => {
-            collect_func_references(f, refs, const_reads);
-            collect_func_references(arg, refs, const_reads);
+        Expr::Call(fst, snd) | Expr::Index(fst, snd) => {
+            collect_func_references(fst, refs, const_reads);
+            collect_func_references(snd, refs, const_reads);
         }
         Expr::Block { body, result, .. } => {
             for s in body {

@@ -4,7 +4,7 @@ use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 use codemap::{File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, Name, TypeId, Var};
+use crate::ast::{Binding, Flag, Name, TypeId, Var};
 use crate::bc::Values;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
@@ -133,7 +133,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let v = self.expr(Expr::int(v));
                 let bits = self.expr(Expr::int(bit_count as i64));
                 let pair = self.expr(Expr::Tuple(vec![bits, v]));
-                let func = self.expr(Expr::GetNamed(self.pool.intern("from_bit_literal")));
+                let func = self.expr(Expr::GetNamed(Flag::From_Bit_Literal.ident()));
                 let call = self.expr(Expr::Call(Box::new(func), Box::new(pair)));
                 Ok(call)
             }
@@ -200,7 +200,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 DoubleSquare => {
                     self.start_subexpr();
                     self.eat(DoubleSquare)?;
-                    self.expr(Expr::SuffixMacro(self.pool.intern("deref"), Box::new(prefix)))
+                    self.expr(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(prefix)))
                 }
                 LeftSquare => {
                     self.eat(LeftSquare)?;
@@ -361,7 +361,7 @@ impl<'a, 'p> Parser<'a, 'p> {
 
                         self.start_subexpr();
                         let callback = self.parse_block_until_squiggle()?;
-                        let name = self.pool.intern("backpass");
+                        let name = Flag::Backpass.ident();
                         let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 

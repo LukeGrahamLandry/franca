@@ -152,12 +152,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         }
     }
 
-    fn pair(
-        &mut self,
-        second: char,
-        single: TokenType<'static>,
-        double: TokenType<'static>,
-    ) -> Token<'p> {
+    fn pair(&mut self, second: char, single: TokenType<'static>, double: TokenType<'static>) -> Token<'p> {
         self.pop();
         let t = if self.peek_c() == second {
             self.pop();
@@ -305,11 +300,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             bit_count += 1;
         }
 
-        self.token(
-            TokenType::BinaryNum { bit_count, value },
-            self.start,
-            self.current,
-        )
+        self.token(TokenType::BinaryNum { bit_count, value }, self.start, self.current)
     }
 
     fn lex_hex(&mut self) -> Token<'p> {
@@ -344,11 +335,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             bit_count += 4;
         }
 
-        self.token(
-            TokenType::BinaryNum { bit_count, value },
-            self.start,
-            self.current,
-        )
+        self.token(TokenType::BinaryNum { bit_count, value }, self.start, self.current)
     }
 
     fn peek_c(&mut self) -> char {
