@@ -3,7 +3,7 @@ use std::{collections::HashMap, mem};
 use codemap::Span;
 
 use crate::{
-    ast::{Program, TypeId, TypeInfo},
+    ast::{Program, TargetArch, TypeId, TypeInfo},
     bc::{Value, Values},
     logging::{outln, LogTag::ShowErr},
 };
@@ -425,7 +425,7 @@ fn interp_send() {
     }
 
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut p = Program::new(vec![], pool);
+    let mut p = Program::new(vec![], pool, TargetArch::Interp, TargetArch::Interp);
     let one = HelloWorld { a: 123, b: 345 };
     let two = one.serialize_one();
     let three = HelloWorld::deserialize_one(two).unwrap();

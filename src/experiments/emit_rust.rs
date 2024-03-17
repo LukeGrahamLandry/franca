@@ -2,7 +2,7 @@ use codemap::{CodeMap, Span};
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
@@ -30,7 +30,7 @@ pub fn bootstrap() -> (String, String) {
 
     let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);
-    let mut program = Program::new(vars, pool);
+    let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
     comp.add_declarations(global).unwrap();
 

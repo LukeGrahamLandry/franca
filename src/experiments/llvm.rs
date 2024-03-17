@@ -401,7 +401,7 @@ pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
 
 #[allow(unused)]
 mod tests {
-    use crate::ast::{Flag, SuperSimple};
+    use crate::ast::{Flag, SuperSimple, TargetArch};
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::experiments::tests::jit_test;
@@ -445,7 +445,7 @@ mod tests {
         }
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
-        let mut program = Program::new(vars, pool);
+        let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Llvm);
         let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
         comp.add_declarations(global)?;
         let main = unwrap!(comp.lookup_unique_func(Flag::Main.ident()), "");

@@ -189,7 +189,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         //     // do for allocators/logging anyway
                         //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
                         // } else {
-                        assert!(f.0 < 512);
+                        // TODO: have a mapping. funcs for other arches take up slots.
+                        // assert!(f.0 < 512);  // TODO?
                         self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
                         self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty(), comp_ctx);
                         // }
@@ -503,7 +504,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 #[cfg(target_arch = "aarch64")]
 mod tests {
     use super::{BcToAsm, Jitted};
-    use crate::ast::{Flag, SuperSimple};
+    use crate::ast::{Flag, SuperSimple, TargetArch};
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::experiments::tests::jit_test;
@@ -539,11 +540,14 @@ mod tests {
         }
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
-        let mut program = Program::new(vars, pool);
+        let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Aarch64);
         let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
         comp.add_declarations(global)?;
         let main = unwrap!(comp.lookup_unique_func(Flag::Main.ident()), "");
-        comp.compile(main, ExecTime::Runtime)?;
+        if let Err(e) = comp.compile(main, ExecTime::Runtime) {
+            println!("{}", e.reason.log(comp.program, pool));
+            return Err(e);
+        }
 
         let debug_path = format!("target/latest_log/asm/{test_name}");
         fs::create_dir_all(&debug_path).unwrap();

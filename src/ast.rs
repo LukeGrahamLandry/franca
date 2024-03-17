@@ -595,6 +595,7 @@ pub struct Func<'p> {
     // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
     pub any_reg_template: Option<FuncId>,
+    pub llvm_ir: Option<Vec<Ident<'p>>>,
 }
 
 impl<'p> Func<'p> {
@@ -621,6 +622,7 @@ impl<'p> Func<'p> {
             comptime_addr: None,
             jitted_code: None,
             any_reg_template: None,
+            llvm_ir: None,
         }
     }
 
@@ -705,14 +707,15 @@ pub struct Program<'p> {
     pub log_type_rec: RefCell<Vec<TypeId>>,
     comptime_only: BitSet, // Index is TypeId
     pub assertion_count: usize,
+    pub runtime_arch: TargetArch,
+    pub comptime_arch: TargetArch,
 }
 
 #[derive(Clone, Debug)]
-pub struct OverloadSet<'p>(pub Vec<OverloadOption<'p>>);
+pub struct OverloadSet<'p>(pub Vec<OverloadOption>, pub Ident<'p>);
 
 #[derive(Clone, Debug)]
-pub struct OverloadOption<'p> {
-    pub name: Ident<'p>, // TODO: why am i storing the name again here?
+pub struct OverloadOption {
     pub ty: FnType,
     pub func: FuncId,
 }
@@ -785,7 +788,7 @@ pub struct IntType {
 }
 
 impl<'p> Program<'p> {
-    pub fn new(vars: Vec<VarInfo>, pool: &'p StringPool<'p>) -> Self {
+    pub fn new(vars: Vec<VarInfo>, pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
             // Any needs to be first becuase I use TypeId(0) as a place holder.
             // The rest are just common ones that i want to find faster if i end up iterating the array.
@@ -811,6 +814,8 @@ impl<'p> Program<'p> {
             log_type_rec: RefCell::new(vec![]),
             comptime_only: BitSet::empty(),
             assertion_count: 0,
+            runtime_arch,
+            comptime_arch,
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -1310,6 +1315,7 @@ impl<'p> Default for Func<'p> {
             comptime_addr: None,
             jitted_code: None,
             any_reg_template: None,
+            llvm_ir: None,
         }
     }
 }
@@ -1397,13 +1403,27 @@ impl TypeId {
     }
 }
 
-/// I don't require the order be stable, it just needs to be fixed within one run of the compiler so I can avoid a billion hash lookups.
+/// It's important that these are consecutive in flags for safety of TryFrom
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
+#[repr(u8)]
+pub enum TargetArch {
+    Interp = Flag::Interp as u8,
+    Aarch64 = Flag::Aarch64 as u8,
+    Llvm = Flag::Llvm as u8,
+}
+
+/// I don't require the values be stable, it just needs to be fixed within one run of the compiler so I can avoid a billion hash lookups.
 /// They're converted to lowercase which means you can't express an uppercase one.
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 #[repr(u8)]
 pub enum Flag {
     _Reserved_Null_,
+    Interp,
+    Aarch64,
+    Llvm,
+    _Reserved_End_Arch_, // It's important which are above and below this point.
     Comptime,
     Inline,
     NoInline,
@@ -1440,6 +1460,7 @@ pub enum Flag {
     Tag,
     Reflect_Print,
     Fn_Ptr,
+    Overload_Set_Ast,
     _Reserved_Count_,
 }
 
@@ -1451,6 +1472,22 @@ impl<'p> TryFrom<Ident<'p>> for Flag {
         // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
         // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
         if value.0 > Flag::_Reserved_Null_ as usize && value.0 < Flag::_Reserved_Count_ as usize {
+            Ok(unsafe { transmute(value.0 as u8) })
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl<'p> TryFrom<Ident<'p>> for TargetArch {
+    type Error = ();
+
+    fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
+        // # Safety
+        // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
+        // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
+        // I defined thier values to be the values in Flag (where I made sure they're consecutive)
+        if value.0 > Flag::_Reserved_Null_ as usize && value.0 < Flag::_Reserved_End_Arch_ as usize {
             Ok(unsafe { transmute(value.0 as u8) })
         } else {
             Err(())

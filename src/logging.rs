@@ -593,7 +593,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
-            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\nARG: {:?}\n A:{:?}]\n{}\n{}\n",
+            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\nARG: {:?}\n A:{:?}]\n{}\n{}llvm={}, aarch64={}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ret.log(pool),
@@ -616,7 +616,9 @@ impl<'p> PoolLog<'p> for Func<'p> {
                     "Const capturing: {:?}.",
                     self.capture_vars_const.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
                 )
-            }
+            },
+            self.llvm_ir.is_some(),
+            self.jitted_code.is_some(),
         )
     }
 }

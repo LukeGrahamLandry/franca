@@ -45,7 +45,7 @@ pub mod export_ffi;
 mod overloading;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
+    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
 };
 use export_ffi::get_special_functions;
 
@@ -62,6 +62,7 @@ macro_rules! stdlib {
 static LIB: &[(&str, &str)] = &[
     stdlib!("core"),
     stdlib!("codegen/aarch64/basic.gen"),
+    stdlib!("codegen/llvm/basic"),
     stdlib!("interp"),
     stdlib!("collections"), 
     stdlib!("system"), 
@@ -141,7 +142,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
 
     let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);
-    let mut program = Program::new(vars, pool);
+    let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, executor);
     let result = comp.add_declarations(global);
 

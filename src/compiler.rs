@@ -13,7 +13,7 @@ use std::mem;
 use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{garbage_loc, Binding, FatStmt, Field, Flag, IntType, Name, OverloadSet, Pattern, Var, VarInfo, VarType, WalkAst};
+use crate::ast::{garbage_loc, Binding, FatStmt, Field, Flag, IntType, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType, WalkAst};
 
 use crate::bc::*;
 use crate::experiments::reflect::Reflect;
@@ -138,6 +138,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     pub(crate) fn pop_state(&mut self, _s: DebugState<'p>) {
         let _found = self.debug_trace.pop().expect("state stack");
         // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
+    }
+    pub(crate) fn pop_stat2(&mut self) {
+        // TODO
+        let _found = self.debug_trace.pop().expect("state stack");
     }
 
     pub fn add_declarations(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
@@ -337,7 +341,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let ret_val = mut_replace!(self.program.funcs[f.0].body, |mut body: Option<FatExpr<'p>>| {
             let body_expr = body.as_mut().unwrap();
 
-            #[cfg(target_arch = "aarch64")]
             if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
                 if *name == Flag::Asm.ident() {
                     self.inline_asm_body(result, f, arg)?;
@@ -615,14 +618,33 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 name.log(self.pool)
                             );
 
-                            self.compute_new_overloads(name.0, i)?;
+                            self.compute_new_overloads(i)?;
                             // TODO: just filter the iterator.
                             let mut overloads = self.program.overload_sets[i].0.clone(); // sad
+
                             overloads.retain(|f| f.ty == f_ty);
+                            // TODO: this is a copy paste
+                            let target = match result.when {
+                                ExecTime::Comptime => self.program.comptime_arch,
+                                ExecTime::Runtime => self.program.runtime_arch,
+                            };
+                            match target {
+                                TargetArch::Interp => overloads.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
+                                TargetArch::Aarch64 => overloads.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
+                                TargetArch::Llvm => overloads.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64)),
+                            }
+
                             let found = match overloads.len() {
                                 0 => err!("Missing overload",),
                                 1 => overloads[0].func,
-                                _ => err!("Ambigous overload",),
+                                _ => err!(
+                                    "Ambigous overload \n{:?}",
+                                    overloads
+                                        .iter()
+                                        .map(|o| self.program.funcs[o.func.0].log(self.pool))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                ),
                             };
                             val = Values::One(Value::GetFn(found));
                         }
@@ -781,7 +803,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 if let Some(var) = var {
                     if result.constants.get(var).is_none() && referencable_name {
                         let index = self.program.overload_sets.len();
-                        self.program.overload_sets.push(OverloadSet(vec![]));
+                        self.program.overload_sets.push(OverloadSet(vec![], var.0));
                         result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::unknown()));
                     }
                 }
@@ -894,8 +916,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 } else {
                     outln!(ShowErr, "VARS: {:?}", result.vars);
                     outln!(ShowErr, "CONSTANTS: {:?}", self.program.log_consts(&result.constants));
-                    let current_func = &self.program.funcs[result.func.0];
-                    outln!(ShowErr, "{}", current_func.log_captures(self.pool));
+                    // let current_func = &self.program.funcs[result.func.0];
+                    // outln!(ShowErr, "{}", current_func.log_captures(self.pool));
                     ice!("Missing resolved variable {:?} '{}'", var, self.pool.get(var.0),)
                 }
             }
@@ -1082,12 +1104,33 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     "fn_ptr" => {
                         let fn_val = self.compile_expr(result, arg, None)?.get()?;
                         if let Values::One(Value::GetFn(id)) = fn_val {
+                            self.ensure_compiled(id, result.when)?;
                             // The backend still needs to do something with this, so just leave it
                             let ty = self.program.func_type(id);
                             let ty = self.program.fn_ty(ty).unwrap();
                             Structured::RuntimeOnly(self.program.intern_type(TypeInfo::FnPtr(ty)))
                         } else {
                             err!("!fn_ptr expected const fn not {fn_val:?}",)
+                        }
+                    }
+                    "overload_set_ast" => {
+                        if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
+                            if let Some((value, ty)) = result.constants.get(*var) {
+                                if let Values::One(Value::OverloadSet(_)) = value {
+                                    let ast = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
+                                    expr.expr = Expr::Value {
+                                        ty: FatExpr::get_type(self.program),
+                                        value: ast.serialize_one(),
+                                    };
+                                    self.compile_expr(result, expr, requested)?
+                                } else {
+                                    ice!("expected overloadset not {value:?}")
+                                }
+                            } else {
+                                ice!("undeclared constant {:?}", var.log(self.pool))
+                            }
+                        } else {
+                            ice!("Expected var found {arg:?}")
                         }
                     }
                     "construct" => {
@@ -2247,11 +2290,26 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(res.ty())
     }
 
+    /// The first two can be used for early bootstrapping since they just look at the ast without comptime eval.
+    /// - tuple of string literals -> llvm-ir
+    /// - tuple of 32-bit int literals -> aarch64 asm ops
+    /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     fn inline_asm_body(&mut self, result: &FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         let src = asm.log(self.pool);
         let asm_ty = Vec::<u32>::get_type(self.program);
         let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
-            let ops: Res<'p, Vec<u32>> = parts
+            // TODO: allow quick const eval for single expression of correct type instead of just tuples.
+            // TODO: annotations to say which target you're expecting.
+            let llvm_ir: Option<Vec<Ident<'p>>> = parts
+                .iter()
+                .map(|op| if let Expr::String(op) = op.expr { Some(op) } else { None })
+                .collect();
+            if llvm_ir.is_some() {
+                self.program.funcs[f.0].add_tag(Flag::Llvm);
+                self.program.funcs[f.0].llvm_ir = llvm_ir;
+                return Ok(());
+            }
+            let asm_bytes: Res<'p, Vec<u32>> = parts
                 .iter()
                 .map(|op| {
                     if let Ok((ty, val)) = bit_literal(op, self.pool) {
@@ -2262,9 +2320,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     }
                 })
                 .collect();
-            if let Ok(ops) = ops {
+
+            if let Ok(ops) = asm_bytes {
                 ops
             } else {
+                // TODO: support dynamic eval to string for llvm ir.
                 let ops = self.immediate_eval_expr(&result.constants, asm.clone(), asm_ty)?;
                 unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
             }
@@ -2272,6 +2332,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             let ops = self.immediate_eval_expr(&result.constants, asm.clone(), asm_ty)?;
             unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
         };
+        self.program.funcs[f.0].add_tag(Flag::Aarch64);
         outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");
         for op in &ops {
             outln!(LogTag::Jitted, "{op:#05x}");

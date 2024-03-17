@@ -1,6 +1,6 @@
-use crate::ast::{Expr, FatExpr, FnType, FuncId, OverloadOption, OverloadSet, Pattern, TypeId, Var};
+use crate::ast::{Expr, FatExpr, Flag, FnType, FuncId, OverloadOption, OverloadSet, Pattern, TargetArch, TypeId, Var};
 use crate::bc::{Value, Values};
-use crate::compiler::{CErr, Compile, DebugState, Executor, FnWip, Res};
+use crate::compiler::{CErr, Compile, DebugState, ExecTime, Executor, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
 use crate::logging::{err, ice, outln, unwrap, LogTag, PoolLog};
 use crate::pool::Ident;
@@ -28,6 +28,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             }
             | &mut Expr::WipFunc(id) => {
                 self.named_args_to_tuple(result, arg, id)?;
+                Some(id)
+            }
+            &mut Expr::Value {
+                value: Values::One(Value::OverloadSet(i)),
+                ..
+            } => {
+                let id = self.resolve_in_overload_set(result, arg, ret, i)?;
                 Some(id)
             }
             Expr::Closure(func) => {
@@ -81,82 +88,109 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         // TODO: combine this with the match up there so its less ugly.
         if let Values::One(Value::OverloadSet(i)) = value {
-            self.compute_new_overloads(name.0, i)?;
-            let mut overloads = self.program.overload_sets[i].clone(); // Sad
-            if let Expr::StructLiteralP(pattern) = &mut arg.expr {
-                self.prune_overloads_by_named_args(&mut overloads, pattern)?;
-            }
-
-            if overloads.0.is_empty() {
-                err!("No overload found {name:?}",);
-            }
-            if overloads.0.len() == 1 {
-                let id = overloads.0[0].func;
-                self.named_args_to_tuple(result, arg, id)?;
-                return Ok(id);
-            }
-
-            match self.type_of(result, arg) {
-                Ok(Some(arg_ty)) => {
-                    let accept = |f_ty: FnType| arg_ty == f_ty.arg && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret));
-
-                    let mut found = None;
-                    for check in &overloads.0 {
-                        if accept(check.ty) {
-                            found = Some(check.func);
-                            break;
-                        }
-                    }
-
-                    if let Some(found) = found {
-                        self.pop_state(state);
-                        return Ok(found);
-                    }
-
-                    let log_goal = |s: &mut Self| {
-                        format!(
-                            "for fn {}({arg_ty:?}={}) {:?};",
-                            name.log(s.pool),
-                            s.program.log_type(arg_ty),
-                            requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
-                        )
-                    };
-
-                    // TODO: put the message in the error so !assert_compile_error doesn't print it.
-                    outln!(ShowErr, "not found {}", log_goal(self));
-                    let decls = self.program.declarations.get(&name.0).unwrap().clone();
-                    for f in decls {
-                        if let Ok(Some(f_ty)) = self.infer_types(f) {
-                            outln!(
-                                ShowErr,
-                                "- found {:?} fn({}) {};",
-                                f,
-                                self.program.log_type(f_ty.arg),
-                                self.program.log_type(f_ty.ret),
-                            );
-                        }
-                    }
-                    outln!(ShowErr, "Impls: {:?}", self.program.impls.get(&name.0));
-                    outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
-
-                    err!(CErr::AmbiguousCall)
-                }
-                Ok(None) => err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool)),
-                Err(e) => err!(
-                    "AmbiguousCall. Unknown type for argument {}. {}",
-                    arg.log(self.pool),
-                    e.reason.log(self.program, self.pool)
-                ),
-            }
+            self.resolve_in_overload_set(result, arg, requested_ret, i)
         } else {
             err!("Expected function for {} but found {:?}", name.log(self.pool), value);
         }
     }
 
-    pub fn compute_new_overloads(&mut self, name: Ident<'p>, i: usize) -> Res<'p, ()> {
-        if let Some(decls) = self.program.declarations.get(&name) {
-            outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(name),);
-            let overloads = &self.program.overload_sets[i];
+    pub fn resolve_in_overload_set(
+        &mut self,
+        result: &mut FnWip<'p>,
+        arg: &mut FatExpr<'p>,
+        requested_ret: Option<TypeId>,
+        i: usize,
+    ) -> Res<'p, FuncId> {
+        let name = self.program.overload_sets[i].1;
+        self.compute_new_overloads(i)?;
+        let mut overloads = self.program.overload_sets[i].clone(); // Sad
+        if let Expr::StructLiteralP(pattern) = &mut arg.expr {
+            self.prune_overloads_by_named_args(&mut overloads, pattern)?;
+        }
+
+        let target = match result.when {
+            ExecTime::Comptime => self.program.comptime_arch,
+            ExecTime::Runtime => self.program.runtime_arch,
+        };
+
+        // TODO: kinda cringe.
+        match target {
+            TargetArch::Interp => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
+            TargetArch::Aarch64 => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
+            TargetArch::Llvm => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64)),
+        }
+
+        for f in &overloads.0 {
+            assert!(!self.program.funcs[f.func.0].has_tag(Flag::Rs));
+        }
+
+        if overloads.0.is_empty() {
+            err!("No overload found {i:?}",);
+        }
+        if overloads.0.len() == 1 {
+            let id = overloads.0[0].func;
+            self.named_args_to_tuple(result, arg, id)?;
+            return Ok(id);
+        }
+
+        match self.type_of(result, arg) {
+            Ok(Some(arg_ty)) => {
+                let accept = |f_ty: FnType| arg_ty == f_ty.arg && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret));
+
+                let mut found = None;
+                for check in &overloads.0 {
+                    if accept(check.ty) {
+                        found = Some(check.func);
+                        break;
+                    }
+                }
+
+                if let Some(found) = found {
+                    self.pop_stat2();
+                    return Ok(found);
+                }
+
+                let log_goal = |s: &mut Self| {
+                    format!(
+                        "for fn {}({arg_ty:?}={}) {:?};",
+                        s.pool.get(name),
+                        s.program.log_type(arg_ty),
+                        requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
+                    )
+                };
+
+                // TODO: put the message in the error so !assert_compile_error doesn't print it.
+                outln!(ShowErr, "not found {}", log_goal(self));
+                let decls = self.program.declarations.get(&name).unwrap().clone();
+                for f in decls {
+                    if let Ok(Some(f_ty)) = self.infer_types(f) {
+                        outln!(
+                            ShowErr,
+                            "- found {:?} fn({}) {};",
+                            f,
+                            self.program.log_type(f_ty.arg),
+                            self.program.log_type(f_ty.ret),
+                        );
+                    }
+                }
+                outln!(ShowErr, "Impls: {:?}", self.program.impls.get(&name));
+                outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
+
+                err!(CErr::AmbiguousCall)
+            }
+            Ok(None) => err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool)),
+            Err(e) => err!(
+                "AmbiguousCall. Unknown type for argument {}. {}",
+                arg.log(self.pool),
+                e.reason.log(self.program, self.pool)
+            ),
+        }
+    }
+
+    pub fn compute_new_overloads(&mut self, i: usize) -> Res<'p, ()> {
+        let overloads = &self.program.overload_sets[i];
+        if let Some(decls) = self.program.declarations.get(&overloads.1) {
+            outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.1),);
             let decls: Vec<_> = decls.iter().copied().filter(|f| !overloads.0.iter().any(|old| old.func == *f)).collect();
             for f in &decls {
                 if let Ok(Some(f_ty)) = self.infer_types(*f) {
@@ -168,11 +202,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         self.program.log_type(f_ty.ret)
                     );
                     // TODO: this is probably wrong if you use !assert_compile_error
-                    self.program.overload_sets[i].0.push(OverloadOption { name, ty: f_ty, func: *f });
+                    self.program.overload_sets[i].0.push(OverloadOption { ty: f_ty, func: *f });
                 }
             }
         } else {
-            err!("expected declarations for overload set {:?} L{i}", self.pool.get(name),)
+            err!("expected declarations for overload set {:?} L{i}", self.pool.get(overloads.1),)
         }
 
         Ok(())
