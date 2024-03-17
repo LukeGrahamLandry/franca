@@ -31,12 +31,7 @@ pub struct EmitIr<'z, 'p: 'z, 'a> {
 }
 
 impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
-    pub fn compile(
-        program: &'z Program<'p>,
-        interp: &'z mut Interp<'_, 'p>,
-        f: FuncId,
-        arena: &'a Arena<'a>,
-    ) -> Res<'p, IrFunc<'a>> {
+    pub fn compile(program: &'z Program<'p>, interp: &'z mut Interp<'_, 'p>, f: FuncId, arena: &'a Arena<'a>) -> Res<'p, IrFunc<'a>> {
         let mut emit = EmitIr::new(program, &mut interp.sizes, arena, f);
         if let Err(mut e) = emit.compile_inner(f) {
             e.loc = emit.last_loc;
@@ -45,12 +40,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         Ok(emit.ir)
     }
 
-    fn new(
-        program: &'z Program<'p>,
-        sizes: &'z mut SizeCache,
-        arena: &'a Arena<'a>,
-        f: FuncId,
-    ) -> Self {
+    fn new(program: &'z Program<'p>, sizes: &'z mut SizeCache, arena: &'a Arena<'a>, f: FuncId) -> Self {
         Self {
             last_loc: None,
             program,
@@ -130,12 +120,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         Ok(())
     }
 
-    fn emit_runtime_call(
-        &mut self,
-        output: Ip,
-        f: &FatExpr<'p>,
-        arg_expr: &FatExpr<'p>,
-    ) -> Res<'p, Ip> {
+    fn emit_runtime_call(&mut self, output: Ip, f: &FatExpr<'p>, arg_expr: &FatExpr<'p>) -> Res<'p, Ip> {
         if let Some(f) = f.as_fn() {
             let func = &self.program.funcs[f.0];
             let f_ty = func.unwrap_ty();
@@ -181,17 +166,10 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 let start = self.compile_expr(out, expr)?;
                 (start, out)
             }
-            Stmt::DeclVar {
-                name,
-                ty,
-                value,
-                kind,
-                ..
-            } => {
+            Stmt::DeclVar { name, ty, value, kind, .. } => {
                 assert_ne!(VarType::Const, *kind);
                 let ty = ty.unwrap();
-                let dest =
-                    self.new_val(self.program.find_interned(TypeInfo::Ptr(ty)), Item::Scalar);
+                let dest = self.new_val(self.program.find_interned(TypeInfo::Ptr(ty)), Item::Scalar);
                 let (start, end) = match value {
                     None => {
                         let start = self.new_block(TypeId::unit());
@@ -201,13 +179,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                         let set = self.new_block(ty);
                         let start = self.compile_expr(set, value)?;
                         let src = self.arg_of(set);
-                        self.push(
-                            set,
-                            Inst::Store {
-                                src,
-                                dest_ptr: dest,
-                            },
-                        );
+                        self.push(set, Inst::Store { src, dest_ptr: dest });
                         (start, set)
                     }
                 };
@@ -251,11 +223,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         Ok(match expr.deref() {
             Expr::WipFunc(_) | Expr::Closure(_) | Expr::GetNamed(_) => unreachable!(),
             Expr::Call(f, arg) => self.emit_runtime_call(output, f, arg)?,
-            Expr::Block {
-                body,
-                result: value,
-                ..
-            } => {
+            Expr::Block { body, result: value, .. } => {
                 let start = self.new_block(TypeId::unit());
                 let mut prev = start;
                 for stmt in body {
@@ -291,9 +259,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 let start = self.new_block(TypeId::unit());
                 let val = if let Some(val) = self.vars.get(var).cloned() {
                     val
-                } else if let Some((value, ty)) =
-                    self.program.funcs[self.func.0].closed_constants.get(*var)
-                {
+                } else if let Some((value, ty)) = self.program.funcs[self.func.0].closed_constants.get(*var) {
                     debug_assert_eq!(expr.ty, ty);
                     self.new_val(ty, Item::Value(value.single()?))
                 } else {
@@ -344,9 +310,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                         // (ptr, ptr_ty).into()
                         todo!()
                     }
-                    "c_call" => err!(
-                        "!c_call has been removed. calling convention is part of the type now.",
-                    ),
+                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
                     "deref" => {
                         let use_ptr = self.new_block(arg.ty);
                         let start = self.compile_expr(use_ptr, arg)?;
@@ -358,12 +322,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                         start
                     }
                     "reflect_print" => todo!(),
-                    "type"
-                    | "assert_compile_error"
-                    | "comptime_print"
-                    | "symbol"
-                    | "struct"
-                    | "enum" => unreachable!(),
+                    "type" | "assert_compile_error" | "comptime_print" | "symbol" | "struct" | "enum" => unreachable!(),
                     "tag" => {
                         // TODO: auto deref and typecheking
                         // let addr = self.addr_macro(result, arg)?;
@@ -473,16 +432,11 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 if let Some(val) = self.vars.get(var).cloned() {
                     let kind = self.program.vars[var.1].kind;
                     if kind != VarType::Var {
-                        err!(
-                            "Can only take address of vars not {kind:?} {}",
-                            var.log(self.program.pool)
-                        )
+                        err!("Can only take address of vars not {kind:?} {}", var.log(self.program.pool))
                     }
                     self.end(start, Ret::GotoWith(output, val));
                     Ok(start)
-                } else if let Some((value, ty)) =
-                    self.program.funcs[self.func.0].closed_constants.get(*var)
-                {
+                } else if let Some((value, ty)) = self.program.funcs[self.func.0].closed_constants.get(*var) {
                     // HACK: this is wrong but it makes constant structs work better.
                     if let TypeInfo::Ptr(_) = self.program.types[ty.0] {
                         let value = self.new_val(ty, Item::Value(value.single()?));
@@ -521,14 +475,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         let if_true = self.compile_expr(output, if_true)?;
         let if_false = self.compile_expr(output, if_false)?;
         let cond = self.arg_of(do_branch);
-        self.end(
-            do_branch,
-            Ret::If {
-                cond,
-                if_true,
-                if_false,
-            },
-        );
+        self.end(do_branch, Ret::If { cond, if_true, if_false });
         Ok(do_cond)
     }
 
@@ -586,12 +533,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
         }
     }
 
-    fn field_access_expr(
-        &mut self,
-        result: &FnBody<'p>,
-        container_ptr: Structured,
-        name: Ident<'p>,
-    ) -> Res<'p, Structured> {
+    fn field_access_expr(&mut self, result: &FnBody<'p>, container_ptr: Structured, name: Ident<'p>) -> Res<'p, Structured> {
         // let mut container_ptr_ty = self.program.raw_type(container_ptr.ty());
         // let mut container_ptr = result.load(self, container_ptr)?.0;
         // // Auto deref for nested place expressions.

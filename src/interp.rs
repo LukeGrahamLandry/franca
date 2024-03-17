@@ -39,6 +39,7 @@ pub struct Interp<'a, 'p> {
     pub last_loc: Option<Span>,
     pub messages: Vec<StackAbsoluteRange>,
     pub sizes: SizeCache,
+    pub ffi_stack: Vec<Values>,
 }
 
 impl<'a, 'p> Interp<'a, 'p> {
@@ -51,6 +52,7 @@ impl<'a, 'p> Interp<'a, 'p> {
             last_loc: None,
             messages: vec![],
             sizes: SizeCache { known: vec![] },
+            ffi_stack: vec![],
         }
     }
 
@@ -708,7 +710,7 @@ impl<'a, 'p> Interp<'a, 'p> {
 
     /// If slot ranges over multiple, return them as a tuple.
     #[track_caller]
-    fn take_slots(&mut self, slot: StackRange) -> Values {
+    pub fn take_slots(&mut self, slot: StackRange) -> Values {
         if slot.count == 0 {
             Value::Unit.into()
         } else if slot.count == 1 {
@@ -933,6 +935,10 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
 
     fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>> {
         self.ready[f.0].clone()
+    }
+
+    fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values> {
+        self.deref_ptr(slot)
     }
 }
 

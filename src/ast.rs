@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
-    compiler::{insert_multi, CErr, FnWip, Res},
+    compiler::{insert_multi, CErr, Compile, Executor, FnWip, Res},
     experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
     logging::err,
@@ -113,7 +113,7 @@ pub enum Expr<'p> {
     String(Ident<'p>),
 }
 
-trait WalkAst<'p> {
+pub trait WalkAst<'p> {
     fn walk_expr(&mut self, _: &mut FatExpr<'p>) {}
     fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
     fn walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
@@ -207,6 +207,7 @@ trait WalkAst<'p> {
     }
 }
 
+// Used for inlining closures.
 struct RenumberVars<'a, 'p> {
     vars: &'a mut Vec<VarInfo>,
     mapping: &'a mut HashMap<Var<'p>, Var<'p>>,

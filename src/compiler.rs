@@ -13,7 +13,7 @@ use std::mem;
 use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadSet, Pattern, Var, VarInfo, VarType};
+use crate::ast::{garbage_loc, Binding, FatStmt, Field, IntType, Name, OverloadSet, Pattern, Var, VarInfo, VarType, WalkAst};
 
 use crate::bc::*;
 use crate::experiments::reflect::Reflect;
@@ -920,16 +920,38 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     "while" => self.emit_call_while(result, arg)?,
                     "addr" => self.addr_macro(result, arg)?,
                     "quote" => {
-                        let arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
+                        let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
+                        let loc = arg.loc;
+
+                        let mut walk = Unquote {
+                            compiler: self,
+                            placeholders: vec![],
+                            result,
+                        };
+                        walk.expr(&mut arg);
+                        let mut placeholders = walk.placeholders; // drop walk.
+
+                        // TODO: want to do this but then my mutation fucks everything. you really do need to do the clone.
+                        //       replace with that constant and a clone. need to impl clone. but deep clone that works on heap ptrs.
                         let mut value = arg.serialize_one();
                         value.make_heap_constant();
                         let ty = FatExpr::get_type(self.program);
-                        // TODO: want to do this but then my mutation fucks everything. you really do need to do the clone.
-                        //       replace with that constant and a clone. need to impl clone. but deep clone that works on heap ptrs.
                         expr.expr = Expr::Value { ty, value: value.clone() };
-                        Structured::Const(ty, value)
+                        expr.ty = ty;
+                        if placeholders.is_empty() {
+                            Structured::Const(ty, value)
+                        } else {
+                            placeholders.push(mem::take(expr));
+                            let arg = Box::new(FatExpr::synthetic(Expr::Tuple(placeholders), loc));
+                            let arg = FatExpr::synthetic(Expr::SuffixMacro(self.pool.intern("slice"), arg), loc);
+                            let f = FatExpr::synthetic(Expr::GetNamed(self.pool.intern("unquote_macro_apply_placeholders")), loc);
+                            *expr = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(arg)), loc);
+                            println!("{:?}", expr.log(self.pool));
+                            self.compile_expr(result, expr, requested)?
+                        }
                     }
                     "slice" => {
+                        println!("{:?}", arg.log(self.pool));
                         let container = self.compile_expr(result, arg, None)?;
                         let ty = self.program.tuple_types(container.ty());
                         let expect = if let Some(types) = ty {
@@ -1283,6 +1305,25 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             "clone_ast" => {
                 let arg: FatExpr = unwrap!(arg.deserialize(), "");
                 Ok(arg.serialize_one())
+            }
+            "unquote_macro_apply_placeholders" => {
+                let (slot, count) = arg.to_pair()?;
+                let mut values = self.executor.deref_ptr_pls(slot)?.vec().into_iter();
+                let mut arg: Vec<FatExpr<'p>> = vec![];
+                for _ in 0..count.to_int()? {
+                    arg.push(unwrap!(FatExpr::deserialize(&mut values), ""));
+                }
+                assert!(values.next().is_none());
+                let mut template = unwrap!(arg.pop(), "");
+                println!("before {:?}", template.log(self.pool));
+                let mut walk = Unquote {
+                    compiler: self,
+                    placeholders: arg,
+                    result,
+                };
+                walk.expr(&mut template); // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
+                println!("after {:?}", template.log(self.pool));
+                Ok(template.serialize_one())
             }
             "get_type_int" => {
                 let mut arg: FatExpr = unwrap!(arg.deserialize(), "");
@@ -2356,6 +2397,7 @@ pub trait Executor<'p>: PoolLog<'p> {
     fn mark_state(&self) -> Self::SavedState;
     fn restore_state(&mut self, state: Self::SavedState);
     fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>>; // asadas
+    fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values>; //  HACK
 }
 
 // i like when my code is rocks not rice
@@ -2368,5 +2410,43 @@ pub(crate) trait ToBytes {
 impl ToBytes for i64 {
     fn to_bytes(self) -> u64 {
         u64::from_le_bytes(self.to_le_bytes())
+    }
+}
+
+pub struct Unquote<'z, 'a, 'p, Exec: Executor<'p>> {
+    pub compiler: &'z mut Compile<'a, 'p, Exec>,
+    pub placeholders: Vec<FatExpr<'p>>,
+    pub result: &'z mut FnWip<'p>,
+}
+
+impl<'z, 'a, 'p, Exec: Executor<'p>> WalkAst<'p> for Unquote<'z, 'a, 'p, Exec> {
+    // TODO: track if we're in unquote mode or placeholder mode.
+    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+        println!("{expr:?}");
+        if let Expr::SuffixMacro(name, arg) = &mut expr.expr {
+            let unquote = self.compiler.pool.intern("unquote");
+            let placeholder_name = self.compiler.pool.intern("placeholder");
+            if *name == unquote {
+                let expr_ty = FatExpr::get_type(self.compiler.program);
+                self.compiler.compile_expr(self.result, arg, Some(expr_ty)).unwrap(); // TODO
+                let loc = arg.loc;
+                let placeholder = Expr::Value {
+                    ty: TypeId::i64(),
+                    value: Value::I64(self.placeholders.len() as i64).into(),
+                };
+                let placeholder = FatExpr::synthetic(placeholder, loc);
+                let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(placeholder_name, Box::new(placeholder)), loc);
+                placeholder.ty = expr_ty;
+                // Note: take <arg> but replace the whole <expr>
+                self.placeholders.push(mem::take(arg.deref_mut()));
+                *expr = placeholder;
+            } else if *name == placeholder_name {
+                println!("replace");
+                let index = arg.as_int().expect("!placeholder expected int") as usize;
+                let value = mem::take(&mut self.placeholders[index]); // TODO: make it more obvious that its only one use and the slot is empty.
+                *expr = value;
+                println!("{:?}", expr.log(self.compiler.pool));
+            }
+        }
     }
 }

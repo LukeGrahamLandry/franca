@@ -50,9 +50,7 @@ macro_rules! init_interp_send {
 pub(crate) use init_interp_send;
 
 impl Value {
-    pub fn deserialize_from<'p, T: InterpSend<'p> + Sized>(
-        values: &mut impl Iterator<Item = Value>,
-    ) -> Option<T> {
+    pub fn deserialize_from<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = Value>) -> Option<T> {
         T::deserialize(values)
     }
 }
@@ -347,9 +345,7 @@ impl<'p> InterpSend<'p> for Span {
     }
 }
 
-impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p>
-    for HashMap<K, V>
-{
+impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for HashMap<K, V> {
     fn get_type_key() -> u128 {
         mix::<K, V>(1234567890)
     }
@@ -363,11 +359,7 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-        Some(
-            Vec::<(K, V)>::deserialize(values)?
-                .into_iter()
-                .collect::<Self>(),
-        )
+        Some(Vec::<(K, V)>::deserialize(values)?.into_iter().collect::<Self>())
     }
 
     fn size() -> usize {
@@ -398,9 +390,7 @@ impl<'p> InterpSend<'p> for String {
 }
 
 fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
-    A::get_type_key()
-        .wrapping_mul(B::get_type_key())
-        .wrapping_mul(extra)
+    A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)
 }
 
 #[test]
@@ -510,6 +500,7 @@ pub mod c {
 
     use crate::ast::IntType;
     use crate::ffi::InterpSend;
+    use crate::interp::Interp;
     use crate::pool::Ident;
     use crate::{
         ast::{Program, TypeId, TypeInfo},
@@ -531,9 +522,7 @@ pub mod c {
                 }
                 TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
                 TypeInfo::Enum { .. } => todo!(),
-                TypeInfo::Unique(ty, _)
-                | TypeInfo::Named(ty, _)
-                | TypeInfo::Struct { as_tuple: ty, .. } => self.as_c_type(*ty)?,
+                TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Struct { as_tuple: ty, .. } => self.as_c_type(*ty)?,
                 TypeInfo::Unit => todo!(),
                 // This is the return type of exit().
                 TypeInfo::Never => CTy::usize(),
@@ -552,13 +541,7 @@ pub mod c {
         }
     }
 
-    pub fn call<'p>(
-        program: &Program<'p>,
-        ptr: usize,
-        f_ty: crate::ast::FnType,
-        arg: Values,
-        comp_ctx: bool,
-    ) -> Res<'p, Values> {
+    pub fn call<'p>(program: &Program<'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, Values> {
         let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
@@ -582,10 +565,7 @@ pub mod c {
         if f_ty.ret != TypeId::unit() {
             b = b.res(program.as_c_type(f_ty.ret)?)
         }
-        let int32 = program.find_interned(TypeInfo::Int(IntType {
-            bit_count: 32,
-            signed: true,
-        }));
+        let int32 = program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true }));
         let sym = *program.ffi_types.get(&Ident::get_type_key()).unwrap();
 
         if comp_ctx {
