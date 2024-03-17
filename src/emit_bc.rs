@@ -566,6 +566,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let cond = result.load(self, cond)?.0;
 
         let ret = result.reserve_slots(self, out_ty)?;
+        // TODO: Really its not a var cause its only set on one branch but I don't want to deal with llvm phi right now.
+        for i in ret {
+            result.slot_is_var.set(i);
+        }
 
         let branch_ip = result.push(Bc::DebugMarker(Flag::Patch.ident(), Flag::Builtin_If.ident()));
         let true_ip = result.insts.len();

@@ -10,10 +10,10 @@ use std::{
 
 use llvm_sys::{
     core::{
-        LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildLoad2, LLVMBuildRet, LLVMBuildStore, LLVMConstInt, LLVMContextCreate,
-        LLVMContextDispose, LLVMCreateBuilderInContext, LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType, LLVMGetParam, LLVMInt1TypeInContext,
-        LLVMInt64TypeInContext, LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd,
-        LLVMStructType,
+        LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildBr, LLVMBuildCondBr, LLVMBuildLoad2, LLVMBuildRet, LLVMBuildStore,
+        LLVMConstInt, LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext, LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType,
+        LLVMGetParam, LLVMInt1TypeInContext, LLVMInt64TypeInContext, LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext,
+        LLVMPositionBuilderAtEnd, LLVMStructType,
     },
     execution_engine::{LLVMCreateJITCompilerForModule, LLVMDisposeExecutionEngine, LLVMExecutionEngineRef, LLVMGetFunctionAddress, LLVMLinkInMCJIT},
     prelude::*,
@@ -25,6 +25,7 @@ use crate::{
     bc::{Bc, StackOffset, Value},
     compiler::Res,
     interp::Interp,
+    logging::PoolLog,
     pool::Ident,
 };
 
@@ -112,9 +113,9 @@ impl JittedLlvm {
             match &program.types[ty.0] {
                 TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!(),
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
-                TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
+                TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
-                &TypeInfo::FnPtr(ty) => {
+                &TypeInfo::Fn(ty) | &TypeInfo::FnPtr(ty) => {
                     let mut arg = vec![self.get_type(program, ty.arg)]; // TODO: represent tuple as multiple arguments.
                     let ret = self.get_type(program, ty.ret);
                     LLVMFunctionType(ret, arg.as_mut_ptr(), arg.len() as c_uint, LLVMBool::from(false))
@@ -174,7 +175,7 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
 
     // TODO: i cant keep copy pasting this shape. gonna cry.
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
-        if self.llvm.get_fn(f).is_some() || self.wip.contains(&f) {
+        if self.llvm.get_fn_jitted(f).is_some() || self.wip.contains(&f) {
             return Ok(());
         }
         self.wip.push(f);
@@ -213,6 +214,7 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
             let func = self.interp.ready[f.0].as_ref().unwrap();
+            println!("{}", func.log(self.program.pool));
             self.slots.clear();
             self.slots.extend(vec![None; func.stack_slots]);
             self.blocks.clear();
@@ -237,9 +239,12 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
             }
 
             let arg_range = func.arg_range;
+            if arg_range.count != 1 {
+                todo!()
+            }
             for i in arg_range {
-                // Note: SEGSEGV here means you told llvm the wrong arity. (ie. check for multiple args vs one struct)
-                let arg_index = (i - arg_range.first.0) as u32;
+                // Note: SEGSEGV here means you told llvm the wrong type for llvm_f.
+                let arg_index = (i - arg_range.first.0) as c_uint;
                 let value = LLVMGetParam(llvm_f, arg_index);
                 self.write_slot(StackOffset(i), value);
             }
@@ -249,9 +254,13 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
             for i in 0..func.insts.len() {
                 let func = &self.interp.ready[f.0].as_ref().unwrap();
                 if func.jump_targets.get(i) {
-                    if !block_finished {}
+                    let block = *self.blocks.get(&(i)).unwrap();
+                    // Fallthrough (false branch of an if)
+                    if !block_finished {
+                        LLVMBuildBr(self.llvm.builder, block);
+                    }
 
-                    LLVMPositionBuilderAtEnd(self.llvm.builder, *self.blocks.get(&i).unwrap());
+                    LLVMPositionBuilderAtEnd(self.llvm.builder, block);
                     block_finished = false;
                 }
                 assert!(!block_finished);
@@ -267,17 +276,25 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                         let ty = self.llvm.get_type(self.program, ty);
                         let value = match value {
                             Value::I64(n) => LLVMConstInt(ty, u64::from_le_bytes(n.to_le_bytes()), LLVMBool::from(false)),
+                            // TODO: type if Fn has to be int because the only time you have them is at comptime where the index is whats important. so need seperate typeof for fn
                             Value::GetFn(FuncId(n)) | Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
+                            Value::Unit => LLVMConstInt(ty, 0, LLVMBool::from(false)), //TODO
                             _ => todo!(),
                         };
                         self.write_slot(slot, value);
                     }
                     &Bc::JumpIf { cond, true_ip, false_ip } => {
-                        todo!();
+                        let cond = self.read_slot(cond);
+                        LLVMBuildCondBr(
+                            self.llvm.builder,
+                            cond,
+                            *self.blocks.get(&true_ip).unwrap(),
+                            *self.blocks.get(&false_ip).unwrap(),
+                        );
                         block_finished = true;
                     }
                     &Bc::Goto { ip } => {
-                        todo!();
+                        LLVMBuildBr(self.llvm.builder, *self.blocks.get(&ip).unwrap());
                         block_finished = true;
                     }
                     &Bc::Ret(slot) => {
@@ -287,7 +304,6 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                         } else {
                             todo!()
                         }
-
                         block_finished = true;
                     }
                     Bc::LastUse(_) | Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
@@ -296,14 +312,23 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                         self.write_slot(to, v);
                     }
                     Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
-                        todo!()
+                        for i in 0..from.count {
+                            let from = StackOffset(i + from.first.0);
+                            let to = StackOffset(i + to.first.0);
+                            let v = self.read_slot(from);
+                            self.write_slot(to, v);
+                        }
                     }
                     &Bc::AbsoluteStackAddr { of, to } => {
                         for slot in of {
                             assert!(self.slot_is_var(StackOffset(slot)));
                         }
-
-                        todo!()
+                        if of.count == 1 {
+                            let ptr = self.slots[of.first.0].unwrap();
+                            self.write_slot(to, ptr);
+                        } else {
+                            todo!()
+                        }
                     }
                     &Bc::SlicePtr { base, offset, ret, .. } => {
                         todo!()
@@ -347,7 +372,7 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
             let ptr = self.slots[slot.0].unwrap();
             unsafe { LLVMBuildStore(self.llvm.builder, value, ptr) };
         } else {
-            assert!(self.slots[slot.0].is_none());
+            assert!(self.slots[slot.0].is_none(), "{slot:?}");
             self.slots[slot.0] = Some(value)
         }
     }
@@ -363,7 +388,7 @@ pub fn null_terminate(bytes: &str) -> CString {
 }
 
 pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
-    if v.len() >= index {
+    if v.len() > index {
         return;
     }
 
@@ -393,9 +418,11 @@ mod tests {
         LIB,
     };
     use codemap::CodeMap;
+    use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
     use llvm_sys::core::{LLVMDisposeMessage, LLVMPrintModuleToString};
     use llvm_sys::execution_engine::LLVMGetFunctionAddress;
     use std::ffi::CStr;
+    use std::mem::MaybeUninit;
     use std::process::Command;
     use std::ptr::addr_of;
     use std::{arch::asm, fs, mem::transmute};
@@ -428,20 +455,28 @@ mod tests {
 
         asm.compile(main)?;
 
-        panic!("done compile");
-
         if cfg!(feature = "dis_debug") {
             let debug_path = format!("target/latest_log/asm/{test_name}");
             fs::create_dir_all(&debug_path).unwrap();
             unsafe {
                 let ir_str = LLVMPrintModuleToString(asm.llvm.module);
-                let dis = CStr::from_ptr(ir_str).to_str().unwrap();
-                LLVMDisposeMessage(ir_str);
+                let dis = CStr::from_ptr(ir_str).to_str().unwrap(); // Note a copy, can't dispose before write.
                 fs::write(format!("{debug_path}/llvm_ir.txt"), dis).unwrap();
+                LLVMDisposeMessage(ir_str);
             }
         }
 
-        panic!("will call");
+        unsafe {
+            let mut msg = MaybeUninit::uninit();
+            let failed = LLVMVerifyModule(asm.llvm.module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg.as_mut_ptr());
+            if failed != 0 {
+                let msg = msg.assume_init();
+                let msg_str = CStr::from_ptr(msg).to_str().unwrap(); // Note a copy, can't dispose before write.
+                panic!("Failed llvm verify! \n{}.", msg_str);
+                LLVMDisposeMessage(msg);
+            }
+        }
+
         let code = asm.llvm.get_fn_jitted(main).unwrap();
         let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
         f(code);
