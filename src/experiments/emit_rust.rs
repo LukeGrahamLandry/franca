@@ -46,7 +46,7 @@ pub fn bootstrap() -> (String, String) {
         asm.compile(*f).unwrap();
     }
 
-    let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.txt\n");
+    let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.fr\n");
     for f in &bs {
         let bytes = unsafe { &*asm.asm.get_fn(*f).unwrap() };
 

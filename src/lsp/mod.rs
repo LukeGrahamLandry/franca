@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::ast::Flag;
 use crate::lex::{Lexer, TokenType};
 use crate::pool::StringPool;
 
@@ -171,11 +172,17 @@ impl<'p> Lsp<'p> {
                 TokenType::Error(_) | TokenType::Eof => break,
                 TokenType::BinaryNum { .. } | TokenType::Number(_) => 0,
                 TokenType::Quoted(_) => 1,
-                TokenType::Symbol(_) => 2,
+                TokenType::Symbol(i) => {
+                    if i.0 < Flag::_Reserved_Count_ as usize {
+                        3
+                    } else {
+                        2
+                    }
+                }
                 TokenType::At => 3,
                 TokenType::Bang => 5,
                 TokenType::DoubleSquare => 6,
-                TokenType::Fn => 7,
+                TokenType::Fn | TokenType::Qualifier(_) => 7,
                 _ => 4,
             };
             let start = text.find_line_col(token.span.low()); // TODO: this has gotta be slow

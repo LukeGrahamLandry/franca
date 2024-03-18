@@ -55,7 +55,7 @@ macro_rules! stdlib {
     ($name:expr) => {
         (
             $name,
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/", $name, ".txt")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/", $name, ".fr")),
         )
     };
 }
@@ -85,7 +85,7 @@ macro_rules! test_file {
 
             assert!(run_main(
                 pool,
-                fs::read_to_string(format!("tests/{}.txt", stringify!($case))).unwrap(),
+                fs::read_to_string(format!("tests/{}.fr", stringify!($case))).unwrap(),
                 Value::I64(3145192),
                 Value::I64(3145192),
                 Some(&stringify!($case)),

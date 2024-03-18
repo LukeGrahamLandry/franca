@@ -20,7 +20,7 @@ fn main() {
         if name == "bootstrap" {
             let (rs, fr) = bootstrap();
             fs::write("target/bootstrap_gen.rs", rs).unwrap();
-            fs::write("target/aarch64_basic.gen.txt", fr).unwrap();
+            fs::write("target/aarch64_basic.gen.fr", fr).unwrap();
             return;
         }
         if name == "log_export_ffi" {
@@ -39,12 +39,12 @@ fn main() {
         }
 
         let pool = Box::leak(Box::<StringPool>::default());
-        let path = PathBuf::from(format!("tests/{name}.txt"));
+        let path = PathBuf::from(format!("tests/{name}.fr"));
         if path.exists() {
             init_logs_flag(0xFFFFFFFFF);
             run_main(
                 pool,
-                fs::read_to_string(format!("tests/{name}.txt")).unwrap(),
+                fs::read_to_string(format!("tests/{name}.fr")).unwrap(),
                 Value::I64(0),
                 Value::I64(0),
                 Some(&name),
@@ -82,7 +82,7 @@ fn main() {
                 fs::read_to_string(case.path()).unwrap(),
                 Value::I64(0),
                 Value::I64(0),
-                Some(case.file_name().to_str().unwrap().strip_suffix(".txt").unwrap()),
+                Some(case.file_name().to_str().unwrap().strip_suffix(".fr").unwrap()),
                 Interp::new(pool),
             );
         }

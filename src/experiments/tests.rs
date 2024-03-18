@@ -175,12 +175,12 @@ macro_rules! jit_test {
         // TODO: bootstrap raw_slice
         // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
 
-        simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.txt"));
+        simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.fr"));
 
         // TODO: this relies on structs being in consecutive stack slots so had to disable reusing them.
-        simple!(structs, 5, 5, include_str!("../../tests/structs.txt"));
-        simple!(overloading, 5, 5, include_str!("../../tests/overloading.txt"));
-        simple!(closures, 5, 5, include_str!("../../tests/closures.txt"));
+        simple!(structs, 5, 5, include_str!("../../tests/structs.fr"));
+        simple!(overloading, 5, 5, include_str!("../../tests/overloading.fr"));
+        simple!(closures, 5, 5, include_str!("../../tests/closures.fr"));
     };
 }
 pub(crate) use jit_test;
