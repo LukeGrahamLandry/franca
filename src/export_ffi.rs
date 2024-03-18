@@ -9,13 +9,13 @@ use std::slice;
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
-    ("fn write(fd: i32, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
-    ("fn getchar() i32", libc::getchar as *const u8),
-    ("fn putchar(c: i32) i32", libc::putchar as *const u8),
-    ("fn exit(status: i32) Never", libc::exit as *const u8),
+    ("@env fn write(fd: i32, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
+    ("@env fn getchar() i32", libc::getchar as *const u8),
+    ("@env fn putchar(c: i32) i32", libc::putchar as *const u8),
+    ("@env fn exit(status: i32) Never", libc::exit as *const u8),
     ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
-    ("fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
+    ("@env fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[
@@ -26,7 +26,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
-    ("@comptime fn Array(T: Type, count: usize) Type", array_type as *const u8),
+    ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
 ];
 
 pub fn get_special_functions() -> String {

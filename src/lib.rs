@@ -42,7 +42,9 @@ pub mod scope;
 pub mod emit_bc;
 pub mod experiments;
 pub mod export_ffi;
-mod overloading;
+pub mod overloading;
+#[cfg(feature="lsp")]
+pub mod lsp;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope

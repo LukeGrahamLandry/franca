@@ -981,7 +981,7 @@ impl<'p> Program<'p> {
                 .map(|(name, ty)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().0)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            out += &format!("define {} @FN{}({args}) {{ {body} }}\n\n", self.for_llvm_ir(ret), f.0);
+            out += &format!("define {} @FN{}({args}) alwaysinline {{ {body} }}\n\n", self.for_llvm_ir(ret), f.0);
         }
 
         out

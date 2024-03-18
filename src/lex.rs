@@ -1,10 +1,10 @@
 //! Convert a string of source code into a stream of tokens.
-
-use codemap::Span;
+// TODO: ignore shabang line and make sure compiler supports running scripts that way. thats a good side affect of the "all info needed in program" goal.
 
 use crate::ast::VarType;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
+use codemap::Span;
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::ops::Deref;

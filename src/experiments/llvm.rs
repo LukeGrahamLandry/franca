@@ -13,12 +13,14 @@ use llvm_sys::{
         LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildBr, LLVMBuildCall2, LLVMBuildCondBr, LLVMBuildLoad2, LLVMBuildRet,
         LLVMBuildStore, LLVMConstInt, LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext, LLVMCreateMemoryBufferWithMemoryRange,
         LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType, LLVMGetNamedGlobal, LLVMGetParam, LLVMInt1TypeInContext, LLVMInt64TypeInContext,
-        LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd, LLVMStructType,
+        LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd, LLVMSetTarget, LLVMStructType,
     },
     execution_engine::{LLVMCreateJITCompilerForModule, LLVMDisposeExecutionEngine, LLVMExecutionEngineRef, LLVMGetFunctionAddress, LLVMLinkInMCJIT},
     ir_reader::LLVMParseIRInContext,
     prelude::*,
     target::{LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget},
+    target_machine::LLVMGetTargetMachineTarget,
+    transforms::ipo::LLVMAddGlobalOptimizerPass,
 };
 
 use crate::{
@@ -71,7 +73,7 @@ impl JittedLlvm {
             assert_eq!(LLVM_InitializeNativeAsmPrinter(), 0);
             // Fixes: JIT has not been linked in.
             LLVMLinkInMCJIT();
-            let failed = LLVMCreateJITCompilerForModule(execution_engine.as_mut_ptr(), module, 0, err.as_mut_ptr());
+            let failed = LLVMCreateJITCompilerForModule(execution_engine.as_mut_ptr(), module, 2, err.as_mut_ptr());
 
             if failed != 0 {
                 // TODO: factor out
