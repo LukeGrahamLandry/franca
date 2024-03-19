@@ -1527,6 +1527,7 @@ pub enum Flag {
     Llvm,
     _Reserved_End_Arch_, // It's important which are above and below this point.
     Comptime,
+    Forward,
     Generic,
     As,
     Inline,

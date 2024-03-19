@@ -120,6 +120,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             TargetArch::Aarch64 => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
             TargetArch::Llvm => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64)),
         }
+        overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Forward)); // HACK
 
         if overloads.0.is_empty() {
             err!("No overload found for {i:?}: {}", self.pool.get(name));

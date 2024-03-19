@@ -1532,10 +1532,32 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(Some(match expr.deref_mut() {
             Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) => return Ok(None),
-            Expr::Value { ty, .. } => *ty,
+            Expr::Value { ty, value } => {
+                if let Ok(_) = value.as_overload_set() {
+                    return Ok(None);
+                } else {
+                    *ty
+                }
+            }
             Expr::Call(f, arg) => {
                 if let Some(id) = f.as_fn() {
                     return Ok(self.program.funcs[id.0].finished_ret);
+                }
+
+                if let Expr::Value { value, .. } = f.deref_mut().deref_mut() {
+                    if let Ok(i) = value.as_overload_set() {
+                        println!("type_of overload {i}");
+                        if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
+                            if let Ok(Some(f_ty)) = self.infer_types(fid) {
+                                // Need to save this because resolving overloads eats named arguments
+                                f.expr = Expr::Value {
+                                    ty: self.program.func_type(fid),
+                                    value: Value::GetFn(fid).into(),
+                                };
+                                return Ok(Some(f_ty.ret));
+                            }
+                        }
+                    }
                 }
 
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {

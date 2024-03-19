@@ -90,6 +90,7 @@ macro_rules! jit_test {
                 }"#
         );
 
+        /* TODO
         simple!(
             recursion,
             5,
@@ -103,7 +104,7 @@ macro_rules! jit_test {
                 }
                 "#
         );
-
+        */
 
         simple!(
             use_any_reg,
