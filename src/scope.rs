@@ -287,5 +287,8 @@ impl<'p> ResolveScope<'p> {
             Name::Var(_) => unreachable!(),
             Name::None => self.resolve_type(&mut binding.ty),
         }
+        if let Some(expr) = &mut binding.default {
+            self.resolve_expr(expr);
+        }
     }
 }

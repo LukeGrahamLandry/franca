@@ -2,7 +2,7 @@ use crate::ast::{Expr, FatExpr, Flag, FnType, FuncId, OverloadOption, OverloadSe
 use crate::bc::{Value, Values};
 use crate::compiler::{CErr, Compile, DebugState, ExecTime, Executor, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
-use crate::logging::{err, ice, outln, unwrap, LogTag, PoolLog};
+use crate::logging::{assert_eq, err, ice, outln, unwrap, LogTag, PoolLog};
 use crate::pool::Ident;
 use std::mem;
 use std::ops::DerefMut;
@@ -43,8 +43,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 Some(id)
             }
             &mut Expr::GetNamed(i) => {
-                // TODO: from_bit_literal in an @enum gets here.
-                self.lookup_unique_func(i)
+                err!("GetNamed func: {}", self.pool.get(i));
             }
             _ => None,
         })
@@ -60,10 +59,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     ) -> Res<'p, FuncId> {
         // TODO: probably don't want this here because it means you can't shadow with a const.
         // If there's only one option, we don't care what type it is.
-        if let Some(f) = self.lookup_unique_func(name.0) {
-            self.named_args_to_tuple(result, arg, f)?;
-            return Ok(f);
-        }
+        // if let Some(f) = self.program.find_unique_func(name.0) {
+        //     self.named_args_to_tuple(result, arg, f)?;
+        //     return Ok(f);
+        // }
 
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
@@ -88,7 +87,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         // TODO: combine this with the match up there so its less ugly.
         if let Values::One(Value::OverloadSet(i)) = value {
-            self.resolve_in_overload_set(result, arg, requested_ret, i)
+            let out = self.resolve_in_overload_set(result, arg, requested_ret, i)?;
+            self.pop_state(state);
+            Ok(out)
         } else {
             err!("Expected function for {} but found {:?}", name.log(self.pool), value);
         }
@@ -120,12 +121,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             TargetArch::Llvm => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64)),
         }
 
-        for f in &overloads.0 {
-            assert!(!self.program.funcs[f.func.0].has_tag(Flag::Rs));
-        }
-
         if overloads.0.is_empty() {
-            err!("No overload found {i:?}",);
+            err!("No overload found for {i:?}: {}", self.pool.get(name));
         }
         if overloads.0.len() == 1 {
             let id = overloads.0[0].func;
@@ -135,11 +132,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         match self.type_of(result, arg) {
             Ok(Some(arg_ty)) => {
-                let accept = |f_ty: FnType| arg_ty == f_ty.arg && (requested_ret.is_none() || (requested_ret.unwrap() == f_ty.ret));
+                let accept = |f_arg: TypeId, f_ret: Option<TypeId>| {
+                    arg_ty == f_arg && (requested_ret.is_none() || f_ret.is_none() || (requested_ret.unwrap() == f_ret.unwrap()))
+                };
 
                 let mut found = None;
                 for check in &overloads.0 {
-                    if accept(check.ty) {
+                    if accept(check.arg, check.ret) {
                         found = Some(check.func);
                         break;
                     }
@@ -161,17 +160,20 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                 // TODO: put the message in the error so !assert_compile_error doesn't print it.
                 outln!(ShowErr, "not found {}", log_goal(self));
-                let decls = self.program.declarations.get(&name).unwrap().clone();
-                for f in decls {
-                    if let Ok(Some(f_ty)) = self.infer_types(f) {
-                        outln!(
-                            ShowErr,
-                            "- found {:?} fn({}) {};",
-                            f,
-                            self.program.log_type(f_ty.arg),
-                            self.program.log_type(f_ty.ret),
-                        );
-                    }
+                for f in overloads.0 {
+                    outln!(
+                        ShowErr,
+                        "- found {:?} fn({:?}={}) {:?}; {:?}",
+                        f.func,
+                        f.arg,
+                        self.program.log_type(f.arg),
+                        f.ret.map(|ret| self.program.log_type(ret)),
+                        self.program.funcs[f.func.0]
+                            .annotations
+                            .iter()
+                            .map(|a| self.pool.get(a.name))
+                            .collect::<Vec<_>>()
+                    );
                 }
                 outln!(ShowErr, "Impls: {:?}", self.program.impls.get(&name));
                 outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
@@ -188,12 +190,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     }
 
     pub fn compute_new_overloads(&mut self, i: usize) -> Res<'p, ()> {
-        let overloads = &self.program.overload_sets[i];
-        if let Some(decls) = self.program.declarations.get(&overloads.1) {
-            outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.1),);
-            let decls: Vec<_> = decls.iter().copied().filter(|f| !overloads.0.iter().any(|old| old.func == *f)).collect();
-            for f in &decls {
-                if let Ok(Some(f_ty)) = self.infer_types(*f) {
+        let overloads = &mut self.program.overload_sets[i];
+        let decls = mem::take(&mut overloads.2); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
+        if decls.is_empty() {
+            return Ok(());
+        }
+        outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.1),);
+        for f in &decls {
+            match self.infer_types(*f) {
+                Ok(Some(f_ty)) => {
                     outln!(
                         LogTag::Generics,
                         "- {f:?} is {:?}={} -> {}",
@@ -202,11 +207,20 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         self.program.log_type(f_ty.ret)
                     );
                     // TODO: this is probably wrong if you use !assert_compile_error
-                    self.program.overload_sets[i].0.push(OverloadOption { ty: f_ty, func: *f });
+                    self.program.overload_sets[i].0.push(OverloadOption {
+                        arg: f_ty.arg,
+                        ret: Some(f_ty.ret),
+                        func: *f,
+                    });
+                }
+                e => {
+                    if let Some(arg) = self.program.funcs[f.0].finished_arg {
+                        self.program.overload_sets[i].0.push(OverloadOption { arg, ret: None, func: *f });
+                    } else {
+                        println!("ERR: {e:?}")
+                    }
                 }
             }
-        } else {
-            err!("expected declarations for overload set {:?} L{i}", self.pool.get(overloads.1),)
         }
 
         Ok(())

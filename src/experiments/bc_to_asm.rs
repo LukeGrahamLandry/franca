@@ -543,7 +543,7 @@ mod tests {
         let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Aarch64);
         let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
         comp.add_declarations(global, Flag::TopLevel.ident(), None)?;
-        let main = unwrap!(comp.lookup_unique_func(Flag::Main.ident()), "");
+        let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
         if let Err(e) = comp.compile(main, ExecTime::Runtime) {
             println!("{}", e.reason.log(comp.program, pool));
             return Err(e);

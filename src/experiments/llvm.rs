@@ -482,7 +482,7 @@ mod tests {
         let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Llvm);
         let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
         comp.add_declarations(global, Flag::TopLevel.ident(), None)?;
-        let main = unwrap!(comp.lookup_unique_func(Flag::Main.ident()), "");
+        let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
         comp.compile(main, ExecTime::Runtime)?;
 
         let mut asm = BcToLlvm::new(&mut comp.executor, &mut program);

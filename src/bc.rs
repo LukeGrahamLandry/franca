@@ -313,6 +313,14 @@ impl Values {
             }
         }
     }
+
+    pub fn as_overload_set<'p>(&self) -> Res<'p, usize> {
+        if let Value::OverloadSet(i) = self.clone().single()? {
+            Ok(i)
+        } else {
+            err!("expected OverloadSet not {self:?}",)
+        }
+    }
 }
 
 impl Value {

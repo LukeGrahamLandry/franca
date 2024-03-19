@@ -26,6 +26,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
+    ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
     ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
 ];
 

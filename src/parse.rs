@@ -127,14 +127,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.start_subexpr();
                 self.start_subexpr();
-                self.start_subexpr();
                 self.pop();
                 let v = i64::from_le_bytes((value as u64).to_le_bytes());
                 let v = self.expr(Expr::int(v));
                 let bits = self.expr(Expr::int(bit_count as i64));
                 let pair = self.expr(Expr::Tuple(vec![bits, v]));
-                let func = self.expr(Expr::GetNamed(Flag::From_Bit_Literal.ident()));
-                let call = self.expr(Expr::Call(Box::new(func), Box::new(pair)));
+                let call = self.expr(Expr::SuffixMacro(Flag::From_Bit_Literal.ident(), Box::new(pair)));
                 Ok(call)
             }
             Symbol(i) => {

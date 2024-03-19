@@ -612,6 +612,28 @@ pub struct Func<'p> {
     pub module: Option<ModuleId>,
 }
 
+// TODO: use this instead of having a billion fields.
+#[derive(Clone, Debug, InterpSend)]
+enum FuncImpl<'p> {
+    Normal(FatExpr<'p>),
+    /// An external symbol to be resolved by the dynamic loader at runtime.
+    /// Libc functions (prefixed with '_') are a safe bet.
+    DynamicImport(Ident<'p>),
+    /// An address to call this function in the compiler's process.
+    ComptimeAddr(usize),
+    /// Some opcodes to be emitted directly as the function body.
+    /// They had better be position independent and follow the expected calling convention.
+    JittedAarch64(Vec<u32>),
+    /// A function the compiler can call with which registers it wants to use and get back some machine code.
+    /// This allows core operations to be written as functions but leave some freedom to the register allocator.
+    AnyRegTemplate(FuncId),
+    /// Lines of llvm ir text to be concatenated as the body of a function.
+    /// The compiler creates the signeture, prefix arg ssa references with '%', you cant declare globals.
+    LlvmIr(Vec<Ident<'p>>),
+    /// Purely a forward declaration. Perhaps an interp builtin.  
+    None,
+}
+
 impl<'p> Func<'p> {
     pub fn new(name: Ident<'p>, arg: Pattern<'p>, ret: LazyType<'p>, body: Option<FatExpr<'p>>, loc: Span, has_name: bool) -> Self {
         Func {
@@ -708,16 +730,13 @@ pub struct VarInfo {
 pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
-    // At the call site, you know the name but not the type.
-    // So you need to look at everybody that might be declaring the function you're trying to call.
-    pub declarations: HashMap<Ident<'p>, Vec<FuncId>>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     pub generics_memo: HashMap<(FuncId, Values), (Values, TypeId)>,
     // If you're looking for a function/type name that doesn't exist, these are places you can try instantiating them.
     pub impls: HashMap<Ident<'p>, Vec<FuncId>>,
     pub vars: Vec<VarInfo>,
-    pub overload_sets: Vec<OverloadSet<'p>>,
+    pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
     comptime_only: BitSet, // Index is TypeId
@@ -744,11 +763,12 @@ pub struct Module<'p> {
 pub struct ModuleId(pub usize);
 
 #[derive(Clone, Debug)]
-pub struct OverloadSet<'p>(pub Vec<OverloadOption>, pub Ident<'p>);
+pub struct OverloadSet<'p>(pub Vec<OverloadOption>, pub Ident<'p>, pub Vec<FuncId>);
 
 #[derive(Clone, Debug)]
 pub struct OverloadOption {
-    pub ty: FnType,
+    pub arg: TypeId,
+    pub ret: Option<TypeId>, // For @comptime, we might not know without the args
     pub func: FuncId,
 }
 
@@ -835,7 +855,6 @@ impl<'p> Program<'p> {
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
                 TypeInfo::F64,
             ],
-            declarations: Default::default(),
             funcs: Default::default(),
             generics_memo: Default::default(),
             impls: Default::default(),
@@ -1030,6 +1049,21 @@ impl<'p> Program<'p> {
             &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
         }
     }
+
+    pub fn find_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
+        for overloads in &self.overload_sets {
+            if overloads.1 == name {
+                if overloads.0.is_empty() && overloads.2.len() == 1 {
+                    return Some(overloads.2[0]);
+                }
+                if overloads.2.is_empty() && overloads.0.len() == 1 {
+                    return Some(overloads.0[0].func);
+                }
+            }
+        }
+
+        None
+    }
 }
 
 impl<'p> Program<'p> {
@@ -1051,11 +1085,7 @@ impl<'p> Program<'p> {
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         let id = FuncId(self.funcs.len());
         let name = func.name;
-        let named = func.referencable_name;
         self.funcs.push(func);
-        if named {
-            insert_multi(&mut self.declarations, name, id);
-        }
         id
     }
 
@@ -1497,6 +1527,8 @@ pub enum Flag {
     Llvm,
     _Reserved_End_Arch_, // It's important which are above and below this point.
     Comptime,
+    Generic,
+    As,
     Inline,
     NoInline,
     Struct,

@@ -77,11 +77,7 @@ pub enum Inst {
 pub enum Ret<'a> {
     Goto(Ip),
     GotoWith(Ip, Val),
-    If {
-        cond: Val,
-        if_true: Ip,
-        if_false: Ip,
-    },
+    If { cond: Val, if_true: Ip, if_false: Ip },
     Call(Call),
     Empty,
     Return(Val),
@@ -130,9 +126,7 @@ impl<'a> IrFunc<'a> {
             match &self.blocks[i.0].end {
                 &Ret::Goto(b) => dirty.push(b),
                 &Ret::GotoWith(b, _) => dirty.push(b),
-                &Ret::If {
-                    if_true, if_false, ..
-                } => {
+                &Ret::If { if_true, if_false, .. } => {
                     dirty.push(if_true);
                     dirty.push(if_false);
                 }
@@ -157,13 +151,7 @@ impl<'a> IrFunc<'a> {
             }
             let mut label = format!("B{i}");
             if !block.args.0.is_unit() {
-                write!(
-                    label,
-                    "({:?}: {})",
-                    block.args.1,
-                    program.log_type(block.args.0)
-                )
-                .unwrap();
+                write!(label, "({:?}: {})", block.args.1, program.log_type(block.args.0)).unwrap();
             };
             label += "\n";
             for inst in &block.body {
@@ -188,18 +176,25 @@ impl<'a> IrFunc<'a> {
                     }
                     writeln!(out)
                 }
-                Ret::If { cond, if_true, if_false } => writeln!(out, "B{i} -> {if_true:?} [label=\"{cond:?}=T\"]\nB{i} -> {if_false:?} [label=\"{cond:?}=F\"]"),
+                Ret::If { cond, if_true, if_false } => writeln!(
+                    out,
+                    "B{i} -> {if_true:?} [label=\"{cond:?}=T\"]\nB{i} -> {if_false:?} [label=\"{cond:?}=F\"]"
+                ),
                 Ret::Call(call) => {
-                    let show = |callable: &Callable| {
-                        match callable {
-                            Callable::Ptr(v) => format!("{v:?}"),
-                            Callable::Fn(f) => format!("{f:?}"),
-                            Callable::Block(b) => format!("{b:?}"),
-                            Callable::Unreachable => String::from("NEVER"),
-                        }
+                    let show = |callable: &Callable| match callable {
+                        Callable::Ptr(v) => format!("{v:?}"),
+                        Callable::Fn(f) => format!("{f:?}"),
+                        Callable::Block(b) => format!("{b:?}"),
+                        Callable::Unreachable => String::from("NEVER"),
                     };
                     if let Callable::Block(b) = &call.then {
-                        writeln!(out, "B{i} -> {b:?} [label=\"{:?} ← {} of {:?}\"]", self.blocks[b.0].args.1, show(&call.f), call.arg)
+                        writeln!(
+                            out,
+                            "B{i} -> {b:?} [label=\"{:?} ← {} of {:?}\"]",
+                            self.blocks[b.0].args.1,
+                            show(&call.f),
+                            call.arg
+                        )
                     } else {
                         writeln!(out, "TODO: TAILCALL")
                     }
@@ -207,7 +202,8 @@ impl<'a> IrFunc<'a> {
                 Ret::Empty => writeln!(out, "B{i} -> ???"),
                 Ret::Return(val) => writeln!(out, "B{i} -> RETURN [label=\"ret ← {val:?}\"]"),
                 Ret::Unused(_) => todo!(),
-            }.unwrap();
+            }
+            .unwrap();
         }
 
         out += "}";

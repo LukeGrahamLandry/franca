@@ -5,11 +5,13 @@
 - module system: want to be able to seperate things to help lsp.
   - hard to think about how that should interact with wanting to use global overloads as traits.
 - nominal type-checking
+- clean up tracking backend specific function bodies
 
-## Llvm
+## Backend
 
 - get llvm backend to parity with aarch64
 - llvm output an executable
+- using mir for compiling c dependencies would be cool
 
 ## Ui
 

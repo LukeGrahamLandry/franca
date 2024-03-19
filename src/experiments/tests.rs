@@ -112,7 +112,7 @@ macro_rules! jit_test {
             r#"
             @any_reg
             fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
-                op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0));
+                op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0b000000));
             });
     
             @c_call fn main(a: i64) i64 = {

@@ -152,7 +152,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     // damn turns out defer would maybe be a good idea
     fn log_dbg<'a, 'p, Exec: Executor<'p>>(comp: &Compile<'a, 'p, Exec>, save: Option<&str>) {
         outln!(Bytecode, "{}", comp.executor.log(comp.pool));
-        if let Some(id) = comp.lookup_unique_func(Flag::Main.ident()) {
+        if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
             outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
         }
         
@@ -207,17 +207,9 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
         }
         Ok(_toplevel) => {
             let name = pool.intern("main");
-            match comp.lookup_unique_func(name) {
+            match comp.program.find_unique_func(name) {
                 None => {
                     outln!(ShowErr, "FN {name:?} = 'MAIN' NOT FOUND");
-                    let decls = comp
-                        
-                        .program
-                        .declarations
-                        .keys()
-                        .map(|n| pool.get(*n).to_string())
-                        .collect::<Vec<String>>();
-                    outln!(ShowErr, "Decls: {decls:?}");
                     log_dbg(&comp, save);
                     return false;
                 }

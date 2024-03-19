@@ -139,12 +139,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     }
 
     pub(crate) fn pop_state(&mut self, _s: DebugState<'p>) {
-        let _found = self.debug_trace.pop().expect("state stack");
-        // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
+        let _found = self.debug_trace.pop(); //.expect("state stack");
+                                             // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
     pub(crate) fn pop_stat2(&mut self) {
         // TODO
-        let _found = self.debug_trace.pop().expect("state stack");
+        let _found = self.debug_trace.pop(); //.expect("state stack");
     }
 
     pub fn add_declarations(&mut self, mut ast: Func<'p>, name: Ident<'p>, parent: Option<ModuleId>) -> Res<'p, FuncId> {
@@ -174,14 +174,14 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         Ok(f)
     }
 
-    pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
-        if let Some(decls) = self.program.declarations.get(&name) {
-            if decls.len() == 1 {
-                return Some(decls[0]);
-            }
-        }
-        None
-    }
+    // pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
+    //     if let Some(decls) = self.program.declarations.get(&name) {
+    //         if decls.len() == 1 {
+    //             return Some(decls[0]);
+    //         }
+    //     }
+    //     None
+    // }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         if !add_unique(&mut self.currently_compiling, f) {
@@ -578,6 +578,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         // Now the args are stored in the new function's constants, so the normal infer thing should work on the return type.
         // Note: we haven't done local constants yet, so ret can't yse them.
+        self.program.funcs[f.0].annotations.retain(|a| a.name != Flag::Generic.ident()); // HACK
         let fn_ty = unwrap!(self.infer_types(f)?, "not inferred");
         let ret = fn_ty.ret;
 
@@ -658,7 +659,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             // TODO: just filter the iterator.
                             let mut overloads = self.program.overload_sets[i].0.clone(); // sad
 
-                            overloads.retain(|f| f.ty == f_ty);
+                            overloads.retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
                             // TODO: this is a copy paste
                             let target = match result.when {
                                 ExecTime::Comptime => self.program.comptime_arch,
@@ -765,6 +766,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 let is_enum = func.has_tag(Flag::Enum);
                 assert!(!(is_struct && is_enum));
                 if is_struct {
+                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.1 == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.intern_type(ty);
                     assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
@@ -774,6 +776,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
                     }
                     // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
+                    //       with new commitment to doing it without idents for modules, the answer is yes.
                     func.name = Flag::Init.ident();
                     if func.body.is_none() {
                         let loc = func.loc;
@@ -787,8 +790,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         let construct = Flag::Construct.ident();
                         func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
                     }
+                    let id = self.add_func(func, &result.constants)?;
+                    *stmt.deref_mut() = Stmt::DoneDeclFunc(id);
+                    self.program.overload_sets[init_overloadset].2.push(id);
+                    return Ok(());
                 }
                 if is_enum {
+                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.1 == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.to_enum(ty);
                     assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
@@ -810,9 +818,11 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
                             new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), init_expr), loc));
                             new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
-                            self.add_func(new_func, &result.constants)?;
+                            let id = self.add_func(new_func, &result.constants)?;
+                            self.program.overload_sets[init_overloadset].2.push(id);
                         }
                     }
+                    *stmt.deref_mut() = Stmt::Noop;
                     // TODO: unfortunate that I have to short circuit, not handle extra annotations, and leave the garbage function there because i split them
                     return Ok(());
                 }
@@ -839,10 +849,16 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
                 // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
                 if let Some(var) = var {
-                    if result.constants.get(var).is_none() && referencable_name {
-                        let index = self.program.overload_sets.len();
-                        self.program.overload_sets.push(OverloadSet(vec![], var.0));
-                        result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::unknown()));
+                    if referencable_name && !is_enum && !is_struct {
+                        // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
+                        if let Some(overloads) = result.constants.get(var) {
+                            let i = overloads.0.as_overload_set()?;
+                            self.program.overload_sets[i].2.push(id);
+                        } else {
+                            let index = self.program.overload_sets.len();
+                            self.program.overload_sets.push(OverloadSet(vec![], var.0, vec![id]));
+                            result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::unknown()));
+                        }
                     }
                 }
 
@@ -1002,7 +1018,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             placeholders.push(mem::take(expr));
                             let arg = Box::new(FatExpr::synthetic(Expr::Tuple(placeholders), loc));
                             let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), arg), loc);
-                            let f = FatExpr::synthetic(Expr::GetNamed(Flag::Unquote_Macro_Apply_Placeholders.ident()), loc);
+                            let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
+                            let _ = self.infer_types(f)?.unwrap();
+                            let f = FatExpr::synthetic(
+                                Expr::Value {
+                                    ty: self.program.func_type(f),
+                                    value: Value::GetFn(f).into(),
+                                },
+                                loc,
+                            );
                             *expr = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(arg)), loc);
                             println!("{:?}", expr.log(self.pool));
                             self.compile_expr(result, expr, requested)?
@@ -1180,6 +1204,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             err!("!construct expected map literal.",)
                         }
                     }
+                    "from_bit_literal" => {
+                        let int = bit_literal(expr, self.pool)?;
+                        let ty = self.program.intern_type(TypeInfo::Int(int.0));
+                        let value = Value::I64(int.1);
+                        expr.expr = Expr::Value { ty, value: value.into() };
+                        Structured::Const(ty, value.into())
+                    }
                     _ => err!(CErr::UndeclaredIdent(*macro_name)),
                 }
             }
@@ -1286,6 +1317,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     self.compile_expr(result, arg, Some(TypeId::ty()))?;
                     let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
                     let ty = self.to_type(ty)?;
+                    target.ty = ty;
                     *expr = mem::take(target);
                     return self.compile_expr(result, expr, Some(ty));
                 }
@@ -1493,8 +1525,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
 
         // TODO: this is unfortunate
-        if let Ok((_, _)) = bit_literal(expr, self.pool) {
-            return Ok(Some(TypeId::i64())); // self.program.intern_type(TypeInfo::Int(int)) but that breaks assert_Eq
+        if let Ok((int, _)) = bit_literal(expr, self.pool) {
+            // return Ok(Some(TypeId::i64()));
+            return Ok(Some(self.program.intern_type(TypeInfo::Int(int)))); // but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
             Expr::Index(_, _) => todo!(),
@@ -1512,8 +1545,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         }
                     }
                     if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
-                        if self.infer_types(fid).is_ok() {
-                            let f_ty = self.program.funcs[fid.0].unwrap_ty();
+                        if let Ok(Some(f_ty)) = self.infer_types(fid) {
                             // Need to save this because resolving overloads eats named arguments
                             f.expr = Expr::Value {
                                 ty: self.program.func_type(fid),
@@ -1523,7 +1555,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         }
                     }
                 } else if let Ok(Some(ty)) = self.type_of(result, f) {
-                    return Ok(Some(self.program.fn_ty(ty).unwrap().ret));
+                    if let Some(ty) = self.program.fn_ty(ty) {
+                        return Ok(Some(ty.ret));
+                    }
                 }
 
                 return Ok(None);
@@ -1553,12 +1587,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     ice!("TODO: closure inference failed. need to make promote_closure non-destructive")
                 }
             }
-            Expr::PrefixMacro { .. } => {
+            Expr::PrefixMacro { name, arg, .. } => {
+                if name.0 == Flag::As.ident() {
+                    let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
+                    let ty = self.program.to_type(ty)?;
+                    ty
+                }
                 // TODO: if this fails you might have changed the state.
-                if let Ok(res) = self.compile_expr(result, expr, None) {
-                    res.ty()
-                } else {
-                    ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?")
+                else {
+                    match self.compile_expr(result, expr, None) {
+                        Ok(res) => res.ty(),
+                        Err(e) => ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?\n{e:?}",),
+                    }
                 }
             }
             Expr::GetNamed(_) | Expr::StructLiteralP(_) => return Ok(None),
@@ -1731,7 +1771,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 f.finished_arg = Some(arg);
             }
             if f.finished_ret.is_none() {
-                if self.infer_types_progress(&f.closed_constants, &mut f.ret)? {
+                if !f.has_tag(Flag::Generic) && self.infer_types_progress(&f.closed_constants, &mut f.ret)? {
                     f.finished_ret = Some(f.ret.unwrap());
 
                     self.pop_state(state);
@@ -2478,16 +2518,14 @@ fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
 }
 
 fn bit_literal<'p>(expr: &FatExpr<'p>, pool: &StringPool<'p>) -> Res<'p, (IntType, i64)> {
-    if let Expr::Call(f, arg) = &expr.expr {
-        if let Some(name) = f.as_ident() {
-            if name == pool.intern("from_bit_literal") {
-                if let Expr::Tuple(parts) = arg.deref().deref() {
-                    if let Expr::Value { value, .. } = parts[0].deref() {
-                        let bit_count = value.clone().single()?.to_int()?;
-                        if let Expr::Value { value, .. } = parts[1].deref() {
-                            let val = value.clone().single()?.to_int()?;
-                            return Ok((IntType { bit_count, signed: false }, val));
-                        }
+    if let Expr::SuffixMacro(name, arg) = &expr.expr {
+        if *name == Flag::From_Bit_Literal.ident() {
+            if let Expr::Tuple(parts) = arg.deref().deref() {
+                if let Expr::Value { value, .. } = parts[0].deref() {
+                    let bit_count = value.clone().single()?.to_int()?;
+                    if let Expr::Value { value, .. } = parts[1].deref() {
+                        let val = value.clone().single()?.to_int()?;
+                        return Ok((IntType { bit_count, signed: false }, val));
                     }
                 }
             }
@@ -2537,7 +2575,9 @@ impl<'z, 'a, 'p, Exec: Executor<'p>> WalkAst<'p> for Unquote<'z, 'a, 'p, Exec> {
         if let Expr::SuffixMacro(name, arg) = &mut expr.expr {
             if *name == Flag::Unquote.ident() {
                 let expr_ty = FatExpr::get_type(self.compiler.program);
-                self.compiler.compile_expr(self.result, arg, Some(expr_ty)).unwrap(); // TODO
+                self.compiler
+                    .compile_expr(self.result, arg, Some(expr_ty))
+                    .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO
                 let loc = arg.loc;
                 let placeholder = Expr::Value {
                     ty: TypeId::i64(),
