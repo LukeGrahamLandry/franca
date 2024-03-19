@@ -500,6 +500,19 @@ impl<'p> FatExpr<'p> {
             loc,
         )
     }
+
+    pub fn parse_dot_chain(&self) -> Res<'p, Vec<Ident<'p>>> {
+        match &self.expr {
+            Expr::FieldAccess(parent, child) => {
+                let mut parent = parent.parse_dot_chain()?;
+                parent.push(*child);
+                Ok(parent)
+            }
+            Expr::GetVar(v) => Ok(vec![v.0]),
+            &Expr::GetNamed(i) => Ok(vec![i]),
+            _ => err!("expected a.b.c.d.e",),
+        }
+    }
 }
 
 impl PartialEq for FatExpr<'_> {
@@ -596,6 +609,7 @@ pub struct Func<'p> {
     pub jitted_code: Option<Vec<u32>>,
     pub any_reg_template: Option<FuncId>,
     pub llvm_ir: Option<Vec<Ident<'p>>>,
+    pub module: Option<ModuleId>,
 }
 
 impl<'p> Func<'p> {
@@ -623,6 +637,7 @@ impl<'p> Func<'p> {
             jitted_code: None,
             any_reg_template: None,
             llvm_ir: None,
+            module: None,
         }
     }
 
@@ -710,7 +725,23 @@ pub struct Program<'p> {
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
+    pub modules: Vec<Module<'p>>,
 }
+
+#[derive(Clone)]
+pub struct Module<'p> {
+    pub name: Ident<'p>,
+    pub id: ModuleId,
+    pub parent: Option<ModuleId>,
+    pub toplevel: FuncId,
+    pub exports: HashMap<Ident<'p>, Var<'p>>,
+    pub children: HashMap<Ident<'p>, ModuleId>,
+    pub i_depend_on: Vec<ModuleId>,
+    pub depend_on_me: Vec<ModuleId>,
+}
+
+#[derive(Copy, Clone, Debug, InterpSend)]
+pub struct ModuleId(pub usize);
 
 #[derive(Clone, Debug)]
 pub struct OverloadSet<'p>(pub Vec<OverloadOption>, pub Ident<'p>);
@@ -818,6 +849,7 @@ impl<'p> Program<'p> {
             runtime_arch,
             comptime_arch,
             inline_llvm_ir: vec![],
+            modules: vec![],
         };
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -1280,9 +1312,8 @@ impl<'p> FatStmt<'p> {
         self.annotations.iter().any(|a| a.name == name)
     }
 
-    pub(crate) fn _get_tag_arg(&self, pool: &StringPool<'p>, name: &str) -> Option<&FatExpr<'p>> {
-        let name = pool.intern(name);
-        self.annotations.iter().find(|a| a.name == name).and_then(|a| a.args.as_ref())
+    pub fn get_tag_arg(&self, name: Flag) -> Option<&FatExpr<'p>> {
+        self.annotations.iter().find(|a| a.name == name.ident()).and_then(|a| a.args.as_ref())
     }
 }
 
@@ -1356,6 +1387,7 @@ impl<'p> Default for Func<'p> {
             jitted_code: None,
             any_reg_template: None,
             llvm_ir: None,
+            module: None,
         }
     }
 }
@@ -1501,6 +1533,10 @@ pub enum Flag {
     Reflect_Print,
     Fn_Ptr,
     Overload_Set_Ast,
+    Import,
+    TopLevel,
+    Module,
+    Include_Std,
     _Reserved_Count_,
 }
 

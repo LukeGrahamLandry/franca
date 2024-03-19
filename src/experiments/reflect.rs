@@ -89,16 +89,14 @@ pub trait VReflect {
     where
         Self: Sized,
     {
-        self.checked_field(index, T::get_ty())
-            .map(|ptr| unsafe { &*(ptr as *const T) })
+        self.checked_field(index, T::get_ty()).map(|ptr| unsafe { &*(ptr as *const T) })
     }
 
     fn field_mut<T: Reflect>(&mut self, index: usize) -> Option<&mut T>
     where
         Self: Sized,
     {
-        self.checked_field(index, T::get_ty())
-            .map(|ptr| unsafe { &mut *(ptr as *mut T) })
+        self.checked_field(index, T::get_ty()).map(|ptr| unsafe { &mut *(ptr as *mut T) })
     }
 }
 
@@ -295,13 +293,7 @@ impl<T: Reflect> Reflect for Vec<T> {
 }
 
 fn ptr_before_len<T>() -> bool {
-    let (a, b, c, d, e): (&[T], &mut [T], _, _, Box<[T]>) = (
-        &[],
-        &mut [],
-        &[] as *const [T],
-        &mut [] as *mut [T],
-        Box::new([]),
-    );
+    let (a, b, c, d, e): (&[T], &mut [T], _, _, Box<[T]>) = (&[], &mut [], &[] as *const [T], &mut [] as *mut [T], Box::new([]));
     // This transmute can't be const.
     let (ptr_a, len_a): (usize, usize) = unsafe { mem::transmute(a) };
     let (ptr_b, len_b): (usize, usize) = unsafe { mem::transmute(b) };
@@ -439,12 +431,8 @@ mod test {
                     let zero_option: Option<T> = mem::zeroed();
                     // let zero_raw =
                     //     slice::from_raw_parts(addr_of!(zero_raw) as *const u8, size_of::<T>());
-                    let zero_option = slice::from_raw_parts(
-                        addr_of!(zero_option) as *const u8,
-                        size_of::<Option<T>>(),
-                    );
-                    let none =
-                        slice::from_raw_parts(addr_of!(none) as *const u8, size_of::<Option<T>>());
+                    let zero_option = slice::from_raw_parts(addr_of!(zero_option) as *const u8, size_of::<Option<T>>());
+                    let none = slice::from_raw_parts(addr_of!(none) as *const u8, size_of::<Option<T>>());
                     ByteInfo {
                         // zero_raw: zero_raw.into(),
                         zero_option: zero_option.into(),
@@ -463,10 +451,7 @@ mod test {
             // Niche optimisation is a thing. You can use a null pointer as the tag.
             assert_eq!(size_of::<Bar>(), size_of::<Option<Bar>>());
             let info = black_box(get_niche::<Bar>());
-            let some = Some(Bar {
-                a: Box::new([]),
-                b: 1,
-            });
+            let some = Some(Bar { a: Box::new([]), b: 1 });
             let some_bytes = slice::from_raw_parts(addr_of!(some) as *const u8, size_of::<Bar>());
             assert_eq!(info.none, info.zero_option);
             assert_ne!(some_bytes, &*info.zero_option);
@@ -502,17 +487,11 @@ mod test {
             opaque_eq(*b_word_none, 0);
 
             // So then nested options can share the niche.
-            assert_eq!(
-                size_of::<Baz>(),
-                size_of::<Option<Option<Option<Option<Baz>>>>>()
-            );
+            assert_eq!(size_of::<Baz>(), size_of::<Option<Option<Option<Option<Baz>>>>>());
             // But before when there was only the pointer and the struct filled its stride, nested options need extra space.
             assert_ne!(size_of::<Bar>(), size_of::<Option<Option<Bar>>>());
             // Now there's a whole extra word so they can nest for free.
-            assert_eq!(
-                size_of::<Option<Option<Bar>>>(),
-                size_of::<Option<Option<Option<Option<Option<Bar>>>>>>(),
-            );
+            assert_eq!(size_of::<Option<Option<Bar>>>(), size_of::<Option<Option<Option<Option<Option<Bar>>>>>>(),);
         }
     }
 }

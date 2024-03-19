@@ -481,7 +481,7 @@ mod tests {
         let vars = ResolveScope::of(&mut global, pool);
         let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Llvm);
         let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
-        comp.add_declarations(global)?;
+        comp.add_declarations(global, Flag::TopLevel.ident(), None)?;
         let main = unwrap!(comp.lookup_unique_func(Flag::Main.ident()), "");
         comp.compile(main, ExecTime::Runtime)?;
 

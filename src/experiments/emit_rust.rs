@@ -32,7 +32,7 @@ pub fn bootstrap() -> (String, String) {
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
-    comp.add_declarations(global).unwrap();
+    comp.add_declarations(global, Flag::TopLevel.ident(), None).unwrap();
 
     let (mut rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
 

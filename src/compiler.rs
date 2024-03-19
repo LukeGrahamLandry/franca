@@ -13,7 +13,9 @@ use std::mem;
 use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{garbage_loc, Binding, FatStmt, Field, Flag, IntType, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType, WalkAst};
+use crate::ast::{
+    garbage_loc, Binding, FatStmt, Field, Flag, IntType, Module, ModuleId, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType, WalkAst,
+};
 
 use crate::bc::*;
 use crate::experiments::reflect::Reflect;
@@ -96,6 +98,7 @@ pub struct FnWip<'p> {
     pub last_loc: Span,
     pub constants: Constants<'p>,
     pub callees: Vec<FuncId>,
+    pub module: Option<ModuleId>,
 }
 
 impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
@@ -144,9 +147,30 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let _found = self.debug_trace.pop().expect("state stack");
     }
 
-    pub fn add_declarations(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
+    pub fn add_declarations(&mut self, mut ast: Func<'p>, name: Ident<'p>, parent: Option<ModuleId>) -> Res<'p, FuncId> {
+        let module = ModuleId(self.program.modules.len());
+        ast.module = Some(module);
         let f = self.add_func(ast, &Constants::empty())?;
+        self.program.modules.push(Module {
+            name,
+            id: module,
+            parent,
+            toplevel: f,
+            exports: Default::default(),
+            children: Default::default(),
+            i_depend_on: Default::default(),
+            depend_on_me: Default::default(),
+        });
+        if let Some(parent) = parent {
+            let prev = self.program.modules[parent.0].children.insert(name, module);
+            assert!(prev.is_none(), "Shadowed module {}", self.pool.get(name));
+        }
         self.ensure_compiled(f, ExecTime::Comptime)?;
+        let exports = self.program.funcs[f.0].closed_constants.clone();
+        for var in exports.local.keys() {
+            let prev = self.program.modules[module.0].exports.insert(var.0, *var);
+            // assert!(prev.is_none(), "Shadowed export {} from {}", self.pool.get(var.0), self.pool.get(name));
+        }
         Ok(f)
     }
 
@@ -212,7 +236,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     }
 
     #[track_caller]
-    fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span, parent: Option<Constants<'p>>) -> FnWip<'p> {
+    fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span, parent: Option<Constants<'p>>, module: Option<ModuleId>) -> FnWip<'p> {
         FnWip {
             stack_slots: 0,
             vars: Default::default(),
@@ -222,6 +246,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             last_loc: loc,
             constants: parent.unwrap_or_else(|| self.program.funcs[func.0].closed_constants.clone()),
             callees: vec![],
+            module,
         }
     }
 
@@ -232,6 +257,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let loc = self.program.funcs[f.0].loc;
         debug_assert!(!self.program.funcs[f.0].evil_uninit);
         debug_assert!(self.program.funcs[f.0].closed_constants.is_valid);
+        let module = self.program.funcs[f.0].module;
 
         mut_replace!(self.program.funcs[f.0].closed_constants, |constants| {
             let mut result = self.empty_fn(
@@ -239,6 +265,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 FuncId(f.0 + 10000000), // TODO: do i even need to pass an index? probably just for debugging
                 loc,
                 Some(constants),
+                module,
             );
 
             mut_replace!(self.program.funcs[f.0].local_constants, |mut local_constants| {
@@ -280,7 +307,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         if let Some(template) = func.any_reg_template {
             self.ensure_compiled(template, ExecTime::Comptime)?;
         } else {
-            let mut result = self.empty_fn(when, f, func.loc, None);
+            let mut result = self.empty_fn(when, f, func.loc, None, func.module);
             self.emit_body(&mut result, f)?;
             self.program.funcs[f.0].wip = Some(result);
         }
@@ -581,9 +608,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     fn compile_stmt(&mut self, result: &mut FnWip<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         debug_assert!(result.constants.is_valid);
         self.last_loc = Some(stmt.loc);
-        match stmt.deref_mut() {
+        match &mut stmt.stmt {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
+                if let Some(module_name) = stmt.annotations.iter().find(|a| a.name == Flag::Module.ident()) {
+                    // TODO: need to not pull out constants somehow.
+                    todo!()
+                }
                 self.compile_expr(result, expr, None)?;
             }
             Stmt::DeclVar { name, ty, value, kind, .. } => {
@@ -602,8 +633,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 self.immediate_eval_expr(&result.constants, value.clone(), res.ty())?
                             }
                             None => {
-                                let name = self.pool.get(name.0);
-                                unwrap!(self.builtin_constant(name), "uninit (non-blessed) const: {:?}", name).0.into()
+                                if let Some(import_path) = stmt.annotations.iter().find(|a| a.name == Flag::Import.ident()) {
+                                    let import_path = unwrap!(import_path.args.as_ref(), "@import requires argument").parse_dot_chain()?;
+                                    self.resolve_import(result.module.unwrap(), import_path, name.0)?
+                                } else {
+                                    let name = self.pool.get(name.0);
+                                    unwrap!(self.builtin_constant(name), "uninit (non-blessed) const: {:?}", name).0.into()
+                                }
                             }
                         };
 
@@ -721,6 +757,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
                 let mut func = mem::take(func);
+                func.module = result.module;
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(Flag::Bs);
                 let any_reg_template = func.has_tag(Flag::Any_Reg);
@@ -1358,14 +1395,14 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 }
                 assert!(values.next().is_none());
                 let mut template = unwrap!(arg.pop(), "");
-                println!("before {:?}", template.log(self.pool));
+                // println!("before {:?}", template.log(self.pool));
                 let mut walk = Unquote {
                     compiler: self,
                     placeholders: arg,
                     result,
                 };
                 walk.expr(&mut template); // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
-                println!("after {:?}", template.log(self.pool));
+                                          // println!("after {:?}", template.log(self.pool));
                 Ok(template.serialize_one())
             }
             "get_type_int" => {
@@ -1803,6 +1840,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     // TODO: calling this in infer is wrong because it might fail and lose the function
     fn promote_closure(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
+            func.module = result.module;
             let f = self.add_func(mem::take(func), &result.constants)?;
             if self.infer_types(f)?.is_none() {
                 // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
@@ -2400,6 +2438,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             };
             Ok((pattern, res))
         }))
+    }
+
+    fn resolve_import(&mut self, current: ModuleId, import_path: Vec<Ident<'_>>, name: Ident<'_>) -> Res<'p, Values> {
+        let mut module = ModuleId(0);
+        for path in &import_path {
+            if let Some(found) = self.program.modules[module.0].children.get(path) {
+                module = *found
+            } else {
+                todo!()
+            }
+        }
+        todo!()
     }
 }
 

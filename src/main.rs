@@ -62,15 +62,6 @@ fn main() {
             );
         }
     } else {
-        #[cfg(feature = "lsp")]
-        {
-            franca::lsp::run_lsp_blocking().unwrap();
-        }
-        if cfg!(not(feature = "lsp")) {
-            println!("lsp feature flag disabled.")
-        }
-        return;
-
         let mut passed = true;
         for case in fs::read_dir("tests").unwrap() {
             init_logs_flag(0xFFFFFFFFF);

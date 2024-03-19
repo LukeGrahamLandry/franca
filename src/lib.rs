@@ -107,6 +107,7 @@ test_file!(aarch64_jit);
 test_file!(backpassing);
 test_file!(dispatch);
 
+
 pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     pool: &'a StringPool<'p>,
     src: String,
@@ -146,7 +147,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, executor);
-    let result = comp.add_declarations(global);
+    let result = comp.add_declarations(global, Flag::TopLevel.ident(), None);
 
     // damn turns out defer would maybe be a good idea
     fn log_dbg<'a, 'p, Exec: Executor<'p>>(comp: &Compile<'a, 'p, Exec>, save: Option<&str>) {

@@ -35,10 +35,11 @@ pub fn get_special_functions() -> String {
     for (sig, ptr) in COMPILER {
         writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
     }
-    writeln!(out).unwrap();
+    // writeln!(out, "@module(libc) {{").unwrap();
     for (sig, ptr) in LIBC {
         writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
     }
+    // writeln!(out, "}};").unwrap();
     out
 }
 
