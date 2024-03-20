@@ -14,7 +14,8 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Binding, FatStmt, Field, Flag, IntType, Module, ModuleId, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType, WalkAst,
+    garbage_loc, Binding, FatStmt, Field, Flag, IntType, Module, ModuleBody, ModuleId, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType,
+    WalkAst,
 };
 
 use crate::bc::*;
@@ -155,7 +156,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             name,
             id: module,
             parent,
-            toplevel: f,
+            toplevel: ModuleBody::Pending(f),
             exports: Default::default(),
             children: Default::default(),
             i_depend_on: Default::default(),
@@ -173,15 +174,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
         Ok(f)
     }
-
-    // pub fn lookup_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
-    //     if let Some(decls) = self.program.declarations.get(&name) {
-    //         if decls.len() == 1 {
-    //             return Some(decls[0]);
-    //         }
-    //     }
-    //     None
-    // }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         if !add_unique(&mut self.currently_compiling, f) {

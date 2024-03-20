@@ -4,11 +4,12 @@
 use crate::ast::VarType;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
-use codemap::Span;
+use codemap::{File, Span};
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::ops::Deref;
 use std::str::Chars;
+use std::sync::Arc;
 
 // TODO: why tf is Range not copy
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ pub enum TokenType<'p> {
     // Bit count means leading zeros are observable.
     BinaryNum { bit_count: u8, value: u128 },
     LeftArrow,
+    IncludeStd,
     Error(LexErr),
 }
 
@@ -73,7 +75,7 @@ pub enum LexErr {
 pub struct Lexer<'a, 'p> {
     pool: &'p StringPool<'p>,
     root: Span,
-    src: &'a str,
+    src: Arc<File>,
     start: usize,
     current: usize,
     chars: Peekable<Chars<'a>>,
@@ -81,13 +83,15 @@ pub struct Lexer<'a, 'p> {
 }
 
 impl<'a, 'p> Lexer<'a, 'p> {
-    pub fn new(src: &'a str, pool: &'p StringPool<'p>, root: Span) -> Self {
+    pub fn new(src: Arc<File>, pool: &'p StringPool<'p>, root: Span) -> Self {
+        // Safety: its in an arc which is dropped at the same time as the iterator.
+        let fuck = unsafe { &*(src.source() as *const str) };
         Self {
             src,
             start: 0,
             current: 0,
-            chars: src.chars().peekable(),
             peeked: VecDeque::with_capacity(10),
+            chars: fuck.chars().peekable(),
             root,
             pool,
         }
@@ -108,6 +112,13 @@ impl<'a, 'p> Lexer<'a, 'p> {
         self.start = self.current;
         match self.peek_c() {
             '\0' => self.one(TokenType::Eof),
+            '#' => {
+                let name = self.lex_ident();
+                if name.kind != TokenType::IncludeStd {
+                    return self.err(LexErr::Unexpected('#'));
+                }
+                name
+            }
             '"' | '“' | '”' | '\'' => self.lex_quoted(),
             '0' => {
                 self.pop();
@@ -191,7 +202,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             match self.pop() {
                 '"' | '“' | '”' | '\'' => {
                     // Payload doesn't include quotes.
-                    let text = &self.src[self.start + 1..self.current - 1];
+                    let text = &self.src.source()[self.start + 1..self.current - 1];
                     return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
                 }
                 // I could let you have multi-line, but I don't like it because you end up with garbage indentation.
@@ -208,7 +219,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 c => !c.is_numeric() && c != '.',
             };
             if done {
-                let text = &self.src[self.start..self.current];
+                let text = &self.src.source()[self.start..self.current];
                 let n = match text.parse::<i64>() {
                     Ok(n) => n,
                     Err(_) => return self.err(LexErr::NumParseErr),
@@ -221,16 +232,18 @@ impl<'a, 'p> Lexer<'a, 'p> {
 
     fn lex_ident(&mut self) -> Token<'p> {
         let mut c = self.peek_c();
-        while c.is_ascii_alphanumeric() || c == '_' {
+        // TODO: only sometimes allow #
+        while c.is_ascii_alphanumeric() || c == '_' || c == '#' {
             self.pop();
             c = self.peek_c();
         }
-        let ty = match &self.src[self.start..self.current] {
+        let ty = match &self.src.source()[self.start..self.current] {
             "fn" => Fn,
             "fun" => Fun,
             "let" => Qualifier(VarType::Let),
             "var" => Qualifier(VarType::Var),
             "const" => Qualifier(VarType::Const),
+            "#include_std" => IncludeStd,
             text => Symbol(self.pool.intern(text)),
         };
         self.token(ty, self.start, self.current)

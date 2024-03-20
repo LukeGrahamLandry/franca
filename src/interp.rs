@@ -516,10 +516,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 outln!(ShowPrint, "=== end print ===");
                 Value::Unit.into()
             }
-            "print_callstack" => {
-                outln!(ShowPrint, "{}", self.log_callstack());
-                Value::Unit.into()
-            }
             "Fn" => {
                 // println!("Fn: {:?}", arg);
                 let (arg, ret) = arg.to_pair()?;

@@ -472,24 +472,21 @@ fn interp_send_empty_ast() {
 #[test]
 fn interp_send_libs_ast() {
     use crate::pool::StringPool;
-    use crate::{ast::FatStmt, parse::Parser, LIB};
+    use crate::{ast::FatStmt, parse::Parser};
     use codemap::CodeMap;
 
     let pool = Box::leak(Box::<StringPool>::default());
     let mut codemap = CodeMap::new();
-    let libs: Vec<_> = LIB
-        .iter()
-        .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
-        .collect();
-    for file in &libs {
-        let stmts = Parser::parse(file.clone(), pool).unwrap();
-        for s in stmts {
-            let prev = format!("{s:?}");
-            let value = s.serialize_one();
-            let after: FatStmt = value.deserialize().unwrap();
-            // Note: this relies on you not printing out addresses in there.
-            assert_eq!(prev, format!("{after:?}"));
-        }
+
+    let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
+    let user_span = file.span;
+    let mut stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
+    for s in stmts {
+        let prev = format!("{s:?}");
+        let value = s.serialize_one();
+        let after: FatStmt = value.deserialize().unwrap();
+        // Note: this relies on you not printing out addresses in there.
+        assert_eq!(prev, format!("{after:?}"));
     }
 }
 

@@ -6,7 +6,6 @@
 #![feature(slice_ptr_len)]
 #![feature(slice_ptr_get)]
 #![feature(closure_track_caller)]
-
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 
@@ -32,55 +31,37 @@ macro_rules! mut_replace {
 pub mod ast;
 pub mod bc;
 pub mod compiler;
+pub mod emit_bc;
+pub mod experiments;
+pub mod export_ffi;
 pub mod ffi;
 pub mod interp;
 pub mod lex;
 pub mod logging;
+#[cfg(feature = "lsp")]
+pub mod lsp;
+pub mod overloading;
 pub mod parse;
 pub mod pool;
 pub mod scope;
-pub mod emit_bc;
-pub mod experiments;
-pub mod export_ffi;
-pub mod overloading;
-#[cfg(feature="lsp")]
-pub mod lsp;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId}, compiler::{Compile, CompileError, ExecTime, Executor}, logging::{get_logs, log_tag_info, outln, save_logs, LogTag::{ShowErr, *},}, parse::Parser, scope::ResolveScope
+    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
+    compiler::{Compile, CompileError, ExecTime, Executor},
+    logging::{
+        get_logs, log_tag_info, outln, save_logs,
+        LogTag::{ShowErr, *},
+    },
+    parse::Parser,
+    scope::ResolveScope,
 };
-use export_ffi::get_special_functions;
-
-macro_rules! stdlib {
-    ($name:expr) => {
-        (
-            $name,
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/", $name, ".fr")),
-        )
-    };
-}
-
-// TODO: modules! This should be a thing defined in the language. Don't just jam everything on the front of every program. 
-static LIB: &[(&str, &str)] = &[
-    stdlib!("core"),
-    stdlib!("codegen/aarch64/basic.gen"),
-    stdlib!("codegen/llvm/basic"),
-    stdlib!("interp"),
-    stdlib!("collections"), 
-    stdlib!("system"), 
-    stdlib!("ast"), 
-    stdlib!("macros"), 
-    stdlib!("codegen/aarch64/instructions"),
-    stdlib!("codegen/aarch64/basic"),
-    stdlib!("codegen/wasm/instructions"),
-];
 
 macro_rules! test_file {
     ($case:ident) => {
         #[test]
         fn $case() {
             crate::logging::init_logs(&[ShowErr]);
-            
+
             let pool = Box::leak(Box::<StringPool>::default());
 
             assert!(run_main(
@@ -107,7 +88,6 @@ test_file!(aarch64_jit);
 test_file!(backpassing);
 test_file!(dispatch);
 
-
 pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     pool: &'a StringPool<'p>,
     src: String,
@@ -122,26 +102,17 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     let mut stmts = Vec::<FatStmt<'p>>::new();
 
     // TODO: this will get less dumb when I have first class modules.
-    let mut libs: Vec<_> = LIB
-        .iter()
-        .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
-        .collect();
-    libs.insert(3, codemap.add_file("special".into(), get_special_functions()));  // TODO: order independent name resolution
-    libs.push(codemap.add_file("main_file".into(), src.clone()));
-    let user_span = libs.last().unwrap().span;
-    for file in &libs {
-        match Parser::parse(file.clone(), pool) {
-            Ok(new) => {
-                stmts.extend(new);
-            }
-            Err(e) => {
-                outln!(ShowErr, "Parse error (Internal: {})", e.loc);
+    let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
+    let user_span = file.span;
+    let stmts = match Parser::parse(&mut codemap, file.clone(), pool) {
+        Ok(new) => new,
+        Err(e) => {
+            outln!(ShowErr, "Parse error (Internal: {})", e.loc);
 
-                emit_diagnostic(&codemap, &e.diagnostic);
-                return false;
-            }
+            emit_diagnostic(&codemap, &e.diagnostic);
+            return false;
         }
-    }
+    };
 
     let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);
@@ -155,24 +126,19 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
         if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
             outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
         }
-        
+
         println!("{}", get_logs(ShowPrint));
         println!("{}", get_logs(ShowErr));
         if let Some(path) = save {
             let folder = &format!("target/latest_log/{path}");
             fs::create_dir_all(folder).unwrap();
             save_logs(folder);
-            println!( "Wrote log to {folder:?}");
+            println!("Wrote log to {folder:?}");
         }
         println!("===============================");
     }
 
-    fn log_err<'p, Exec: Executor<'p>>(
-        codemap: CodeMap,
-        interp: &Compile<'_, 'p, Exec>,
-        e: CompileError<'p>,
-        save: Option<&str>,
-    ) {
+    fn log_err<'p, Exec: Executor<'p>>(codemap: CodeMap, interp: &Compile<'_, 'p, Exec>, e: CompileError<'p>, save: Option<&str>) {
         outln!(ShowPrint, "ERROR");
         if let Some(loc) = e.loc {
             let diagnostic = vec![Diagnostic {
@@ -187,11 +153,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
             }];
             emit_diagnostic(&codemap, &diagnostic);
         } else {
-            outln!(
-                ShowErr,
-                "{}",
-                e.reason.log(interp.program, interp.pool)
-            );
+            outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
         }
 
         outln!(ShowErr, "Internal: {}", e.internal_loc);
@@ -206,10 +168,9 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
             return false;
         }
         Ok(_toplevel) => {
-            let name = pool.intern("main");
-            match comp.program.find_unique_func(name) {
+            match comp.program.find_unique_func(Flag::Main.ident()) {
                 None => {
-                    outln!(ShowErr, "FN {name:?} = 'MAIN' NOT FOUND");
+                    outln!(ShowErr, "'fn main' NOT FOUND");
                     log_dbg(&comp, save);
                     return false;
                 }
@@ -222,18 +183,18 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                         Ok(_) => {
                             let end = timestamp();
                             let seconds = end - start;
-                            let lib: String = LIB.iter().map(|(_, code)| *code).collect();
-                            let lines = format!("{}\n{}", lib, src)
-                                .split('\n')
-                                .filter(|s| !s.split("//").next().unwrap().is_empty())
-                                .count();
+                            // let lib: String = LIB.iter().map(|(_, code)| *code).collect();
+                            // let lines = format!("{}\n{}", lib, src)
+                            //     .split('\n')
+                            //     .filter(|s| !s.split("//").next().unwrap().is_empty())
+                            //     .count();
 
-                            outln!(ShowPrint, "===============");
-                            outln!(ShowPrint, 
-                                "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                                lines as f64 / seconds
-                            );
-                            outln!(ShowPrint, "===============");
+                            // outln!(ShowPrint, "===============");
+                            // outln!(ShowPrint,
+                            //     "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                            //     lines as f64 / seconds
+                            // );
+                            // outln!(ShowPrint, "===============");
                             let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
@@ -244,18 +205,14 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                                     let end = timestamp();
                                     let seconds = end - start;
                                     outln!(ShowPrint, "===============");
-                                    outln!(ShowPrint, 
-                                        "Interpreter finished running main() in {seconds:.5} seconds."
-                                    );
+                                    outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
                                     debug_assert_eq!(result, expect.into());
                                     // TODO: change this when i add assert(bool)
                                     let assertion_count = src.split("assert_eq(").count() - 1;
                                     // debug so dont crash in web if not using my system of one run per occurance.
-                                    debug_assert_eq!(
-                                        comp.program.assertion_count, assertion_count,
-                                        "vm missed assertions?"
-                                    );
-                                    outln!(ShowPrint, 
+                                    debug_assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
+                                    outln!(
+                                        ShowPrint,
                                         "   - {assertion_count} assertions passed. {} comptime evaluations.",
                                         comp.anon_fn_counter
                                     );
@@ -279,7 +236,8 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
         let mut emitter = Emitter::vec(&mut out, Some(codemap));
         emitter.emit(diagnostic);
         drop(emitter);
-        outln!(ShowErr,
+        outln!(
+            ShowErr,
             "{}",
             String::from_utf8(out).unwrap_or_else(|_| "ICE: diagnostic was not valid utf8".into())
         );
@@ -288,7 +246,6 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
         emitter.emit(diagnostic);
     }
 }
-
 
 pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
     let name = pool.intern("@toplevel@");
@@ -305,7 +262,6 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     Func::new(name, g_arg, g_ret, body, user_span, true)
 }
 
-
 // TODO: its unfortunate that ifdefing this out means i don't get ide here.
 /// C ABI callable from js when targeting wasm.
 #[cfg(target_arch = "wasm32")]
@@ -314,9 +270,9 @@ pub mod web {
     use crate::logging::{init_logs_flag, save_logs};
 
     use crate::bc::Value;
+    use crate::interp::Interp;
     use crate::logging::{outln, LogTag::*};
     use crate::pool::StringPool;
-    use crate::interp::Interp;
     use crate::run_main;
     use std::alloc::{alloc, Layout};
     use std::ffi::{c_char, CStr, CString};
@@ -329,7 +285,7 @@ pub mod web {
     pub unsafe extern "C" fn run(log_flag: u64, input_query: *const u8, len: usize) {
         let s = format!("Running with log={log_flag:?}");
         unsafe { crate::web::console_log(s.as_ptr(), s.len()) };
-        
+
         init_logs_flag(log_flag);
         if POOL.is_none() {
             POOL = Some(StringPool::default());
@@ -382,9 +338,6 @@ pub fn timestamp() -> f64 {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::time::SystemTime;
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64()
+        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64()
     }
 }

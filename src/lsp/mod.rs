@@ -1,15 +1,9 @@
 use codemap::{CodeMap, File};
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{DidChangeTextDocument, DidOpenTextDocument};
-use lsp_types::request::{Completion, DocumentHighlightRequest, DocumentSymbolRequest, SemanticTokensFullRequest};
-use lsp_types::{request::GotoDefinition, GotoDefinitionResponse, InitializeParams, ServerCapabilities};
-use lsp_types::{
-    ColorProviderCapability, CompletionItem, CompletionList, CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentHighlight, DocumentSymbolParams, DocumentSymbolResponse, Location, OneOf, Position, SemanticToken,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
-    WorkDoneProgressOptions,
-};
+use lsp_types::request::{Completion, SemanticTokensFullRequest};
+use lsp_types::*;
+use lsp_types::{InitializeParams, ServerCapabilities};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
@@ -161,7 +155,7 @@ impl<'p> Lsp<'p> {
     fn semantic_tokens(&mut self, params: SemanticTokensParams) -> Option<SemanticTokensResult> {
         let text = self.files.get(&params.text_document.uri)?;
 
-        let mut lex = Lexer::new(text.source(), self.pool, text.span);
+        let mut lex = Lexer::new(text.clone(), self.pool, text.span);
 
         let mut symbols = vec![];
         let mut last_line = 0;

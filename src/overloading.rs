@@ -55,15 +55,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         result: &mut FnWip<'p>,
         name: Var<'p>,
         arg: &mut FatExpr<'p>,
-        mut requested_ret: Option<TypeId>,
+        requested_ret: Option<TypeId>,
     ) -> Res<'p, FuncId> {
-        // TODO: probably don't want this here because it means you can't shadow with a const.
-        // If there's only one option, we don't care what type it is.
-        // if let Some(f) = self.program.find_unique_func(name.0) {
-        //     self.named_args_to_tuple(result, arg, f)?;
-        //     return Ok(f);
-        // }
-
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
@@ -80,9 +73,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         // TODO: get rid of any
         if let Some(ty) = requested_ret {
-            if ty.is_any() {
-                requested_ret = None
-            }
+            assert!(!ty.is_any());
+            assert!(!ty.is_unknown());
         }
 
         // TODO: combine this with the match up there so its less ugly.

@@ -1,7 +1,7 @@
-use franca::export_ffi::get_special_functions;
 use franca::{
     bc::Value,
     experiments::emit_rust::bootstrap,
+    export_ffi::get_include_std,
     interp::Interp,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
@@ -24,7 +24,8 @@ fn main() {
             return;
         }
         if name == "log_export_ffi" {
-            println!("{}", get_special_functions());
+            println!("{}", get_include_std("compiler").unwrap());
+            println!("{}", get_include_std("libc").unwrap());
             return;
         }
         if name == "lsp" {

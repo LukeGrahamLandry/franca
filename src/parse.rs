@@ -1,11 +1,12 @@
 //! Convert a stream of tokens into ASTs.
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
-use codemap::{File, Span};
+use codemap::{CodeMap, File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Binding, Flag, Name, TypeId, Var};
 use crate::bc::Values;
+use crate::export_ffi::get_include_std;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
@@ -18,8 +19,9 @@ use TokenType::*;
 pub struct Parser<'a, 'p> {
     pool: &'p StringPool<'p>,
     expr_id: usize,
-    lexer: Lexer<'a, 'p>,
+    lexer: Vec<Lexer<'a, 'p>>,
     spans: Vec<Span>,
+    codemap: &'a mut CodeMap,
 }
 
 type Res<T> = Result<T, ParseErr>;
@@ -31,7 +33,7 @@ pub struct ParseErr {
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
-    pub fn parse(file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
+    pub fn parse(codemap: &'a mut CodeMap, file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
         outln!(
             Parsing,
             "\n######################################\n### START FILE: {} \n######################################\n",
@@ -40,9 +42,10 @@ impl<'a, 'p> Parser<'a, 'p> {
 
         let mut p = Parser {
             pool,
-            lexer: Lexer::new(file.source(), pool, file.span),
+            lexer: vec![Lexer::new(file.clone(), pool, file.span)], // TODO
             expr_id: 0,
             spans: vec![],
+            codemap,
         };
 
         p.start_subexpr();
@@ -291,7 +294,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         let stmt = match self.peek() {
             // Require name, optional body.
             Fn => {
-                let loc = self.lexer.nth(0).span;
+                let loc = self.next_span();
                 self.eat(Fn)?;
                 let name = self.ident()?;
 
@@ -379,6 +382,27 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(Semicolon)?;
                 Stmt::Noop
             }
+
+            IncludeStd => {
+                self.eat(IncludeStd)?;
+                self.eat(LeftParen)?;
+                if let TokenType::Quoted(name) = self.peek() {
+                    self.pop();
+                    self.eat(RightParen)?;
+                    self.eat(Semicolon)?;
+                    let name = self.pool.get(name);
+                    if let Some(src) = get_include_std(name) {
+                        self.end_subexpr();
+                        let file = self.codemap.add_file(name.to_string(), src);
+                        self.lexer.push(Lexer::new(file.clone(), self.pool, file.span)); // TODO
+                        return self.parse_stmt();
+                    } else {
+                        return Err(self.expected("known path for #include_std"));
+                    }
+                } else {
+                    return Err(self.expected("quoted path"));
+                }
+            }
             _ => {
                 let e = self.parse_expr()?;
                 let s = if self.maybe(Equals) {
@@ -416,7 +440,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     /// Used for fn sig args and also struct literals.
     /// `Names: Expr, Names: Expr` ends with ')' or '}' or missing comma
     fn parse_args(&mut self) -> Res<Pattern<'p>> {
-        let mut args = Pattern::empty(self.lexer.nth(0).span);
+        let mut args = Pattern::empty(self.next_span());
 
         loop {
             match self.peek() {
@@ -503,7 +527,12 @@ impl<'a, 'p> Parser<'a, 'p> {
     // start a new subexpression
     // this must be called once for every .expr because that calls end
     fn start_subexpr(&mut self) {
-        self.spans.push(self.lexer.nth(0).span);
+        let s = self.next_span();
+        self.spans.push(s);
+    }
+
+    fn next_span(&mut self) -> Span {
+        self.lexer.last_mut().unwrap().nth(0).span
     }
 
     // return the span of the working expression but also add it to the previous one.
@@ -519,14 +548,24 @@ impl<'a, 'p> Parser<'a, 'p> {
     // get a token and track its span on the working expression
     #[track_caller]
     fn pop(&mut self) -> Token<'p> {
-        let t = self.lexer.next();
+        let t = self.lexer.last_mut().unwrap().next();
         let prev = self.spans.last().unwrap();
+        if t.kind == TokenType::Eof && self.lexer.len() > 1 {
+            self.lexer.pop();
+            return self.pop();
+        }
         *self.spans.last_mut().unwrap() = prev.merge(t.span);
         t
     }
 
     fn peek(&mut self) -> TokenType<'p> {
-        self.lexer.nth(0).kind
+        let kind = self.lexer.last_mut().unwrap().nth(0).kind;
+        if kind == TokenType::Eof && self.lexer.len() > 1 {
+            self.lexer.pop();
+            self.peek()
+        } else {
+            kind
+        }
     }
 
     #[track_caller]
@@ -572,7 +611,7 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn error_next(&mut self, message: String) -> ParseErr {
-        let token = self.lexer.next();
+        let token = self.lexer.last_mut().unwrap().next();
         let last = if self.spans.len() < 2 {
             *self.spans.last().unwrap()
         } else {

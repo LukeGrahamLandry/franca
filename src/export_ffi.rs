@@ -7,6 +7,29 @@ use crate::pool::Ident;
 use std::fmt::Write;
 use std::slice;
 
+macro_rules! stdlib {
+    ($name:expr) => {
+        (
+            concat!($name, ".fr"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/", $name, ".fr")),
+        )
+    };
+}
+
+static LIB: &[(&str, &str)] = &[
+    stdlib!("lib"),
+    stdlib!("core"),
+    stdlib!("codegen/aarch64/basic.gen"),
+    stdlib!("codegen/llvm/basic"),
+    stdlib!("collections"),
+    stdlib!("system"),
+    stdlib!("ast"),
+    stdlib!("macros"),
+    stdlib!("codegen/aarch64/instructions"),
+    stdlib!("codegen/aarch64/basic"),
+    stdlib!("codegen/wasm/instructions"),
+];
+
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn write(fd: i32, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
@@ -30,18 +53,28 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
 ];
 
-pub fn get_special_functions() -> String {
+pub fn get_include_std(name: &str) -> Option<String> {
+    if let Some((_, src)) = LIB.iter().find(|(check, _)| name == *check) {
+        return Some(src.to_string());
+    }
+
     let mut out = String::new();
     writeln!(out, "//! IMPORTANT: don't try to save @comptime_addr('ASLR junk'), it won't go well. \n").unwrap();
-    for (sig, ptr) in COMPILER {
-        writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+    match name {
+        "libc" => {
+            for (sig, ptr) in LIBC {
+                writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
+            }
+        }
+        "compiler" => {
+            for (sig, ptr) in COMPILER {
+                writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+            }
+        }
+        _ => return None,
     }
-    // writeln!(out, "@module(libc) {{").unwrap();
-    for (sig, ptr) in LIBC {
-        writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
-    }
-    // writeln!(out, "}};").unwrap();
-    out
+
+    Some(out)
 }
 
 // macro_rules! _result_ffi {

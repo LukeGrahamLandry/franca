@@ -752,11 +752,19 @@ pub struct Module<'p> {
     pub name: Ident<'p>,
     pub id: ModuleId,
     pub parent: Option<ModuleId>,
-    pub toplevel: FuncId,
+    pub toplevel: ModuleBody<'p>,
     pub exports: HashMap<Ident<'p>, Var<'p>>,
     pub children: HashMap<Ident<'p>, ModuleId>,
     pub i_depend_on: Vec<ModuleId>,
     pub depend_on_me: Vec<ModuleId>,
+}
+
+#[derive(Clone)]
+pub enum ModuleBody<'p> {
+    Ready(FuncId),
+    Pending(FuncId),
+    Parsed(Func<'p>),
+    Src(String),
 }
 
 #[derive(Copy, Clone, Debug, InterpSend)]

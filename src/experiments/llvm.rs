@@ -439,7 +439,6 @@ mod tests {
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::experiments::tests::jit_test;
-    use crate::export_ffi::get_special_functions;
     use crate::{
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
@@ -449,7 +448,6 @@ mod tests {
         parse::Parser,
         pool::StringPool,
         scope::ResolveScope,
-        LIB,
     };
     use codemap::CodeMap;
     use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
@@ -467,16 +465,9 @@ mod tests {
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut codemap = CodeMap::new();
-        let mut stmts = vec![];
-        let mut libs: Vec<_> = LIB
-            .iter()
-            .map(|(name, code)| codemap.add_file(name.to_string(), code.to_string()))
-            .collect();
-        libs.insert(3, codemap.add_file("special".into(), get_special_functions())); // TODO: order independent name resolution
-        libs.push(codemap.add_file("main_file".into(), src.to_string()));
-        for l in libs {
-            stmts.extend(Parser::parse(l, pool).unwrap());
-        }
+        let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
+        let user_span = file.span;
+        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
         let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Llvm);
