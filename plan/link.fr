@@ -1,0 +1,81 @@
+
+/*
+const lib_src = `
+long lib_add(long a, long b) {
+    return a + b;
+}
+
+long lib_mul(long a, long b) {
+    long c = 0;
+    for (long i=0;i<b;i++) {
+        c += a;
+    }
+    return c;
+}
+`;
+*/
+
+@struct fn ClangArgs(
+    inputs: Slice(Str), 
+    output: Str,
+    macro_defines: Slice(Str) = empty(), 
+    includes: Slice(Str) = empty(), 
+    frameworks: Slice(Str) = empty(), 
+    no_link: bool = false,
+    dynamiclib: bool = false, 
+    objective_c: bool = false,
+    dump_ast: bool = false,
+    cmd: Str = "clang",
+);
+
+fn string(args: ClangArgs) List(u8) = {
+    var out: List(u8) = list_clone(args.cmd[]);
+    var out = out!addr;
+
+    args.inputs.foreach(fn(path: Str) = {
+        out.push_all(path);
+        out.push_all(" ");
+    });
+    out.push_all("-o ");
+    out.push_all(args.output[]);
+    out.push_all(" ");
+    (args.no_link[], fn()={
+        out.push_all("-c ");
+    }, fn()=())!if;
+
+    out[]
+}
+
+@env fn temp_path() Str;
+
+@env fn run_clang(args: ClangArgs) Result(Unit, Unit) = {
+    var a = args.string();
+    system_no_args(a.items());
+    a.drop();
+    init(Ok: ())
+}
+
+@env @pure fn build(src: Str) LinkLib = {
+    var src_path = temp_path();
+    var obj_path = temp_path();
+    write(src_path, src).unwrap();
+    let args: ClangArgs = init(
+        inputs: src_path!addr.slice(), 
+        output: obj_path!addr.slice(), 
+        no_link: true,
+    );
+    run_clang().unwrap();
+    let obj_data: Slice(u8) = read(obj_path).unwrap();
+    let lib = link_macho_object(obj_data).unwrap();
+    lib
+}
+
+const my_lib = build(lib_src);
+
+@link(my_lib) fn lib_add(a: i64, b: i64) i64;
+@link(my_lib) fn lib_mul(a: i64, b: i64) i64;
+
+fn main() {
+    assert_eq(add(5, 10), lib_add(5, 10));
+    assert_eq(mul(5, 10), lib_mul(5, 10));
+}

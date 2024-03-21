@@ -30,6 +30,7 @@ macro_rules! mut_replace {
 
 pub mod ast;
 pub mod bc;
+pub mod clang_ast;
 pub mod compiler;
 pub mod emit_bc;
 pub mod experiments;
@@ -339,5 +340,17 @@ pub fn timestamp() -> f64 {
     {
         use std::time::SystemTime;
         SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64()
+    }
+}
+
+#[cfg(feature = "mir")]
+#[test]
+fn test_mir() {
+    use mir_sys::*;
+    unsafe {
+        let ctx = _MIR_init();
+        c2mir_init(ctx);
+        // c2mir_compile(ctx, ops, getc_func, getc_data, source_name, output_file);
+        c2mir_finish(ctx);
     }
 }

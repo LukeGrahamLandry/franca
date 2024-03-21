@@ -39,6 +39,8 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
     ("@env fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
+    ("@env fn open(null_terminated_path: Ptr(u8), flags: i32) Fd", libc::open as *const u8),
+    ("@env fn close(fd: Fd) i32", libc::close as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[
@@ -67,6 +69,14 @@ pub fn get_include_std(name: &str) -> Option<String> {
             }
         }
         "compiler" => {
+            writeln!(
+                out,
+                "const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
+                libc::O_RDONLY,
+                libc::O_WRONLY,
+                libc::O_RDWR
+            )
+            .unwrap();
             for (sig, ptr) in COMPILER {
                 writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
