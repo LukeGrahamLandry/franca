@@ -30,7 +30,6 @@ macro_rules! mut_replace {
 
 pub mod ast;
 pub mod bc;
-pub mod clang_ast;
 pub mod compiler;
 pub mod emit_bc;
 pub mod experiments;
@@ -98,9 +97,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     executor: Exec,
 ) -> bool {
     log_tag_info();
-    let start = timestamp();
     let mut codemap = CodeMap::new();
-    let mut stmts = Vec::<FatStmt<'p>>::new();
 
     // TODO: this will get less dumb when I have first class modules.
     let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
@@ -182,8 +179,6 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                             return false;
                         }
                         Ok(_) => {
-                            let end = timestamp();
-                            let seconds = end - start;
                             // let lib: String = LIB.iter().map(|(_, code)| *code).collect();
                             // let lines = format!("{}\n{}", lib, src)
                             //     .split('\n')

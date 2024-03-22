@@ -11,7 +11,7 @@ use crate::ast::Flag;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::{EmitBc, SizeCache};
 use crate::ffi::InterpSend;
-use crate::logging::{assert, assert_eq, err, ice, logln, LogTag::ShowPrint};
+use crate::logging::{assert, assert_eq, err, logln, LogTag::ShowPrint};
 use crate::logging::{outln, unwrap, PoolLog};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
@@ -276,6 +276,7 @@ impl<'a, 'p> Interp<'a, 'p> {
                     let arg = self.take_slots(arg);
 
                     // TODO: HACK! just want to test function pointers dynamic dispatch. this wont work on asm!
+                    //      this goes away when i properly implement GetNativeFnPtr
                     if let Some(f) = f.to_func() {
                         self.bump_ip(); // pre-bump
                         let when = self.call_stack.last().unwrap().when;

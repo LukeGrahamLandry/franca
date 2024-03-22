@@ -28,6 +28,7 @@ macro_rules! jit_test {
             "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }"
         );
         simple!(math, 5, 20, "@c_call fn main(a: i64) i64 = { add(a, 15) }");
+        simple!(math2, (5, 10), 15, "@c_call fn main(a: i64, b: i64) i64 = { add(a, b) }");
         simple!(
             test_while,
             4,

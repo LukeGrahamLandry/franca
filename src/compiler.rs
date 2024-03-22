@@ -169,7 +169,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         self.ensure_compiled(f, ExecTime::Comptime)?;
         let exports = self.program.funcs[f.0].closed_constants.clone();
         for var in exports.local.keys() {
-            let prev = self.program.modules[module.0].exports.insert(var.0, *var);
+            let _prev = self.program.modules[module.0].exports.insert(var.0, *var);
+            // TODO
             // assert!(prev.is_none(), "Shadowed export {} from {}", self.pool.get(var.0), self.pool.get(name));
         }
         Ok(f)
@@ -604,7 +605,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         match &mut stmt.stmt {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
-                if let Some(module_name) = stmt.annotations.iter().find(|a| a.name == Flag::Module.ident()) {
+                if let Some(_module_name) = stmt.annotations.iter().find(|a| a.name == Flag::Module.ident()) {
                     // TODO: need to not pull out constants somehow.
                     todo!()
                 }
@@ -1158,6 +1159,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     "fn_ptr" => {
                         let fn_val = self.compile_expr(result, arg, None)?.get()?;
                         if let Values::One(Value::GetFn(id)) = fn_val {
+                            add_unique(&mut result.callees, id);
                             self.ensure_compiled(id, result.when)?;
                             // The backend still needs to do something with this, so just leave it
                             let ty = self.program.func_type(id);
@@ -1511,6 +1513,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     //       then need to be more careful about what gets put in the result
     //       cause like for blocks too, it would be nice to infer a function's return type by just compiling
     //       the function and seeing what you get.
+    // this is such a source of wierd nondeterminism bugs because of ^
     pub(crate) fn type_of(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if !expr.ty.is_unknown() {
             return Ok(Some(expr.ty));
@@ -1525,7 +1528,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, value } => {
-                if let Ok(_) = value.as_overload_set() {
+                if value.as_overload_set().is_ok() {
                     return Ok(None);
                 } else {
                     *ty
@@ -1604,8 +1607,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Expr::PrefixMacro { name, arg, .. } => {
                 if name.0 == Flag::As.ident() {
                     let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
-                    let ty = self.program.to_type(ty)?;
-                    ty
+                    self.program.to_type(ty)?
                 }
                 // TODO: if this fails you might have changed the state.
                 else {
@@ -1962,7 +1964,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     fn emit_call_while(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
         if let Expr::Tuple(parts) = arg.deref_mut() {
-            let force_inline = self.pool.intern("inline");
+            let _force_inline = self.pool.intern("inline"); // TODO
             if let Expr::Closure(_) = parts[0].deref_mut() {
                 let cond_fn = self.promote_closure(result, &mut parts[0])?;
                 self.program.funcs[cond_fn.0].add_tag(Flag::Inline);
@@ -2494,7 +2496,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }))
     }
 
-    fn resolve_import(&mut self, current: ModuleId, import_path: Vec<Ident<'_>>, name: Ident<'_>) -> Res<'p, Values> {
+    fn resolve_import(&mut self, _current: ModuleId, import_path: Vec<Ident<'_>>, _name: Ident<'_>) -> Res<'p, Values> {
         let mut module = ModuleId(0);
         for path in &import_path {
             if let Some(found) = self.program.modules[module.0].children.get(path) {
@@ -2531,7 +2533,7 @@ fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     false
 }
 
-fn bit_literal<'p>(expr: &FatExpr<'p>, pool: &StringPool<'p>) -> Res<'p, (IntType, i64)> {
+fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntType, i64)> {
     if let Expr::SuffixMacro(name, arg) = &expr.expr {
         if *name == Flag::From_Bit_Literal.ident() {
             if let Expr::Tuple(parts) = arg.deref().deref() {

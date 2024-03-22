@@ -7,7 +7,7 @@ use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
-use crate::logging::{err, ice, unwrap};
+use crate::logging::{err, unwrap};
 use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
@@ -18,14 +18,14 @@ pub fn bootstrap() -> (String, String) {
     let mut codemap = CodeMap::new();
     let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
     let user_span = file.span;
-    let mut stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
+    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
     let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
     comp.add_declarations(global, Flag::TopLevel.ident(), None).unwrap();
 
-    let (mut rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
+    let (rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
 
     let bs = comp.save_bootstrap.clone();
     for f in &bs {
@@ -137,7 +137,6 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         let func = &self.comp.program.funcs[f.0];
         let name = self.make_fn_name(f);
         let ty = func.unwrap_ty();
-        let args = func.arg.flatten();
         let want_export = func.has_tag(Flag::Rs);
         let args: String = func
             .arg
@@ -161,8 +160,8 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
     fn make_fn_name(&self, f: FuncId) -> String {
         let func = &self.comp.program.funcs[f.0];
         let name = self.comp.program.pool.get(func.name).to_string();
-        let ty = func.unwrap_ty();
-        let want_export = func.has_tag(Flag::Rs);
+        let _ty = func.unwrap_ty();
+        let _want_export = func.has_tag(Flag::Rs);
         // TODO: doing this is bad because it means the names change every time because my typeids aren't deterministic
         //       so since im committing this it makes the diff noisy which annoys me
         // if want_export {
@@ -184,7 +183,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, String> {
         let func = &self.comp.program.funcs[f.0];
-        let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
+        let _ = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
         let func = self.comp.program.funcs[f.0].clone(); // TODO: no clone
         if let Some(body) = func.body {

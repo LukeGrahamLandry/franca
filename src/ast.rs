@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
-    compiler::{insert_multi, CErr, Compile, Executor, FnWip, Res},
+    compiler::{CErr, FnWip, Res},
     experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
     logging::err,
@@ -1092,7 +1092,6 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         let id = FuncId(self.funcs.len());
-        let name = func.name;
         self.funcs.push(func);
         id
     }
@@ -1111,7 +1110,7 @@ impl<'p> Program<'p> {
             Value::Bool(_) => TypeId::bool(),
             Value::Type(_) => TypeId::ty(),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
-            Value::GetFn(f) => self.func_type(*f),
+            Value::GetNativeFnPtr(f) | Value::GetFn(f) => self.func_type(*f),
             Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),
@@ -1563,6 +1562,7 @@ pub enum Flag {
     Rs,
     Any_Reg,
     Impl,
+    Ptr,
     Literal_Ast,
     Main,
     Builtin_If,

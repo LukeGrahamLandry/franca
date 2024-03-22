@@ -60,8 +60,21 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
-        let prefix = self.parse_expr_inner()?;
-        self.maybe_parse_suffix(prefix)
+        match self.peek() {
+            Star => {
+                self.eat(Star)?;
+                self.start_subexpr();
+                self.start_subexpr();
+                let ptr = self.pool.intern("Ptr"); // AAAA Flag:: auto lowercases it.
+                let ptr = self.expr(Expr::GetNamed(ptr));
+                let inner = self.parse_expr()?;
+                Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
+            }
+            _ => {
+                let prefix = self.parse_expr_inner()?;
+                self.maybe_parse_suffix(prefix)
+            }
+        }
     }
 
     fn parse_expr_inner(&mut self) -> Res<FatExpr<'p>> {
@@ -208,6 +221,11 @@ impl<'a, 'p> Parser<'a, 'p> {
                     // TODO: a[b] or a[b] = c
                     //       new plan is treat those the same and have the `=` statement cope with all place expr stuff.
                     return Err(self.todo("index expr"));
+                }
+                Amp => {
+                    self.start_subexpr();
+                    self.eat(Amp)?;
+                    self.expr(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(prefix)))
                 }
                 _ => return Ok(prefix),
             };

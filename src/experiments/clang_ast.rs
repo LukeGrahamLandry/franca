@@ -1,3 +1,6 @@
+#![allow(non_snake_case)]
+#![allow(unused)]
+
 use std::fs;
 
 use serde::Deserialize;
@@ -70,6 +73,7 @@ enum ClangData {
     Other,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Deserialize, Debug, Clone)]
 enum ClangTag {
     r#struct,

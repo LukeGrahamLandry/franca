@@ -112,12 +112,12 @@ fn main_loop<'p>(connection: Connection, params: serde_json::Value, pool: &'p St
                     return Ok(());
                 }
                 let req = request!(lsp, connection, req, SemanticTokensFullRequest, semantic_tokens);
-                let req = request!(lsp, connection, req, Completion, completion);
+                let _ = request!(lsp, connection, req, Completion, completion);
             }
-            Message::Response(resp) => {}
+            Message::Response(_) => {}
             Message::Notification(not) => {
                 let not = notif!(lsp, not, DidOpenTextDocument, did_open);
-                let not = notif!(lsp, not, DidChangeTextDocument, did_change);
+                let _ = notif!(lsp, not, DidChangeTextDocument, did_change);
             }
         }
     }
@@ -202,7 +202,7 @@ impl<'p> Lsp<'p> {
         }))
     }
     fn completion(&mut self, params: CompletionParams) -> Option<CompletionResponse> {
-        let text = self.files.get(&params.text_document_position.text_document.uri)?;
+        let _ = self.files.get(&params.text_document_position.text_document.uri)?;
         Some(CompletionResponse::List(CompletionList {
             is_incomplete: true,
             items: vec![CompletionItem {

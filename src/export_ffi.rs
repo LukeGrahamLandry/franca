@@ -1,8 +1,8 @@
 #![allow(improper_ctypes_definitions)]
 
-use crate::ast::{FatExpr, Program, TypeId, TypeInfo};
+use crate::ast::{Program, TypeId, TypeInfo};
 use crate::compiler::Res;
-use crate::logging::{err, ice, unwrap};
+use crate::logging::unwrap;
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::slice;

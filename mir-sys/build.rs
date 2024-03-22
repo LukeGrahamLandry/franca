@@ -19,6 +19,7 @@ fn main() {
 
     let bindings = bindgen::Builder::default()
         .clang_arg(format!("-I{}", mir_repo.to_str().unwrap()))
+        .clang_arg("-Wno-everything")
         .header(mir_repo.join("mir.h").to_str().unwrap())
         .header(mir_repo.join("c2mir/c2mir.h").to_str().unwrap())
         .allowlist_var(r#"(\w*MIR\w*)"#)
@@ -39,6 +40,7 @@ fn main() {
 
     build
         .include(mir_repo)
+        .warnings(false)
         .file(mir_repo.join("mir.c"))
         .file(mir_repo.join("mir-gen.c"))
         .file(mir_repo.join("c2mir/c2mir.c"))

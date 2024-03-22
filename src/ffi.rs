@@ -3,7 +3,7 @@ use std::{collections::HashMap, mem};
 use codemap::Span;
 
 use crate::{
-    ast::{Program, TargetArch, TypeId, TypeInfo},
+    ast::{Program, TypeId, TypeInfo},
     bc::{Value, Values},
     logging::{outln, LogTag::ShowErr},
 };
@@ -395,6 +395,7 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 
 #[test]
 fn interp_send() {
+    use crate::ast::TargetArch;
     use crate::pool::StringPool;
     use interp_derive::InterpSend;
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
@@ -479,8 +480,8 @@ fn interp_send_libs_ast() {
     let mut codemap = CodeMap::new();
 
     let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
-    let user_span = file.span;
-    let mut stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
+
+    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
     for s in stmts {
         let prev = format!("{s:?}");
         let value = s.serialize_one();

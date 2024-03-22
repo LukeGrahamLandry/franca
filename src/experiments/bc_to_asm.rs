@@ -219,6 +219,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
                     &Value::Heap { value, .. } => todo!("{:?}", unsafe { &(*value).values }),
+                    Value::GetNativeFnPtr(f) => todo!(),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
                     self.get_slot(x0, cond);

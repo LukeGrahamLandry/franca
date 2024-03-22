@@ -1,6 +1,6 @@
 ## trying to make an lsp
 
-- "expected tuple of two elements found map": request is (id, params) but notification is just params. 
+- "expected tuple of two elements found map": request is (id, params) but notification is just params.
 - symbol provider vs highlighting vs colours vs semantic tokens.
 - Kinda works in Kate, it will give colours for "Data Type" for ENUM, comment works, but you get "Normal" for everything else regardless of what you ask for (those work in theme editor).
 - Dot completion works in Kate tho.
@@ -10,7 +10,7 @@
 - So now I can see my stderr when selected in the drop down so I know its answering the requests, but it still doesnt show colours or dot completion.
   It works less than Kate so the problem must be in my extension not my lsp.
 - problem was not telling it which TextDocumentSyncCapability i wanted. kate just picked one i guess.
-  But now it works and I do get colours, so that part at least was just a kate problem. 
+  But now it works and I do get colours, so that part at least was just a kate problem.
 
 ## Dot call syntax (Mar 15)
 

@@ -25,21 +25,21 @@ fn set() Unit = {unit};
 
 @comptime @impl
 fn Slice(T: Type) Type = {
-    const Self: Type = (ptr: Ptr(T), len: i64)!struct;
+    const Self: Type = (ptr: *T, len: i64)!struct;
     const T = T;  // TODO
     
-    @pub fn slice(ptr: Ptr(T)) Self = (ptr: ptr, len: 1);
+    @pub fn slice(ptr: *T) Self = (ptr: ptr, len: 1);
     // TODO: @pub fn empty() Self = (ptr: zeroed(), len: 0);
-    @pub fn slice(ptr: Ptr(T), count: i64) Self = (ptr: ptr, len: count);
+    @pub fn slice(ptr: *T, count: i64) Self = (ptr: ptr, len: count);
     @pub fn len(self: Self) i64 = self.len[];
     
     @pub fn get(self: Self, i: i64) T = {
         // assert(lt(i, len(self)), "OOB"); // TODO: asm
-        let v: Ptr(T) = index(self, i);  // TODO: fix so dont need useless binding 
+        let v: *T = index(self, i);  // TODO: fix so dont need useless binding 
         v[]
     }
     
-    @pub fn index(self: Self, i: i64) Ptr(T) = {
+    @pub fn index(self: Self, i: i64) *T = {
         // assert(lt(i, len(self)), "OOB"); // TODO: asm
         var s: Self = subslice(self, i, 1);
         s.ptr[]
@@ -62,12 +62,12 @@ fn Slice(T: Type) Type = {
         slice(ptr, first, add(first, count))
     }
     
-    const P: Type = (i64, Ptr(T));  // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
+    const P: Type = (i64, *T);  // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
     @pub fn enumerate(arr: Self, f: Fn(P, Unit)) Unit = {
         var i = 0;
         let l: i64 = len(arr);
         (fn() bool = lt(i, l), fn() Unit = {
-            let e: Ptr(T) = index(arr, i);
+            let e: *T = index(arr, i);
             f(i, e);
             i = add(i, 1);
         })!while;
@@ -77,14 +77,14 @@ fn Slice(T: Type) Type = {
     //       but I dont have let destructuring (only function args) so its a pain to take tuples by pointer. 
     //       I should be able to destructure Ptr(A, B) to (Ptr(A), Ptr(B))
     @pub fn foreach(arr: Self, f: Fn(T, Unit)) Unit = {
-        foreach(arr, fn(v: Ptr(T)) Unit = f(v[]))
+        foreach(arr, fn(v: *T) Unit = f(v[]))
     }
     
-    @pub fn foreach(arr: Self, f: Fn(Ptr(T), Unit)) Unit = {
+    @pub fn foreach(arr: Self, f: Fn(*T, Unit)) Unit = {
         var i = 0;
         let l: i64 = len(arr);
         (fn() bool = lt(i, l), fn() Unit = {
-            let e: Ptr(T) = index(arr, i);
+            let e: *T = index(arr, i);
             f(e);
             i = add(i, 1);
         })!while;
@@ -92,7 +92,7 @@ fn Slice(T: Type) Type = {
     
     @pub fn memcpy(dest: Self, src: Self) Unit = {
         assert(eq(len(dest), len(src)), "OOB");  // Note: not using `asser t_eq` because the vm tracks those for my tests
-        const f = fn(i: i64, e: Ptr(T)) Unit = set(dest, i, e[]);
+        const f = fn(i: i64, e: *T) Unit = set(dest, i, e[]);
         enumerate(src, f);
     }
     
@@ -129,24 +129,24 @@ fn List(T: Type) Type = {
     // Can't reuse the allocation because drop() will free it. TODO: COW
     @pub fn list_clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
         var self: Self = list(len(from));
-        push_all(self!addr, from);
+        push_all(self&, from);
         self
     }
     
-    @pub fn items(self: Ptr(Self)) Slice(T) = {
+    @pub fn items(self: *Self) Slice(T) = {
         slice(self.maybe_uninit[], 0, self.len[])
     }
     
-    @pub fn index(self: Ptr(Self), i: i64) Ptr(T) = {
+    @pub fn index(self: *Self, i: i64) *T = {
         index(self.maybe_uninit[], i)
     }
     
     @pub fn get(self: Self, i: i64) T = {
-        let ptr: Ptr(T) = index(self!addr, i);
+        let ptr: *T = index(self&, i);
         ptr[]
     }
     
-    @pub fn reserve(self: Ptr(Self), extra: i64) Unit = {
+    @pub fn reserve(self: *Self, extra: i64) Unit = {
         let total = add(self.len[], extra);
         let old_cap: i64 = len(self.maybe_uninit[]);
         (lt(old_cap, total), fn() = {
@@ -162,29 +162,29 @@ fn List(T: Type) Type = {
         }, fn()=())!if
     }
     
-    @pub fn push(self: Ptr(Self), v: T) Unit = {
+    @pub fn push(self: *Self, v: T) Unit = {
         reserve(self, 1);
-        let last: Ptr(T) = index(self.maybe_uninit[], self.len[]); 
+        let last: *T = index(self.maybe_uninit[], self.len[]); 
         last[] = v;
         self.len[] = add(self.len[], 1);
     }
     
-    @pub fn pop_last(self: Ptr(Self)) T = {
+    @pub fn pop_last(self: *Self) T = {
         assert(gt(self.len[], 0), "OOB");
         let i = sub(self.len[], 1);
-        let e: Ptr(T) = index(self.maybe_uninit[], i);
+        let e: *T = index(self.maybe_uninit[], i);
         self.len[] = i;
         e[]
     }
     
-    @pub fn push_all(self: Ptr(Self), new: Slice(T)) Unit = {
+    @pub fn push_all(self: *Self, new: Slice(T)) Unit = {
         reserve(self, len(new));
         let dest: Slice(T) = subslice(self.maybe_uninit[], self.len[], len(new));
         memcpy(dest, new);
         self.len[] = add(self.len[], len(new));
     }
     
-    @pub fn drop(self: Ptr(Self)) Unit = dealloc(T, self.maybe_uninit.ptr[], self.maybe_uninit.len[]);
+    @pub fn drop(self: *Self) Unit = dealloc(T, self.maybe_uninit.ptr[], self.maybe_uninit.len[]);
     
     Self
 }
@@ -195,9 +195,9 @@ fn dump_ffi_types() Str;
 // TODO: this is really inefficient if you already own 'a'
 fn concat(a: Str, b: Str) Str = {
     var c: List(i64) = list(add(len(a), len(b)));
-    push_all(c!addr, a);
-    push_all(c!addr, b);
-    items(c!addr)
+    c&.push_all(a);
+    c&.push_all(b);
+    c&.items()
 }
 
 fn split(haystack: Str, needle: Str) List(Str) = {
@@ -211,14 +211,14 @@ fn split(haystack: Str, needle: Str) List(Str) = {
             let check: Str = subslice(haystack, i, len(needle));
             (slice_eq(check, needle), fn() Unit = {
                 let found: Str = subslice(haystack, start, sub(i, start));
-                push(lines!addr, found);
+                push(lines&, found);
                 i = add(i, len(needle));
                 start = i;
             }, fn() Unit = { i = add(i, 1); })!if
         }, fn() Unit = { i = add(i, 1); })!if
     })!while;
     let found: Str = subslice(haystack, start, max(0, sub(len(haystack), start)));
-    push(lines!addr, found);
+    push(lines&, found);
     lines
 }
 
@@ -254,14 +254,14 @@ fn str() Unit = { unit };  // TODO: scope.rs support recursion.
 fn str(i: i64) Str = {
     var s: List(i64) = list(1);
     (and(ge(i, 0), lt(i, 10)), 
-        fn() Unit = push(s!addr, add(48, i)),
+        fn() Unit = push(s&, add(48, i)),
         fn() Unit = {
-            push_all(s!addr, str(div(i, 10))); // TODO: push to list
-            push(s!addr, add(48, mod(i, 10)));
+            push_all(s&, str(div(i, 10))); // TODO: push to list
+            push(s&, add(48, mod(i, 10)));
         }
     )!if;
     
-    items(s!addr)
+    items(s&)
 }
 
 // TODO: error checking. 
@@ -317,7 +317,7 @@ fn multi_puts(s: Slice(Str)) Unit = {
 fn str(s: Symbol) Str;
 
 fn str(s: ""!type) Str = {  // TODO: god damn bro
-    let ptr: Ptr(Ptr(i64)) = raw_slice(s!addr, 0, size_of(i64));
-    let len: Ptr(i64) = raw_slice(s!addr, size_of(i64), mul(2, size_of(i64)));
+    let ptr: Ptr(Ptr(i64)) = raw_slice(s&, 0, size_of(i64));
+    let len: Ptr(i64) = raw_slice(s&, size_of(i64), mul(2, size_of(i64)));
     slice(ptr[], len[])
 };

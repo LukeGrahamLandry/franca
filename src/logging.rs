@@ -63,7 +63,7 @@ macro_rules! assert_eq {
 macro_rules! ice {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        err!(crate::compiler::CErr::IceFmt(msg))
+        crate::logging::err!(crate::compiler::CErr::IceFmt(msg))
     }};
 }
 use codemap::Span;
@@ -79,7 +79,7 @@ macro_rules! unwrap {
         if let Some(value) = $maybe {
             value
         } else {
-            ice!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*))
+            crate::logging::ice!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*))
         }
     }};
 }

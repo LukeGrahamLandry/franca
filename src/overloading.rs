@@ -1,9 +1,8 @@
-use crate::ast::{Expr, FatExpr, Flag, FnType, FuncId, OverloadOption, OverloadSet, Pattern, TargetArch, TypeId, Var};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, TargetArch, TypeId, Var};
 use crate::bc::{Value, Values};
 use crate::compiler::{CErr, Compile, DebugState, ExecTime, Executor, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
-use crate::logging::{assert_eq, err, ice, outln, unwrap, LogTag, PoolLog};
-use crate::pool::Ident;
+use crate::logging::{assert_eq, err, outln, unwrap, LogTag, PoolLog};
 use std::mem;
 use std::ops::DerefMut;
 
