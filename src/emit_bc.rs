@@ -494,7 +494,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::FieldAccess(e, name) => {
-                let container_ptr = self.addr_macro(result, e)?;
+                let container_ptr = self.compile_expr(result, e)?;
                 self.field_access_expr(result, container_ptr, *name, false)?
             }
             Expr::Index { ptr, index } => {

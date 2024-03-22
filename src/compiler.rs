@@ -1208,7 +1208,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 }
             }
             Expr::FieldAccess(e, name) => {
-                let container_ptr = self.addr_macro(result, e)?;
+                let container_ptr = self.compile_expr(result, e, None)?;
                 self.field_access_expr(result, container_ptr, *name)?
             }
             Expr::Index { ptr, index } => {
@@ -2106,6 +2106,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         // Auto deref for nested place expressions.
         // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
         let depth = self.program.ptr_depth(container_ptr_ty);
+        assert_eq!(depth, 1, "index expr ptr must be one level of indirection");
         if depth > 1 {
             for _ in 0..(depth - 1) {
                 container_ptr_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");

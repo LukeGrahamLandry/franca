@@ -64,8 +64,8 @@ macro_rules! jit_test {
             @c_call fn main(n: i64) i64 = {
                 const A = (a: i64, b: i64)!struct;
                 var a: A = (a: n, b: 0);
-                a.b[] = add(a.a[], 7);
-                a.b[]
+                a&.b[] = add(a&.a[], 7);
+                a&.b[]
             }"#
         );
 
@@ -77,7 +77,7 @@ macro_rules! jit_test {
                 @c_call fn main(n: i64) i64 = {
                     const A = (a: i64, b: i64)!enum;
                     var a: A = (a: n);
-                    add(a.a[], 7)
+                    add(a&.a[], 7)
                 }"#
         );
         simple!(
