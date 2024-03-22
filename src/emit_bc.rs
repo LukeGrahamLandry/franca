@@ -328,7 +328,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref() {
-            Expr::Index(_, _) => todo!(),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
@@ -496,7 +495,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::FieldAccess(e, name) => {
                 let container_ptr = self.addr_macro(result, e)?;
-                self.field_access_expr(result, container_ptr, *name)?
+                self.field_access_expr(result, container_ptr, *name, false)?
+            }
+            Expr::Index { ptr, index } => {
+                let container_ptr = self.addr_macro(result, ptr)?;
+                let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
+                // TODO: hack
+                self.field_access_expr(result, container_ptr, Ident(index, PhantomData), true)?
             }
             Expr::StructLiteralP(pattern) => {
                 let requested = expr.ty;
@@ -670,7 +675,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    fn field_access_expr(&mut self, result: &mut FnBody<'p>, container_ptr: Structured, name: Ident<'p>) -> Res<'p, Structured> {
+    fn field_access_expr(&mut self, result: &mut FnBody<'p>, container_ptr: Structured, name: Ident<'p>, name_is_index: bool) -> Res<'p, Structured> {
         let mut container_ptr_ty = self.program.raw_type(container_ptr.ty());
         let mut container_ptr = result.load(self, container_ptr)?.0;
         // Auto deref for nested place expressions.
@@ -697,6 +702,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let raw_container_ty = self.program.raw_type(container_ty);
         match &self.program.types[raw_container_ty.0] {
             TypeInfo::Struct { fields, .. } => {
+                assert!(!name_is_index);
                 let mut offset = 0;
                 for f in fields {
                     if f.name == name {
@@ -726,6 +732,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 );
             }
             TypeInfo::Enum { cases, .. } => {
+                assert!(!name_is_index);
                 for (i, (f_name, f_ty)) in cases.iter().enumerate() {
                     if *f_name == name {
                         let f_ty = *f_ty;
@@ -744,6 +751,29 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         });
                         return Ok((ret, ty).into());
                     }
+                }
+                err!(
+                    "unknown name {} on {:?}",
+                    self.program.pool.get(name),
+                    self.program.log_type(container_ty)
+                );
+            }
+            TypeInfo::Tuple(types) => {
+                assert!(name_is_index);
+                let mut offset = 0;
+                for (i, f_ty) in types.iter().enumerate() {
+                    if i == name.0 {
+                        let ty = self.program.find_interned(TypeInfo::Ptr(*f_ty));
+                        let ret = result.reserve_slots(self, ty)?;
+                        result.push(Bc::SlicePtr {
+                            base: container_ptr.single(),
+                            offset,
+                            count: self.slot_count(*f_ty),
+                            ret: ret.single(),
+                        });
+                        return Ok((ret, ty).into());
+                    }
+                    offset += self.slot_count(*f_ty);
                 }
                 err!(
                     "unknown name {} on {:?}",

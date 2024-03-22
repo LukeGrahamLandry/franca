@@ -1,3 +1,9 @@
+## llvm agragate returns (Mar 22)
+
+LLVM can't return structs by value.
+Seems like clang will return a vector for two words but use pointer param for 3 or more (https://godbolt.org/z/qGWvbf4K4).
+I probably want that for other backends anyway so perhaps I'll make that a pass on the AST.
+
 ## trying to make an lsp
 
 - "expected tuple of two elements found map": request is (id, params) but notification is just params.

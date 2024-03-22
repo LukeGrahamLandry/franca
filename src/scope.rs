@@ -161,7 +161,7 @@ impl<'p> ResolveScope<'p> {
         let loc = expr.loc;
         match expr.deref_mut() {
             Expr::WipFunc(_) => unreachable!(),
-            Expr::Call(fst, snd) | Expr::Index(fst, snd) => {
+            Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.resolve_expr(fst);
                 self.resolve_expr(snd);
             }

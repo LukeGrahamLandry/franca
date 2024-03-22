@@ -217,10 +217,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.expr(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(prefix)))
                 }
                 LeftSquare => {
+                    self.start_subexpr();
                     self.eat(LeftSquare)?;
-                    // TODO: a[b] or a[b] = c
-                    //       new plan is treat those the same and have the `=` statement cope with all place expr stuff.
-                    return Err(self.todo("index expr"));
+                    let index = Box::new(self.parse_expr()?);
+                    self.eat(RightSquare)?;
+                    self.expr(Expr::Index {
+                        ptr: Box::new(prefix),
+                        index,
+                    })
                 }
                 Amp => {
                     self.start_subexpr();

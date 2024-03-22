@@ -111,7 +111,10 @@ pub enum Expr<'p> {
     GetVar(Var<'p>),
     GetNamed(Ident<'p>),
     String(Ident<'p>),
-    Index(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
+    Index {
+        ptr: Box<FatExpr<'p>>,
+        index: Box<FatExpr<'p>>,
+    },
 }
 
 pub trait WalkAst<'p> {
@@ -125,7 +128,7 @@ pub trait WalkAst<'p> {
     fn expr(&mut self, expr: &mut FatExpr<'p>) {
         self.walk_expr(expr);
         match &mut expr.expr {
-            Expr::Call(fst, snd) | Expr::Index(fst, snd) => {
+            Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.expr(fst);
                 self.expr(snd);
             }

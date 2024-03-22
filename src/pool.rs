@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, mem
 use crate::{ast::Flag, bc::Value, ffi::InterpSend};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Ident<'pool>(pub usize, PhantomData<&'pool str>);
+pub struct Ident<'pool>(pub usize, pub PhantomData<&'pool str>);
 
 impl Flag {
     pub const fn ident<'p>(self) -> Ident<'p> {

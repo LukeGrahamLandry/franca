@@ -915,7 +915,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
-            Expr::Index(_, _) => todo!(),
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, expr)?;
                 Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
@@ -1211,6 +1210,14 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             Expr::FieldAccess(e, name) => {
                 let container_ptr = self.addr_macro(result, e)?;
                 self.field_access_expr(result, container_ptr, *name)?
+            }
+            Expr::Index { ptr, index } => {
+                let ptr = self.compile_expr(result, ptr, None)?;
+                self.compile_expr(result, index, Some(TypeId::i64()))?;
+                let value = self.immediate_eval_expr(&result.constants, *index.clone(), TypeId::i64())?;
+                let i = value.clone().single()?.to_int()? as usize;
+                index.expr = Expr::Value { ty: TypeId::i64(), value };
+                self.index_expr(result, ptr, i)?
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => self.construct_struct(result, requested, pattern)?,
@@ -1526,7 +1533,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int)))); // but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
-            Expr::Index(_, _) => todo!(),
+            Expr::Index { .. } => return Ok(None), // TODO
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, value } => {
                 if value.as_overload_set().is_ok() {
@@ -2161,6 +2168,49 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 self.program.log_type(container_ty),
                 self.program.log_type(raw_container_ty)
             ),
+        }
+    }
+
+    // TODO: desugar field access into this.
+    fn index_expr(&mut self, _result: &mut FnWip<'p>, container_ptr: Structured, index: usize) -> Res<'p, Structured> {
+        let container_ptr_ty = self.program.raw_type(container_ptr.ty());
+        let depth = self.program.ptr_depth(container_ptr_ty);
+        assert_eq!(depth, 1, "index expr ptr must be one level of indirection");
+        let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
+        let raw_container_ty = self.program.raw_type(container_ty);
+
+        if let TypeInfo::Tuple(types) = &self.program.types[raw_container_ty.0] {
+            let mut count = 0;
+            for (i, f_ty) in types.clone().iter().enumerate() {
+                if i == index {
+                    let ty = self.program.ptr_type(*f_ty);
+                    // const eval lets me do enum fields in asm without doign heap values first.
+                    if let &Structured::Const(
+                        _,
+                        Values::One(Value::Heap {
+                            value,
+                            physical_first,
+                            physical_count,
+                        }),
+                    ) = &container_ptr
+                    {
+                        let size = self.executor.size_of(self.program, *f_ty);
+                        assert!(physical_count >= size);
+                        let value = Values::One(Value::Heap {
+                            value,
+                            physical_first: physical_first + count,
+                            physical_count: size,
+                        });
+                        let s = Structured::Const(ty, value);
+                        return Ok(s);
+                    }
+                    return Ok(Structured::RuntimeOnly(ty));
+                }
+                count += self.executor.size_of(self.program, *f_ty);
+            }
+            err!("unknown index {index} on {:?}", self.program.log_type(container_ty));
+        } else {
+            err!("Only tuples support index expr",)
         }
     }
 
