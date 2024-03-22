@@ -12,6 +12,7 @@
 - get llvm backend to parity with aarch64
 - llvm output an executable
 - using mir for compiling c dependencies would be cool
+- figure out if llvm-sys statically links itself and if it can cross compile
 
 ## Ui
 

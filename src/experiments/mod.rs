@@ -1,6 +1,7 @@
 pub mod arena;
 pub mod bc_to_asm;
 pub mod bootstrap_gen;
+#[cfg(feature = "clang_ast")]
 pub mod clang_ast;
 pub mod emit_ir;
 pub mod emit_rust;

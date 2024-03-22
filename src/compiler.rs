@@ -1021,12 +1021,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 loc,
                             );
                             *expr = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(arg)), loc);
-                            println!("{:?}", expr.log(self.pool));
+                            // println!("{:?}", expr.log(self.pool));
                             self.compile_expr(result, expr, requested)?
                         }
                     }
                     "slice" => {
-                        println!("{:?}", arg.log(self.pool));
+                        // println!("{:?}", arg.log(self.pool));
                         let container = self.compile_expr(result, arg, None)?;
                         let ty = self.program.tuple_types(container.ty());
                         let expect = if let Some(types) = ty {
@@ -1235,6 +1235,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                             let mut res = mem::take(target);
                             let value = mem::take(&mut exprs[1]);
+                            // TODO: add to closure captures? should really just factor out the scope visitor.
                             let mut f = |expr: &mut Expr<'p>| {
                                 if let Expr::GetNamed(n) = expr {
                                     if *n == name.0 {
@@ -1541,7 +1542,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
                 if let Expr::Value { value, .. } = f.deref_mut().deref_mut() {
                     if let Ok(i) = value.as_overload_set() {
-                        println!("type_of overload {i}");
+                        // println!("type_of overload {i}");
                         if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
                             if let Ok(Some(f_ty)) = self.infer_types(fid) {
                                 // Need to save this because resolving overloads eats named arguments

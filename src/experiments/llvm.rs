@@ -11,22 +11,20 @@ use std::{
 
 use llvm_sys::{
     analysis::{LLVMVerifierFailureAction, LLVMVerifyFunction, LLVMVerifyModule},
-    core::{
-        LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildBr, LLVMBuildCall2, LLVMBuildCondBr, LLVMBuildGEP2, LLVMBuildLoad2,
-        LLVMBuildRet, LLVMBuildStore, LLVMConstInt, LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext,
-        LLVMCreateMemoryBufferWithMemoryRange, LLVMCreateMemoryBufferWithMemoryRangeCopy, LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType,
-        LLVMGetNamedFunction, LLVMGetNamedGlobal, LLVMGetParam, LLVMInt1TypeInContext, LLVMInt32TypeInContext, LLVMInt64TypeInContext,
-        LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd, LLVMSetTarget, LLVMStructType,
-    },
+    core::*,
     execution_engine::{
         LLVMAddModule, LLVMCreateJITCompilerForModule, LLVMDisposeExecutionEngine, LLVMExecutionEngineGetErrMsg, LLVMExecutionEngineRef,
         LLVMFindFunction, LLVMGetFunctionAddress, LLVMGetGlobalValueAddress, LLVMLinkInMCJIT, LLVMRecompileAndRelinkFunction,
     },
     ir_reader::LLVMParseIRInContext,
+    linker::LLVMLinkModules2,
     prelude::*,
     target::{LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget},
     target_machine::LLVMGetTargetMachineTarget,
-    transforms::ipo::LLVMAddGlobalOptimizerPass,
+    transforms::{
+        ipo::LLVMAddGlobalOptimizerPass, pass_builder::LLVMRunPasses, pass_manager_builder::LLVMPassManagerBuilderSetOptLevel,
+        scalar::LLVMAddReassociatePass,
+    },
 };
 
 use crate::{
@@ -46,35 +44,23 @@ pub struct JittedLlvm {
     builder: LLVMBuilderRef,
     types: Vec<Option<LLVMTypeRef>>,
     functions: Vec<Option<(LLVMValueRef, CString, bool)>>,
-    err: Box<MaybeUninit<*mut i8>>,
+    i32_ty: LLVMTypeRef,
 }
 
 impl JittedLlvm {
-    pub fn new(name_in: &str, program: &mut Program) -> JittedLlvm {
+    /// Note: this will leak memory unless you call `release` but that has safety rules so I don't want to impl drop.
+    pub fn new<'p>(name_in: &str, program: &mut Program) -> Res<'p, JittedLlvm> {
         unsafe {
             let context = LLVMContextCreate();
-            let name = null_terminate("inline_asm");
-            let mut llvm_ir = std::convert::Into::<Vec<u8>>::into(program.emit_inline_llvm_ir());
-            let len = llvm_ir.len(); // TODO: include the null?
-            llvm_ir.push(0); // why the fuck isnt this a function bro  // maybe dont need now?
-            let llvm_ir = CString::from_vec_with_nul(llvm_ir).unwrap();
+            let llvm_ir = program.emit_inline_llvm_ir();
+            let len = llvm_ir.len(); // TODO: include null?
 
-            let llvm_ir = LLVMCreateMemoryBufferWithMemoryRangeCopy(llvm_ir.as_ptr(), len, name.as_ptr());
+            // Not using the ___Copy one but I immediatly call parseIR_ so assuming it pulls everything it needs out of the string, it's fine to not outlive the stack frame.
+            let llvm_ir = null_terminated(llvm_ir); // dont inline this in the expression cause it drops it too soon
+            let llvm_ir = LLVMCreateMemoryBufferWithMemoryRange(llvm_ir.as_ptr(), len, EMPTY, LLVMBool::from(false));
 
-            let mut err = Box::new(MaybeUninit::uninit());
-            let mut inline_asm_module = MaybeUninit::uninit();
-
-            let failed = LLVMParseIRInContext(context, llvm_ir, inline_asm_module.as_mut_ptr(), err.as_mut_ptr());
-            if failed != 0 {
-                let err = MaybeUninit::assume_init(*err);
-                let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
-                LLVMDisposeMessage(err);
-                panic!("{}", msg);
-            }
-            let inline_asm_module = inline_asm_module.assume_init();
+            let inline_asm_module = return_ref(|out, err| LLVMParseIRInContext(context, llvm_ir, out, err))?;
             verify_module(inline_asm_module);
-
-            let mut execution_engine = MaybeUninit::uninit();
 
             // Fixes: Unable to find target for this triple (no targets are registered)
             assert_eq!(LLVM_InitializeNativeTarget(), 0);
@@ -82,22 +68,16 @@ impl JittedLlvm {
             assert_eq!(LLVM_InitializeNativeAsmPrinter(), 0);
             // Fixes: JIT has not been linked in.
             LLVMLinkInMCJIT();
-            let failed = LLVMCreateJITCompilerForModule(execution_engine.as_mut_ptr(), inline_asm_module, 0, err.as_mut_ptr());
-
-            if failed != 0 {
-                // TODO: factor out
-                let err = MaybeUninit::assume_init(*err);
-                let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
-                LLVMDisposeMessage(err);
-                panic!("{}", msg);
-            }
+            let execution_engine = return_ref(|out, err| LLVMCreateJITCompilerForModule(out, inline_asm_module, 2, err))?;
 
             let name = null_terminate(name_in);
             // Yes this is a lot of fucking around that seems pointless but you can't emit new code into a module created with LLVMParseIRInContext.
             // If you try there's no error (it passes verify), but asking the jit for pointers to newly emitted functions just gives you null.
+            // Its weird cause it works if the module is empty at the beginning, its just if it has any functions, then it locks you out from making more.
             // Which really sucks cause then i cant do inline ir dynamiclly? well i guess just create a new module every time.
+            // fuck i bet it cant inline across modules which kinda kills my whole plan of using functions for primatives.
+            // TODO: maybe i just need to call LLVMLinkModules2 at the end? seems to just segsev but maybe i did it too early or wrong way around, idc rn.
             let module = LLVMModuleCreateWithNameInContext(name.as_ptr(), context);
-            let execution_engine = execution_engine.assume_init();
             LLVMAddModule(execution_engine, module);
 
             let mut this = Self {
@@ -108,7 +88,7 @@ impl JittedLlvm {
                 module,
                 types: vec![],
                 functions: vec![],
-                err,
+                i32_ty: LLVMInt32TypeInContext(context),
             };
 
             for f in program.inline_llvm_ir.clone() {
@@ -122,11 +102,11 @@ impl JittedLlvm {
                 this.functions[f.0] = Some((value, name, true));
             }
 
-            this
+            Ok(this)
         }
     }
 
-    pub fn decl_function(&mut self, program: &mut Program, f: FuncId) -> LLVMValueRef {
+    fn decl_function(&mut self, program: &mut Program, f: FuncId) -> LLVMValueRef {
         extend_options(&mut self.functions, f.0);
         if let Some((f, _, _)) = self.functions[f.0] {
             return f;
@@ -144,7 +124,7 @@ impl JittedLlvm {
         }
     }
 
-    pub fn get_fn(&mut self, f: FuncId) -> Option<LLVMValueRef> {
+    fn get_fn(&mut self, f: FuncId) -> Option<LLVMValueRef> {
         extend_options(&mut self.functions, f.0);
         self.functions[f.0].as_ref().and_then(|(f, _, ready)| {
             if *ready {
@@ -160,19 +140,6 @@ impl JittedLlvm {
         let value = self.get_fn(f)?;
         let name = self.functions[f.0].as_ref().unwrap().1.as_ptr();
         let ptr = unsafe { LLVMGetFunctionAddress(self.execution_engine, name) as usize as *const u8 };
-
-        if ptr as usize == 0 {
-            unsafe {
-                let mut err = MaybeUninit::uninit();
-                let has_err = LLVMExecutionEngineGetErrMsg(self.execution_engine, err.as_mut_ptr());
-                if has_err != 0 {
-                    let err = err.assume_init();
-                    let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
-                    LLVMDisposeMessage(err);
-                    panic!("{}", msg);
-                }
-            }
-        }
         assert_ne!(ptr as usize, 0);
         Some(ptr)
     }
@@ -196,7 +163,7 @@ impl JittedLlvm {
     ///   TODO: its weird that structs are treated differently but you need to be able to do whatever c does for ffi.
     ///         should have a @repr(C) so you can opt in. but then also some huristic for when to not bother trying to represent big tuples in registers?
     ///         or its fine, just spill them like you would if someone manually wrote that function, just seems like extra regalloc work.
-    pub fn get_function_type(&mut self, program: &mut Program, ty: FnType) -> LLVMTypeRef {
+    fn get_function_type(&mut self, program: &mut Program, ty: FnType) -> LLVMTypeRef {
         let mut arg = if let TypeInfo::Tuple(fields) = &program.types[ty.arg.0] {
             fields.clone().iter().map(|ty| self.get_type(program, *ty)).collect()
         } else {
@@ -206,7 +173,7 @@ impl JittedLlvm {
         unsafe { LLVMFunctionType(ret, arg.as_mut_ptr(), arg.len() as c_uint, LLVMBool::from(false)) }
     }
 
-    pub fn get_type(&mut self, program: &mut Program, ty: TypeId) -> LLVMTypeRef {
+    fn get_type(&mut self, program: &mut Program, ty: TypeId) -> LLVMTypeRef {
         extend_options(&mut self.types, ty.0);
         if let Some(ty) = self.types[ty.0] {
             return ty;
@@ -216,9 +183,8 @@ impl JittedLlvm {
             match &program.types[ty.0] {
                 TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!("llvm type: {}", program.log_type(ty)),
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
-                TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
+                TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
-                &TypeInfo::Fn(ty) => todo!("comptime fn index llvm"),
                 &TypeInfo::FnPtr(ty) => self.get_function_type(program, ty),
                 &TypeInfo::Ptr(inner) => {
                     let inner = self.get_type(program, inner);
@@ -238,12 +204,23 @@ impl JittedLlvm {
         result
     }
 
+    /// # Safety
+    /// Invalidates jitted function pointers.
     pub unsafe fn release(&self) {
-        // this used to cause a segsev, idk
+        LLVMDisposeBuilder(self.builder);
         LLVMDisposeExecutionEngine(self.execution_engine);
-        LLVMDisposeModule(self.module);
+        // causes SEGSEV. Execution engine owns the module I guess?
+        // LLVMDisposeModule(self.module);
+        // LLVMDisposeModule(self.inline_asm_module);
         LLVMContextDispose(self.context);
     }
+}
+
+fn null_terminated(s: String) -> CString {
+    debug_assert_ne!(s.bytes().last(), Some(0));
+    let mut s = std::convert::Into::<Vec<u8>>::into(s);
+    s.push(0); // why the fuck isnt this a function bro
+    CString::from_vec_with_nul(s).unwrap()
 }
 
 pub struct BcToLlvm<'z, 'a, 'p> {
@@ -259,7 +236,7 @@ pub struct BcToLlvm<'z, 'a, 'p> {
 impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
     pub fn new(interp: &'z mut Interp<'a, 'p>, program: &'z mut Program<'p>) -> Self {
         Self {
-            llvm: JittedLlvm::new("franca", program),
+            llvm: JittedLlvm::new("franca", program).unwrap(),
             program,
             interp,
             f: FuncId(0), // TODO: bad
@@ -308,13 +285,6 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
         unsafe {
             self.f = f;
             let ff = &self.program.funcs[f.0];
-            // TODO: better here or in init like i have now?
-            // if ff.llvm_ir.is_some() {
-            //     let name = null_terminate(&format!("FN{}", f.0));
-            //     let value = LLVMGetNamedGlobal(self.llvm.module, name.as_ptr());
-            //     self.llvm.functions[f.0] = Some((value, true));
-            //     return Ok(());
-            // }
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
             let func = self.interp.ready[f.0].as_ref().unwrap();
@@ -343,9 +313,9 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
             }
 
             let arg_range = func.arg_range;
-            if arg_range.count != 1 {
-                todo!()
-            }
+            // if arg_range.count != 1 {
+            //     todo!()
+            // }
             for i in arg_range {
                 // Note: SEGSEGV here means you told llvm the wrong type for llvm_f.
                 let arg_index = (i - arg_range.first.0) as c_uint;
@@ -374,33 +344,40 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                     Bc::NoCompile => unreachable!(),
                     Bc::CallDynamic { .. } => todo!(),
                     &Bc::CallDirect { f, ret, arg } => {
-                        // TODO: incorrect number of arguments is because get_type sees multiple args as tuple struct.
                         let ty = self.program.func_type(f);
                         let ty = self.program.fn_ty(ty).unwrap();
                         assert!(
                             !matches!(self.program.types[ty.arg.0], TypeInfo::Struct { .. }),
                             "TODO: do struct args get flattened like tuples? ffi? enums?"
                         );
-                        let ty = self.llvm.get_function_type(self.program, ty);
+                        let ty = self.func_type(f);
                         let function = self.llvm.get_fn(f).unwrap();
-                        let empty = CString::from(vec![]); // TODO: hoist
                         let mut args = arg.into_iter().map(|i| self.read_slot(StackOffset(i))).collect::<Vec<_>>();
-                        let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, empty.as_ptr());
+                        let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, EMPTY);
                         self.write_slot(ret.single(), value);
                     }
                     Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                     &Bc::LoadConstant { slot, value } => {
-                        let ty = self.slot_type(slot);
-                        let ty = self.llvm.get_type(self.program, ty);
+                        let mut ty = self.llvm_type(slot);
                         let value = match value {
                             Value::I64(n) => LLVMConstInt(ty, u64::from_le_bytes(n.to_le_bytes()), LLVMBool::from(false)),
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
-                            Value::GetFn(FuncId(n)) | Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
-                            Value::GetNativeFnPtr(f) => {
+                            Value::Type(TypeId(n)) | Value::OverloadSet(n) | Value::GetFn(FuncId(n)) | Value::Symbol(n) => {
+                                LLVMConstInt(ty, n as u64, LLVMBool::from(false))
+                            }
+                            Value::GetNativeFnPtr(ff) => {
+                                ty = self.func_type(ff);
                                 unwrap!(self.llvm.get_fn(f), "GetNativeFnPtr on uncompiled {f:?}")
                             }
-                            Value::Unit => LLVMConstInt(ty, 0, LLVMBool::from(false)), //TODO
-                            _ => todo!(),
+                            Value::Bool(b) => LLVMConstInt(ty, b as u64, LLVMBool::from(false)),
+                            Value::Unit => LLVMConstInt(ty, 0, LLVMBool::from(false)),
+                            Value::F64(_) => todo!(),
+                            Value::Poison | Value::InterpAbsStackAddr(_) => err!("intrp constant in llvm",),
+                            Value::Heap {
+                                value,
+                                physical_first,
+                                physical_count,
+                            } => todo!(),
                         };
                         self.write_slot(slot, value);
                     }
@@ -457,28 +434,25 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                         assert!(matches!(self.program.types[ty.0], TypeInfo::Struct { .. }));
                         let ty = self.llvm.get_type(self.program, ty);
                         let ptr = self.read_slot(base);
+                        // The first one is because you're going through the pointer.
                         let mut index_values = vec![
-                            LLVMConstInt(LLVMInt32TypeInContext(self.llvm.context), 0, LLVMBool::from(false)),
-                            LLVMConstInt(LLVMInt32TypeInContext(self.llvm.context), offset as u64, LLVMBool::from(false)),
+                            LLVMConstInt(self.llvm.i32_ty, 0, LLVMBool::from(false)),
+                            LLVMConstInt(self.llvm.i32_ty, offset as u64, LLVMBool::from(false)),
                         ];
-                        let empty = CString::from(vec![]); // TODO: hoist
-                        let field_ptr_value = LLVMBuildGEP2(
-                            self.llvm.builder,
-                            ty,
-                            ptr,
-                            index_values.as_mut_ptr(),
-                            index_values.len() as c_uint,
-                            empty.as_ptr(),
-                        );
+                        let field_ptr_value =
+                            LLVMBuildGEP2(self.llvm.builder, ty, ptr, index_values.as_mut_ptr(), index_values.len() as c_uint, EMPTY);
                         self.write_slot(ret, field_ptr_value);
                     }
                     &Bc::Load { from, to } => {
+                        let ty = self.llvm_type(to.single());
                         let ptr = self.read_slot(from);
-                        todo!()
+                        let val = LLVMBuildLoad2(self.llvm.builder, ty, ptr, EMPTY);
+                        self.write_slot(to.single(), val);
                     }
                     &Bc::Store { to, from } => {
                         let ptr = self.read_slot(to);
-                        todo!()
+                        let val = self.read_slot(from.single());
+                        LLVMBuildStore(self.llvm.builder, val, ptr);
                     }
                     &Bc::TagCheck { enum_ptr, value } => {
                         let ptr = self.read_slot(enum_ptr);
@@ -496,11 +470,10 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
 
     fn read_slot(&mut self, slot: StackOffset) -> LLVMValueRef {
         if self.slot_is_var(slot) {
-            let empty = CString::from(vec![]); // TODO: hoist
             let ptr = self.slots[slot.0].unwrap();
             let ty = self.slot_type(slot);
             let ty = self.llvm.get_type(self.program, ty);
-            unsafe { LLVMBuildLoad2(self.llvm.builder, ty, ptr, empty.as_ptr()) }
+            unsafe { LLVMBuildLoad2(self.llvm.builder, ty, ptr, EMPTY) }
         } else {
             self.slots[slot.0].unwrap()
         }
@@ -518,6 +491,17 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
         self.interp.ready[self.f.0].as_ref().unwrap().slot_is_var.get(slot.0)
+    }
+
+    fn llvm_type(&mut self, slot: StackOffset) -> LLVMTypeRef {
+        let ty = self.slot_type(slot);
+        self.llvm.get_type(self.program, ty)
+    }
+
+    fn func_type(&mut self, ff: FuncId) -> LLVMTypeRef {
+        let ff = self.program.func_type(ff);
+        let ff = self.program.fn_ty(ff).unwrap();
+        self.llvm.get_function_type(self.program, ff)
     }
 }
 
@@ -565,7 +549,7 @@ mod tests {
     use std::ptr::{addr_of, null};
     use std::{arch::asm, fs, mem::transmute};
 
-    use super::{verify_module, BcToLlvm};
+    use super::{print_module, verify_module, BcToLlvm};
 
     // TODO: this is an ugly copy paste
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
@@ -590,10 +574,9 @@ mod tests {
             let debug_path = format!("target/latest_log/asm/{test_name}");
             fs::create_dir_all(&debug_path).unwrap();
             unsafe {
-                let ir_str = LLVMPrintModuleToString(asm.llvm.module);
-                let dis = CStr::from_ptr(ir_str).to_str().unwrap(); // Note a copy, can't dispose before write.
-                fs::write(format!("{debug_path}/llvm_ir.txt"), dis).unwrap();
-                LLVMDisposeMessage(ir_str);
+                print_module(asm.llvm.module, |dis| {
+                    fs::write(format!("{debug_path}/program_llvm_ir.txt"), dis).unwrap()
+                });
             }
         }
 
@@ -602,6 +585,9 @@ mod tests {
         let code = asm.llvm.get_fn_jitted(main).unwrap();
         let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
         f(code);
+        unsafe {
+            asm.llvm.release();
+        }
         Ok(())
     }
 
@@ -609,16 +595,40 @@ mod tests {
 }
 
 fn verify_module<'p>(module: LLVMModuleRef) -> Res<'p, ()> {
-    unsafe {
-        let mut msg = MaybeUninit::uninit();
-        let failed = LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg.as_mut_ptr());
-        if failed != 0 {
-            let msg = msg.assume_init();
-            let msg_str = CStr::from_ptr(msg).to_str().unwrap(); // Note: not a copy, can't dispose before write.
-            let msg_str = format!("Failed llvm verify! \n{}.", msg_str);
-            LLVMDisposeMessage(msg);
-            err!("{}", msg_str)
-        }
+    unsafe { checked_llvm(|msg| LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg))? }
+    Ok(())
+}
+
+/// # Safety
+/// `f` must return non zero only if it has initilized its parameter to an llvm string.
+unsafe fn checked_llvm<'p>(f: impl FnOnce(*mut *mut ::libc::c_char) -> LLVMBool) -> Res<'p, ()> {
+    let mut err = MaybeUninit::uninit();
+    let failed = f(err.as_mut_ptr());
+    if failed != 0 {
+        let err = MaybeUninit::assume_init(err);
+        let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
+        LLVMDisposeMessage(err);
+        err!("LLVM Error: {}", msg)
     }
     Ok(())
 }
+
+/// # Safety
+/// `f` must uphold contract of `checked_llvm` and also return zero only if it has initilized its parameter.
+unsafe fn return_ref<'p, T>(f: impl FnOnce(*mut T, *mut *mut ::libc::c_char) -> LLVMBool) -> Res<'p, T> {
+    let mut out = MaybeUninit::uninit();
+    checked_llvm(|err| f(out.as_mut_ptr(), err))?;
+    Ok(out.assume_init())
+}
+
+/// # Safety
+/// `module` must be valid.
+unsafe fn print_module<T>(module: LLVMModuleRef, f: impl FnOnce(&str) -> T) -> T {
+    let ir_str = LLVMPrintModuleToString(module);
+    let dis = CStr::from_ptr(ir_str).to_str().unwrap(); // Note a copy, can't dispose before write.
+    let out = f(dis);
+    LLVMDisposeMessage(ir_str);
+    out
+}
+
+const EMPTY: *const libc::c_char = &[0i8] as *const libc::c_char;

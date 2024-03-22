@@ -659,7 +659,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
         match self {
             Bc::NoCompile => write!(f, "UNREACHABLE_BODY"),
             Bc::CallDynamic { f: func_slot, ret, arg } | Bc::CallC { f: func_slot, ret, arg, .. } => {
-                write!(f, "{ret:?} = call({func_slot:?}, {arg:?});")
+                write!(f, "{ret:?} = call_c({func_slot:?}, {arg:?});")
             }
             Bc::CallDirect { f: func, ret, arg } => {
                 write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)

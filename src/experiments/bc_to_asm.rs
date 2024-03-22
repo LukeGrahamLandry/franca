@@ -109,7 +109,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
 
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let func = self.interp.ready[f.0].as_ref().unwrap();
-        println!("{}", func.log(self.program.pool));
+        // println!("{}", func.log(self.program.pool));
         let ff = &self.program.funcs[func.func.0];
         self.f = f;
         self.next_slot = SpOffset(0);

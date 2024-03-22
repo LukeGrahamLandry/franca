@@ -232,13 +232,11 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     }
 
     fn post_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
-        if let Expr::Block { locals, .. } = &mut expr.expr {
-            if let Some(locals) = locals {
-                for var in locals {
-                    if let Some(new) = self.mapping.get(var) {
-                        *var = *new
-                    } // TODO: else seems like a problem
-                }
+        if let Expr::Block { locals: Some(locals), .. } = &mut expr.expr {
+            for var in locals {
+                if let Some(new) = self.mapping.get(var) {
+                    *var = *new
+                } // TODO: else seems like a problem
             }
         }
     }
@@ -1071,6 +1069,14 @@ impl<'p> Program<'p> {
         }
 
         None
+    }
+
+    pub fn flat_types(&self, ty: TypeId) -> Option<&[TypeId]> {
+        match &self.types[ty.0] {
+            TypeInfo::Tuple(t) => Some(t),
+            &TypeInfo::Struct { as_tuple, .. } => self.flat_types(as_tuple),
+            _ => None,
+        }
     }
 }
 

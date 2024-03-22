@@ -623,6 +623,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
         result.jump_targets.set(cond_ip);
         result.jump_targets.set(branch_ip);
+        result.jump_targets.set(body_ip);
         result.jump_targets.set(end_ip);
 
         Ok(Structured::Const(TypeId::unit(), Value::Unit.into()))
@@ -924,17 +925,30 @@ impl<'p> FnBody<'p> {
             Values::Many(values) => {
                 let start = self.stack_slots;
                 let count = values.len();
-                for value in values {
-                    let to = self.reserve_slots(program, TypeId::any())?; // TODO: this breaks llvm. for tuples of int literals
-                    self.push(Bc::LoadConstant { slot: to.single(), value });
-                }
-                Ok((
+                let res = (
                     StackRange {
                         first: StackOffset(start),
                         count,
                     },
                     ty,
-                ))
+                );
+                let ty = program.program.raw_type(ty); // TODO: enums
+                if let Some(types) = program.program.flat_types(ty) {
+                    if types.len() == values.len() {
+                        let types = types.to_vec();
+                        for (value, ty) in values.into_iter().zip(types.into_iter()) {
+                            let to = self.reserve_slots(program, ty)?;
+                            self.push(Bc::LoadConstant { slot: to.single(), value });
+                        }
+                        return Ok(res);
+                    }
+                }
+
+                for value in values {
+                    let to = self.reserve_slots(program, TypeId::any())?; // TODO: this breaks llvm, now just for enums maybe
+                    self.push(Bc::LoadConstant { slot: to.single(), value });
+                }
+                Ok(res)
             }
         }
     }
