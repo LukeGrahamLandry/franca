@@ -10,13 +10,13 @@ use std::{
 };
 
 use llvm_sys::{
-    analysis::{LLVMVerifierFailureAction, LLVMVerifyFunction},
+    analysis::{LLVMVerifierFailureAction, LLVMVerifyFunction, LLVMVerifyModule},
     core::{
         LLVMAddFunction, LLVMAppendBasicBlock, LLVMBuildAlloca, LLVMBuildBr, LLVMBuildCall2, LLVMBuildCondBr, LLVMBuildGEP2, LLVMBuildLoad2,
         LLVMBuildRet, LLVMBuildStore, LLVMConstInt, LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext,
-        LLVMCreateMemoryBufferWithMemoryRange, LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType, LLVMGetNamedFunction, LLVMGetNamedGlobal,
-        LLVMGetParam, LLVMInt1TypeInContext, LLVMInt32TypeInContext, LLVMInt64TypeInContext, LLVMModuleCreateWithNameInContext, LLVMPointerType,
-        LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd, LLVMSetTarget, LLVMStructType,
+        LLVMCreateMemoryBufferWithMemoryRange, LLVMCreateMemoryBufferWithMemoryRangeCopy, LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType,
+        LLVMGetNamedFunction, LLVMGetNamedGlobal, LLVMGetParam, LLVMInt1TypeInContext, LLVMInt32TypeInContext, LLVMInt64TypeInContext,
+        LLVMModuleCreateWithNameInContext, LLVMPointerType, LLVMPointerTypeInContext, LLVMPositionBuilderAtEnd, LLVMSetTarget, LLVMStructType,
     },
     execution_engine::{
         LLVMAddModule, LLVMCreateJITCompilerForModule, LLVMDisposeExecutionEngine, LLVMExecutionEngineGetErrMsg, LLVMExecutionEngineRef,
@@ -34,13 +34,14 @@ use crate::{
     bc::{Bc, StackOffset, Value},
     compiler::Res,
     interp::Interp,
-    logging::{unwrap, PoolLog},
+    logging::{err, unwrap, PoolLog},
     pool::Ident,
 };
 
 pub struct JittedLlvm {
     context: LLVMContextRef,
     module: LLVMModuleRef,
+    inline_asm_module: LLVMModuleRef,
     execution_engine: LLVMExecutionEngineRef,
     builder: LLVMBuilderRef,
     types: Vec<Option<LLVMTypeRef>>,
@@ -49,28 +50,29 @@ pub struct JittedLlvm {
 }
 
 impl JittedLlvm {
-    pub fn new(name: &str, program: &mut Program) -> JittedLlvm {
+    pub fn new(name_in: &str, program: &mut Program) -> JittedLlvm {
         unsafe {
             let context = LLVMContextCreate();
-            let name = null_terminate(name);
+            let name = null_terminate("inline_asm");
             let mut llvm_ir = std::convert::Into::<Vec<u8>>::into(program.emit_inline_llvm_ir());
             let len = llvm_ir.len(); // TODO: include the null?
-            llvm_ir.push(0); // why the fuck isnt this a function bro
+            llvm_ir.push(0); // why the fuck isnt this a function bro  // maybe dont need now?
             let llvm_ir = CString::from_vec_with_nul(llvm_ir).unwrap();
 
-            let llvm_ir = LLVMCreateMemoryBufferWithMemoryRange(llvm_ir.as_ptr(), len, name.as_ptr(), LLVMBool::from(false));
+            let llvm_ir = LLVMCreateMemoryBufferWithMemoryRangeCopy(llvm_ir.as_ptr(), len, name.as_ptr());
 
             let mut err = Box::new(MaybeUninit::uninit());
-            let mut module = MaybeUninit::uninit();
+            let mut inline_asm_module = MaybeUninit::uninit();
 
-            let failed = LLVMParseIRInContext(context, llvm_ir, module.as_mut_ptr(), err.as_mut_ptr());
+            let failed = LLVMParseIRInContext(context, llvm_ir, inline_asm_module.as_mut_ptr(), err.as_mut_ptr());
             if failed != 0 {
                 let err = MaybeUninit::assume_init(*err);
                 let msg = CStr::from_ptr(err).to_str().unwrap().to_string();
                 LLVMDisposeMessage(err);
                 panic!("{}", msg);
             }
-            let module = module.assume_init();
+            let inline_asm_module = inline_asm_module.assume_init();
+            verify_module(inline_asm_module);
 
             let mut execution_engine = MaybeUninit::uninit();
 
@@ -80,7 +82,7 @@ impl JittedLlvm {
             assert_eq!(LLVM_InitializeNativeAsmPrinter(), 0);
             // Fixes: JIT has not been linked in.
             LLVMLinkInMCJIT();
-            let failed = LLVMCreateJITCompilerForModule(execution_engine.as_mut_ptr(), module, 0, err.as_mut_ptr());
+            let failed = LLVMCreateJITCompilerForModule(execution_engine.as_mut_ptr(), inline_asm_module, 0, err.as_mut_ptr());
 
             if failed != 0 {
                 // TODO: factor out
@@ -90,10 +92,19 @@ impl JittedLlvm {
                 panic!("{}", msg);
             }
 
+            let name = null_terminate(name_in);
+            // Yes this is a lot of fucking around that seems pointless but you can't emit new code into a module created with LLVMParseIRInContext.
+            // If you try there's no error (it passes verify), but asking the jit for pointers to newly emitted functions just gives you null.
+            // Which really sucks cause then i cant do inline ir dynamiclly? well i guess just create a new module every time.
+            let module = LLVMModuleCreateWithNameInContext(name.as_ptr(), context);
+            let execution_engine = execution_engine.assume_init();
+            LLVMAddModule(execution_engine, module);
+
             let mut this = Self {
-                execution_engine: execution_engine.assume_init(),
+                execution_engine,
                 builder: LLVMCreateBuilderInContext(context),
                 context,
+                inline_asm_module,
                 module,
                 types: vec![],
                 functions: vec![],
@@ -102,7 +113,11 @@ impl JittedLlvm {
 
             for f in program.inline_llvm_ir.clone() {
                 let name = null_terminate(&format!("FN{}", f.0));
-                let value = LLVMGetNamedFunction(this.module, name.as_ptr());
+                let ty = program.func_type(f);
+                let ty = program.fn_ty(ty).unwrap();
+                let ty = this.get_function_type(program, ty);
+                // Note: not LLVMGetNamedFunction on inline_asm_module! we're declaring that we plan on importing into the normal module.
+                let value = unsafe { LLVMAddFunction(this.module, name.as_ptr(), ty) };
                 extend_options(&mut this.functions, f.0);
                 this.functions[f.0] = Some((value, name, true));
             }
@@ -525,7 +540,7 @@ pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
 
 #[allow(unused)]
 mod tests {
-    use crate::ast::{Flag, SuperSimple, TargetArch};
+    use crate::ast::{Flag, FuncId, SuperSimple, TargetArch};
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::experiments::tests::jit_test;
@@ -550,7 +565,7 @@ mod tests {
     use std::ptr::{addr_of, null};
     use std::{arch::asm, fs, mem::transmute};
 
-    use super::BcToLlvm;
+    use super::{verify_module, BcToLlvm};
 
     // TODO: this is an ugly copy paste
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
@@ -582,16 +597,7 @@ mod tests {
             }
         }
 
-        unsafe {
-            let mut msg = MaybeUninit::uninit();
-            let failed = LLVMVerifyModule(asm.llvm.module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg.as_mut_ptr());
-            if failed != 0 {
-                let msg = msg.assume_init();
-                let msg_str = CStr::from_ptr(msg).to_str().unwrap(); // Note a copy, can't dispose before write.
-                panic!("Failed llvm verify! \n{}.", msg_str);
-                LLVMDisposeMessage(msg);
-            }
-        }
+        verify_module(asm.llvm.module);
 
         let code = asm.llvm.get_fn_jitted(main).unwrap();
         let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
@@ -600,4 +606,19 @@ mod tests {
     }
 
     jit_test!(jit_main);
+}
+
+fn verify_module<'p>(module: LLVMModuleRef) -> Res<'p, ()> {
+    unsafe {
+        let mut msg = MaybeUninit::uninit();
+        let failed = LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg.as_mut_ptr());
+        if failed != 0 {
+            let msg = msg.assume_init();
+            let msg_str = CStr::from_ptr(msg).to_str().unwrap(); // Note: not a copy, can't dispose before write.
+            let msg_str = format!("Failed llvm verify! \n{}.", msg_str);
+            LLVMDisposeMessage(msg);
+            err!("{}", msg_str)
+        }
+    }
+    Ok(())
 }
