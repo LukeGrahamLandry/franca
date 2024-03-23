@@ -224,9 +224,9 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         physical_first,
                         physical_count,
                     } => {
-                        // TODO: this needs to be different when I actually want to emit an executable.
                         let ty = self.slot_type(*slot);
                         assert!(self.program.unptr_ty(ty).is_some(), "Expected Value::Heap to be ptr");
+                        // TODO: this needs to be different when I actually want to emit an executable.
                         let ptr = self.asm.constants.copy_heap(value, physical_first, physical_count);
                         self.load_imm(x0, ptr as u64);
                         self.set_slot(x0, *slot);

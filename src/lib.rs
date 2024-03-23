@@ -8,6 +8,7 @@
 #![feature(closure_track_caller)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
+#![feature(pointer_is_aligned)]
 
 extern crate core;
 

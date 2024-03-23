@@ -107,7 +107,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         // TODO: kinda cringe.
         match target {
-            TargetArch::Interp => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
+            TargetArch::Interp => overloads
+                .0
+                .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm) && !self.program.funcs[f.func.0].has_tag(Flag::No_Interp)),
             TargetArch::Aarch64 => overloads
                 .0
                 .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm) && !self.program.funcs[f.func.0].has_tag(Flag::Interp)),

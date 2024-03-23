@@ -1545,6 +1545,7 @@ pub enum Flag {
     Comptime,
     Forward,
     Generic,
+    No_Interp,
     As,
     Inline,
     NoInline,

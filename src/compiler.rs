@@ -2556,7 +2556,6 @@ fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTy
 pub trait Executor<'p>: PoolLog<'p> {
     type SavedState;
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()>;
-    fn run_with_arg<T: Reflect>(&mut self, program: &mut Program<'p>, f: FuncId, arg: &mut T) -> Res<'p, ()>;
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values>;
     fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values>;
     fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize;

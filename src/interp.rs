@@ -885,14 +885,6 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
         result
     }
 
-    fn run_with_arg<T: crate::experiments::reflect::Reflect>(&mut self, program: &mut Program<'p>, f: FuncId, arg: &mut T) -> Res<'p, ()> {
-        let addr = arg as *const T as usize as i64;
-        let arg = Values::One(Value::I64(addr));
-        let ret = self.run(f, arg, ExecTime::Runtime, 1, program)?;
-        assert_eq!(ret.single()?, Value::Unit);
-        Ok(())
-    }
-
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
         let ret = program.funcs[f.0].unwrap_ty().ret;
         let size = self.size_of(program, ret);

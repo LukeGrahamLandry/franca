@@ -2,7 +2,7 @@
 
 use crate::ast::{Program, TypeId, TypeInfo};
 use crate::compiler::Res;
-use crate::logging::unwrap;
+use crate::logging::{err, unwrap};
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::slice;
@@ -32,7 +32,7 @@ static LIB: &[(&str, &str)] = &[
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
-    ("@env fn write(fd: i32, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
+    ("@env fn write(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
     ("@env fn getchar() i32", libc::getchar as *const u8),
     ("@env fn putchar(c: i32) i32", libc::putchar as *const u8),
     ("@env fn exit(status: i32) Never", libc::exit as *const u8),
@@ -52,6 +52,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
+    ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
     ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
 ];
 
