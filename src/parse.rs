@@ -627,11 +627,6 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     #[track_caller]
-    fn todo(&mut self, msg: &str) -> ParseErr {
-        self.error_next(format!("Not yet implemented: {msg}."))
-    }
-
-    #[track_caller]
     fn error_next(&mut self, message: String) -> ParseErr {
         let token = self.lexer.last_mut().unwrap().next();
         let last = if self.spans.len() < 2 {

@@ -8,8 +8,9 @@ use codemap::Span;
 use interp_derive::InterpSend;
 
 use crate::ast::Flag;
+use crate::bc::SizeCache;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
-use crate::emit_bc::{EmitBc, SizeCache};
+use crate::emit_bc::EmitBc;
 use crate::ffi::InterpSend;
 use crate::logging::{assert, assert_eq, err, logln, LogTag::ShowPrint};
 use crate::logging::{outln, unwrap, PoolLog};
@@ -661,7 +662,7 @@ impl<'a, 'p> Interp<'a, 'p> {
         let return_slot = self.range_to_index(ret);
         let stack_base = self.value_stack.len(); // Our stack includes the argument but not the return slot.
         self.push_expanded(arg);
-        let debug_name = program.funcs[f.0].get_name(self.pool);
+        let debug_name = program[f].get_name(self.pool);
         self.call_stack.push(CallFrame {
             stack_base: StackAbsolute(stack_base),
             current_func: f,
@@ -886,7 +887,7 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
     }
 
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
-        let ret = program.funcs[f.0].unwrap_ty().ret;
+        let ret = program[f].unwrap_ty().ret;
         let size = self.size_of(program, ret);
         self.run(f, arg, ExecTime::Runtime, size, program)
     }

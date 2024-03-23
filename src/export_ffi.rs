@@ -2,7 +2,7 @@
 
 use crate::ast::{Program, TypeId, TypeInfo};
 use crate::compiler::Res;
-use crate::logging::{err, unwrap};
+use crate::logging::unwrap;
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::slice;

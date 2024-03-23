@@ -12,6 +12,7 @@ use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
 use crate::experiments::reflect::BitSet;
+use crate::extend_options;
 use crate::interp::Interp;
 use crate::logging::PoolLog;
 
@@ -22,11 +23,6 @@ pub struct DebugInfo<'p> {
     pub internal_loc: &'static Location<'static>,
     pub src_loc: Span,
     pub p: PhantomData<&'p str>,
-}
-
-#[derive(Default, Clone)]
-pub struct SizeCache {
-    pub known: Vec<Option<usize>>,
 }
 
 pub struct EmitBc<'z, 'p: 'z> {
@@ -87,11 +83,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
         self.locals.clear();
         self.locals.push(vec![]);
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
         let mut result = self.empty_fn(wip);
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         // println!("{} {:?}", self.program.pool.get(func.name), func.body);
         let arg_range = result.reserve_slots(self, func.unwrap_ty().arg)?;
         result.arg_range = arg_range;
@@ -139,7 +135,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn emit_body(&mut self, result: &mut FnBody<'p>, full_arg_range: StackRange, f: FuncId) -> Res<'p, Structured> {
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         let has_body = func.body.is_some();
 
         let mut args_to_drop = self.bind_args(result, full_arg_range, &func.arg)?;
@@ -181,7 +177,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         let body = func.body.as_ref().unwrap();
         let ret_val = self.compile_expr(result, body)?;
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         // We're done with our arguments, get rid of them. Same for other vars.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
         result.push(Bc::DebugMarker(Flag::Drop_Args.ident(), func.get_name(self.program.pool)));
@@ -206,10 +202,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>) -> Res<'p, Structured> {
         let arg = self.compile_expr(result, arg_expr)?;
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         let f_ty = func.unwrap_ty();
         assert!(!self.program.is_comptime_only_type(f_ty.arg), "{}", arg_expr.log(self.program.pool));
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));
         let (arg, arg_ty) = result.load(self, arg)?;
@@ -312,7 +308,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn return_stack_slots(&mut self, f: FuncId) -> usize {
         // You must self.infer_types(f); before calling this
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         let ty = func.unwrap_ty();
         self.slot_count(ty.ret)
     }
@@ -331,11 +327,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.program.pool));
                 assert!(!arg.ty.is_unknown(), "Not typechecked: {}", arg.log(self.program.pool));
                 if let Some(f_id) = f.as_fn() {
-                    let func = &self.program.funcs[f_id.0];
+                    let func = &self.program[f_id];
                     assert!(!func.has_tag(Flag::Comptime));
                     return self.emit_runtime_call(result, f_id, arg);
                 }
-                if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
+                if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
                     let f = self.compile_expr(result, f)?;
                     let f = result.load(self, f)?;
                     let arg = self.compile_expr(result, arg)?;
@@ -531,7 +527,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     Ok((addr_slot, ptr_ty).into())
                 } else if let Some(value) = result.constants.get(*var) {
                     // HACK: this is wrong but it makes constant structs work better.
-                    if let TypeInfo::Ptr(_) = self.program.types[value.1 .0] {
+                    if let TypeInfo::Ptr(_) = self.program[value.1] {
                         return Ok(value.into());
                     }
                     err!("Took address of constant {}", var.log(self.program.pool))
@@ -682,7 +678,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         );
 
         let raw_container_ty = self.program.raw_type(container_ty);
-        match &self.program.types[raw_container_ty.0] {
+        match &self.program[raw_container_ty] {
             TypeInfo::Struct { fields, .. } => {
                 let mut offset = 0;
                 for f in fields.iter().take(index) {
@@ -754,7 +750,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert_eq!(names.len(), values.len());
         let raw_container_ty = self.program.raw_type(requested);
 
-        Ok(match &self.program.types[raw_container_ty.0] {
+        Ok(match &self.program[raw_container_ty] {
             TypeInfo::Struct { fields, as_tuple, .. } => {
                 assert_eq!(
                     fields.len(),
@@ -817,19 +813,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 }
 
+// TODO: !!! doesnt work if you use .slot_count and .byte_count. dont allow that.
 impl SizeCache {
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub fn slot_count(&mut self, program: &Program, ty: TypeId) -> usize {
-        while self.known.len() <= ty.0 {
-            self.known.push(None);
-        }
+        extend_options(&mut self.known, ty.0);
         if let Some(size) = self.known[ty.0] {
             return size;
         }
         let ty = program.raw_type(ty);
-        let size = match &program.types[ty.0] {
+        let size = match &program[ty] {
             TypeInfo::Unknown => 9999,
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(program, *t)).sum(),
             TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(program, f.ty)).sum(),
@@ -884,7 +879,7 @@ impl<'p> FnBody<'p> {
     fn reserve_slots(&mut self, program: &mut EmitBc<'_, 'p>, ty: TypeId) -> Res<'p, StackRange> {
         let ty = program.program.raw_type(ty);
         let count = program.slot_count(ty);
-        match &program.program.types[ty.0] {
+        match &program.program[ty] {
             TypeInfo::Enum { .. } => {
                 let first = StackOffset(self.stack_slots);
                 self.slot_types.push(TypeId::i64());

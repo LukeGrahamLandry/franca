@@ -776,14 +776,7 @@ impl<'p> Debug for CompileError<'p> {
 
 impl<'p> DebugState<'p> {
     pub fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
-        let show_f = |func: FuncId| {
-            format!(
-                "f{}:{:?}:{}",
-                func.0,
-                program.funcs[func.0].get_name(pool),
-                program.funcs[func.0].synth_name(pool)
-            )
-        };
+        let show_f = |func: FuncId| format!("f{}:{:?}:{}", func.0, program[func].get_name(pool), program[func].synth_name(pool));
         match self {
             DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f) => {

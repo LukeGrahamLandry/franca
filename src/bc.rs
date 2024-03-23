@@ -1,6 +1,7 @@
 //! Low level instructions that the interpreter can execute.
 use crate::emit_bc::DebugInfo;
 use crate::experiments::reflect::BitSet;
+use crate::impl_index;
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
     compiler::{ExecTime, Res},
@@ -114,6 +115,17 @@ pub struct FnBody<'p> {
     /// true -> we might Drop but the put a value back. false -> it's an ssa intermediate only needed once.
     pub slot_is_var: BitSet,
     pub jump_targets: BitSet,
+}
+
+#[derive(Clone, Default)]
+pub struct BcReady<'p> {
+    pub ready: Vec<Option<FnBody<'p>>>,
+    pub sizes: SizeCache,
+}
+
+#[derive(Default, Clone)]
+pub struct SizeCache {
+    pub known: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -434,3 +446,5 @@ impl IntoIterator for StackRange {
         self.first.0..self.first.0 + self.count
     }
 }
+
+impl_index!(BcReady<'p>, FuncId, Option<FnBody<'p>>, ready);

@@ -74,19 +74,19 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         self.asm.make_write();
 
         self.wip.push(f);
-        if let Some(template) = self.program.funcs[f.0].any_reg_template {
+        if let Some(template) = self.program[f].any_reg_template {
             // TODO: want to use asm instead of interp so will need to compile.
             //       but really it would be better to have the separation of compiling for host vs target so I could cross compile once I support other architectures.
             // self.compile(template)?;
-        } else if self.program.funcs[f.0].comptime_addr.is_some() {
+        } else if self.program[f].comptime_addr.is_some() {
             // TODO
         } else {
-            let callees = self.program.funcs[f.0].wip.as_ref().unwrap().callees.clone();
+            let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
                 self.compile(c)?;
             }
 
-            let func = &self.program.funcs[f.0];
+            let func = &self.program[f];
             if let Some(insts) = func.jitted_code.as_ref() {
                 // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
                 // TODO: this needs to be aware of the distinction between comptime and runtime target.
@@ -111,7 +111,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let func = self.interp.ready[f.0].as_ref().unwrap();
         // println!("{}", func.log(self.program.pool));
-        let ff = &self.program.funcs[func.func.0];
+        let ff = &self.program[func.func];
         self.f = f;
         self.next_slot = SpOffset(0);
         self.slots.clear();
@@ -153,7 +153,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                 Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
                 Bc::CallDirect { f, ret, arg } => {
-                    let target = &self.program.funcs[f.0];
+                    let target = &self.program[*f];
                     let target_c_call = target.has_tag(Flag::C_Call);
                     let comp_ctx = target.has_tag(Flag::Ct);
                     if let Some(template) = target.any_reg_template {

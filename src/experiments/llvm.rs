@@ -31,6 +31,7 @@ use crate::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, StackOffset, Value},
     compiler::Res,
+    extend_options,
     interp::Interp,
     logging::{err, unwrap, PoolLog},
     pool::Ident,
@@ -164,7 +165,7 @@ impl JittedLlvm {
     ///         should have a @repr(C) so you can opt in. but then also some huristic for when to not bother trying to represent big tuples in registers?
     ///         or its fine, just spill them like you would if someone manually wrote that function, just seems like extra regalloc work.
     fn get_function_type(&mut self, program: &mut Program, ty: FnType) -> LLVMTypeRef {
-        let mut arg = if let TypeInfo::Tuple(fields) = &program.types[ty.arg.0] {
+        let mut arg = if let TypeInfo::Tuple(fields) = &program[ty.arg] {
             fields.clone().iter().map(|ty| self.get_type(program, *ty)).collect()
         } else {
             vec![self.get_type(program, ty.arg)]
@@ -180,7 +181,7 @@ impl JittedLlvm {
         }
 
         let result = unsafe {
-            match &program.types[ty.0] {
+            match &program[ty] {
                 TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!("llvm type: {}", program.log_type(ty)),
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
                 TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
@@ -253,16 +254,16 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
         }
         self.wip.push(f);
 
-        if let Some(template) = self.program.funcs[f.0].any_reg_template {
-        } else if self.program.funcs[f.0].comptime_addr.is_some() {
+        if let Some(template) = self.program[f].any_reg_template {
+        } else if self.program[f].comptime_addr.is_some() {
             // TODO
         } else {
-            let callees = self.program.funcs[f.0].wip.as_ref().unwrap().callees.clone();
+            let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
                 self.compile(c)?;
             }
 
-            let func = &self.program.funcs[f.0];
+            let func = &self.program[f];
             if let Some(insts) = func.jitted_code.as_ref() {
                 todo!()
             } else {
@@ -284,7 +285,7 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         unsafe {
             self.f = f;
-            let ff = &self.program.funcs[f.0];
+            let ff = &self.program[f];
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
             let func = self.interp.ready[f.0].as_ref().unwrap();
@@ -347,7 +348,7 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                         let ty = self.program.func_type(f);
                         let ty = self.program.fn_ty(ty).unwrap();
                         assert!(
-                            !matches!(self.program.types[ty.arg.0], TypeInfo::Struct { .. }),
+                            !matches!(self.program[ty.arg], TypeInfo::Struct { .. }),
                             "TODO: do struct args get flattened like tuples? ffi? enums?"
                         );
                         let ty = self.func_type(f);
@@ -431,7 +432,7 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                     &Bc::SlicePtr { base, offset, ret, .. } => {
                         let ty = self.slot_type(base);
                         let ty = unwrap!(self.program.unptr_ty(ty), "not ptr");
-                        assert!(matches!(self.program.types[ty.0], TypeInfo::Struct { .. }));
+                        assert!(matches!(self.program[ty], TypeInfo::Struct { .. }));
                         let ty = self.llvm.get_type(self.program, ty);
                         let ptr = self.read_slot(base);
                         // The first one is because you're going through the pointer.
@@ -509,18 +510,6 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
 pub fn null_terminate(bytes: &str) -> CString {
     let bytes: Vec<_> = Vec::from(bytes).into_iter().map(|b| NonZeroU8::new(b).unwrap()).collect();
     CString::from(bytes)
-}
-
-pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
-    if v.len() > index {
-        return;
-    }
-
-    let count = index - v.len() + 1;
-    v.reserve(count);
-    for _ in 0..count {
-        v.push(None);
-    }
 }
 
 #[allow(unused)]

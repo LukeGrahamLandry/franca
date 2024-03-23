@@ -41,7 +41,7 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         let bytes = unsafe { &*asm.asm.get_fn(*f).unwrap() };
 
-        let annotations: String = asm.program.funcs[f.0]
+        let annotations: String = asm.program[*f]
             .annotations
             .iter()
             .filter(|a| a.name != Flag::Bs.ident())
@@ -127,14 +127,14 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             return Ok(());
         }
         self.comp.compile(f, ExecTime::Runtime)?;
-        let callees = self.comp.program.funcs[f.0].wip.as_ref().unwrap().callees.clone();
+        let callees = self.comp.program[f].wip.as_ref().unwrap().callees.clone();
         for c in callees {
             self.compile(c)?;
         }
 
         self.func = Some(f);
         let body = self.compile_inner(f)?;
-        let func = &self.comp.program.funcs[f.0];
+        let func = &self.comp.program[f];
         let name = self.make_fn_name(f);
         let ty = func.unwrap_ty();
         let want_export = func.has_tag(Flag::Rs);
@@ -158,7 +158,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
 
     // If its just something we call not something we want to export, can mangle the name so overloads are allowed.
     fn make_fn_name(&self, f: FuncId) -> String {
-        let func = &self.comp.program.funcs[f.0];
+        let func = &self.comp.program[f];
         let name = self.comp.program.pool.get(func.name).to_string();
         let _ty = func.unwrap_ty();
         let _want_export = func.has_tag(Flag::Rs);
@@ -182,10 +182,10 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
     }
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, String> {
-        let func = &self.comp.program.funcs[f.0];
+        let func = &self.comp.program[f];
         let _ = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
-        let func = self.comp.program.funcs[f.0].clone(); // TODO: no clone
+        let func = self.comp.program[f].clone(); // TODO: no clone
         if let Some(body) = func.body {
             let mut ret = self.compile_expr(&body);
             if let Err(e) = &mut ret {
@@ -209,7 +209,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
 
     fn emit_type(&mut self, ty: TypeId) -> Res<'p, String> {
         let info = self.comp.program.raw_type(ty);
-        Ok(match &self.comp.program.types[info.0] {
+        Ok(match &self.comp.program[info] {
             TypeInfo::Int(_) => String::from("i64"),
             TypeInfo::Bool => String::from("bool"),
             TypeInfo::Unit => String::from("()"),
@@ -261,7 +261,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             Expr::Value { value, .. } => self.emit_values(value)?,
             Expr::Call(f, arg) => {
                 if let Some(f_id) = f.as_fn() {
-                    let func = &self.comp.program.funcs[f_id.0];
+                    let func = &self.comp.program[f_id];
                     assert!(!func.has_tag(Flag::Comptime));
                     let name = self.make_fn_name(f_id);
                     let args = self.compile_expr(arg)?;

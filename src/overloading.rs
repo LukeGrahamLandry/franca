@@ -1,4 +1,4 @@
-use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, TargetArch, TypeId, Var};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var};
 use crate::bc::{Value, Values};
 use crate::compiler::{CErr, Compile, DebugState, ExecTime, Executor, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
@@ -100,24 +100,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             self.prune_overloads_by_named_args(&mut overloads, pattern)?;
         }
 
-        let target = match result.when {
-            ExecTime::Comptime => self.program.comptime_arch,
-            ExecTime::Runtime => self.program.runtime_arch,
-        };
+        filter_arch(self.program, &mut overloads, result.when);
 
-        // TODO: kinda cringe.
-        match target {
-            TargetArch::Interp => overloads
-                .0
-                .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm) && !self.program.funcs[f.func.0].has_tag(Flag::No_Interp)),
-            TargetArch::Aarch64 => overloads
-                .0
-                .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm) && !self.program.funcs[f.func.0].has_tag(Flag::Interp)),
-            TargetArch::Llvm => overloads
-                .0
-                .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64) && !self.program.funcs[f.func.0].has_tag(Flag::Interp)),
-        }
-        overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Forward)); // HACK
+        overloads.0.retain(|f| !self.program[f.func].has_tag(Flag::Forward)); // HACK
 
         if overloads.0.is_empty() {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
@@ -166,11 +151,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         f.arg,
                         self.program.log_type(f.arg),
                         f.ret.map(|ret| self.program.log_type(ret)),
-                        self.program.funcs[f.func.0]
-                            .annotations
-                            .iter()
-                            .map(|a| self.pool.get(a.name))
-                            .collect::<Vec<_>>()
+                        self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
                     );
                 }
                 outln!(ShowErr, "Impls: {:?}", self.program.impls.get(&name));
@@ -212,7 +193,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     });
                 }
                 e => {
-                    if let Some(arg) = self.program.funcs[f.0].finished_arg {
+                    if let Some(arg) = self.program[*f].finished_arg {
                         self.program.overload_sets[i].0.push(OverloadOption { arg, ret: None, func: *f });
                     } else {
                         println!("ERR: {e:?}")
@@ -226,7 +207,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
     fn named_args_to_tuple(&mut self, _result: &mut FnWip<'p>, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
-            let expected = &self.program.funcs[f.0].arg;
+            let expected = &self.program[f].arg;
             assert_eq!(expected.bindings.len(), pattern.bindings.len());
             let mut parts = vec![];
             for name in expected.flatten_names() {
@@ -250,7 +231,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     fn prune_overloads_by_named_args(&self, overload_set: &mut OverloadSet<'p>, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let names = pattern.flatten_names();
         overload_set.0.retain(|overload| {
-            let mut expected = self.program.funcs[overload.func.0].arg.flatten_names();
+            let mut expected = self.program[overload.func].arg.flatten_names();
             if expected.len() != names.len() {
                 // TODO: its sad that ive already allcoated the vec of names.
                 return false;
@@ -267,5 +248,25 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             true
         });
         Ok(())
+    }
+}
+
+pub fn filter_arch<'p>(program: &Program<'p>, overloads: &mut OverloadSet<'p>, when: ExecTime) {
+    let target = match when {
+        ExecTime::Comptime => program.comptime_arch,
+        ExecTime::Runtime => program.runtime_arch,
+    };
+
+    // TODO: kinda cringe.
+    match target {
+        TargetArch::Interp => overloads
+            .0
+            .retain(|f| !program[f.func].has_tag(Flag::Llvm) && !program[f.func].has_tag(Flag::No_Interp)),
+        TargetArch::Aarch64 => overloads
+            .0
+            .retain(|f| !program[f.func].has_tag(Flag::Llvm) && !program[f.func].has_tag(Flag::Interp)),
+        TargetArch::Llvm => overloads
+            .0
+            .retain(|f| !program[f.func].has_tag(Flag::Aarch64) && !program[f.func].has_tag(Flag::Interp)),
     }
 }

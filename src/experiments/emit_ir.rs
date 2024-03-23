@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use crate::ast::{FatStmt, Pattern, Var, VarType};
+use crate::bc::SizeCache;
 use crate::bc::*;
 use crate::compiler::{CErr, Res};
-use crate::emit_bc::SizeCache;
 use crate::experiments::arena::Arena;
 use crate::experiments::ir::{Block, Call, Callable, Cc, Inst, Ip, IrFunc, Item, Ret, Val};
 use crate::experiments::reflect::BitSet;
@@ -91,9 +91,9 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
     }
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, ()> {
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         debug_assert!(!func.evil_uninit);
-        let func = &self.program.funcs[f.0];
+        let func = &self.program[f];
         if let Some(body) = func.body.as_ref() {
             let entry = self.new_block(func.finished_arg.unwrap());
             self.bind_args(entry, &func.arg)?;
@@ -122,7 +122,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
 
     fn emit_runtime_call(&mut self, output: Ip, f: &FatExpr<'p>, arg_expr: &FatExpr<'p>) -> Res<'p, Ip> {
         if let Some(f) = f.as_fn() {
-            let func = &self.program.funcs[f.0];
+            let func = &self.program[f];
             let f_ty = func.unwrap_ty();
             let do_call = self.new_block(f_ty.arg);
             let do_arg = self.compile_expr(do_call, arg_expr)?;
@@ -137,7 +137,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 }),
             );
             Ok(do_arg)
-        } else if let TypeInfo::FnPtr(f_ty) = self.program.types[f.ty.0] {
+        } else if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
             let do_call = self.new_block(f_ty.arg);
             let do_arg = self.compile_expr(do_call, arg_expr)?;
             let do_func = self.compile_expr(do_arg, f)?; // TODO: wrong. 'output' arg ty needs to be the fn ptr
@@ -260,7 +260,7 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                 let start = self.new_block(TypeId::unit());
                 let val = if let Some(val) = self.vars.get(var).cloned() {
                     val
-                } else if let Some((value, ty)) = self.program.funcs[self.func.0].closed_constants.get(*var) {
+                } else if let Some((value, ty)) = self.program[self.func].closed_constants.get(*var) {
                     debug_assert_eq!(expr.ty, ty);
                     self.new_val(ty, Item::Value(value.single()?))
                 } else {
@@ -437,9 +437,9 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
                     }
                     self.end(start, Ret::GotoWith(output, val));
                     Ok(start)
-                } else if let Some((value, ty)) = self.program.funcs[self.func.0].closed_constants.get(*var) {
+                } else if let Some((value, ty)) = self.program[self.func].closed_constants.get(*var) {
                     // HACK: this is wrong but it makes constant structs work better.
-                    if let TypeInfo::Ptr(_) = self.program.types[ty.0] {
+                    if let TypeInfo::Ptr(_) = self.program[ty] {
                         let value = self.new_val(ty, Item::Value(value.single()?));
                         self.end(start, Ret::GotoWith(output, value));
                         return Ok(start);

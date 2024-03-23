@@ -4,6 +4,7 @@ use crate::{
     compiler::{CErr, FnWip, Res},
     experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
+    impl_index,
     logging::err,
     pool::{Ident, StringPool},
 };
@@ -747,6 +748,10 @@ pub struct Program<'p> {
     pub inline_llvm_ir: Vec<FuncId>,
     pub modules: Vec<Module<'p>>,
 }
+
+impl_index!(Program<'p>, TypeId, TypeInfo<'p>, types);
+impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
+impl_index!(Program<'p>, ModuleId, Module<'p>, modules);
 
 #[derive(Clone)]
 pub struct Module<'p> {

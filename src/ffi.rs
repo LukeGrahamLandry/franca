@@ -549,7 +549,7 @@ pub mod c {
         }
         let mut args: Vec<_> = if f_ty.arg == TypeId::unit() {
             vec![]
-        } else if let TypeInfo::Tuple(fields) = &program.types[f_ty.arg.0] {
+        } else if let TypeInfo::Tuple(fields) = &program[f_ty.arg] {
             for ty in fields {
                 b = b.arg(program.as_c_type(*ty)?);
             }

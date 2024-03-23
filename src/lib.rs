@@ -350,3 +350,34 @@ fn test_mir() {
         c2mir_finish(ctx);
     }
 }
+
+macro_rules! impl_index {
+    ($container:ty, $idx:ty, $elem:ty, $field:ident) => {
+        impl<'p> std::ops::Index<$idx> for $container {
+            type Output = $elem;
+
+            fn index(&self, index: $idx) -> &Self::Output {
+                &self.$field[index.0]
+            }
+        }
+
+        impl<'p> std::ops::IndexMut<$idx> for $container {
+            fn index_mut(&mut self, index: $idx) -> &mut Self::Output {
+                &mut self.$field[index.0]
+            }
+        }
+    };
+}
+pub(crate) use impl_index;
+
+pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
+    if v.len() > index {
+        return;
+    }
+
+    let count = index - v.len() + 1;
+    v.reserve(count);
+    for _ in 0..count {
+        v.push(None);
+    }
+}
