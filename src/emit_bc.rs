@@ -7,16 +7,13 @@ use std::ops::Deref;
 use std::panic::Location;
 use std::usize;
 
+use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
 use crate::experiments::reflect::BitSet;
 use crate::interp::Interp;
 use crate::logging::PoolLog;
-use crate::{
-    ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo},
-    pool::Ident,
-};
 
 use crate::logging::{assert, assert_eq, err, ice, unwrap};
 
@@ -497,7 +494,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Index { ptr, index } => {
                 let container_ptr = self.compile_expr(result, ptr)?;
                 let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
-                self.index_expr(result, container_ptr, index)?
+                self.index_expr(result, container_ptr, index, expr.ty)?
             }
             Expr::StructLiteralP(pattern) => {
                 let requested = expr.ty;
@@ -673,24 +670,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    fn index_expr(&mut self, result: &mut FnBody<'p>, container_ptr: Structured, index: usize) -> Res<'p, Structured> {
-        let mut container_ptr_ty = self.program.raw_type(container_ptr.ty());
-        let mut container_ptr = result.load(self, container_ptr)?.0;
-        // Auto deref for nested place expressions.
-        // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
+    fn index_expr(&mut self, result: &mut FnBody<'p>, container_ptr: Structured, index: usize, ty: TypeId) -> Res<'p, Structured> {
+        let container_ptr_ty = self.program.raw_type(container_ptr.ty());
+        let container_ptr = result.load(self, container_ptr)?.0;
         let depth = self.program.ptr_depth(container_ptr_ty);
-        if depth > 1 {
-            for _ in 0..(depth - 1) {
-                container_ptr_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
-                container_ptr_ty = self.program.raw_type(container_ptr_ty);
-                let ret = result.reserve_slots(self, container_ptr_ty)?;
-                result.push(Bc::Load {
-                    from: container_ptr.single(),
-                    to: ret,
-                });
-                container_ptr = ret;
-            }
-        }
+        assert_eq!(depth, 1);
         let container_ty = unwrap!(
             self.program.unptr_ty(container_ptr_ty),
             "unreachable unptr_ty {:?}",
@@ -705,7 +689,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     offset += self.slot_count(f.ty);
                 }
                 let f = fields[index];
-                let ty = self.program.find_interned(TypeInfo::Ptr(f.ty));
                 let ret = result.reserve_slots(self, ty)?;
                 let offset = if let Some(bytes) = f.ffi_byte_offset {
                     assert_eq!(bytes % 8, 0);
@@ -719,11 +702,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     count: self.slot_count(f.ty),
                     ret: ret.single(),
                 });
-                return Ok((ret, ty).into());
+                Ok((ret, ty).into())
             }
             TypeInfo::Enum { cases, .. } => {
-                let (_, f_ty) = cases[index];
-                let ty = self.program.find_interned(TypeInfo::Ptr(f_ty));
+                let f_ty = cases[index].1;
                 let ret = result.reserve_slots(self, ty)?;
                 let count = self.slot_count(f_ty);
                 result.push(Bc::TagCheck {
@@ -736,25 +718,22 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     count,
                     ret: ret.single(),
                 });
-                return Ok((ret, ty).into());
+                Ok((ret, ty).into())
             }
             TypeInfo::Tuple(types) => {
                 let mut offset = 0;
-                for (i, f_ty) in types.iter().enumerate() {
-                    if i == index {
-                        let ty = self.program.find_interned(TypeInfo::Ptr(*f_ty));
-                        let ret = result.reserve_slots(self, ty)?;
-                        result.push(Bc::SlicePtr {
-                            base: container_ptr.single(),
-                            offset,
-                            count: self.slot_count(*f_ty),
-                            ret: ret.single(),
-                        });
-                        return Ok((ret, ty).into());
-                    }
+                for f_ty in types.iter().take(index) {
                     offset += self.slot_count(*f_ty);
                 }
-                unreachable!()
+                let f_ty = types[index];
+                let ret = result.reserve_slots(self, ty)?;
+                result.push(Bc::SlicePtr {
+                    base: container_ptr.single(),
+                    offset,
+                    count: self.slot_count(f_ty),
+                    ret: ret.single(),
+                });
+                Ok((ret, ty).into())
             }
             _ => err!(
                 "only structs/enums support field access but found {} = {}",

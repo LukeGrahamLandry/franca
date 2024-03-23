@@ -176,14 +176,20 @@ macro_rules! jit_test_aarch_only {
             }"#
         );
 
-        simple!(
-            assert_eq_ffi,
-            (),
-            2,
+        simple!(assert_eq_ffi, (), 2,
             r#"
             @c_call fn main() i64 = {
                 assert_eq(1, 1);
                 2
+            }"#
+        );
+
+        // Requires being able to write constant heap values.
+        simple!(use_str, (), 5,
+            r#"
+            @c_call fn main() i64 = {
+                let s: Str = "hello";
+                len(s)
             }"#
         );
 
@@ -192,6 +198,8 @@ macro_rules! jit_test_aarch_only {
         simple!(structs, 5, 5, include_str!("../../tests/structs.fr"));
         simple!(overloading, 5, 5, include_str!("../../tests/overloading.fr"));
         simple!(closures, 5, 5, include_str!("../../tests/closures.fr"));
+        // simple!(basic, 5, 5, include_str!("../../tests/basic.fr"));
+
     };
 }
 pub(crate) use jit_test;

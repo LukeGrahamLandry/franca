@@ -1077,10 +1077,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
                         let ty = unwrap!(self.type_of(result, arg)?, "could not infer yet");
-                        expr.expr = Expr::Value {
-                            ty: TypeId::ty(),
-                            value: Value::Type(ty).into(),
-                        };
+                        expr.expr = Expr::ty(ty);
                         self.program.load_value(Value::Type(ty))
                     }
                     "size_of" => {
@@ -1090,10 +1087,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
                         let ty = self.to_type(ty)?;
                         let size = self.executor.size_of(self.program, ty);
-                        expr.expr = Expr::Value {
-                            ty: TypeId::i64(),
-                            value: Value::I64(size as i64).into(),
-                        };
+                        expr.expr = Expr::int(size as i64);
                         self.program.load_value(Value::I64(size as i64))
                     }
                     "assert_compile_error" => {
@@ -2199,10 +2193,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
-    fn get_index_type(&mut self, mut container_ptr_ty: TypeId, index: usize) -> Res<'p, TypeId> {
-        // Auto deref for nested place expressions.
-        // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
-        let depth = self.program.ptr_depth(container_ptr_ty);
+    fn get_index_type(&mut self, container_ptr_ty: TypeId, index: usize) -> Res<'p, TypeId> {
         let container_ty = unwrap!(
             self.program.unptr_ty(container_ptr_ty),
             "unreachable unptr_ty {:?}",

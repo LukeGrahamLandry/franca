@@ -5,13 +5,14 @@
 #![allow(unused)]
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
-use crate::bc::{Bc, StackOffset, StackRange, Value, Values};
+use crate::bc::{Bc, InterpBox, StackOffset, StackRange, Value, Values};
 use crate::compiler::{ExecTime, Res};
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
 use crate::logging::{err, PoolLog};
 use crate::{ast::Program, bc::FnBody};
 use std::arch::asm;
+use std::cell::UnsafeCell;
 use std::mem::transmute;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -218,7 +219,18 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                     Value::Unit => {}
                     Value::Poison => todo!(),
                     Value::InterpAbsStackAddr(_) => todo!(),
-                    &Value::Heap { value, .. } => todo!("{:?}", unsafe { &(*value).values }),
+                    &Value::Heap {
+                        value,
+                        physical_first,
+                        physical_count,
+                    } => {
+                        // TODO: this needs to be different when I actually want to emit an executable.
+                        let ty = self.slot_type(*slot);
+                        assert!(self.program.unptr_ty(ty).is_some(), "Expected Value::Heap to be ptr");
+                        let ptr = self.asm.constants.copy_heap(value, physical_first, physical_count);
+                        self.load_imm(x0, ptr as u64);
+                        self.set_slot(x0, *slot);
+                    }
                     Value::GetNativeFnPtr(f) => todo!(),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
@@ -604,10 +616,57 @@ use crate::ffi::InterpSend;
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
 
+#[derive(Default)]
+pub struct ConstBytes {
+    /// Safety: the asm code will alias these pointers so be careful. TODO: does it have to be a *const [UnsafeCell<i64>]?
+    constants: Vec<UnsafeCell<Vec<i64>>>,
+}
+
+impl ConstBytes {
+    pub fn store<'a>(&mut self, values: impl Iterator<Item = &'a Value>) -> *const u8 {
+        let mut out = vec![];
+        for value in values {
+            self.write_int_copy(value, &mut out);
+        }
+        let ptr = out.as_ptr() as *const u8;
+        self.constants.push(UnsafeCell::new(out));
+        ptr
+    }
+
+    fn copy_heap(&mut self, value: *mut InterpBox, first: usize, count: usize) -> *const u8 {
+        let value = unsafe { &*value };
+        assert!(value.is_constant, "wont be shared by reference so only makes sense for constants?");
+        let values = &value.values[first..first + count];
+        self.store(values.iter())
+    }
+
+    pub fn write_int_copy(&mut self, value: &Value, out: &mut Vec<i64>) {
+        match value {
+            Value::F64(_) => todo!(),
+            &Value::I64(i) => out.push(i),
+            &Value::Bool(i) => out.push(i as i64),
+            &Value::OverloadSet(i) | &Value::Symbol(i) | &Value::Type(TypeId(i)) | &Value::GetFn(FuncId(i)) => out.push(i as i64),
+            Value::Unit => out.push(0), // TODO
+            Value::Poison | Value::InterpAbsStackAddr(_) => unreachable!(),
+            Value::GetNativeFnPtr(_) => todo!(),
+            &Value::Heap {
+                value,
+                physical_first,
+                physical_count,
+            } => {
+                let ptr = self.copy_heap(value, physical_count, physical_count);
+                out.push(ptr as usize as i64);
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 pub mod jit {
     use crate::ast::FuncId;
+    use crate::experiments::bc_to_asm::ConstBytes;
     use crate::experiments::bootstrap_gen::brk;
+    use std::cell::UnsafeCell;
     use std::ptr::null;
     use std::slice;
 
@@ -621,6 +680,7 @@ pub mod jit {
         current_start: *const u8,
         next: *mut u8,
         ip_to_inst: Vec<*const u8>,
+        pub constants: ConstBytes,
     }
 
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
@@ -636,6 +696,7 @@ pub mod jit {
                 dispatch: vec![],
                 ranges: vec![],
                 ip_to_inst: vec![],
+                constants: ConstBytes::default(),
             }
         }
 

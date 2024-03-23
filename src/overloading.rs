@@ -108,8 +108,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         // TODO: kinda cringe.
         match target {
             TargetArch::Interp => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
-            TargetArch::Aarch64 => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm)),
-            TargetArch::Llvm => overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64)),
+            TargetArch::Aarch64 => overloads
+                .0
+                .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Llvm) && !self.program.funcs[f.func.0].has_tag(Flag::Interp)),
+            TargetArch::Llvm => overloads
+                .0
+                .retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Aarch64) && !self.program.funcs[f.func.0].has_tag(Flag::Interp)),
         }
         overloads.0.retain(|f| !self.program.funcs[f.func.0].has_tag(Flag::Forward)); // HACK
 
