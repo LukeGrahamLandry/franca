@@ -351,6 +351,7 @@ pub struct Binding<'p> {
     pub name: Name<'p>,
     pub ty: LazyType<'p>,
     pub default: Option<FatExpr<'p>>,
+    pub kind: VarType,
 }
 
 impl<'p> Binding<'p> {
@@ -387,7 +388,7 @@ impl<'p> Pattern<'p> {
         self.bindings.extend(other.bindings);
     }
 
-    pub fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId)> {
+    pub fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId, VarType)> {
         self.bindings
             .iter()
             .map(|b| {
@@ -395,7 +396,7 @@ impl<'p> Pattern<'p> {
                     Name::Var(v) => Some(v),
                     _ => None,
                 };
-                (name, b.unwrap())
+                (name, b.unwrap(), b.kind)
             })
             .collect()
     }
@@ -701,11 +702,17 @@ impl<'p> Func<'p> {
                 ty: LazyType::Finished(arg),
                 name: Name::None,
                 default: None,
+                kind: VarType::Let,
             }],
             loc,
         };
         let ret = LazyType::Finished(ret);
         (arg, ret)
+    }
+
+    pub fn any_const_args(&self) -> bool {
+        // TODO: include comptime only types
+        self.arg.bindings.iter().any(|b| b.kind == VarType::Const)
     }
 }
 
@@ -972,7 +979,7 @@ impl<'p> Program<'p> {
             .arg
             .flatten()
             .iter()
-            .map(|(name, ty)| format!("{}: {}, ", name.map(|n| self.pool.get(n.0)).unwrap_or("_"), self.log_type(*ty)))
+            .map(|(name, ty, _)| format!("{}: {}, ", name.map(|n| self.pool.get(n.0)).unwrap_or("_"), self.log_type(*ty)))
             .collect();
         let ret = self.log_type(func.ret.unwrap());
         let out = format!("fn {}({args}) {ret}", self.pool.get(func.name));
@@ -1043,7 +1050,7 @@ impl<'p> Program<'p> {
             let args = arg
                 .flatten()
                 .into_iter()
-                .map(|(name, ty)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().0)))
+                .map(|(name, ty, _)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().0)))
                 .collect::<Vec<_>>()
                 .join(", ");
             out += &format!("define {} @FN{}({args}) alwaysinline {{ {body} }}\n\n", self.for_llvm_ir(ret), f.0);
@@ -1593,6 +1600,7 @@ pub enum Flag {
     TopLevel,
     Module,
     Include_Std,
+    Alloc,
     _Reserved_Count_,
 }
 

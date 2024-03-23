@@ -108,11 +108,7 @@ pub extern "C" fn arena_alloc(arena: &Arena, stride: usize, count: usize, align:
 }
 
 fn prev_chunk(chunk: ArenaChunk) -> *mut ArenaChunk {
-    unsafe {
-        chunk
-            .start
-            .add(chunk.start as usize % align_of::<ArenaChunk>()) as *mut ArenaChunk
-    }
+    unsafe { chunk.start.add(chunk.start as usize % align_of::<ArenaChunk>()) as *mut ArenaChunk }
 }
 
 #[no_mangle]
@@ -165,9 +161,7 @@ impl ArenaChunk {
 
 impl MemoryGeorgWhoOwnsAllTheMemory {
     pub fn pop(&mut self) -> &'static Arena<'static> {
-        self.arenas
-            .pop()
-            .unwrap_or_else(|| Box::leak(Box::default()))
+        self.arenas.pop().unwrap_or_else(|| Box::leak(Box::default()))
     }
 
     fn _push(&mut self, arena: &'static Arena<'static>) {
@@ -176,15 +170,9 @@ impl MemoryGeorgWhoOwnsAllTheMemory {
 }
 
 unsafe impl<'p> Allocator for &'p Arena<'p> {
-    fn allocate(
-        &self,
-        layout: std::alloc::Layout,
-    ) -> Result<NonNull<[u8]>, std::alloc::AllocError> {
+    fn allocate(&self, layout: std::alloc::Layout) -> Result<NonNull<[u8]>, std::alloc::AllocError> {
         let ptr = arena_alloc(self, layout.size(), 1, layout.align());
-        Ok(NonNull::slice_from_raw_parts(
-            NonNull::new(ptr).unwrap(),
-            layout.size(),
-        ))
+        Ok(NonNull::slice_from_raw_parts(NonNull::new(ptr).unwrap(), layout.size()))
     }
 
     unsafe fn deallocate(&self, _: NonNull<u8>, _: std::alloc::Layout) {

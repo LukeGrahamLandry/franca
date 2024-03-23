@@ -317,7 +317,9 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         mut_replace!(self.program[f], |func: Func<'p>| {
             assert!(result.when == ExecTime::Comptime || !func.has_tag(Flag::Comptime));
             let arguments = func.arg.flatten();
-            for (name, ty) in arguments {
+            for (name, ty, kind) in arguments {
+                // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
+                assert!(kind != VarType::Const, "Tried to emit before binding const args.");
                 if let Some(name) = name {
                     let _prev = result.vars.insert(name, ty);
                     // assert!(prev.is_none(), "overwrite arg?");  // TODO: but closures inlined multiple times in the same fn
@@ -398,6 +400,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let force_inline = func.has_tag(Flag::Inline);
         assert!(func.capture_vars.is_empty());
         assert!(!force_inline);
+        assert!(!func.any_const_args());
         add_unique(&mut result.callees, f);
         self.ensure_compiled(f, result.when)?;
         let ret_ty = unwrap!(self.program[f].finished_ret, "fn ret");
@@ -554,7 +557,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let func = &self.program[f];
         let args = func.arg.flatten().into_iter();
         let mut arg_values = arg_value.vec().into_iter();
-        for (name, ty) in args {
+        for (name, ty, _) in args {
             let size = self.executor.size_of(self.program, ty); // TODO: better pattern matching
             let mut values = vec![];
             for _ in 0..size {
@@ -611,6 +614,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 self.compile_expr(result, expr, None)?;
             }
             Stmt::DeclVar { name, ty, value, kind, .. } => {
+                let loc = stmt.loc;
                 let no_type = matches!(ty, LazyType::Infer);
                 self.infer_types_progress(&result.constants, ty)?;
 
@@ -700,7 +704,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         if let Some(e) = value {
                             e.expr = val_expr;
                         } else {
-                            *value = Some(FatExpr::synthetic(val_expr, garbage_loc()));
+                            *value = Some(FatExpr::synthetic(val_expr, loc));
                         }
                         result.constants.insert(*name, (val, final_ty));
                         // println!("{}", self.program.log_consts(&result.constants));
@@ -868,7 +872,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     self.compile_expr(result, value, Some(ty))?;
                 }
                 let arguments = binding.flatten();
-                for (name, ty) in arguments {
+                for (name, ty, kind) in arguments {
+                    assert_ne!(kind, VarType::Const);
                     if let Some(name) = name {
                         let _prev = result.vars.insert(name, ty);
                         // assert!(prev.is_none(), "overwrite arg?");  // TODO: but closures inlined multiple times in the same fn
@@ -1147,6 +1152,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     "fn_ptr" => {
                         let fn_val = self.compile_expr(result, arg, None)?.get()?;
                         if let Values::One(Value::GetFn(id)) = fn_val {
+                            assert!(!self.program[id].any_const_args());
                             add_unique(&mut result.callees, id);
                             self.ensure_compiled(id, result.when)?;
                             // The backend still needs to do something with this, so just leave it
@@ -1279,6 +1285,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                                 // ty: LazyType::Finished(unique_ty),
                                 ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
                                 default: None,
+                                kind: VarType::Let,
                             });
                         }
                         let var = Var(self.pool.intern("T"), self.program.vars.len());
@@ -1287,11 +1294,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                             name: Name::Var(var),
                             ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
                             default: None,
+                            kind: VarType::Let,
                         });
                         the_type.bindings.push(Binding {
                             name: Name::Var(var),
                             ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(TypeId::ty()), loc)),
                             default: None,
+                            kind: VarType::Let,
                         });
                         let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
                         let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
@@ -2059,7 +2068,8 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
 
         let as_tuple = self.program.tuple_of(types);
         let mut fields = vec![];
-        for (name, ty) in raw_fields {
+        for (name, ty, kind) in raw_fields {
+            assert_ne!(kind, VarType::Const, "todo");
             fields.push(Field {
                 name: unwrap!(name, "field name").0,
                 ty,
@@ -2262,10 +2272,13 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
         self.type_check_arg(arg_val.ty(), arg_ty, "fn arg")?;
 
+        // TODO: you really want to compile as much of the body as possible before you start baking things.
+        let any_const_args = self.program[original_f].any_const_args();
+
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
         // TODO: seperate function for this
-        if self.program.is_comptime_only_type(arg_ty) {
+        if self.program.is_comptime_only_type(arg_ty) || any_const_args {
             let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
             self.push_state(&state);
             // Some part of the argument must be known at comptime.
@@ -2301,17 +2314,18 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     let mut skipped_args = vec![]; // TODO: need to remove these baked ones from the arg expr as well!
                     let mut skipped_types = vec![];
                     let mut removed = 0;
-                    for (i, ((name, ty), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
-                        if self.program.is_comptime_only_type(ty) {
+                    for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
+                        if self.program.is_comptime_only_type(ty) || kind == VarType::Const {
                             let id = arg_value.clone().get()?.single()?.to_func(); // TODO: not this
                             let name = unwrap!(name, "arg needs name (unreachable?)");
                             current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
                             // TODO: need to do capturing_call to the ast
                             if let Some(id) = id {
                                 let other_captures = self.program[id].capture_vars.clone();
-                                if other_captures.is_empty() {
-                                    add_unique(&mut result.callees, id);
-                                }
+                                // TODO: why was i doing this?
+                                // if other_captures.is_empty() {
+                                //     add_unique(&mut result.callees, id);
+                                // }
 
                                 self.program[current_fn].capture_vars.extend(other_captures)
                             }

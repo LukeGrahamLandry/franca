@@ -110,7 +110,8 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
     fn bind_args(&mut self, block: Ip, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let arguments = pattern.flatten();
         let container = self.arg_of(block);
-        for (index, (name, ty)) in arguments.into_iter().enumerate() {
+        for (index, (name, ty, kind)) in arguments.into_iter().enumerate() {
+            assert_ne!(kind, VarType::Const);
             let val = self.new_val(ty, Item::Gep { container, index });
             if let Some(name) = name {
                 let prev = self.vars.insert(name, val);

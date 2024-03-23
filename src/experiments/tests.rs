@@ -199,8 +199,8 @@ macro_rules! jit_test_aarch_only {
         simple!(overloading, 5, 5, include_str!("../../tests/overloading.fr"));
         simple!(closures, 5, 5, include_str!("../../tests/closures.fr"));
         simple!(macros, 5, 5, include_str!("../../tests/macros.fr"));
-        //simple!(generics, 5, 5, include_str!("../../tests/generics.fr"));
-        // simple!(basic, 5, 5, include_str!("../../tests/basic.fr"));
+        simple!(generics, 5, 5, include_str!("../../tests/generics.fr"));
+        simple!(basic, 5, 5, include_str!("../../tests/basic.fr"));
 
     };
 }

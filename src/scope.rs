@@ -281,6 +281,7 @@ impl<'p> ResolveScope<'p> {
                         name: Name::Var(var),
                         ty: mem::replace(&mut binding.ty, LazyType::Infer),
                         default: mem::take(&mut binding.default),
+                        kind: binding.kind,
                     };
                 }
             }

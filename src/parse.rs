@@ -4,7 +4,7 @@ use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 use codemap::{CodeMap, File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, Flag, Name, TypeId, Var};
+use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType};
 use crate::bc::Values;
 use crate::export_ffi::get_include_std;
 use crate::{
@@ -274,6 +274,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         name: Name::Ident(name),
                         ty: value,
                         default,
+                        kind: VarType::Var,
                     };
                     self.maybe(Comma);
                     let mut named = if RightParen == self.peek() {
@@ -379,6 +380,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                             name: Name::Ident(name),
                             ty,
                             default: None,
+                            kind,
                         });
                         self.eat(Semicolon)?;
 
@@ -486,6 +488,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 name: Name::None,
                 ty: LazyType::Finished(TypeId::unit()),
                 default: None,
+                kind: VarType::Let,
             });
         }
 
@@ -495,6 +498,12 @@ impl<'a, 'p> Parser<'a, 'p> {
     // TODO: rn just one ident but support tuple for pattern matching
     /// `Names ':' ?Expr`
     fn parse_type_binding(&mut self, allow_default: bool) -> Res<Binding<'p>> {
+        let kind = if let Qualifier(kind) = self.peek() {
+            self.pop();
+            kind
+        } else {
+            VarType::Var // TODO: default to let?
+        };
         let name = self.ident()?;
         let types = if Colon == self.peek() {
             self.pop();
@@ -513,6 +522,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             name: Name::Ident(name),
             ty: types,
             default,
+            kind,
         })
     }
 

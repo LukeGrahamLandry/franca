@@ -544,18 +544,6 @@ impl<'a, 'p> Interp<'a, 'p> {
                 // println!(" => {:?}", self.program.log_type(ty));
                 Value::Type(ty).into()
             }
-            "Opaque" => {
-                // TODO: this doesn't actually do anything.
-                let (size, align) = arg.to_pair()?;
-                let (size, align) = (size.to_int()?, align.to_int()?);
-                let ty = TypeInfo::Struct {
-                    fields: vec![],
-                    as_tuple: TypeId::unknown(),
-                    ffi_byte_align: Some(align as usize),
-                    ffi_byte_stride: Some(size as usize),
-                };
-                Value::Type(program.intern_type(ty)).into()
-            }
             "system" => {
                 self.fail_on_wasm("fn system")?;
                 let mut arg = unwrap!(
@@ -888,6 +876,7 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
 
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
         let ret = program[f].unwrap_ty().ret;
+        assert!(!ret.is_any() && !ret.is_unknown());
         let size = self.size_of(program, ret);
         self.run(f, arg, ExecTime::Runtime, size, program)
     }

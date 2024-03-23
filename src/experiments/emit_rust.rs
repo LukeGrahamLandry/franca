@@ -2,7 +2,7 @@ use codemap::{CodeMap, Span};
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo, VarType};
 use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
@@ -142,7 +142,8 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
             .arg
             .flatten()
             .iter()
-            .map(|(name, ty)| {
+            .map(|(name, ty, kind)| {
+                assert_ne!(*kind, VarType::Const);
                 let name = name.map(|name| self.comp.pool.get(name.0)).unwrap_or("_");
                 let ty = self.emit_type(*ty).unwrap();
                 format!("{}: {}, ", name, ty)

@@ -117,7 +117,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let mut args_to_drop = vec![];
         let arguments = pattern.flatten();
         let mut slot_count = 0;
-        for (name, ty) in arguments {
+        for (name, ty, kind) in arguments {
+            assert_ne!(kind, VarType::Const);
             let size = self.slot_count(ty);
             let range = StackRange {
                 first: full_arg_range.offset(slot_count),

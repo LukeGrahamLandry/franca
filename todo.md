@@ -1,11 +1,16 @@
 ## Sema
 
 - remove the need for forward declarations
-- Bc::Index for accessing tuple/struct fields instead of using raw_slice because it seems like a useful semantic difference and makes it easy to use GEP.
 - module system: want to be able to seperate things to help lsp.
   - hard to think about how that should interact with wanting to use global overloads as traits.
 - nominal type-checking
 - clean up tracking backend specific function bodies
+
+## Replacing Interp
+
+- const function args so can impl alloc for asm
+- give executors access to the compiler so dont need the hacky message passing with errors
+- convert bytes + type back to Values
 
 ## Backend
 
@@ -13,6 +18,10 @@
 - llvm output an executable
 - using mir for compiling c dependencies would be cool
 - figure out if llvm-sys statically links itself and if it can cross compile
+- reference counting and deduplication of heap constants
+- be able to serialize asm for any function so can cache macro handlers. is it faster to hash source than recompile?
+- explicit uninit vars to make asm allocate slots
+- trying to call print on asm tries to call builtin alloc somehow
 
 ## Ui
 
