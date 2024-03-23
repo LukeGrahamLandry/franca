@@ -22,6 +22,7 @@
 - be able to serialize asm for any function so can cache macro handlers. is it faster to hash source than recompile?
 - explicit uninit vars to make asm allocate slots
 - trying to call print on asm tries to call builtin alloc somehow
+  I think the problem is that you need two versions of things that are called at both comptime and runtime when not for the same architecture.
 
 ## Ui
 

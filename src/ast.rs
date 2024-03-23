@@ -682,10 +682,12 @@ impl<'p> Func<'p> {
     }
 
     pub fn add_tag(&mut self, name: Flag) {
-        self.annotations.push(Annotation {
-            name: name.ident(),
-            args: None,
-        });
+        if !self.has_tag(name) {
+            self.annotations.push(Annotation {
+                name: name.ident(),
+                args: None,
+            });
+        }
     }
 
     #[track_caller]

@@ -78,8 +78,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             // TODO: want to use asm instead of interp so will need to compile.
             //       but really it would be better to have the separation of compiling for host vs target so I could cross compile once I support other architectures.
             // self.compile(template)?;
-        } else if self.program[f].comptime_addr.is_some() {
-            // TODO
+        } else if self.program[f].comptime_addr.is_some() && self.program[f].jitted_code.is_none() {
+            println!("Skip asm for {f:?}");
         } else {
             let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {

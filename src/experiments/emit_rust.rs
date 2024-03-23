@@ -7,7 +7,7 @@ use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
-use crate::logging::{err, unwrap};
+use crate::logging::{err, unwrap, PoolLog};
 use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
@@ -47,7 +47,7 @@ pub fn bootstrap() -> (String, String) {
             .filter(|a| a.name != Flag::Bs.ident())
             .map(|a| {
                 assert!(a.args.is_none(), "TODO: args");
-                format!("@{}", pool.get(a.name))
+                format!("@{} ", pool.get(a.name))
             })
             .collect();
 
@@ -58,7 +58,7 @@ pub fn bootstrap() -> (String, String) {
             .array_chunks::<4>()
             .map(|b| format!("{:#05x}, ", u32::from_le_bytes(b)))
             .collect();
-        fr += &format!("\n{annotations} @aarch64 {sig} = (\n    {bytes}\n)!asm;\n")
+        fr += &format!("\n{annotations}\n{sig} = (\n    {bytes}\n)!asm;\n")
         // TODO dont hardcode arch
     }
 

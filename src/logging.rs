@@ -224,7 +224,7 @@ impl<'p> Program<'p> {
                 TypeInfo::F64 => "f64".to_owned(),
                 TypeInfo::Bool => "bool".to_owned(),
                 // TODO: be careful of recursion
-                TypeInfo::Ptr(e) => format!("(&{})", self.log_type(*e)),
+                TypeInfo::Ptr(e) => format!("*{}", self.log_type(*e)),
                 TypeInfo::Struct { fields, .. } => {
                     // TODO: factor out iter().join(str), how does that not already exist
                     let v: Vec<_> = fields
@@ -253,7 +253,7 @@ impl<'p> Program<'p> {
                 }
                 TypeInfo::Type => "Type".to_owned(),
                 TypeInfo::Unit => "Unit".to_owned(),
-                TypeInfo::VoidPtr => "(&Void)".to_owned(),
+                TypeInfo::VoidPtr => "VoidPtr".to_owned(),
                 TypeInfo::Int(int) => {
                     format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
                 }
