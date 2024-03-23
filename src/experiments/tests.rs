@@ -1,17 +1,17 @@
 macro_rules! jit_test {
     ($test_func:ident) => {
         macro_rules! simple {
-                ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
-                    #[test]
-                    fn $name() {
-                        $test_func(stringify!($name), $src, |f| {
-                            let ret: i64 = f($arg);
-                            assert_eq!(ret, $ret);
-                        })
-                        .unwrap();
-                    }
-                };
-            }
+            ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
+                #[test]
+                fn $name() {
+                    $test_func(stringify!($name), $src, |f| {
+                        let ret: i64 = f($arg);
+                        assert_eq!(ret, $ret);
+                    })
+                    .unwrap();
+                }
+            };
+        }
 
         simple!(trivial, (), 42, "@c_call fn main() i64 = { 42 }");
         simple!(
@@ -21,12 +21,7 @@ macro_rules! jit_test {
             "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }"
         );
         simple!(test_ifa, true, 123, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
-        simple!(
-            test_ifb,
-            false,
-            456,
-            "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }"
-        );
+        simple!(test_ifb, false, 456, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
         simple!(math, 5, 20, "@c_call fn main(a: i64) i64 = { add(a, 15) }");
         simple!(
             test_while,
@@ -57,30 +52,6 @@ macro_rules! jit_test {
             }"#
         );
         simple!(
-            fields,
-            3,
-            10,
-            r#"
-            @c_call fn main(n: i64) i64 = {
-                const A = (a: i64, b: i64)!struct;
-                var a: A = (a: n, b: 0);
-                a&.b[] = add(a&.a[], 7);
-                a&.b[]
-            }"#
-        );
-
-        simple!(
-            varient,
-            3,
-            10,
-            r#"
-                @c_call fn main(n: i64) i64 = {
-                    const A = (a: i64, b: i64)!enum;
-                    var a: A = (a: n);
-                    add(a&.a[], 7)
-                }"#
-        );
-        simple!(
             nested,
             (),
             91,
@@ -105,32 +76,6 @@ macro_rules! jit_test {
                 "#
         );
         */
-
-        simple!(
-            use_any_reg,
-            5,
-            2,
-            r#"
-            @any_reg
-            fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
-                op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0b000000));
-            });
-    
-            @c_call fn main(a: i64) i64 = {
-                sub2(a, 3)
-            }"#
-        );
-
-        simple!(
-            assert_eq_ffi,
-            (),
-            2,
-            r#"
-            @c_call fn main() i64 = {
-                assert_eq(1, 1);
-                2
-            }"#
-        );
 
         #[test]
         fn use_ptr() {
@@ -175,9 +120,74 @@ macro_rules! jit_test {
 
         // TODO: bootstrap raw_slice
         // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
+    };
+}
+macro_rules! jit_test_aarch_only {
+    ($test_func:ident) => {
+        macro_rules! simple {
+            ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
+                #[test]
+                fn $name() {
+                    $test_func(stringify!($name), $src, |f| {
+                        let ret: i64 = f($arg);
+                        assert_eq!(ret, $ret);
+                    })
+                    .unwrap();
+                }
+            };
+        }
+
+        simple!(
+            fields,
+            3,
+            10,
+            r#"
+            @c_call fn main(n: i64) i64 = {
+                const A = (a: i64, b: i64)!struct;
+                var a: A = (a: n, b: 0);
+                a&.b[] = add(a&.a[], 7);
+                a&.b[]
+            }"#
+        );
+
+        simple!(
+            varient,
+            3,
+            10,
+            r#"
+                @c_call fn main(n: i64) i64 = {
+                    const A = (a: i64, b: i64)!enum;
+                    var a: A = (a: n);
+                    add(a&.a[], 7)
+                }"#
+        );
+        simple!(
+            use_any_reg,
+            5,
+            2,
+            r#"
+            @any_reg
+            fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
+                op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0b000000));
+            });
+    
+            @c_call fn main(a: i64) i64 = {
+                sub2(a, 3)
+            }"#
+        );
+
+        simple!(
+            assert_eq_ffi,
+            (),
+            2,
+            r#"
+            @c_call fn main() i64 = {
+                assert_eq(1, 1);
+                2
+            }"#
+        );
 
         simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.fr"));
-
         // TODO: this relies on structs being in consecutive stack slots so had to disable reusing them.
         simple!(structs, 5, 5, include_str!("../../tests/structs.fr"));
         simple!(overloading, 5, 5, include_str!("../../tests/overloading.fr"));
@@ -185,3 +195,4 @@ macro_rules! jit_test {
     };
 }
 pub(crate) use jit_test;
+pub(crate) use jit_test_aarch_only;

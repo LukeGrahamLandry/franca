@@ -1136,7 +1136,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                     }
                     "tag" => {
                         // TODO: auto deref and typecheking
-                        self.addr_macro(result, arg)?;
+                        let container_ptr = self.compile_expr(result, arg, None)?;
+                        let container_ptr_ty = self.program.raw_type(container_ptr.ty());
+                        let depth = self.program.ptr_depth(container_ptr_ty);
+                        assert_eq!(depth, 1, "!tag ptr must be one level of indirection. {:?}", container_ptr_ty);
                         let ty = self.program.intern_type(TypeInfo::Ptr(TypeId::i64()));
                         Structured::RuntimeOnly(ty)
                     }
@@ -1208,8 +1211,12 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 }
             }
             Expr::FieldAccess(e, name) => {
-                let container_ptr = self.compile_expr(result, e, None)?;
-                self.field_access_expr(result, container_ptr, *name)?
+                let index = self.field_access_expr(result, e, *name)?;
+                expr.expr = Expr::Index {
+                    ptr: mem::take(e),
+                    index: Box::new(FatExpr::synthetic(Expr::int(index as i64), loc)),
+                };
+                self.compile_expr(result, expr, requested)? // TODO: dont dispatch again
             }
             Expr::Index { ptr, index } => {
                 let ptr = self.compile_expr(result, ptr, None)?;
@@ -1533,7 +1540,6 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int)))); // but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
-            Expr::Index { .. } => return Ok(None), // TODO
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, value } => {
                 if value.as_overload_set().is_ok() {
@@ -1596,10 +1602,16 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                 assert_eq!(before, types.len(), "some of tuple not infered");
                 self.program.tuple_of(types)
             }
-            Expr::FieldAccess(container, name) => {
-                if let Some(container_ty) = self.type_of(result, container)? {
-                    let container_ptr_ty = self.program.ptr_type(container_ty); // TODO: kinda hacky that you need to do this. should be more consistant
-                    self.get_field_type(container_ptr_ty, *name)?
+            Expr::FieldAccess(container, _) => {
+                if let Some(_) = self.type_of(result, container)? {
+                    self.compile_expr(result, expr, None)?.ty()
+                } else {
+                    return Ok(None);
+                }
+            }
+            Expr::Index { ptr, index } => {
+                if let Ok(Some(container_ptr_ty)) = self.type_of(result, ptr) {
+                    self.get_index_type(container_ptr_ty, unwrap!(index.as_int(), "") as usize)?
                 } else {
                     return Ok(None);
                 }
@@ -2101,65 +2113,27 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
-    fn field_access_expr(&mut self, _result: &mut FnWip<'p>, container_ptr: Structured, name: Ident<'p>) -> Res<'p, Structured> {
-        let mut container_ptr_ty = self.program.raw_type(container_ptr.ty());
-        // Auto deref for nested place expressions.
-        // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
+    fn field_access_expr(&mut self, result: &mut FnWip<'p>, container_ptr: &mut FatExpr<'p>, name: Ident<'p>) -> Res<'p, usize> {
+        let container_ptr = self.compile_expr(result, container_ptr, None)?;
+        let container_ptr_ty = self.program.raw_type(container_ptr.ty());
         let depth = self.program.ptr_depth(container_ptr_ty);
-        assert_eq!(depth, 1, "index expr ptr must be one level of indirection");
-        if depth > 1 {
-            for _ in 0..(depth - 1) {
-                container_ptr_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
-                container_ptr_ty = self.program.raw_type(container_ptr_ty);
-                // TODO: not sure if its better to do the loads here or in backend
-            }
-        }
-        let container_ty = unwrap!(
-            self.program.unptr_ty(container_ptr_ty),
-            "unreachable unptr_ty {:?}",
-            self.program.log_type(container_ptr_ty)
-        );
+        assert_eq!(depth, 1, "index expr ptr must be one level of indirection. {:?}", container_ptr_ty);
+        let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "",);
 
         let raw_container_ty = self.program.raw_type(container_ty);
         match &self.program.types[raw_container_ty.0] {
             TypeInfo::Struct { fields, .. } => {
-                let mut count = 0;
-                for f in fields {
+                for (i, f) in fields.iter().enumerate() {
                     if f.name == name {
-                        let f = *f;
-                        let ty = self.program.ptr_type(f.ty);
-                        // const eval lets me do enum fields in asm without doign heap values first.
-                        if let &Structured::Const(
-                            _,
-                            Values::One(Value::Heap {
-                                value,
-                                physical_first,
-                                physical_count,
-                            }),
-                        ) = &container_ptr
-                        {
-                            let size = self.executor.size_of(self.program, f.ty);
-                            assert!(physical_count >= size);
-                            let value = Values::One(Value::Heap {
-                                value,
-                                physical_first: physical_first + count,
-                                physical_count: size,
-                            });
-                            let s = Structured::Const(ty, value);
-                            return Ok(s);
-                        }
-                        return Ok(Structured::RuntimeOnly(ty));
+                        return Ok(i);
                     }
-                    count += self.executor.size_of(self.program, f.ty);
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
             }
             TypeInfo::Enum { cases, .. } => {
-                for (_, (f_name, f_ty)) in cases.iter().enumerate() {
+                for (i, (f_name, f_ty)) in cases.iter().enumerate() {
                     if *f_name == name {
-                        let f_ty = *f_ty;
-                        let ty = self.program.ptr_type(f_ty);
-                        return Ok(Structured::RuntimeOnly(ty));
+                        return Ok(i);
                     }
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
@@ -2178,7 +2152,17 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         let depth = self.program.ptr_depth(container_ptr_ty);
         assert_eq!(depth, 1, "index expr ptr must be one level of indirection");
         let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
-        let raw_container_ty = self.program.raw_type(container_ty);
+        let mut raw_container_ty = self.program.raw_type(container_ty);
+
+        if let TypeInfo::Struct { as_tuple, .. } = self.program.types[raw_container_ty.0] {
+            raw_container_ty = as_tuple;
+        }
+
+        if let TypeInfo::Enum { cases } = &self.program.types[raw_container_ty.0] {
+            let ty = cases[index].1;
+            let ty = self.program.ptr_type(ty);
+            return Ok(Structured::RuntimeOnly(ty));
+        }
 
         if let TypeInfo::Tuple(types) = &self.program.types[raw_container_ty.0] {
             let mut count = 0;
@@ -2215,50 +2199,26 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         }
     }
 
-    // TODO: copy paste from the emit
-    fn get_field_type(&mut self, mut container_ptr_ty: TypeId, name: Ident<'_>) -> Res<'p, TypeId> {
+    fn get_index_type(&mut self, mut container_ptr_ty: TypeId, index: usize) -> Res<'p, TypeId> {
         // Auto deref for nested place expressions.
         // TODO: i actually just want same depth in chains, not always deref all the way, you might want to do stuff with a &&T or whatever.
         let depth = self.program.ptr_depth(container_ptr_ty);
-        if depth > 1 {
-            for _ in 0..(depth - 1) {
-                container_ptr_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
-            }
-        }
-
         let container_ty = unwrap!(
             self.program.unptr_ty(container_ptr_ty),
             "unreachable unptr_ty {:?}",
             self.program.log_type(container_ptr_ty)
         );
 
-        let unknown_name = || err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
-
         let raw_container_ty = self.program.raw_type(container_ty);
         match &self.program.types[raw_container_ty.0] {
-            TypeInfo::Struct { fields, .. } => {
-                for f in fields {
-                    if f.name == name {
-                        let f = *f;
-                        let ty = self.program.ptr_type(f.ty);
-                        return Ok(ty);
-                    }
-                }
-                unknown_name()
-            }
-            TypeInfo::Enum { cases, .. } => {
-                for (_, (f_name, f_ty)) in cases.iter().enumerate() {
-                    if *f_name == name {
-                        let f_ty = *f_ty;
-                        let ty = self.program.ptr_type(f_ty);
-
-                        return Ok(ty);
-                    }
-                }
-                unknown_name()
-            }
+            TypeInfo::Tuple(types) => Ok(self.program.ptr_type(types[index])),
+            TypeInfo::Struct { fields, .. } => Ok(self.program.ptr_type(fields[index].ty)),
+            TypeInfo::Enum { cases, .. } => Ok(self.program.ptr_type(cases[index].1)),
             TypeInfo::Unique(_, _) => unreachable!(),
-            _ => err!("only structs support field access but found {}", self.program.log_type(container_ty)),
+            _ => err!(
+                "only tuple/struct/enum/ support field access but found {}",
+                self.program.log_type(container_ty)
+            ),
         }
     }
 

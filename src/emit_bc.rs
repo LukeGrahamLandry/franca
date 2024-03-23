@@ -467,7 +467,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::Tag => {
                         // TODO: auto deref and typecheking
-                        let addr = self.addr_macro(result, arg)?;
+                        let addr = self.compile_expr(result, arg)?;
                         let ty = self.program.find_interned(TypeInfo::Ptr(TypeId::i64()));
                         let addr = result.load(self, addr)?.0;
                         let ret = result.reserve_slots(self, ty)?;
@@ -493,15 +493,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
-            Expr::FieldAccess(e, name) => {
-                let container_ptr = self.compile_expr(result, e)?;
-                self.field_access_expr(result, container_ptr, *name, false)?
-            }
+            Expr::FieldAccess(_, _) => unreachable!(),
             Expr::Index { ptr, index } => {
-                let container_ptr = self.addr_macro(result, ptr)?;
+                let container_ptr = self.compile_expr(result, ptr)?;
                 let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
-                // TODO: hack
-                self.field_access_expr(result, container_ptr, Ident(index, PhantomData), true)?
+                self.index_expr(result, container_ptr, index)?
             }
             Expr::StructLiteralP(pattern) => {
                 let requested = expr.ty;
@@ -514,6 +510,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn addr_macro(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, Structured> {
+        self.last_loc = Some(arg.loc);
         match arg.deref() {
             Expr::GetVar(var) => {
                 if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
@@ -549,8 +546,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let name = self.program.pool.get(*macro_name);
                 ice!("Took address of macro {name} not supported")
             }
+            Expr::FieldAccess(_, _) => unreachable!(),
             // TODO: this is a bit weird but it makes place expressions work.
-            Expr::FieldAccess(_, _) => self.compile_expr(result, arg),
+            Expr::Index { .. } => self.compile_expr(result, arg),
             &Expr::GetNamed(i) => err!(CErr::UndeclaredIdent(i)),
             _ => err!(CErr::AddrRvalue(arg.clone())),
         }
@@ -675,7 +673,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    fn field_access_expr(&mut self, result: &mut FnBody<'p>, container_ptr: Structured, name: Ident<'p>, name_is_index: bool) -> Res<'p, Structured> {
+    fn index_expr(&mut self, result: &mut FnBody<'p>, container_ptr: Structured, index: usize) -> Res<'p, Structured> {
         let mut container_ptr_ty = self.program.raw_type(container_ptr.ty());
         let mut container_ptr = result.load(self, container_ptr)?.0;
         // Auto deref for nested place expressions.
@@ -702,67 +700,48 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let raw_container_ty = self.program.raw_type(container_ty);
         match &self.program.types[raw_container_ty.0] {
             TypeInfo::Struct { fields, .. } => {
-                assert!(!name_is_index);
                 let mut offset = 0;
-                for f in fields {
-                    if f.name == name {
-                        let f = *f;
-                        let ty = self.program.find_interned(TypeInfo::Ptr(f.ty));
-                        let ret = result.reserve_slots(self, ty)?;
-                        let offset = if let Some(bytes) = f.ffi_byte_offset {
-                            assert_eq!(bytes % 8, 0);
-                            bytes / 8
-                        } else {
-                            offset
-                        };
-                        result.push(Bc::SlicePtr {
-                            base: container_ptr.single(),
-                            offset,
-                            count: self.slot_count(f.ty),
-                            ret: ret.single(),
-                        });
-                        return Ok((ret, ty).into());
-                    }
+                for f in fields.iter().take(index) {
                     offset += self.slot_count(f.ty);
                 }
-                err!(
-                    "unknown name {} on {:?}",
-                    self.program.pool.get(name),
-                    self.program.log_type(container_ty)
-                );
+                let f = fields[index];
+                let ty = self.program.find_interned(TypeInfo::Ptr(f.ty));
+                let ret = result.reserve_slots(self, ty)?;
+                let offset = if let Some(bytes) = f.ffi_byte_offset {
+                    assert_eq!(bytes % 8, 0);
+                    bytes / 8
+                } else {
+                    offset
+                };
+                result.push(Bc::SlicePtr {
+                    base: container_ptr.single(),
+                    offset,
+                    count: self.slot_count(f.ty),
+                    ret: ret.single(),
+                });
+                return Ok((ret, ty).into());
             }
             TypeInfo::Enum { cases, .. } => {
-                assert!(!name_is_index);
-                for (i, (f_name, f_ty)) in cases.iter().enumerate() {
-                    if *f_name == name {
-                        let f_ty = *f_ty;
-                        let ty = self.program.find_interned(TypeInfo::Ptr(f_ty));
-                        let ret = result.reserve_slots(self, ty)?;
-                        let count = self.slot_count(f_ty);
-                        result.push(Bc::TagCheck {
-                            enum_ptr: container_ptr.single(),
-                            value: i as i64,
-                        });
-                        result.push(Bc::SlicePtr {
-                            base: container_ptr.single(),
-                            offset: 1,
-                            count,
-                            ret: ret.single(),
-                        });
-                        return Ok((ret, ty).into());
-                    }
-                }
-                err!(
-                    "unknown name {} on {:?}",
-                    self.program.pool.get(name),
-                    self.program.log_type(container_ty)
-                );
+                let (_, f_ty) = cases[index];
+                let ty = self.program.find_interned(TypeInfo::Ptr(f_ty));
+                let ret = result.reserve_slots(self, ty)?;
+                let count = self.slot_count(f_ty);
+                result.push(Bc::TagCheck {
+                    enum_ptr: container_ptr.single(),
+                    value: index as i64,
+                });
+                result.push(Bc::SlicePtr {
+                    base: container_ptr.single(),
+                    offset: 1,
+                    count,
+                    ret: ret.single(),
+                });
+                return Ok((ret, ty).into());
             }
             TypeInfo::Tuple(types) => {
-                assert!(name_is_index);
                 let mut offset = 0;
                 for (i, f_ty) in types.iter().enumerate() {
-                    if i == name.0 {
+                    if i == index {
                         let ty = self.program.find_interned(TypeInfo::Ptr(*f_ty));
                         let ret = result.reserve_slots(self, ty)?;
                         result.push(Bc::SlicePtr {
@@ -775,11 +754,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     offset += self.slot_count(*f_ty);
                 }
-                err!(
-                    "unknown name {} on {:?}",
-                    self.program.pool.get(name),
-                    self.program.log_type(container_ty)
-                );
+                unreachable!()
             }
             _ => err!(
                 "only structs/enums support field access but found {} = {}",

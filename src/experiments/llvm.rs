@@ -458,7 +458,8 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                         let ptr = self.read_slot(enum_ptr);
                         todo!()
                     }
-                    Bc::CallC { f, arg, ret, ty, comp_ctx } => {
+                    &Bc::CallC { f, arg, ret, ty, comp_ctx } => {
+                        let ty = self.llvm.get_function_type(self.program, ty);
                         todo!()
                     }
                 }

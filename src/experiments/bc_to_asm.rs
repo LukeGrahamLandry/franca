@@ -508,7 +508,7 @@ mod tests {
     use crate::ast::{Flag, SuperSimple, TargetArch};
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
-    use crate::experiments::tests::jit_test;
+    use crate::experiments::tests::{jit_test, jit_test_aarch_only};
     use crate::{
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
@@ -597,6 +597,7 @@ mod tests {
     }
 
     jit_test!(jit_main);
+    jit_test_aarch_only!(jit_main);
 }
 
 use crate::ffi::InterpSend;
