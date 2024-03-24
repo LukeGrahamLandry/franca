@@ -80,6 +80,8 @@ pub struct Lexer<'a, 'p> {
     current: usize,
     chars: Peekable<Chars<'a>>,
     peeked: VecDeque<Token<'p>>,
+    pub(crate) line: usize,
+    pub(crate) comment_lines: usize
 }
 
 impl<'a, 'p> Lexer<'a, 'p> {
@@ -94,6 +96,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
             chars: fuck.chars().peekable(),
             root,
             pool,
+            line: 0,
+            comment_lines: 0,
         }
     }
 
@@ -251,8 +255,11 @@ impl<'a, 'p> Lexer<'a, 'p> {
 
     fn eat_whitespace(&mut self) {
         loop {
+            // TODO count blank as comment
             while self.peek_c().is_whitespace() {
-                self.pop();
+                if self.pop() == '\n' {
+                    self.line += 1;
+                }
             }
             if self.peek_c() == '/' {
                 self.eat_comment();
@@ -268,7 +275,12 @@ impl<'a, 'p> Lexer<'a, 'p> {
         match self.pop() {
             '/' => loop {
                 match self.pop() {
-                    '\0' | '\n' => break,
+                    '\0' => break,
+                    '\n' => {
+                        self.line += 1;
+                        self.comment_lines += 1;
+                        break
+                    }
                     _ => {}
                 }
             },
@@ -291,6 +303,10 @@ impl<'a, 'p> Lexer<'a, 'p> {
                                 self.pop();
                                 depth += 1;
                             }
+                        }
+                        '\n' => {
+                            self.line += 1;
+                            self.comment_lines += 1;
                         }
                         _ => {}
                     }

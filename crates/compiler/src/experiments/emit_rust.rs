@@ -18,7 +18,7 @@ pub fn bootstrap() -> (String, String) {
     let mut codemap = CodeMap::new();
     let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
     let user_span = file.span;
-    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
+    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
     let mut global = make_toplevel(pool, user_span, stmts);
     let vars = ResolveScope::of(&mut global, pool);
     let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);

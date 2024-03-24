@@ -1,13 +1,5 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::{
-    bc::{Bc, Constants, Structured, Value, Values},
-    compiler::{CErr, FnWip, Res},
-    err,
-    experiments::reflect::{Reflect, RsType},
-    ffi::{init_interp_send, InterpSend},
-    impl_index,
-    pool::{Ident, StringPool},
-};
+use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{CErr, FnWip, Res}, err, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, impl_index, impl_index_imm, pool::{Ident, StringPool}};
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
@@ -741,6 +733,8 @@ pub struct VarInfo {
 pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
+    // twice as much memory but it's so much faster. TODO: can i just store hashes?
+    type_lookup: HashMap<TypeInfo<'p>, TypeId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     pub generics_memo: HashMap<(FuncId, Values), (Values, TypeId)>,
@@ -758,7 +752,7 @@ pub struct Program<'p> {
     pub modules: Vec<Module<'p>>,
 }
 
-impl_index!(Program<'p>, TypeId, TypeInfo<'p>, types);
+impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
 impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
 impl_index!(Program<'p>, ModuleId, Module<'p>, modules);
 
@@ -892,7 +886,12 @@ impl<'p> Program<'p> {
             comptime_arch,
             inline_llvm_ir: vec![],
             modules: vec![],
+            type_lookup: HashMap::new(),
         };
+
+        for (i, ty) in program.types.iter().enumerate() {
+            program.type_lookup.insert(ty.clone(), TypeId(i));
+        }
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
         init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
@@ -904,7 +903,7 @@ impl<'p> Program<'p> {
     /// This allows ffi types to be unique.
     pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            let n = self.intern_type(TypeInfo::Unknown);
+            let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId(placeholder);
@@ -913,7 +912,7 @@ impl<'p> Program<'p> {
             self.types.push(TypeInfo::simple_struct(vec![], n));
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
-            self.types[placeholder] = TypeInfo::Unique(ty, (id & usize::max_value() as u128) as usize);
+            self.types[placeholder] = TypeInfo::Unique(ty, (id & usize::MAX as u128) as usize);
             ty_final
         })
     }
@@ -922,7 +921,7 @@ impl<'p> Program<'p> {
         use crate::experiments::reflect::*;
         let id = type_info as *const RsType as usize as u128;
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            let n = self.intern_type(TypeInfo::Unknown);
+            let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId(placeholder);
@@ -1100,15 +1099,19 @@ impl<'p> Program<'p> {
 impl<'p> Program<'p> {
     // TODO: this is O(n), at the very least make sure the common types are at the beginning.
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
-        let id = self.types.iter().position(|check| check == &ty).unwrap_or_else(|| {
+        self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
-            self.types.push(ty);
+            self.types.push(ty.clone());
             if self.calc_is_comptime_only_type(TypeId(id)) {
                 self.comptime_only.set(id);
             }
-            id
-        });
-        TypeId(id)
+            self.type_lookup.insert(ty, TypeId(id));
+            TypeId(id)
+        })
+        // let id = self.types.iter().position(|check| check == &ty).unwrap_or_else(|| {
+        //
+        // });
+        // TypeId(id)
     }
 
     // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS

@@ -105,8 +105,9 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
 
     // TODO: this will get less dumb when I have first class modules.
     let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
+    let start = timestamp();
     let user_span = file.span;
-    let stmts = match Parser::parse(&mut codemap, file.clone(), pool) {
+    let (stmts, lines) = match Parser::parse(&mut codemap, file.clone(), pool) {
         Ok(new) => new,
         Err(e) => {
             outln!(ShowErr, "Parse error (Internal: {})", e.loc);
@@ -138,6 +139,7 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
             println!("Wrote log to {folder:?}");
         }
         println!("===============================");
+
     }
 
     fn log_err<'p, Exec: Executor<'p>>(codemap: CodeMap, interp: &Compile<'_, 'p, Exec>, e: CompileError<'p>, save: Option<&str>) {
@@ -183,18 +185,14 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                             return false;
                         }
                         Ok(_) => {
-                            // let lib: String = LIB.iter().map(|(_, code)| *code).collect();
-                            // let lines = format!("{}\n{}", lib, src)
-                            //     .split('\n')
-                            //     .filter(|s| !s.split("//").next().unwrap().is_empty())
-                            //     .count();
-
-                            // outln!(ShowPrint, "===============");
-                            // outln!(ShowPrint,
-                            //     "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment/empty) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                            //     lines as f64 / seconds
-                            // );
-                            // outln!(ShowPrint, "===============");
+                            let end = timestamp();
+                            let seconds = end - start;
+                            outln!(ShowPrint, "===============");
+                            outln!(ShowPrint,
+                                "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                                lines as f64 / seconds
+                            );
+                            outln!(ShowPrint, "===============");
                             let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
@@ -354,7 +352,7 @@ fn test_mir() {
     }
 }
 
-macro_rules! impl_index {
+macro_rules! impl_index_imm {
     ($container:ty, $idx:ty, $elem:ty, $field:ident) => {
         impl<'p> std::ops::Index<$idx> for $container {
             type Output = $elem;
@@ -363,6 +361,12 @@ macro_rules! impl_index {
                 &self.$field[index.0]
             }
         }
+    };
+}
+
+macro_rules! impl_index {
+    ($container:ty, $idx:ty, $elem:ty, $field:ident) => {
+        $crate::impl_index_imm!($container, $idx, $elem, $field);
 
         impl<'p> std::ops::IndexMut<$idx> for $container {
             fn index_mut(&mut self, index: $idx) -> &mut Self::Output {
@@ -372,6 +376,7 @@ macro_rules! impl_index {
     };
 }
 pub(crate) use impl_index;
+pub(crate) use impl_index_imm;
 
 pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
     if v.len() > index {

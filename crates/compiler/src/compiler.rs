@@ -1700,7 +1700,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         };
         if let Some(ty) = ty {
             let ty = self.program.intern_type(ty);
-            let tyty = self.program.intern_type(TypeInfo::Type);
+            let tyty = TypeId::ty();
             return Some((Value::Type(ty), tyty));
         }
 
@@ -1885,7 +1885,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
     #[track_caller]
     fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
         match value {
-            Values::One(Value::Unit) => Ok(self.program.intern_type(TypeInfo::Unit)),
+            Values::One(Value::Unit) => Ok(TypeId::unit()),
             Values::One(Value::Type(id)) => Ok(id),
             Values::Many(values) => {
                 let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v.into())).collect();
@@ -1946,7 +1946,7 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
         arg: &mut FatExpr<'p>,
         _requested: Option<TypeId>, // TODO: allow giving return type to infer
     ) -> Res<'p, Structured> {
-        let unit = self.program.intern_type(TypeInfo::Unit);
+        let unit = TypeId::unit();
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;

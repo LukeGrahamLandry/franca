@@ -79,7 +79,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
             //       but really it would be better to have the separation of compiling for host vs target so I could cross compile once I support other architectures.
             // self.compile(template)?;
         } else if self.program[f].comptime_addr.is_some() && self.program[f].jitted_code.is_none() {
-            println!("Skip asm for {f:?}");
+            // println!("Skip asm for {f:?}");
         } else {
             let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
@@ -119,6 +119,8 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
         self.open_slots.clear();
         let is_c_call = ff.has_tag(Flag::C_Call);
 
+        // TODO: match the frame pointer usage that would make lldb see my stack frames.
+        //       what zig thinks: https://github.com/ziglang/zig/blob/master/lib/std/debug.zig#L644
         self.asm.push(sub_im(X64, sp, sp, 16, 0));
         self.asm.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
         self.asm.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
@@ -171,7 +173,7 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         }
                         assert_eq!(ret.count, 1);
                         for op in ops {
-                            println!("{op:#05x}, ");
+                            // println!("{op:#05x}, ");
                             self.asm.push(op);
                         }
 
@@ -545,7 +547,7 @@ mod tests {
         let mut codemap = CodeMap::new();
         let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
         let user_span = file.span;
-        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
+        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
         let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Aarch64);

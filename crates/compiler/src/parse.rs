@@ -23,6 +23,7 @@ pub struct Parser<'a, 'p> {
     lexer: Vec<Lexer<'a, 'p>>,
     spans: Vec<Span>,
     codemap: &'a mut CodeMap,
+    lines: usize,
 }
 
 type Res<T> = Result<T, ParseErr>;
@@ -34,7 +35,7 @@ pub struct ParseErr {
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
-    pub fn parse(codemap: &'a mut CodeMap, file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
+    pub fn parse(codemap: &'a mut CodeMap, file: Arc<File>, pool: &'p StringPool<'p>) -> Res<(Vec<FatStmt<'p>>, usize)> {
         outln!(
             Parsing,
             "\n######################################\n### START FILE: {} \n######################################\n",
@@ -47,6 +48,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             expr_id: 0,
             spans: vec![],
             codemap,
+            lines: 0,
         };
 
         p.start_subexpr();
@@ -56,8 +58,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
         let _full = p.end_subexpr();
         debug_assert!(p.spans.is_empty(), "leaked parse loc context");
+        let lex = p.lexer.pop().unwrap();
+        p.lines += lex.line - lex.comment_lines;
 
-        Ok(stmts)
+        Ok((stmts, p.lines))
     }
 
     fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
@@ -594,7 +598,8 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn peek(&mut self) -> TokenType<'p> {
         let kind = self.lexer.last_mut().unwrap().nth(0).kind;
         if kind == TokenType::Eof && self.lexer.len() > 1 {
-            self.lexer.pop();
+            let lex = self.lexer.pop().unwrap();
+            self.lines += lex.line - lex.comment_lines;
             self.peek()
         } else {
             kind

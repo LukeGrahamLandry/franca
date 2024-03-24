@@ -549,7 +549,7 @@ mod tests {
         let mut codemap = CodeMap::new();
         let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
         let user_span = file.span;
-        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap();
+        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
         let mut global = make_toplevel(pool, garbage_loc(), stmts);
         let vars = ResolveScope::of(&mut global, pool);
         let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Llvm);

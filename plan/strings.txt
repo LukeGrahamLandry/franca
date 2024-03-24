@@ -1,0 +1,62 @@
+/*
+
+## Debug Formating
+
+- Syntax sugar for passing a slice of args.
+  Want to be able to concat("a", "b", "c", some_string) and have concat know the lengths up front.
+  Do I really want to force a macro for every function like that?
+- Tho for debug printing, you probably don't know the size up front but want to append to a String, not allocate then concat. 
+  Macro makes sense because you want to support things of different types. 
+- I find it strange that everyone has a little DSL in thier format strings.
+  I guess it would be really verbose if they have to be functions, is there any other reason? 
+
+let s: List(u8) = @concat("Name: ", name_str, " ", some_struct, 123);
+
+fn debug(self: *T, out: *mut List(u8)) Unit; 
+fn debug(self: *T, var out: List(u8) = empty()) List(u8) = {
+    self.debug(out&);
+    out
+}
+
+You really want a default implementation that just forwards to each field. 
+Following pointers is problematic: what if it has cycles or is invalid memory? 
+Maybe rust can only pull off nice Debug/Clone/Eq because it has strict rules about cycles. 
+Do I want something like @acyclic or @self_referential? 
+
+- https://github.com/rust-lang/rust/blob/master/library/alloc/src/fmt.rs
+    - https://github.com/rust-lang/rust/blob/master/compiler/rustc_builtin_macros/src/format.rs
+- https://github.com/ziglang/zig/blob/master/lib/std/fmt.zig
+    - if (std.meta.hasMethod(T, "format")) {  return try value.format(actual_fmt: str, FormatOptions, writer); }
+- printf
+
+## What is a string? 
+
+Pretty sure everyone agrees you should have a length, not a null terminator. 
+- I think zig gives constants a null terminator so you can pass to c without copying. 
+
+You probably want to be strict about supporting utf8. 
+- A type for one character. Rust:char, Zig:u19, Go:rune
+- You give up random access to characters which feels weird but I think you rarely want it anyway. 
+- Js uses utf16 so if you want to use the dom you want to represent that nicely. 
+- Rust has OsString because you don't want to assume every operating system agrees on to represent a path. 
+
+How do you manage memory. 
+- You want to be able to take a slice into a string without copying. 
+- Sometimes you want a string builder which allocates extra capacity when you resize. 
+- Sometimes you want to have small strings without allocating (empty or keywords/vars in a compiler perhaps). 
+- Copy on write. Nice for functions that only need to reallocate sometimes (uppercase, replace substrings). 
+- Reference counting where you share the allocation and only the last guy is allowed to mutate in place. Does any tiny slice keep the whole thing alive? 
+- Maybe you want reference counting but shared mutation. 
+- Sometimes you want to specify the allocator. 
+
+Most of those memory things are not specific to strings. 
+I find the rust nesting of types annoying but I like that you can be precise about what you're doing. 
+
+I don't want to write fn count_spaces(Str) for both Rc<str> and Box<str> and don't want to write both Cow<str> and Cow<[usize]>. 
+- Trait generics so you can say "anything with fn alias(T) Str". 
+- You also want specialization. So like sure you can concat anything AsRef<str> but if it already owns the memory just reuse it.  
+- Do you have some algorithm about most specific overload? Or just let people say priorities? 
+- You don't want to break someone else's module by adding an overload. 
+  But if they're generic over the trait and get passesd your new type, you want them to get yours. 
+
+*/

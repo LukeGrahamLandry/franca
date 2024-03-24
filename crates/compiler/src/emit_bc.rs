@@ -925,7 +925,6 @@ impl<'p> FnBody<'p> {
                     }
                 }
 
-                println!("{} => {values:?}", program.program.log_type(ty));
                 for value in values {
                     let to = self.reserve_slots(program, TypeId::any())?; // TODO: this breaks llvm, now just for enums maybe
                     self.push(Bc::LoadConstant { slot: to.single(), value });
