@@ -660,39 +660,46 @@ impl<'a, 'p> Compile<'a, 'p> {
                             }
                         };
 
+                        // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.
+                        // TODO: more efficient way of handling overload sets
+                        // TODO: better syntax for inserting a function into an imported overload set.
                         if let Values::One(Value::OverloadSet(i)) = val {
-                            if ty.ty().is_none() {
-                                err!("Const {} OverloadSet requires type annotation.", name.log(self.pool));
-                            } // TODO: fn name instead of var name in messages?
-                            let ty = ty.ty().unwrap();
-                            let f_ty = unwrap!(
-                                self.program.fn_ty(ty),
-                                "const {} OverloadSet must have function type",
-                                name.log(self.pool)
-                            );
+                            if let Some(ty) = ty.ty() {
+                                if ty != TypeId::overload_set() {
+                                    // TODO: fn name instead of var name in messages?
+                                    let f_ty = unwrap!(
+                                        self.program.fn_ty(ty),
+                                        "const {} OverloadSet must have function type",
+                                        name.log(self.pool)
+                                    );
 
-                            self.compute_new_overloads(i)?;
-                            // TODO: just filter the iterator.
-                            let mut overloads = self.program.overload_sets[i].clone(); // sad
+                                    self.compute_new_overloads(i)?;
+                                    // TODO: just filter the iterator.
+                                    let mut overloads = self.program.overload_sets[i].clone(); // sad
 
-                            overloads
-                                .0
-                                .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
-                            filter_arch(self.program, &mut overloads, result.when);
-                            let found = match overloads.0.len() {
-                                0 => err!("Missing overload",),
-                                1 => overloads.0[0].func,
-                                _ => err!(
-                                    "Ambigous overload \n{:?}",
                                     overloads
-                                        .0
-                                        .iter()
-                                        .map(|o| self.program[o.func].log(self.pool))
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                ),
-                            };
-                            val = Values::One(Value::GetFn(found));
+                                        .ready
+                                        .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
+                                    filter_arch(self.program, &mut overloads, result.when);
+                                    let found = match overloads.ready.len() {
+                                        0 => err!("Missing overload",),
+                                        1 => overloads.ready[0].func,
+                                        _ => err!(
+                                            "Ambigous overload \n{:?}",
+                                            overloads
+                                                .ready
+                                                .iter()
+                                                .map(|o| self.program[o.func].log(self.pool))
+                                                .collect::<Vec<_>>()
+                                                .join("\n")
+                                        ),
+                                    };
+                                    val = Values::One(Value::GetFn(found));
+                                }
+                            } else {
+                                // TODO: make sure its not a problem that usage in an expression can end up as different types each time
+                                *ty = LazyType::Finished(TypeId::overload_set())
+                            }
                         }
 
                         let found_ty = self.program.type_of_raw(&val);
@@ -775,7 +782,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let is_enum = func.has_tag(Flag::Enum);
                 assert!(!(is_struct && is_enum));
                 if is_struct {
-                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.1 == Flag::Init.ident()).unwrap();
+                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.intern_type(ty);
                     assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
@@ -801,11 +808,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     let id = self.add_func(func, &result.constants)?;
                     *stmt.deref_mut() = Stmt::DoneDeclFunc(id);
-                    self.program.overload_sets[init_overloadset].2.push(id);
+                    self.program.overload_sets[init_overloadset].pending.push(id);
                     return Ok(());
                 }
                 if is_enum {
-                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.1 == Flag::Init.ident()).unwrap();
+                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.to_enum(ty);
                     assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
@@ -828,7 +835,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), init_expr), loc));
                             new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
                             let id = self.add_func(new_func, &result.constants)?;
-                            self.program.overload_sets[init_overloadset].2.push(id);
+                            self.program.overload_sets[init_overloadset].pending.push(id);
                         }
                     }
                     *stmt.deref_mut() = Stmt::Noop;
@@ -848,6 +855,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     func.any_reg_template = Some(body.as_fn().unwrap());
                 }
 
+                let public = func.has_tag(Flag::Pub);
                 let id = self.add_func(func, &result.constants)?;
                 *stmt.deref_mut() = Stmt::DoneDeclFunc(id);
 
@@ -860,12 +868,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(var) = var {
                     if referencable_name && !is_enum && !is_struct {
                         // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
+                        // TODO: distinguish between overload sets that you add to and those that you re-export
                         if let Some(overloads) = result.constants.get(var) {
                             let i = overloads.0.as_overload_set()?;
-                            self.program.overload_sets[i].2.push(id);
+                            let os = &mut self.program.overload_sets[i];
+                            assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
+                            os.pending.push(id);
                         } else {
                             let index = self.program.overload_sets.len();
-                            self.program.overload_sets.push(OverloadSet(vec![], var.0, vec![id]));
+                            self.program.overload_sets.push(OverloadSet {
+                                ready: vec![],
+                                name: var.0,
+                                pending: vec![id],
+                                public,
+                            });
                             result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::unknown()));
                         }
                     }
@@ -1716,6 +1732,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "bool" => Some(Bool),
             "Never" => Some(TypeInfo::Never),
             "VoidPtr" => Some(VoidPtr),
+            "OverloadSet" => Some(TypeInfo::OverloadSet),
             _ => None,
         };
         if let Some(ty) = ty {
@@ -2532,7 +2549,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let module_f = self.get_module(module)?;
         if let Some(var) = self.program[module].exports.get(&name) {
             let value = unwrap!(self.program[module_f].closed_constants.get(*var), "missing export");
-            println!("Import {module:?} {name:?} = {value:?}");
             Ok(value.0) // TODO: include type
         } else {
             err!("Module {} does not export {}", module.0, self.pool.get(name))

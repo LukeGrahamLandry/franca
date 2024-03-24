@@ -67,6 +67,7 @@ pub enum TypeInfo<'p> {
     Type,
     Unit, // TODO: same as empty tuple but easier to type
     VoidPtr,
+    OverloadSet,
 }
 
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
@@ -796,7 +797,12 @@ pub enum ModuleBody<'p> {
 pub struct ModuleId(pub usize);
 
 #[derive(Clone, Debug)]
-pub struct OverloadSet<'p>(pub Vec<OverloadOption>, pub Ident<'p>, pub Vec<FuncId>);
+pub struct OverloadSet<'p> {
+    pub ready: Vec<OverloadOption>,
+    pub name: Ident<'p>,
+    pub pending: Vec<FuncId>,
+    pub public: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct OverloadOption {
@@ -887,6 +893,7 @@ impl<'p> Program<'p> {
                 TypeInfo::VoidPtr,
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
                 TypeInfo::F64,
+                TypeInfo::OverloadSet,
             ],
             funcs: Default::default(),
             generics_memo: Default::default(),
@@ -1081,7 +1088,7 @@ impl<'p> Program<'p> {
         match &self.types[ty.0] {
             TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
-            TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
+            TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
             TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Enum { .. } => todo!(),
@@ -1091,12 +1098,12 @@ impl<'p> Program<'p> {
 
     pub fn find_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
         for overloads in &self.overload_sets {
-            if overloads.1 == name {
-                if overloads.0.is_empty() && overloads.2.len() == 1 {
-                    return Some(overloads.2[0]);
+            if overloads.name == name {
+                if overloads.ready.is_empty() && overloads.pending.len() == 1 {
+                    return Some(overloads.pending[0]);
                 }
-                if overloads.2.is_empty() && overloads.0.len() == 1 {
-                    return Some(overloads.0[0].func);
+                if overloads.pending.is_empty() && overloads.ready.len() == 1 {
+                    return Some(overloads.ready[0].func);
                 }
             }
         }
@@ -1158,7 +1165,7 @@ impl<'p> Program<'p> {
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),
             Value::InterpAbsStackAddr(_) | Value::Heap { .. } => TypeId::void_ptr(),
-            Value::OverloadSet(_) => todo!(),
+            Value::OverloadSet(_) => TypeId::overload_set(),
         }
     }
     pub fn type_of_raw(&mut self, v: &Values) -> TypeId {
@@ -1308,7 +1315,9 @@ impl<'p> Program<'p> {
             // TODO: supply "runtime" versions of these for macros to work with
             TypeInfo::Fn(_) => true,
             // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
-            TypeInfo::Type => false,
+            // but really its just that you cant do the fancy stuff at comptime.
+            // distinguish between const which is your own comptime and @ct which is anytime with access to the compiler context.
+            TypeInfo::OverloadSet | TypeInfo::Type => false,
             TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
             TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Ptr(ty) => self.is_comptime_only_type(*ty),
             TypeInfo::Struct { fields, .. } => fields.iter().any(|f| self.is_comptime_only_type(f.ty)),
@@ -1552,6 +1561,14 @@ impl TypeId {
     // Be careful that this is in the pool correctly!
     pub fn never() -> TypeId {
         TypeId(7)
+    }
+
+    pub fn f64() -> TypeId {
+        TypeId(8)
+    }
+
+    pub fn overload_set() -> TypeId {
+        TypeId(9)
     }
 }
 

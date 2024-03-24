@@ -187,7 +187,7 @@ impl JittedLlvm {
             match &program[ty] {
                 TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!("llvm type: {}", program.log_type(ty)),
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
-                TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
+                TypeInfo::OverloadSet | TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
                 &TypeInfo::FnPtr(ty) => self.get_function_type(program, ty),
                 &TypeInfo::Struct { as_tuple, .. } => self.get_type(program, as_tuple),

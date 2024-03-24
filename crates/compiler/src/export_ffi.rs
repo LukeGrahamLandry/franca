@@ -14,7 +14,7 @@ macro_rules! stdlib {
 }
 
 static LIB: &[(&str, &str)] = &[
-    stdlib!("lib"),
+    stdlib!("prelude"),
     stdlib!("core"),
     stdlib!("codegen/aarch64/basic.gen"),
     stdlib!("codegen/llvm/basic"),

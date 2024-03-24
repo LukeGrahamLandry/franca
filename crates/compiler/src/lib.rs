@@ -102,7 +102,7 @@ pub fn load_program<'a, 'p>(comp: &mut Compile<'a, 'p>, src: &str) -> Res<'p, Fu
     let file = comp
         .program
         .codemap
-        .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+        .add_file("main_file".to_string(), format!("#include_std(\"prelude.fr\");\n{src}"));
     let user_span = file.span;
     let parsed = match Parser::parse(&mut comp.program.codemap, file.clone(), comp.pool) {
         Ok(s) => s,

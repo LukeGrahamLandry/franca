@@ -841,6 +841,7 @@ impl SizeCache {
             | TypeInfo::VoidPtr
             | TypeInfo::FnPtr(_)
             | TypeInfo::Type
+            | TypeInfo::OverloadSet
             | TypeInfo::Unit => 1,
             TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };

@@ -94,7 +94,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         requested_ret: Option<TypeId>,
         i: usize,
     ) -> Res<'p, FuncId> {
-        let name = self.program.overload_sets[i].1;
+        let name = self.program.overload_sets[i].name;
         self.compute_new_overloads(i)?;
         let mut overloads = self.program.overload_sets[i].clone(); // Sad
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
@@ -103,13 +103,13 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         filter_arch(self.program, &mut overloads, result.when);
 
-        overloads.0.retain(|f| !self.program[f.func].has_tag(Flag::Forward)); // HACK
+        overloads.ready.retain(|f| !self.program[f.func].has_tag(Flag::Forward)); // HACK
 
-        if overloads.0.is_empty() {
+        if overloads.ready.is_empty() {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
         }
-        if overloads.0.len() == 1 {
-            let id = overloads.0[0].func;
+        if overloads.ready.len() == 1 {
+            let id = overloads.ready[0].func;
             self.named_args_to_tuple(result, arg, id)?;
             return Ok(id);
         }
@@ -121,7 +121,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 };
 
                 let mut found = None;
-                for check in &overloads.0 {
+                for check in &overloads.ready {
                     if accept(check.arg, check.ret) {
                         found = Some(check.func);
                         break;
@@ -144,7 +144,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // TODO: put the message in the error so !assert_compile_error doesn't print it.
                 outln!(ShowErr, "not found {}", log_goal(self));
-                for f in overloads.0 {
+                for f in overloads.ready {
                     outln!(
                         ShowErr,
                         "- found {:?} fn({:?}={}) {:?}; {:?}",
@@ -171,11 +171,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn compute_new_overloads(&mut self, i: usize) -> Res<'p, ()> {
         let overloads = &mut self.program.overload_sets[i];
-        let decls = mem::take(&mut overloads.2); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
+        let decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
         if decls.is_empty() {
             return Ok(());
         }
-        outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.1),);
+        outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.name),);
         for f in &decls {
             match self.infer_types(*f) {
                 Ok(Some(f_ty)) => {
@@ -187,7 +187,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.log_type(f_ty.ret)
                     );
                     // TODO: this is probably wrong if you use !assert_compile_error
-                    self.program.overload_sets[i].0.push(OverloadOption {
+                    self.program.overload_sets[i].ready.push(OverloadOption {
                         arg: f_ty.arg,
                         ret: Some(f_ty.ret),
                         func: *f,
@@ -195,7 +195,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 e => {
                     if let Some(arg) = self.program[*f].finished_arg {
-                        self.program.overload_sets[i].0.push(OverloadOption { arg, ret: None, func: *f });
+                        self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: *f });
                     } else {
                         println!("ERR: {e:?}")
                     }
@@ -231,7 +231,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn prune_overloads_by_named_args(&self, overload_set: &mut OverloadSet<'p>, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let names = pattern.flatten_names();
-        overload_set.0.retain(|overload| {
+        overload_set.ready.retain(|overload| {
             let mut expected = self.program[overload.func].arg.flatten_names();
             if expected.len() != names.len() {
                 // TODO: its sad that ive already allcoated the vec of names.
@@ -261,13 +261,13 @@ pub fn filter_arch<'p>(program: &Program<'p>, overloads: &mut OverloadSet<'p>, w
     // TODO: kinda cringe.
     match target {
         TargetArch::Interp => overloads
-            .0
+            .ready
             .retain(|f| !program[f.func].has_tag(Flag::Llvm) && !program[f.func].has_tag(Flag::No_Interp)),
         TargetArch::Aarch64 => overloads
-            .0
+            .ready
             .retain(|f| !program[f.func].has_tag(Flag::Llvm) && !program[f.func].has_tag(Flag::Interp)),
         TargetArch::Llvm => overloads
-            .0
+            .ready
             .retain(|f| !program[f.func].has_tag(Flag::Aarch64) && !program[f.func].has_tag(Flag::Interp)),
     }
 }

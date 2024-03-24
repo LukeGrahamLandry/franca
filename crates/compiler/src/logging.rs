@@ -223,6 +223,7 @@ impl<'p> Program<'p> {
                 TypeInfo::Never => "Never".to_owned(),
                 TypeInfo::F64 => "f64".to_owned(),
                 TypeInfo::Bool => "bool".to_owned(),
+                TypeInfo::OverloadSet => "OverloadSet".to_owned(),
                 // TODO: be careful of recursion
                 TypeInfo::Ptr(e) => format!("*{}", self.log_type(*e)),
                 TypeInfo::Struct { fields, .. } => {

@@ -5,6 +5,7 @@
   - hard to think about how that should interact with wanting to use global overloads as traits.
 - nominal type-checking
 - clean up tracking backend specific function bodies
+- transitive function annotations (@env, @ct, eventually @async) where you get one if you call someone that has one.
 
 ## Replacing Interp
 

@@ -480,7 +480,7 @@ fn interp_send_libs_ast() {
     let pool = Box::leak(Box::<StringPool>::default());
     let mut codemap = CodeMap::new();
 
-    let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
+    let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"prelude.fr\");".to_string());
 
     let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().stmts;
     for s in stmts {
