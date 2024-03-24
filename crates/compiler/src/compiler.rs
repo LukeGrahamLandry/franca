@@ -19,17 +19,18 @@ use crate::ast::{
 
 use crate::bc::*;
 use crate::ffi::InterpSend;
-use crate::logging::{outln, LogTag, PoolLog};
 use crate::overloading::filter_arch;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-
-use crate::logging::{
-    assert, assert_eq, err, ice, logln, unwrap,
-    LogTag::{ShowErr, ShowPrint},
+use crate::{
+    logging::{LogTag, PoolLog},
+    outln,
 };
+
+use crate::logging::LogTag::{ShowErr, ShowPrint};
+use crate::{assert, assert_eq, err, ice, logln, unwrap};
 
 #[derive(Clone)]
 pub struct CompileError<'p> {
@@ -1095,13 +1096,15 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         self.executor.restore_state(state);
                         *result = saved_res;
+
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
                     }
                     "comptime_print" => {
-                        outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
+                        // TODO: wtf bounds check
+                        // outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
                         let value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());
-                        outln!(ShowPrint, "VALUE: {:?}", value);
+                        // outln!(ShowPrint, "VALUE: {:?}", value);
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
                     }

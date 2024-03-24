@@ -5,7 +5,8 @@ use codemap::Span;
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::{Value, Values},
-    logging::{outln, LogTag::ShowErr},
+    logging::LogTag::ShowErr,
+    outln,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
@@ -491,19 +492,18 @@ fn interp_send_libs_ast() {
     }
 }
 
-#[cfg(feature = "interp_c_ffi")]
 pub mod c {
     use libc::c_void;
     use libffi::middle::{Arg, Type};
 
     use crate::ast::IntType;
+    use crate::err;
     use crate::ffi::InterpSend;
     use crate::pool::Ident;
     use crate::{
         ast::{Program, TypeId, TypeInfo},
         bc::{Value, Values},
         compiler::Res,
-        logging::err,
     };
 
     type CTy = libffi::middle::Type;

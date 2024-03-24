@@ -8,7 +8,6 @@
 
 ## Replacing Interp
 
-- const function args so can impl alloc for asm
 - give executors access to the compiler so dont need the hacky message passing with errors
 - convert bytes + type back to Values
 

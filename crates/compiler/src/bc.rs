@@ -5,8 +5,8 @@ use crate::impl_index;
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
     compiler::{ExecTime, Res},
+    err,
     ffi::InterpSend,
-    logging::err,
     pool::Ident,
 };
 use codemap::Span;

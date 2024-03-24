@@ -7,11 +7,11 @@ use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
-use crate::logging::{err, unwrap, PoolLog};
 use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
 use crate::{bc::*, make_toplevel};
+use crate::{err, unwrap};
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());

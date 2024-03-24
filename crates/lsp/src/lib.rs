@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::ast::Flag;
-use crate::lex::{Lexer, TokenType};
-use crate::pool::StringPool;
+use compiler::ast::Flag;
+use compiler::lex::{Lexer, TokenType};
+use compiler::pool::StringPool;
 
 macro_rules! notif {
     ($lsp:expr, $not:expr, $ty:ty, $method:ident) => {{

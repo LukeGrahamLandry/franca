@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! jit_test {
     ($test_func:ident) => {
         macro_rules! simple {
@@ -193,16 +194,17 @@ macro_rules! jit_test_aarch_only {
             }"#
         );
 
-        simple!(backpassing, 5, 5, include_str!("../../tests/backpassing.fr"));
+        simple!(backpassing, 5, 5, include_str!("../../../../tests/backpassing.fr"));
         // TODO: this relies on structs being in consecutive stack slots so had to disable reusing them.
-        simple!(structs, 5, 5, include_str!("../../tests/structs.fr"));
-        simple!(overloading, 5, 5, include_str!("../../tests/overloading.fr"));
-        simple!(closures, 5, 5, include_str!("../../tests/closures.fr"));
-        simple!(macros, 5, 5, include_str!("../../tests/macros.fr"));
-        simple!(generics, 5, 5, include_str!("../../tests/generics.fr"));
-        simple!(basic, 5, 5, include_str!("../../tests/basic.fr"));
-
+        simple!(structs, 5, 5, include_str!("../../../../tests/structs.fr"));
+        simple!(overloading, 5, 5, include_str!("../../../../tests/overloading.fr"));
+        simple!(closures, 5, 5, include_str!("../../../../tests/closures.fr"));
+        simple!(macros, 5, 5, include_str!("../../../../tests/macros.fr"));
+        simple!(generics, 5, 5, include_str!("../../../../tests/generics.fr"));
+        simple!(basic, 5, 5, include_str!("../../../../tests/basic.fr"));
+        // simple!(collections, 5, 5, include_str!("../../tests/collections.fr"));
     };
 }
-pub(crate) use jit_test;
+
+pub use jit_test;
 pub(crate) use jit_test_aarch_only;

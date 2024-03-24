@@ -27,14 +27,15 @@ use llvm_sys::{
     },
 };
 
-use crate::{
+use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, StackOffset, Value},
     compiler::Res,
-    extend_options,
+    err, extend_options,
     interp::Interp,
-    logging::{err, unwrap, PoolLog},
+    logging::PoolLog,
     pool::Ident,
+    unwrap,
 };
 
 pub struct JittedLlvm {
@@ -46,6 +47,7 @@ pub struct JittedLlvm {
     types: Vec<Option<LLVMTypeRef>>,
     functions: Vec<Option<(LLVMValueRef, CString, bool)>>,
     i32_ty: LLVMTypeRef,
+    ptr_ty: *mut llvm_sys::LLVMType,
 }
 
 impl JittedLlvm {
@@ -90,6 +92,7 @@ impl JittedLlvm {
                 types: vec![],
                 functions: vec![],
                 i32_ty: LLVMInt32TypeInContext(context),
+                ptr_ty: LLVMPointerTypeInContext(context, c_uint::from(0u16)),
             };
 
             for f in program.inline_llvm_ir.clone() {
@@ -187,10 +190,6 @@ impl JittedLlvm {
                 TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
                 &TypeInfo::FnPtr(ty) => self.get_function_type(program, ty),
-                &TypeInfo::Ptr(inner) => {
-                    let inner = self.get_type(program, inner);
-                    LLVMPointerType(inner, c_uint::from(0u16))
-                }
                 &TypeInfo::Struct { as_tuple, .. } => self.get_type(program, as_tuple),
                 TypeInfo::Tuple(fields) => {
                     let mut fields: Vec<_> = fields.clone().iter().map(|ty| self.get_type(program, *ty)).collect();
@@ -198,7 +197,8 @@ impl JittedLlvm {
                 }
                 TypeInfo::Enum { cases } => todo!(),
                 &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.get_type(program, ty), // TOOD: carry forward struct names?
-                TypeInfo::VoidPtr => LLVMPointerTypeInContext(self.context, c_uint::from(0u16)),
+                // They want to get rid of non-opaque pointers anyway: https://llvm.org/docs/OpaquePointers.html
+                TypeInfo::Ptr(_) | TypeInfo::VoidPtr => self.ptr_ty,
             }
         };
         self.types[ty.0] = Some(result);
@@ -440,8 +440,9 @@ impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
                             LLVMConstInt(self.llvm.i32_ty, 0, LLVMBool::from(false)),
                             LLVMConstInt(self.llvm.i32_ty, offset as u64, LLVMBool::from(false)),
                         ];
+                        // https://llvm.org/docs/GetElementPtr.html
                         let field_ptr_value =
-                            LLVMBuildGEP2(self.llvm.builder, ty, ptr, index_values.as_mut_ptr(), index_values.len() as c_uint, EMPTY);
+                            LLVMBuildInBoundsGEP2(self.llvm.builder, ty, ptr, index_values.as_mut_ptr(), index_values.len() as c_uint, EMPTY);
                         self.write_slot(ret, field_ptr_value);
                     }
                     &Bc::Load { from, to } => {
@@ -514,21 +515,22 @@ pub fn null_terminate(bytes: &str) -> CString {
 
 #[allow(unused)]
 mod tests {
-    use crate::ast::{Flag, FuncId, SuperSimple, TargetArch};
-    use crate::experiments::arena::Arena;
-    use crate::experiments::emit_ir::EmitIr;
-    use crate::experiments::tests::jit_test;
-    use crate::{
+    use codemap::CodeMap;
+    use compiler::ast::{Flag, FuncId, SuperSimple, TargetArch};
+    use compiler::experiments::arena::Arena;
+    use compiler::experiments::emit_ir::EmitIr;
+    use compiler::experiments::tests::jit_test;
+    use compiler::{
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
+        err, ice,
         interp::Interp,
-        logging::{err, ice, unwrap},
         make_toplevel,
         parse::Parser,
         pool::StringPool,
         scope::ResolveScope,
+        unwrap,
     };
-    use codemap::CodeMap;
     use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
     use llvm_sys::core::{LLVMDisposeBuilder, LLVMDisposeMessage, LLVMPrintModuleToString};
     use llvm_sys::error::{LLVMCreateStringError, LLVMGetErrorMessage};

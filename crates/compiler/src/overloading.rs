@@ -2,7 +2,8 @@ use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Patte
 use crate::bc::{Value, Values};
 use crate::compiler::{CErr, Compile, DebugState, ExecTime, Executor, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
-use crate::logging::{assert_eq, err, outln, unwrap, LogTag, PoolLog};
+use crate::logging::{LogTag, PoolLog};
+use crate::{assert_eq, err, outln, unwrap};
 use std::mem;
 use std::ops::DerefMut;
 

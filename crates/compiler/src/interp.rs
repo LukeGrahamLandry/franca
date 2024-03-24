@@ -12,8 +12,10 @@ use crate::bc::SizeCache;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::EmitBc;
 use crate::ffi::InterpSend;
-use crate::logging::{assert, assert_eq, err, logln, LogTag::ShowPrint};
-use crate::logging::{outln, unwrap, PoolLog};
+use crate::logging::LogTag::ShowPrint;
+use crate::logging::{unwrap, PoolLog};
+use crate::outln;
+use crate::{assert, assert_eq, err, logln};
 use crate::{
     ast::{FnType, FuncId, Program, TypeId, TypeInfo},
     export_ffi,
@@ -286,17 +288,10 @@ impl<'a, 'p> Interp<'a, 'p> {
                         continue;
                     }
 
-                    #[cfg(not(feature = "interp_c_ffi"))]
-                    {
-                        err!("Interp c ffi is disabled.",)
-                    }
-                    #[cfg(feature = "interp_c_ffi")]
-                    {
-                        self.bump_ip();
-                        let ptr = f.to_int()?.to_bytes() as usize;
-                        let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
-                        *self.get_slot_mut(ret.single()) = result.single()?;
-                    }
+                    self.bump_ip();
+                    let ptr = f.to_int()?.to_bytes() as usize;
+                    let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
+                    *self.get_slot_mut(ret.single()) = result.single()?;
                 }
             }
         }

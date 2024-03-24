@@ -9,10 +9,7 @@ use std::slice;
 
 macro_rules! stdlib {
     ($name:expr) => {
-        (
-            concat!($name, ".fr"),
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/", $name, ".fr")),
-        )
+        (concat!($name, ".fr"), include_str!(concat!("../../../lib/", $name, ".fr")))
     };
 }
 
@@ -53,8 +50,9 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
     ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
-    ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
 ];
+
+pub const COMPILER_LATE: &[(&str, *const u8)] = &[("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8)];
 
 pub fn get_include_std(name: &str) -> Option<String> {
     if let Some((_, src)) = LIB.iter().find(|(check, _)| name == *check) {
@@ -79,6 +77,11 @@ pub fn get_include_std(name: &str) -> Option<String> {
             )
             .unwrap();
             for (sig, ptr) in COMPILER {
+                writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+            }
+        }
+        "compiler_late" => {
+            for (sig, ptr) in COMPILER_LATE {
                 writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
         }
@@ -132,6 +135,15 @@ pub extern "C" fn assert_eq(program: &mut Program, a: i64, b: i64) {
 pub extern "C" fn array_type(program: &mut Program, ty: TypeId, count: usize) -> TypeId {
     let types = vec![ty; count];
     program.intern_type(TypeInfo::Tuple(types))
+}
+
+// TODO: test abi
+pub extern "C" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*const u8, i64) {
+    hope(|| {
+        let _symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
+        todo!(); // TODO: bytes or expand into int array
+                 // Ok(("abcd".as_ptr(), 1))
+    })
 }
 
 #[cfg(target_arch = "aarch64")]

@@ -19,7 +19,7 @@ use crate::{
     pool::Ident,
 };
 
-use crate::logging::{assert, assert_eq, err, ice, unwrap};
+use crate::{assert, assert_eq, err, ice, unwrap};
 
 pub struct EmitIr<'z, 'p: 'z, 'a> {
     program: &'z Program<'p>,

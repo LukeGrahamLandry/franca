@@ -7,11 +7,12 @@ use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType};
 use crate::bc::Values;
 use crate::export_ffi::get_include_std;
+use crate::outln;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
     bc::Value,
     lex::{Lexer, Token, TokenType},
-    logging::{outln, LogTag::Parsing, PoolLog},
+    logging::{LogTag::Parsing, PoolLog},
     pool::{Ident, StringPool},
 };
 use TokenType::*;

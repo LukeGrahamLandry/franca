@@ -50,7 +50,7 @@ use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
     compiler::{Compile, CompileError, ExecTime, Executor},
     logging::{
-        get_logs, log_tag_info, outln, save_logs,
+        get_logs, log_tag_info, save_logs,
         LogTag::{ShowErr, *},
     },
     parse::Parser,
@@ -65,14 +65,17 @@ macro_rules! test_file {
 
             let pool = Box::leak(Box::<StringPool>::default());
 
-            assert!(run_main(
+            let res = run_main(
                 pool,
-                fs::read_to_string(format!("tests/{}.fr", stringify!($case))).unwrap(),
+                fs::read_to_string(format!("../../tests/{}.fr", stringify!($case))).unwrap(),
                 Value::I64(3145192),
                 Value::I64(3145192),
                 Some(&stringify!($case)),
-                crate::interp::Interp::new(pool)
-            ));
+                crate::interp::Interp::new(pool),
+            );
+            if !res {
+                panic!("Test Failed")
+            }
         }
     };
 }

@@ -9,8 +9,8 @@ use crate::bc::{Bc, InterpBox, StackOffset, StackRange, Value, Values};
 use crate::compiler::{ExecTime, Res};
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
-use crate::logging::{err, PoolLog};
 use crate::{ast::Program, bc::FnBody};
+use crate::{err, logging::PoolLog};
 use std::arch::asm;
 use std::cell::UnsafeCell;
 use std::mem::transmute;
@@ -225,7 +225,11 @@ impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
                         physical_count,
                     } => {
                         let ty = self.slot_type(*slot);
-                        assert!(self.program.unptr_ty(ty).is_some(), "Expected Value::Heap to be ptr");
+                        assert!(
+                            self.program.unptr_ty(ty).is_some(),
+                            "Expected Value::Heap to be ptr, not {:?}",
+                            self.program.log_type(ty)
+                        );
                         // TODO: this needs to be different when I actually want to emit an executable.
                         let ptr = self.asm.constants.copy_heap(value, physical_first, physical_count);
                         self.load_imm(x0, ptr as u64);
@@ -525,11 +529,11 @@ mod tests {
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
         interp::Interp,
-        logging::{err, ice, unwrap},
         make_toplevel,
         parse::Parser,
         pool::StringPool,
         scope::ResolveScope,
+        {err, ice, unwrap},
     };
     use codemap::CodeMap;
     use std::process::Command;

@@ -4,7 +4,8 @@ use codemap::Span;
 
 use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
-    logging::{outln, LogTag::Scope},
+    logging::LogTag::Scope,
+    outln,
     pool::{Ident, StringPool},
 };
 

@@ -1,4 +1,4 @@
-use franca::{
+use compiler::{
     bc::Value,
     experiments::emit_rust::bootstrap,
     export_ffi::get_include_std,
@@ -31,7 +31,7 @@ fn main() {
         if name == "lsp" {
             #[cfg(feature = "lsp")]
             {
-                franca::lsp::run_lsp_blocking().unwrap();
+                lsp::run_lsp_blocking().unwrap();
             }
             if cfg!(not(feature = "lsp")) {
                 println!("lsp feature flag disabled.")

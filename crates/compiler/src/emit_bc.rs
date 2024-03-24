@@ -16,7 +16,7 @@ use crate::extend_options;
 use crate::interp::Interp;
 use crate::logging::PoolLog;
 
-use crate::logging::{assert, assert_eq, err, ice, unwrap};
+use crate::{assert, assert_eq, err, ice, unwrap};
 
 #[derive(Debug, Clone)]
 pub struct DebugInfo<'p> {
@@ -203,6 +203,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>) -> Res<'p, Structured> {
         let arg = self.compile_expr(result, arg_expr)?;
+        assert!(!arg.ty().is_any());
         let func = &self.program[f];
         let f_ty = func.unwrap_ty();
         assert!(!self.program.is_comptime_only_type(f_ty.arg), "{}", arg_expr.log(self.program.pool));
@@ -417,7 +418,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     // Note: arg is not evalutated
                     Flag::If => self.emit_call_if(result, arg, expr.ty)?,
                     Flag::While => self.emit_call_while(result, arg)?,
-                    Flag::Addr => self.addr_macro(result, arg)?,
+                    Flag::Addr => self.addr_macro(result, arg, expr.ty)?,
                     Flag::Quote => unreachable!(),
                     Flag::Slice => {
                         let container = self.compile_expr(result, arg)?;
@@ -462,16 +463,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     Flag::Tag => {
                         // TODO: auto deref and typecheking
                         let addr = self.compile_expr(result, arg)?;
-                        let ty = self.program.find_interned(TypeInfo::Ptr(TypeId::i64()));
+                        debug_assert_eq!(self.program[expr.ty], TypeInfo::Ptr(TypeId::i64()));
                         let addr = result.load(self, addr)?.0;
-                        let ret = result.reserve_slots(self, ty)?;
+                        let ret = result.reserve_slots(self, expr.ty)?;
                         result.push(Bc::SlicePtr {
                             base: addr.single(),
                             offset: 0,
                             count: 1,
                             ret: ret.single(),
                         });
-                        (ret, ty).into()
+                        (ret, expr.ty).into()
                     }
                     Flag::Fn_Ptr => {
                         let val = self.compile_expr(result, arg)?;
@@ -503,7 +504,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         })
     }
 
-    fn addr_macro(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, Structured> {
+    fn addr_macro(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, ptr_ty: TypeId) -> Res<'p, Structured> {
         self.last_loc = Some(arg.loc);
         match arg.deref() {
             Expr::GetVar(var) => {
@@ -519,7 +520,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         assert!(result.slot_is_var.get(i), "addr non-var {}", var.log(self.program.pool));
                     }
 
-                    let ptr_ty = self.program.find_interned(TypeInfo::Ptr(value_ty));
+                    debug_assert_eq!(self.program[ptr_ty], TypeInfo::Ptr(value_ty));
                     let addr_slot = result.reserve_slots(self, ptr_ty)?;
                     result.push(Bc::AbsoluteStackAddr {
                         of: stack_slot,
@@ -924,6 +925,7 @@ impl<'p> FnBody<'p> {
                     }
                 }
 
+                println!("{} => {values:?}", program.program.log_type(ty));
                 for value in values {
                     let to = self.reserve_slots(program, TypeId::any())?; // TODO: this breaks llvm, now just for enums maybe
                     self.push(Bc::LoadConstant { slot: to.single(), value });

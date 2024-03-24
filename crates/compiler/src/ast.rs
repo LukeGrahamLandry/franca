@@ -2,10 +2,10 @@
 use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
     compiler::{CErr, FnWip, Res},
+    err,
     experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
     impl_index,
-    logging::err,
     pool::{Ident, StringPool},
 };
 use codemap::Span;

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Write};
 use std::{fs, mem};
 
+#[macro_export]
 macro_rules! err {
     ($payload:expr) => {{
         return Err($crate::compiler::CompileError {
@@ -23,6 +24,7 @@ macro_rules! err {
     }};
 }
 
+#[macro_export]
 macro_rules! assert {
     ($cond:expr, $($arg:tt)+) => {{
         if !($cond) {
@@ -35,6 +37,7 @@ macro_rules! assert {
 }
 
 // looks weird cause i stole it from the rust one. apparently its faster or whatever
+#[macro_export]
 macro_rules! assert_eq {
     ($left:expr, $right:expr, $($arg:tt)+) => {
         match (&$left, &$right) {
@@ -60,31 +63,33 @@ macro_rules! assert_eq {
 
 // I want to be as easy to use my error system as just paniking.
 // Use this one for things that aren't supported yet or should have been caught in a previous stage of compilation.
+#[macro_export]
 macro_rules! ice {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        crate::logging::err!(crate::compiler::CErr::IceFmt(msg))
+        $crate::err!($crate::compiler::CErr::IceFmt(msg))
     }};
 }
 use codemap::Span;
-pub(crate) use ice;
+pub use ice;
 
 // TODO: compile errors should include the line number of the most recent ast node.
 
 // TODO: have an enum for distringuishing ice from invalid input and use that everywhere instead of having two of each macro.
 // TODO: I really like stringify! for error messages. make sure ast macros in my language have that.
 // Convert a missing option into a compile error with a message.
+#[macro_export]
 macro_rules! unwrap {
     ($maybe:expr, $($arg:tt)*) => {{
         if let Some(value) = $maybe {
             value
         } else {
-            crate::logging::ice!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*))
+            $crate::ice!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*))
         }
     }};
 }
 
-pub(crate) use unwrap;
+pub use unwrap;
 
 // Note: if you add more, make sure nobody's using 255 to mean 'all'.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,29 +156,29 @@ pub fn save_logs(folder: &str) {
     }
 }
 
+#[macro_export]
 macro_rules! outln {
     ($tag:expr, $($arg:tt)*) => {{
-        if cfg!(feature = "println_now") && $tag == crate::logging::LogTag::ShowPrint {
+        if cfg!(feature = "println_now") && $tag == $crate::logging::LogTag::ShowPrint {
             println!($($arg)*);
 
         } else if cfg!(feature = "some_log") {
-            let tag: crate::logging::LogTag = $tag;
-            crate::logging::LOG.with(|settings| {
+            let tag: $crate::logging::LogTag = $tag;
+            $crate::logging::LOG.with(|settings| {
                 if (settings.borrow().track & (1 << tag as usize)) != 0 {
                     settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
                 }
             })
-        } else if $tag == crate::logging::LogTag::ShowPrint || $tag == crate::logging::LogTag::ShowErr {
-            let tag: crate::logging::LogTag = $tag;
-            crate::logging::LOG.with(|settings| {
+        } else if $tag == $crate::logging::LogTag::ShowPrint || $tag == $crate::logging::LogTag::ShowErr {
+            let tag: $crate::logging::LogTag = $tag;
+            $crate::logging::LOG.with(|settings| {
                 settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
             })
         }
     }};
 }
 
-pub(crate) use outln;
-
+#[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
         if cfg!(feature = "spam_log") {
@@ -181,8 +186,8 @@ macro_rules! log {
         }
     }};
 }
-pub(crate) use log;
 
+#[macro_export]
 macro_rules! logln {
     // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
     ($($arg:tt)*) => {{
@@ -191,11 +196,6 @@ macro_rules! logln {
         }
     }};
 }
-pub(crate) use logln;
-
-pub(crate) use assert;
-pub(crate) use assert_eq;
-pub(crate) use err;
 
 use crate::ast::FatStmt;
 use crate::bc::*;
