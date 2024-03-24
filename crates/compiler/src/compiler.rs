@@ -643,8 +643,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                             }
                             None => {
                                 if let Some(import_path) = stmt.annotations.iter().find(|a| a.name == Flag::Import.ident()) {
-                                    let import_path = unwrap!(import_path.args.as_ref(), "@import requires argument").parse_dot_chain()?;
-                                    self.resolve_import(result.module.unwrap(), import_path, name.0)?
+                                    let import_path = unwrap!(import_path.args.as_ref(), "@import requires argument");
+                                    let module = if let Some(module) = import_path.as_int() {
+                                        let m = ModuleId(module as usize);
+                                        assert!(self.program.modules.len() > m.0);
+                                        m
+                                    } else {
+                                        let import_path = import_path.parse_dot_chain()?;
+                                        self.resolve_module(result.module.unwrap(), &import_path)?
+                                    };
+                                    self.resolve_import(module, name.0)?
                                 } else {
                                     let name = self.pool.get(name.0);
                                     unwrap!(self.builtin_constant(name), "uninit (non-blessed) const: {:?}", name).0.into()
@@ -2520,26 +2528,29 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
-    fn resolve_import(&mut self, current: ModuleId, import_path: Vec<Ident<'p>>, name: Ident<'_>) -> Res<'p, Values> {
-        let module = self.resolve_module(current, &import_path)?;
+    fn resolve_import(&mut self, module: ModuleId, name: Ident<'_>) -> Res<'p, Values> {
+        let module_f = self.get_module(module)?;
+        if let Some(var) = self.program[module].exports.get(&name) {
+            let value = unwrap!(self.program[module_f].closed_constants.get(*var), "missing export");
+            println!("Import {module:?} {name:?} = {value:?}");
+            Ok(value.0) // TODO: include type
+        } else {
+            err!("Module {} does not export {}", module.0, self.pool.get(name))
+        }
+    }
 
-        let module_f = match self.program[module].toplevel {
-            ModuleBody::Ready(f) => f,
+    pub fn get_module(&mut self, module: ModuleId) -> Res<'p, FuncId> {
+        match self.program[module].toplevel {
+            ModuleBody::Ready(f) => Ok(f),
             ModuleBody::Compiling(_) | ModuleBody::Resolving => err!("Module {} is not ready yet. Circular dependency?", module.0),
             ModuleBody::Parsed(_) => {
                 let body = mem::replace(&mut self.program[module].toplevel, ModuleBody::Resolving);
                 let mut body = if let ModuleBody::Parsed(f) = body { f } else { unreachable!() };
                 ResolveScope::of(&mut body, self, vec![])?; // TODO: nested directives
                 let f = self.compile_module(body)?;
-                f
+                Ok(f)
             }
             ModuleBody::Src(_) => unreachable!(),
-        };
-        if let Some(var) = self.program[module].exports.get(&name) {
-            let value = unwrap!(self.program[module_f].closed_constants.get(*var), "missing export");
-            Ok(value.0) // TODO: include type
-        } else {
-            err!("Module {} does not export {}", module.0, self.pool.get(name))
         }
     }
 

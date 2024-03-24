@@ -3,7 +3,7 @@ use std::{mem, ops::DerefMut};
 use codemap::Span;
 
 use crate::{
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, ModuleBody, Name, Stmt, Var, VarInfo, VarType},
+    ast::{Annotation, Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, ModuleBody, Name, Stmt, Var, VarInfo, VarType},
     compiler::{Compile, Res},
     err,
     logging::LogTag::Scope,
@@ -60,7 +60,29 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 Flag::Open => {
                     let name = arg.parse_dot_chain()?;
                     let module = self.compiler.resolve_module(current, &name)?;
-                    todo!()
+                    self.compiler.get_module(module)?;
+                    // TODO: something less fragile for making them not collide
+                    self.next_var = self.compiler.program.vars.len();
+                    // TODO: do it lazily
+                    for var in self.compiler.program[module].exports.values() {
+                        let import = Annotation {
+                            name: Flag::Import.ident(),
+                            args: Some(FatExpr::synthetic(Expr::int(module.0 as i64), self.last_loc)),
+                        };
+                        let stmt = FatStmt {
+                            stmt: Stmt::DeclVar {
+                                name: *var,
+                                ty: LazyType::Infer,
+                                value: None,
+                                kind: VarType::Const,
+                                dropping: None,
+                            },
+                            annotations: vec![import],
+                            loc: self.last_loc,
+                        };
+                        stmts.local_constants.push(stmt);
+                        self.scopes.last_mut().unwrap().push(*var);
+                    }
                 }
                 Flag::Module => {
                     let mut body = arg.as_func()?;
@@ -74,8 +96,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         self.push_scope(true);
         self.resolve_func(stmts);
-        let (_globals, outer_captures) = self.pop_scope();
-        let (_imports, _import_captures) = self.pop_scope();
+        let (_globals, _captured_imports) = self.pop_scope();
+        let (_imports, outer_captures) = self.pop_scope();
         assert!(outer_captures.unwrap().is_empty(), "unreachable?");
         assert!(self.compiler.program[current].exports.is_empty());
         for var in &self.exports {
@@ -113,12 +135,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
         }
 
-        func.local_constants = self.local_constants.pop().unwrap();
+        // Extend because #open pokes some constants in earlier.
+        func.local_constants.extend(self.local_constants.pop().unwrap());
 
         outln!(Scope, "{}", func.log_captures(self.pool));
     }
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
+        debug_assert_eq!(self.next_var, self.compiler.program.vars.len());
         let loc = stmt.loc;
         self.last_loc = loc;
         let mut public = false;
