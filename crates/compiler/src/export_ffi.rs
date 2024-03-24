@@ -64,25 +64,25 @@ pub fn get_include_std(name: &str) -> Option<String> {
     match name {
         "libc" => {
             for (sig, ptr) in LIBC {
-                writeln!(out, "@comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
             }
         }
         "compiler" => {
             writeln!(
                 out,
-                "const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
+                "@pub const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
                 libc::O_RDONLY,
                 libc::O_WRONLY,
                 libc::O_RDWR
             )
             .unwrap();
             for (sig, ptr) in COMPILER {
-                writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
         }
         "compiler_late" => {
             for (sig, ptr) in COMPILER_LATE {
-                writeln!(out, "@comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
         }
         _ => return None,
