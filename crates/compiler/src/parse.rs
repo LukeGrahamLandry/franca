@@ -1,4 +1,5 @@
 //! Convert a stream of tokens into ASTs.
+use std::ops::{FromResidual, Yeet};
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{CodeMap, File, Span};
@@ -6,6 +7,7 @@ use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType};
 use crate::bc::Values;
+use crate::compiler::CompileError;
 use crate::export_ffi::get_include_std;
 use crate::outln;
 use crate::{

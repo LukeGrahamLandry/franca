@@ -31,7 +31,7 @@ pub struct EmitIr<'z, 'p: 'z, 'a> {
 }
 
 impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
-    pub fn compile(program: &'z Program<'p>, interp: &'z mut Interp<'_, 'p>, f: FuncId, arena: &'a Arena<'a>) -> Res<'p, IrFunc<'a>> {
+    pub fn compile(program: &'z Program<'p>, interp: &'z mut Interp<'p>, f: FuncId, arena: &'a Arena<'a>) -> Res<'p, IrFunc<'a>> {
         let mut emit = EmitIr::new(program, &mut interp.sizes, arena, f);
         if let Err(mut e) = emit.compile_inner(f) {
             e.loc = emit.last_loc;

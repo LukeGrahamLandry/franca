@@ -104,7 +104,7 @@ impl<'p> InterpSend<'p> for bool {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
-    fn create_type(program: &mut Program<'p>) -> TypeId {
+    fn create_type(_program: &mut Program<'p>) -> TypeId {
         TypeId::bool()
     }
 
@@ -427,7 +427,7 @@ fn interp_send() {
     }
 
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut p = Program::new(vec![], pool, TargetArch::Interp, TargetArch::Interp);
+    let mut p = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let one = HelloWorld { a: 123, b: 345 };
     let two = one.serialize_one();
     let three = HelloWorld::deserialize_one(two).unwrap();

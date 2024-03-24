@@ -4,26 +4,20 @@ use std::ops::Deref;
 
 use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo, VarType};
 use crate::ast::{FatStmt, Var};
-use crate::compiler::{Compile, ExecTime, Executor, Res};
+use crate::compiler::{Compile, ExecTime, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
 use crate::parse::Parser;
 use crate::pool::StringPool;
 use crate::scope::ResolveScope;
-use crate::{bc::*, make_toplevel};
+use crate::{bc::*, load_program, make_toplevel};
 use crate::{err, unwrap};
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut codemap = CodeMap::new();
-    let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
-    let user_span = file.span;
-    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
-    let mut global = make_toplevel(pool, user_span, stmts);
-    let vars = ResolveScope::of(&mut global, pool);
-    let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
-    let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
-    comp.add_declarations(global, Flag::TopLevel.ident(), None).unwrap();
+    let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
+    let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
+    let result = load_program(&mut comp, "");
 
     let (rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
 
@@ -31,7 +25,8 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
     }
-    let mut asm = BcToAsm::new(&mut comp.executor, &mut program);
+    let mut interp = comp.executor.to_interp().unwrap();
+    let mut asm = BcToAsm::new(&mut interp, &mut program);
     asm.asm.reserve(asm.program.funcs.len());
     for f in &bs {
         asm.compile(*f).unwrap();
@@ -65,8 +60,8 @@ pub fn bootstrap() -> (String, String) {
     (rs, fr)
 }
 
-pub struct EmitRs<'z, 'p: 'z, Exec: Executor<'p>> {
-    comp: Compile<'z, 'p, Exec>,
+pub struct EmitRs<'z, 'p: 'z> {
+    comp: Compile<'z, 'p>,
     last_loc: Option<Span>,
     ready: Vec<Option<String>>,
     global_constants: HashMap<Var<'p>, (TypeId, String)>,
@@ -94,8 +89,8 @@ const Shift: &ShiftTy = &ShiftTy {
 };
 "##;
 
-impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
-    pub fn emit_rs(e: Compile<'z, 'p, Exec>) -> Res<'p, (String, Compile<'z, 'p, Exec>)> {
+impl<'z, 'p: 'z> EmitRs<'z, 'p> {
+    pub fn emit_rs(e: Compile<'z, 'p>) -> Res<'p, (String, Compile<'z, 'p>)> {
         let mut emit = EmitRs::new(e);
 
         for f in 0..emit.comp.program.funcs.len() {
@@ -172,7 +167,7 @@ impl<'z, 'p: 'z, Exec: Executor<'p>> EmitRs<'z, 'p, Exec> {
         // }
     }
 
-    fn new(comp: Compile<'z, 'p, Exec>) -> Self {
+    fn new(comp: Compile<'z, 'p>) -> Self {
         Self {
             last_loc: None,
             comp,

@@ -1,6 +1,14 @@
 //! High level representation of a Franca program. Macros operate on these types.
-use crate::{bc::{Bc, Constants, Structured, Value, Values}, compiler::{CErr, FnWip, Res}, err, experiments::reflect::{Reflect, RsType}, ffi::{init_interp_send, InterpSend}, impl_index, impl_index_imm, pool::{Ident, StringPool}};
-use codemap::Span;
+use crate::{
+    bc::{Bc, Constants, Structured, Value, Values},
+    compiler::{CErr, FnWip, Res},
+    err,
+    experiments::reflect::{Reflect, RsType},
+    ffi::{init_interp_send, InterpSend},
+    impl_index, impl_index_imm,
+    pool::{Ident, StringPool},
+};
+use codemap::{CodeMap, Span};
 use interp_derive::{InterpSend, Reflect};
 use std::{
     cell::RefCell,
@@ -729,7 +737,6 @@ pub struct VarInfo {
     pub loc: Span,
 }
 
-#[derive(Clone)]
 pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
@@ -750,6 +757,7 @@ pub struct Program<'p> {
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
     pub modules: Vec<Module<'p>>,
+    pub codemap: CodeMap,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -857,7 +865,7 @@ pub struct IntType {
 }
 
 impl<'p> Program<'p> {
-    pub fn new(vars: Vec<VarInfo>, pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
+    pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
             // Any needs to be first becuase I use TypeId(0) as a place holder.
             // The rest are just common ones that i want to find faster if i end up iterating the array.
@@ -875,7 +883,7 @@ impl<'p> Program<'p> {
             funcs: Default::default(),
             generics_memo: Default::default(),
             impls: Default::default(),
-            vars,
+            vars: vec![],
             pool,
             overload_sets: Default::default(),
             ffi_types: Default::default(),
@@ -887,6 +895,7 @@ impl<'p> Program<'p> {
             inline_llvm_ir: vec![],
             modules: vec![],
             type_lookup: HashMap::new(),
+            codemap: CodeMap::new(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1606,6 +1615,7 @@ pub enum Flag {
     Module,
     Include_Std,
     Alloc,
+    Pub,
     _Reserved_Count_,
 }
 

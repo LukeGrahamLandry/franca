@@ -3,36 +3,39 @@ use std::{mem, ops::DerefMut};
 use codemap::Span;
 
 use crate::{
-    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
+    compiler::Compile,
     logging::LogTag::Scope,
     outln,
     pool::{Ident, StringPool},
 };
 
-pub struct ResolveScope<'p> {
+pub struct ResolveScope<'z, 'a, 'p> {
     next_var: usize,
     scopes: Vec<Vec<Var<'p>>>,
     track_captures_before_scope: Vec<usize>,
     captures: Vec<Var<'p>>,
-    info: Vec<VarInfo>,
     local_constants: Vec<Vec<FatStmt<'p>>>,
     pool: &'p StringPool<'p>,
+    exports: Vec<Var<'p>>,
+    compiler: &'z mut Compile<'a, 'p>,
 }
 
-impl<'p> ResolveScope<'p> {
+impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     // TODO: we know when we're at the top level where order doesn't matter, so should prescan for decls?
     //       then functions could be delt with here too.
     // TODO: will need to keep some state about this for macros that want to add vars?
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut Func<'p>, pool: &'p StringPool<'p>) -> Vec<VarInfo> {
+    pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) {
         let mut resolver = ResolveScope {
-            next_var: Default::default(),
+            next_var: compiler.program.vars.len(),
             scopes: Default::default(),
             track_captures_before_scope: Default::default(),
             captures: Default::default(),
-            info: Default::default(),
             local_constants: Default::default(),
-            pool,
+            pool: compiler.pool,
+            exports: vec![],
+            compiler,
         };
 
         resolver.push_scope(true);
@@ -41,7 +44,6 @@ impl<'p> ResolveScope<'p> {
 
         assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
         assert!(outer_captures.unwrap().is_empty(), "unreachable?");
-        resolver.info
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) {
@@ -66,7 +68,7 @@ impl<'p> ResolveScope<'p> {
         }
 
         for v in capures {
-            if self.info[v.1].kind == VarType::Const {
+            if self.compiler.program.vars[v.1].kind == VarType::Const {
                 func.capture_vars_const.push(v);
             } else {
                 func.capture_vars.push(v);
@@ -80,9 +82,13 @@ impl<'p> ResolveScope<'p> {
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
         let loc = stmt.loc;
+        let mut public = false;
         for a in &mut stmt.annotations {
             if let Some(args) = &mut a.args {
                 self.resolve_expr(args)
+            }
+            if a.name == Flag::Pub.ident() {
+                public = true;
             }
         }
 
@@ -95,7 +101,7 @@ impl<'p> ResolveScope<'p> {
                     self.resolve_expr(value);
                 }
                 let (old, new) = self.decl_var(name);
-                self.info.push(VarInfo { kind: *kind, loc });
+                self.compiler.program.vars.push(VarInfo { kind: *kind, loc });
                 let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
@@ -109,6 +115,9 @@ impl<'p> ResolveScope<'p> {
                         .unwrap()
                         .push(decl.fat_with(mem::take(&mut stmt.annotations), stmt.loc));
                     stmt.stmt = Stmt::Noop;
+                    if public {
+                        self.exports.push(new);
+                    }
                 } else {
                     stmt.stmt = decl;
                 }
@@ -124,15 +133,20 @@ impl<'p> ResolveScope<'p> {
                     // Functions don't shadow, they just add to an overload group.
                     // TODO: what happens if you're shadowing a normal variable? just err maybe?
                     // TOOD: @pub vs @private
-                    if let Some(v) = self.find_var(&func.name) {
+                    let name = if let Some(v) = self.find_var(&func.name) {
                         func.var_name = Some(v);
+                        v
                     } else {
                         let (_, v) = self.decl_var(&func.name);
                         func.var_name = Some(v);
-                        self.info.push(VarInfo {
+                        self.compiler.program.vars.push(VarInfo {
                             kind: VarType::Const,
                             loc: func.loc,
                         });
+                        v
+                    };
+                    if public {
+                        self.exports.push(name);
                     }
                 }
                 func.annotations = aaa;
@@ -277,7 +291,7 @@ impl<'p> ResolveScope<'p> {
                 self.resolve_type(&mut binding.ty);
                 if declaring {
                     let (_old, var) = self.decl_var(&name);
-                    self.info.push(VarInfo { kind: VarType::Var, loc });
+                    self.compiler.program.vars.push(VarInfo { kind: VarType::Var, loc });
                     *binding = Binding {
                         name: Name::Var(var),
                         ty: mem::replace(&mut binding.ty, LazyType::Infer),

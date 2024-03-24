@@ -454,7 +454,7 @@ impl<'p> PoolLog<'p> for Program<'p> {
     }
 }
 
-impl<'a, 'p> PoolLog<'p> for Interp<'a, 'p> {
+impl<'p> PoolLog<'p> for Interp<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut s = String::new();
         // s += &self.program.log_cached_types();
@@ -722,7 +722,7 @@ impl Stmt<'_> {
     }
 }
 
-impl<'a, 'p> Interp<'a, 'p> {
+impl<'p> Interp<'p> {
     pub fn log_stack(&self) {
         if cfg!(not(feature = "spam_log")) {
             return;

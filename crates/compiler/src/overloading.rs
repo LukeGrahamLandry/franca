@@ -1,13 +1,13 @@
 use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var};
 use crate::bc::{Value, Values};
-use crate::compiler::{CErr, Compile, DebugState, ExecTime, Executor, FnWip, Res};
+use crate::compiler::{CErr, Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
 use crate::logging::{LogTag, PoolLog};
 use crate::{assert_eq, err, outln, unwrap};
 use std::mem;
 use std::ops::DerefMut;
 
-impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
+impl<'a, 'p> Compile<'a, 'p> {
     pub fn maybe_direct_fn(
         &mut self,
         result: &mut FnWip<'p>,

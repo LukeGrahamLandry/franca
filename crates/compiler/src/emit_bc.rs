@@ -33,7 +33,7 @@ pub struct EmitBc<'z, 'p: 'z> {
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    pub fn compile(program: &'z Program<'p>, interp: &'z mut Interp<'_, 'p>, f: FuncId) -> Res<'p, ()> {
+    pub fn compile(program: &'z Program<'p>, interp: &'z mut Interp<'p>, f: FuncId) -> Res<'p, ()> {
         while interp.ready.len() <= f.0 {
             interp.ready.push(None);
         }

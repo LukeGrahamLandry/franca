@@ -35,8 +35,8 @@ pub struct CallFrame<'p> {
 }
 
 #[derive(Clone)]
-pub struct Interp<'a, 'p> {
-    pub pool: &'a StringPool<'p>,
+pub struct Interp<'p> {
+    pub pool: &'p StringPool<'p>,
     pub value_stack: Vec<Value>,
     pub call_stack: Vec<CallFrame<'p>>,
     pub ready: Vec<Option<FnBody<'p>>>,
@@ -46,8 +46,8 @@ pub struct Interp<'a, 'p> {
     pub ffi_stack: Vec<Values>,
 }
 
-impl<'a, 'p> Interp<'a, 'p> {
-    pub fn new(pool: &'a StringPool<'p>) -> Self {
+impl<'p> Interp<'p> {
+    pub fn new(pool: &'p StringPool<'p>) -> Self {
         Self {
             pool,
             value_stack: vec![],
@@ -857,8 +857,9 @@ pub struct CmdResult {
     stderr: Vec<u8>,
 }
 
-impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
+impl<'p> Executor<'p> for Interp<'p> {
     type SavedState = (usize, usize);
+
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()> {
         let init_heights = (self.call_stack.len(), self.value_stack.len());
         let result = EmitBc::compile(program, self, f);
@@ -917,6 +918,10 @@ impl<'a, 'p> Executor<'p> for Interp<'a, 'p> {
 
     fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values> {
         self.deref_ptr(slot)
+    }
+
+    fn to_interp(self: Box<Self>) -> Option<Interp<'p>> {
+        Some(*self)
     }
 }
 

@@ -5,6 +5,7 @@
 #![allow(clippy::wrong_self_convention)]
 
 use codemap::Span;
+use codemap_diagnostic::Diagnostic;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -19,6 +20,7 @@ use crate::ast::{
 
 use crate::bc::*;
 use crate::ffi::InterpSend;
+use crate::interp::Interp;
 use crate::overloading::filter_arch;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -57,19 +59,20 @@ pub enum CErr<'p> {
     AmbiguousCall,
     VarNotFound(Var<'p>),
     InterpMsgToCompiler(Ident<'p>, Values, StackAbsoluteRange),
+    Diagnostic(Vec<Diagnostic>),
 }
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
-pub struct Compile<'a, 'p, Exec: Executor<'p>> {
-    pub pool: &'a StringPool<'p>,
+pub struct Compile<'a, 'p> {
+    pub pool: &'p StringPool<'p>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
     pub anon_fn_counter: usize,
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     last_loc: Option<Span>,
-    pub executor: Exec,
+    pub executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
     pub program: &'a mut Program<'p>,
     pub jitted: Vec<*const u8>,
     pub save_bootstrap: Vec<FuncId>,
@@ -102,8 +105,8 @@ pub struct FnWip<'p> {
     pub module: Option<ModuleId>,
 }
 
-impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
-    pub fn new(pool: &'a StringPool<'p>, program: &'a mut Program<'p>, executor: Exec) -> Self {
+impl<'a, 'p> Compile<'a, 'p> {
+    pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>, executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>) -> Self {
         Self {
             pool,
             debug_trace: vec![],
@@ -1101,9 +1104,10 @@ impl<'a, 'p, Exec: Executor<'p>> Compile<'a, 'p, Exec> {
                         self.program.load_value(Value::Unit)
                     }
                     "comptime_print" => {
+                        println!("TODO: fix comptime_print");
                         // TODO: wtf bounds check
                         // outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
-                        let value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());
+                        let _value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());
                         // outln!(ShowPrint, "VALUE: {:?}", value);
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
@@ -2575,6 +2579,7 @@ pub trait Executor<'p>: PoolLog<'p> {
     fn restore_state(&mut self, state: Self::SavedState);
     fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>>; // asadas
     fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values>; //  HACK
+    fn to_interp(self: Box<Self>) -> Option<Interp<'p>>;
 }
 
 // i like when my code is rocks not rice
@@ -2590,13 +2595,13 @@ impl ToBytes for i64 {
     }
 }
 
-pub struct Unquote<'z, 'a, 'p, Exec: Executor<'p>> {
-    pub compiler: &'z mut Compile<'a, 'p, Exec>,
+pub struct Unquote<'z, 'a, 'p> {
+    pub compiler: &'z mut Compile<'a, 'p>,
     pub placeholders: Vec<FatExpr<'p>>,
     pub result: &'z mut FnWip<'p>,
 }
 
-impl<'z, 'a, 'p, Exec: Executor<'p>> WalkAst<'p> for Unquote<'z, 'a, 'p, Exec> {
+impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
     // TODO: track if we're in unquote mode or placeholder mode.
     fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
         if let Expr::SuffixMacro(name, arg) = &mut expr.expr {

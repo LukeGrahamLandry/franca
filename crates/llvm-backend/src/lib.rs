@@ -224,9 +224,9 @@ fn null_terminated(s: String) -> CString {
     CString::from_vec_with_nul(s).unwrap()
 }
 
-pub struct BcToLlvm<'z, 'a, 'p> {
+pub struct BcToLlvm<'z, 'p> {
     program: &'z mut Program<'p>,
-    interp: &'z mut Interp<'a, 'p>,
+    interp: &'z mut Interp<'p>,
     llvm: JittedLlvm,
     f: FuncId,
     wip: Vec<FuncId>, // makes recursion work
@@ -234,8 +234,8 @@ pub struct BcToLlvm<'z, 'a, 'p> {
     blocks: HashMap<usize, LLVMBasicBlockRef>,
 }
 
-impl<'z, 'a, 'p> BcToLlvm<'z, 'a, 'p> {
-    pub fn new(interp: &'z mut Interp<'a, 'p>, program: &'z mut Program<'p>) -> Self {
+impl<'z, 'p> BcToLlvm<'z, 'p> {
+    pub fn new(interp: &'z mut Interp<'p>, program: &'z mut Program<'p>) -> Self {
         Self {
             llvm: JittedLlvm::new("franca", program).unwrap(),
             program,
@@ -520,6 +520,7 @@ mod tests {
     use compiler::experiments::arena::Arena;
     use compiler::experiments::emit_ir::EmitIr;
     use compiler::experiments::tests::jit_test;
+    use compiler::load_program;
     use compiler::{
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
@@ -546,19 +547,14 @@ mod tests {
     // TODO: this is an ugly copy paste
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
-        let mut codemap = CodeMap::new();
-        let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
-        let user_span = file.span;
-        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
-        let mut global = make_toplevel(pool, garbage_loc(), stmts);
-        let vars = ResolveScope::of(&mut global, pool);
-        let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Llvm);
-        let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
-        comp.add_declarations(global, Flag::TopLevel.ident(), None)?;
+        let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Llvm);
+        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
+        load_program(&mut comp, src)?;
         let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
         comp.compile(main, ExecTime::Runtime)?;
 
-        let mut asm = BcToLlvm::new(&mut comp.executor, &mut program);
+        let mut interp = comp.executor.to_interp().unwrap();
+        let mut asm = BcToLlvm::new(&mut interp, &mut program);
 
         asm.compile(main)?;
 

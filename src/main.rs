@@ -49,7 +49,7 @@ fn main() {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&name),
-                Interp::new(pool),
+                Box::new(Interp::new(pool)),
             );
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
@@ -59,7 +59,7 @@ fn main() {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&name),
-                Interp::new(pool),
+                Box::new(Interp::new(pool)),
             );
         }
     } else {
@@ -75,7 +75,7 @@ fn main() {
                 Value::I64(0),
                 Value::I64(0),
                 Some(case.file_name().to_str().unwrap().strip_suffix(".fr").unwrap()),
-                Interp::new(pool),
+                Box::new(Interp::new(pool)),
             );
         }
         assert!(passed);

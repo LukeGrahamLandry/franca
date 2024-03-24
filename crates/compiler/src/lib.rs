@@ -9,14 +9,17 @@
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 #![feature(pointer_is_aligned)]
-
+#![feature(try_trait_v2)]
+#![feature(try_trait_v2_yeet)]
 extern crate core;
 
 use std::fs;
 
+use ast::FuncId;
 use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
+use compiler::{CErr, Res};
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -49,6 +52,7 @@ pub mod scope;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
     compiler::{Compile, CompileError, ExecTime, Executor},
+    interp::Interp,
     logging::{
         get_logs, log_tag_info, save_logs,
         LogTag::{ShowErr, *},
@@ -71,7 +75,7 @@ macro_rules! test_file {
                 Value::I64(3145192),
                 Value::I64(3145192),
                 Some(&stringify!($case)),
-                crate::interp::Interp::new(pool),
+                Box::new(crate::interp::Interp::new(pool)),
             );
             if !res {
                 panic!("Test Failed")
@@ -92,83 +96,50 @@ test_file!(aarch64_jit);
 test_file!(backpassing);
 test_file!(dispatch);
 
-pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
+pub fn load_program<'a, 'p>(comp: &mut Compile<'a, 'p>, src: &str) -> Res<'p, FuncId> {
+    let mut codemap = CodeMap::new();
+
+    // TODO: this will get less dumb when I have first class modules.
+    let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+    let user_span = file.span;
+    let (stmts, lines) = match Parser::parse(&mut codemap, file.clone(), comp.pool) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(CompileError {
+                internal_loc: e.loc,
+                loc: Some(e.diagnostic[0].spans[0].span),
+                reason: CErr::Diagnostic(e.diagnostic),
+                trace: String::new(),
+                value_stack: vec![],
+                call_stack: String::new(),
+            })
+        }
+    };
+
+    let mut global = make_toplevel(comp.pool, user_span, stmts);
+    ResolveScope::of(&mut global, comp);
+    comp.add_declarations(global, Flag::TopLevel.ident(), None)
+}
+
+pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
     src: String,
     arg: Value,
     expect: Value,
     save: Option<&str>,
-    executor: Exec,
+    executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
 ) -> bool {
     log_tag_info();
-    let mut codemap = CodeMap::new();
-
-    // TODO: this will get less dumb when I have first class modules.
-    let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
     let start = timestamp();
-    let user_span = file.span;
-    let (stmts, lines) = match Parser::parse(&mut codemap, file.clone(), pool) {
-        Ok(new) => new,
-        Err(e) => {
-            outln!(ShowErr, "Parse error (Internal: {})", e.loc);
-
-            emit_diagnostic(&codemap, &e.diagnostic);
-            return false;
-        }
-    };
-
-    let mut global = make_toplevel(pool, user_span, stmts);
-    let vars = ResolveScope::of(&mut global, pool);
-    let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Interp);
+    let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, executor);
-    let result = comp.add_declarations(global, Flag::TopLevel.ident(), None);
+    let result = load_program(&mut comp, &src);
 
     // damn turns out defer would maybe be a good idea
-    fn log_dbg<'a, 'p, Exec: Executor<'p>>(comp: &Compile<'a, 'p, Exec>, save: Option<&str>) {
-        outln!(Bytecode, "{}", comp.executor.log(comp.pool));
-        if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
-            outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
-        }
-
-        println!("{}", get_logs(ShowPrint));
-        println!("{}", get_logs(ShowErr));
-        if let Some(path) = save {
-            let folder = &format!("target/latest_log/{path}");
-            fs::create_dir_all(folder).unwrap();
-            save_logs(folder);
-            println!("Wrote log to {folder:?}");
-        }
-        println!("===============================");
-
-    }
-
-    fn log_err<'p, Exec: Executor<'p>>(codemap: CodeMap, interp: &Compile<'_, 'p, Exec>, e: CompileError<'p>, save: Option<&str>) {
-        outln!(ShowPrint, "ERROR");
-        if let Some(loc) = e.loc {
-            let diagnostic = vec![Diagnostic {
-                level: Level::Error,
-                message: e.reason.log(interp.program, interp.pool),
-                code: None,
-                spans: vec![SpanLabel {
-                    span: loc,
-                    label: None,
-                    style: SpanStyle::Primary,
-                }],
-            }];
-            emit_diagnostic(&codemap, &diagnostic);
-        } else {
-            outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
-        }
-
-        outln!(ShowErr, "Internal: {}", e.internal_loc);
-        outln!(ShowErr, "{}", e.trace);
-        outln!(ShowErr, "{}", e.call_stack);
-        log_dbg(interp, save);
-    }
 
     match result {
         Err(e) => {
-            log_err(codemap, &comp, e, save);
+            log_err(&comp, e, save);
             return false;
         }
         Ok(_toplevel) => {
@@ -181,29 +152,29 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
                 Some(f) => {
                     match comp.compile(f, ExecTime::Runtime) {
                         Err(e) => {
-                            log_err(codemap, &comp, e, save);
+                            log_err(&comp, e, save);
                             return false;
                         }
                         Ok(_) => {
                             let end = timestamp();
                             let seconds = end - start;
-                            outln!(ShowPrint, "===============");
-                            outln!(ShowPrint,
-                                "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                                lines as f64 / seconds
-                            );
-                            outln!(ShowPrint, "===============");
+                            // outln!(ShowPrint, "===============");
+                            // outln!(ShowPrint,
+                            //     "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                            //     lines as f64 / seconds
+                            // );
+                            // outln!(ShowPrint, "===============");
                             let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
-                                    log_err(codemap, &comp, e, save);
+                                    log_err(&comp, e, save);
                                     return false;
                                 }
                                 Ok(result) => {
                                     let end = timestamp();
                                     let seconds = end - start;
-                                    outln!(ShowPrint, "===============");
-                                    outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
+                                    // outln!(ShowPrint, "===============");
+                                    // outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
                                     debug_assert_eq!(result, expect.into());
                                     // TODO: change this when i add assert(bool)
                                     let assertion_count = src.split("assert_eq(").count() - 1;
@@ -226,6 +197,47 @@ pub fn run_main<'a: 'p, 'p, Exec: Executor<'p>>(
     outln!(ShowPrint, "===============");
     log_dbg(&comp, save);
     true
+}
+
+fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
+    outln!(Bytecode, "{}", comp.executor.log(comp.pool));
+    if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
+        outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
+    }
+
+    println!("{}", get_logs(ShowPrint));
+    println!("{}", get_logs(ShowErr));
+    if let Some(path) = save {
+        let folder = &format!("target/latest_log/{path}");
+        fs::create_dir_all(folder).unwrap();
+        save_logs(folder);
+        println!("Wrote log to {folder:?}");
+    }
+    println!("===============================");
+}
+
+fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>) {
+    outln!(ShowPrint, "ERROR");
+    if let Some(loc) = e.loc {
+        let diagnostic = vec![Diagnostic {
+            level: Level::Error,
+            message: e.reason.log(interp.program, interp.pool),
+            code: None,
+            spans: vec![SpanLabel {
+                span: loc,
+                label: None,
+                style: SpanStyle::Primary,
+            }],
+        }];
+        emit_diagnostic(&interp.program.codemap, &diagnostic);
+    } else {
+        outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
+    }
+
+    outln!(ShowErr, "Internal: {}", e.internal_loc);
+    outln!(ShowErr, "{}", e.trace);
+    outln!(ShowErr, "{}", e.call_stack);
+    log_dbg(interp, save);
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {

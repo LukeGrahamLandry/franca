@@ -18,9 +18,9 @@ use std::mem::transmute;
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct SpOffset(usize);
 
-pub struct BcToAsm<'z, 'a, 'p> {
+pub struct BcToAsm<'z, 'p> {
     pub program: &'z mut Program<'p>,
-    pub interp: &'z mut Interp<'a, 'p>,
+    pub interp: &'z mut Interp<'p>,
     pub asm: Jitted,
     pub slots: Vec<Option<SpOffset>>,
     pub open_slots: Vec<(SpOffset, usize)>,
@@ -51,8 +51,8 @@ const sp: i64 = 31;
 // const W32: i64 = 0b0;
 const X64: i64 = 0b1;
 
-impl<'z, 'a, 'p> BcToAsm<'z, 'a, 'p> {
-    pub fn new(interp: &'z mut Interp<'a, 'p>, program: &'z mut Program<'p>) -> Self {
+impl<'z, 'p> BcToAsm<'z, 'p> {
+    pub fn new(interp: &'z mut Interp<'p>, program: &'z mut Program<'p>) -> Self {
         Self {
             program,
             interp,
@@ -527,6 +527,7 @@ mod tests {
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::experiments::tests::{jit_test, jit_test_aarch_only};
+    use crate::load_program;
     use crate::{
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
@@ -544,15 +545,9 @@ mod tests {
 
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
-        let mut codemap = CodeMap::new();
-        let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");{src}"));
-        let user_span = file.span;
-        let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
-        let mut global = make_toplevel(pool, garbage_loc(), stmts);
-        let vars = ResolveScope::of(&mut global, pool);
-        let mut program = Program::new(vars, pool, TargetArch::Interp, TargetArch::Aarch64);
-        let mut comp = Compile::new(pool, &mut program, Interp::new(pool));
-        comp.add_declarations(global, Flag::TopLevel.ident(), None)?;
+        let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
+        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
+        load_program(&mut comp, src)?;
         let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
         if let Err(e) = comp.compile(main, ExecTime::Runtime) {
             println!("{}", e.reason.log(comp.program, pool));
@@ -576,7 +571,8 @@ mod tests {
         //     }
         // }
 
-        let mut asm = BcToAsm::new(&mut comp.executor, &mut program);
+        let mut interp: Interp = comp.executor.to_interp().unwrap();
+        let mut asm = BcToAsm::new(&mut interp, &mut program);
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
 
