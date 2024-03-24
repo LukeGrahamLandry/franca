@@ -3,11 +3,13 @@ use std::{mem, ops::DerefMut};
 use codemap::Span;
 
 use crate::{
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
-    compiler::Compile,
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, ModuleBody, Name, Stmt, Var, VarInfo, VarType},
+    compiler::{Compile, Res},
+    err,
     logging::LogTag::Scope,
     outln,
     pool::{Ident, StringPool},
+    unwrap,
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {
@@ -19,6 +21,7 @@ pub struct ResolveScope<'z, 'a, 'p> {
     pool: &'p StringPool<'p>,
     exports: Vec<Var<'p>>,
     compiler: &'z mut Compile<'a, 'p>,
+    last_loc: Span,
 }
 
 impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
@@ -26,7 +29,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     //       then functions could be delt with here too.
     // TODO: will need to keep some state about this for macros that want to add vars?
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) {
+    pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, directives: Vec<(Ident<'p>, FatExpr<'p>)>) -> Res<'p, ()> {
         let mut resolver = ResolveScope {
             next_var: compiler.program.vars.len(),
             scopes: Default::default(),
@@ -36,14 +39,49 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             pool: compiler.pool,
             exports: vec![],
             compiler,
+            last_loc: stmts.loc,
         };
-
-        resolver.push_scope(true);
-        resolver.resolve_func(stmts);
-        let (_globals, outer_captures) = resolver.pop_scope();
-
+        if let Err(mut e) = resolver.run(stmts, directives) {
+            e.loc = e.loc.or(Some(resolver.last_loc));
+            return Err(e);
+        }
         assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
+        Ok(())
+    }
+
+    fn run(&mut self, stmts: &mut Func<'p>, directives: Vec<(Ident<'p>, FatExpr<'p>)>) -> Res<'p, ()> {
+        self.push_scope(true);
+        let current = unwrap!(stmts.module, "unknown module");
+        // Handle imports
+        for (i, arg) in directives {
+            self.last_loc = arg.loc;
+            let i = Flag::try_from(i)?;
+            match i {
+                Flag::Open => {
+                    let name = arg.parse_dot_chain()?;
+                    let module = self.compiler.resolve_module(current, &name)?;
+                    todo!()
+                }
+                Flag::Module => {
+                    let mut body = arg.as_func()?;
+                    let module = self.compiler.add_module(body.name, Some(current))?;
+                    body.module = Some(module);
+                    self.compiler.program[module].toplevel = ModuleBody::Parsed(body);
+                }
+                _ => err!("Unknown directive",),
+            }
+        }
+
+        self.push_scope(true);
+        self.resolve_func(stmts);
+        let (_globals, outer_captures) = self.pop_scope();
+        let (_imports, _import_captures) = self.pop_scope();
         assert!(outer_captures.unwrap().is_empty(), "unreachable?");
+        assert!(self.compiler.program[current].exports.is_empty());
+        for var in &self.exports {
+            self.compiler.program[current].exports.insert(var.0, *var);
+        }
+        Ok(())
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) {
@@ -82,6 +120,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
         let loc = stmt.loc;
+        self.last_loc = loc;
         let mut public = false;
         for a in &mut stmt.annotations {
             if let Some(args) = &mut a.args {
@@ -174,6 +213,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     // TODO: this could use walk_whatever()
     fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
         let loc = expr.loc;
+        self.last_loc = loc;
         match expr.deref_mut() {
             Expr::WipFunc(_) => unreachable!(),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {

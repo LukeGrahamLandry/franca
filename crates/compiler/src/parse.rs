@@ -26,6 +26,7 @@ pub struct Parser<'a, 'p> {
     spans: Vec<Span>,
     codemap: &'a mut CodeMap,
     lines: usize,
+    directives: Vec<(Ident<'p>, FatExpr<'p>)>,
 }
 
 type Res<T> = Result<T, ParseErr>;
@@ -33,11 +34,18 @@ type Res<T> = Result<T, ParseErr>;
 #[derive(Debug)]
 pub struct ParseErr {
     pub loc: &'static Location<'static>,
+    pub file: Arc<File>,
     pub diagnostic: Vec<Diagnostic>,
 }
 
+pub struct Parsed<'p> {
+    pub stmts: Vec<FatStmt<'p>>,
+    pub lines: usize,
+    pub directives: Vec<(Ident<'p>, FatExpr<'p>)>,
+}
+
 impl<'a, 'p> Parser<'a, 'p> {
-    pub fn parse(codemap: &'a mut CodeMap, file: Arc<File>, pool: &'p StringPool<'p>) -> Res<(Vec<FatStmt<'p>>, usize)> {
+    pub fn parse(codemap: &'a mut CodeMap, file: Arc<File>, pool: &'p StringPool<'p>) -> Res<Parsed<'p>> {
         outln!(
             Parsing,
             "\n######################################\n### START FILE: {} \n######################################\n",
@@ -51,6 +59,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             spans: vec![],
             codemap,
             lines: 0,
+            directives: vec![],
         };
 
         p.start_subexpr();
@@ -63,7 +72,11 @@ impl<'a, 'p> Parser<'a, 'p> {
         let lex = p.lexer.pop().unwrap();
         p.lines += lex.line - lex.comment_lines;
 
-        Ok((stmts, p.lines))
+        Ok(Parsed {
+            stmts,
+            lines: p.lines,
+            directives: p.directives,
+        })
     }
 
     fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
@@ -434,6 +447,13 @@ impl<'a, 'p> Parser<'a, 'p> {
                     return Err(self.expected("quoted path"));
                 }
             }
+            Directive(name) => {
+                self.pop();
+                let expr = self.parse_expr()?;
+                self.directives.push((name, expr));
+                self.eat(TokenType::Semicolon)?;
+                Stmt::Noop
+            }
             _ => {
                 let e = self.parse_expr()?;
                 let s = if self.maybe(Equals) {
@@ -646,7 +666,8 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn error_next(&mut self, message: String) -> ParseErr {
-        let token = self.lexer.last_mut().unwrap().next();
+        let lex = self.lexer.last_mut().unwrap();
+        let token = lex.next();
         let last = if self.spans.len() < 2 {
             *self.spans.last().unwrap()
         } else {
@@ -671,6 +692,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     },
                 ],
             }],
+            file: lex.src.clone(),
         }
     }
 

@@ -22,6 +22,7 @@ use crate::bc::*;
 use crate::ffi::InterpSend;
 use crate::interp::Interp;
 use crate::overloading::filter_arch;
+use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
@@ -151,15 +152,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         let _found = self.debug_trace.pop(); //.expect("state stack");
     }
 
-    pub fn add_declarations(&mut self, mut ast: Func<'p>, name: Ident<'p>, parent: Option<ModuleId>) -> Res<'p, FuncId> {
+    pub fn add_module(&mut self, name: Ident<'p>, parent: Option<ModuleId>) -> Res<'p, ModuleId> {
         let module = ModuleId(self.program.modules.len());
-        ast.module = Some(module);
-        let f = self.add_func(ast, &Constants::empty())?;
         self.program.modules.push(Module {
             name,
             id: module,
             parent,
-            toplevel: ModuleBody::Pending(f),
+            toplevel: ModuleBody::Resolving,
             exports: Default::default(),
             children: Default::default(),
             i_depend_on: Default::default(),
@@ -169,13 +168,22 @@ impl<'a, 'p> Compile<'a, 'p> {
             let prev = self.program.modules[parent.0].children.insert(name, module);
             assert!(prev.is_none(), "Shadowed module {}", self.pool.get(name));
         }
+        Ok(module)
+    }
+
+    pub fn compile_module(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
+        let module = unwrap!(ast.module, "You must ast.module = Some(compiler.add_module(name, parent))");
+        assert!(matches!(self.program[module].toplevel, ModuleBody::Resolving));
+        let f = self.add_func(ast, &Constants::empty())?;
+        self.program[module].toplevel = ModuleBody::Compiling(f);
         self.ensure_compiled(f, ExecTime::Comptime)?;
-        let exports = self.program[f].closed_constants.clone();
-        for var in exports.local.keys() {
-            let _prev = self.program.modules[module.0].exports.insert(var.0, *var);
-            // TODO
-            // assert!(prev.is_none(), "Shadowed export {} from {}", self.pool.get(var.0), self.pool.get(name));
-        }
+        self.program[module].toplevel = ModuleBody::Ready(f);
+        // let exports = self.program[f].closed_constants.clone();
+        // for var in exports.local.keys() {
+        //     let _prev = self.program.modules[module.0].exports.insert(var.0, *var);
+        //     // TODO
+        //     // assert!(prev.is_none(), "Shadowed export {} from {}", self.pool.get(var.0), self.pool.get(name));
+        // }
         Ok(f)
     }
 
@@ -2512,16 +2520,48 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
-    fn resolve_import(&mut self, _current: ModuleId, import_path: Vec<Ident<'_>>, _name: Ident<'_>) -> Res<'p, Values> {
+    fn resolve_import(&mut self, current: ModuleId, import_path: Vec<Ident<'p>>, name: Ident<'_>) -> Res<'p, Values> {
+        let module = self.resolve_module(current, &import_path)?;
+
+        let module_f = match self.program[module].toplevel {
+            ModuleBody::Ready(f) => f,
+            ModuleBody::Compiling(_) | ModuleBody::Resolving => err!("Module {} is not ready yet. Circular dependency?", module.0),
+            ModuleBody::Parsed(_) => {
+                let body = mem::replace(&mut self.program[module].toplevel, ModuleBody::Resolving);
+                let mut body = if let ModuleBody::Parsed(f) = body { f } else { unreachable!() };
+                ResolveScope::of(&mut body, self, vec![])?; // TODO: nested directives
+                let f = self.compile_module(body)?;
+                f
+            }
+            ModuleBody::Src(_) => unreachable!(),
+        };
+        if let Some(var) = self.program[module].exports.get(&name) {
+            let value = unwrap!(self.program[module_f].closed_constants.get(*var), "missing export");
+            Ok(value.0) // TODO: include type
+        } else {
+            err!("Module {} does not export {}", module.0, self.pool.get(name))
+        }
+    }
+
+    pub fn resolve_module(&mut self, current: ModuleId, mut import_path: &[Ident<'p>]) -> Res<'p, ModuleId> {
         let mut module = ModuleId(0);
-        for path in &import_path {
-            if let Some(found) = self.program.modules[module.0].children.get(path) {
+        if import_path[0] == Flag::This.ident() {
+            module = current;
+            import_path = &import_path[1..];
+        } else if import_path[0] == Flag::Super.ident() {
+            module = unwrap!(self.program[current].parent, "tried to refer to parent of root module");
+            import_path = &import_path[1..];
+        };
+
+        for path in import_path {
+            if let Some(found) = self.program[module].children.get(path) {
                 module = *found
             } else {
-                todo!()
+                err!("Module not found {}", self.pool.get(*path))
             }
         }
-        todo!()
+
+        Ok(module)
     }
 }
 

@@ -50,7 +50,7 @@ pub mod pool;
 pub mod scope;
 
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
+    ast::{garbage_loc, Expr, FatExpr, FatStmt, Flag, Func, ModuleId, Program, TargetArch, TypeId},
     compiler::{Compile, CompileError, ExecTime, Executor},
     interp::Interp,
     logging::{
@@ -95,14 +95,16 @@ test_file!(macros);
 test_file!(aarch64_jit);
 test_file!(backpassing);
 test_file!(dispatch);
+test_file!(modules);
 
 pub fn load_program<'a, 'p>(comp: &mut Compile<'a, 'p>, src: &str) -> Res<'p, FuncId> {
-    let mut codemap = CodeMap::new();
-
     // TODO: this will get less dumb when I have first class modules.
-    let file = codemap.add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+    let file = comp
+        .program
+        .codemap
+        .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
     let user_span = file.span;
-    let (stmts, lines) = match Parser::parse(&mut codemap, file.clone(), comp.pool) {
+    let parsed = match Parser::parse(&mut comp.program.codemap, file.clone(), comp.pool) {
         Ok(s) => s,
         Err(e) => {
             return Err(CompileError {
@@ -116,9 +118,11 @@ pub fn load_program<'a, 'p>(comp: &mut Compile<'a, 'p>, src: &str) -> Res<'p, Fu
         }
     };
 
-    let mut global = make_toplevel(comp.pool, user_span, stmts);
-    ResolveScope::of(&mut global, comp);
-    comp.add_declarations(global, Flag::TopLevel.ident(), None)
+    let mut global = make_toplevel(comp.pool, user_span, parsed.stmts);
+    let current = comp.add_module(Flag::TopLevel.ident(), None)?;
+    global.module = Some(current);
+    ResolveScope::of(&mut global, comp, parsed.directives)?;
+    comp.compile_module(global)
 }
 
 pub fn run_main<'a: 'p, 'p>(
@@ -218,7 +222,9 @@ fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
 
 fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>) {
     outln!(ShowPrint, "ERROR");
-    if let Some(loc) = e.loc {
+    if let CErr::Diagnostic(diagnostic) = &e.reason {
+        emit_diagnostic(&interp.program.codemap, diagnostic);
+    } else if let Some(loc) = e.loc {
         let diagnostic = vec![Diagnostic {
             level: Level::Error,
             message: e.reason.log(interp.program, interp.pool),
@@ -241,6 +247,9 @@ fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
+    for d in diagnostic {
+        println!("{}", d.message);
+    }
     if cfg!(target_arch = "wasm32") {
         let mut out = vec![];
         let mut emitter = Emitter::vec(&mut out, Some(codemap));

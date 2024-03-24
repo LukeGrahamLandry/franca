@@ -482,7 +482,7 @@ fn interp_send_libs_ast() {
 
     let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"core.fr\");".to_string());
 
-    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().0;
+    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().stmts;
     for s in stmts {
         let prev = format!("{s:?}");
         let value = s.serialize_one();

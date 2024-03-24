@@ -57,6 +57,7 @@ pub enum TokenType<'p> {
     BinaryNum { bit_count: u8, value: u128 },
     LeftArrow,
     IncludeStd,
+    Directive(Ident<'p>),
     Error(LexErr),
 }
 
@@ -75,13 +76,13 @@ pub enum LexErr {
 pub struct Lexer<'a, 'p> {
     pool: &'p StringPool<'p>,
     root: Span,
-    src: Arc<File>,
+    pub src: Arc<File>,
     start: usize,
     current: usize,
     chars: Peekable<Chars<'a>>,
     peeked: VecDeque<Token<'p>>,
     pub(crate) line: usize,
-    pub(crate) comment_lines: usize
+    pub(crate) comment_lines: usize,
 }
 
 impl<'a, 'p> Lexer<'a, 'p> {
@@ -116,13 +117,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         self.start = self.current;
         match self.peek_c() {
             '\0' => self.one(TokenType::Eof),
-            '#' => {
-                let name = self.lex_ident();
-                if name.kind != TokenType::IncludeStd {
-                    return self.err(LexErr::Unexpected('#'));
-                }
-                name
-            }
+            '#' => self.lex_ident(),
             '"' | '“' | '”' | '\'' => self.lex_quoted(),
             '0' => {
                 self.pop();
@@ -236,6 +231,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
 
     fn lex_ident(&mut self) -> Token<'p> {
         let mut c = self.peek_c();
+        let is_directive = c == '#';
         // TODO: only sometimes allow #
         while c.is_ascii_alphanumeric() || c == '_' || c == '#' {
             self.pop();
@@ -248,7 +244,13 @@ impl<'a, 'p> Lexer<'a, 'p> {
             "var" => Qualifier(VarType::Var),
             "const" => Qualifier(VarType::Const),
             "#include_std" => IncludeStd,
-            text => Symbol(self.pool.intern(text)),
+            text => {
+                if is_directive {
+                    Directive(self.pool.intern(&text[1..]))
+                } else {
+                    Symbol(self.pool.intern(text))
+                }
+            }
         };
         self.token(ty, self.start, self.current)
     }
@@ -279,7 +281,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                     '\n' => {
                         self.line += 1;
                         self.comment_lines += 1;
-                        break
+                        break;
                     }
                     _ => {}
                 }

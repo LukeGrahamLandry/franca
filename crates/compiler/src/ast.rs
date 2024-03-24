@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
-    compiler::{CErr, FnWip, Res},
+    compiler::{CErr, CompileError, FnWip, Res},
     err,
     experiments::reflect::{Reflect, RsType},
     ffi::{init_interp_send, InterpSend},
@@ -516,6 +516,13 @@ impl<'p> FatExpr<'p> {
             _ => err!("expected a.b.c.d.e",),
         }
     }
+
+    pub fn as_func(self) -> Res<'p, Func<'p>> {
+        match self.expr {
+            Expr::Closure(f) => Ok(*f),
+            _ => err!("expected function expression",),
+        }
+    }
 }
 
 impl PartialEq for FatExpr<'_> {
@@ -776,10 +783,11 @@ pub struct Module<'p> {
     pub depend_on_me: Vec<ModuleId>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ModuleBody<'p> {
     Ready(FuncId),
-    Pending(FuncId),
+    Compiling(FuncId),
+    Resolving,
     Parsed(Func<'p>),
     Src(String),
 }
@@ -1616,11 +1624,14 @@ pub enum Flag {
     Include_Std,
     Alloc,
     Pub,
+    Open,
+    This,
+    Super,
     _Reserved_Count_,
 }
 
 impl<'p> TryFrom<Ident<'p>> for Flag {
-    type Error = ();
+    type Error = CompileError<'p>;
 
     fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
         // # Safety
@@ -1629,7 +1640,7 @@ impl<'p> TryFrom<Ident<'p>> for Flag {
         if value.0 > Flag::_Reserved_Null_ as usize && value.0 < Flag::_Reserved_Count_ as usize {
             Ok(unsafe { transmute(value.0 as u8) })
         } else {
-            Err(())
+            err!("Unknown Ident",)
         }
     }
 }
