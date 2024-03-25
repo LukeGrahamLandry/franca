@@ -1644,6 +1644,7 @@ pub enum Flag {
     Open,
     This,
     Super,
+    Unreachable,
     _Reserved_Count_,
 }
 

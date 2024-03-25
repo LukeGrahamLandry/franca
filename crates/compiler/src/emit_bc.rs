@@ -485,6 +485,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             unreachable!()
                         }
                     }
+                    Flag::Unreachable => {
+                        result.push(Bc::Unreachable);
+                        Structured::RuntimeOnly(TypeId::never())
+                    }
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
@@ -572,13 +576,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let branch_ip = result.push(Bc::DebugMarker(Flag::Patch.ident(), Flag::Builtin_If.ident()));
         let true_ip = result.insts.len();
         let true_ret = self.compile_expr(result, if_true)?;
-        let true_ret = result.load(self, true_ret)?.0;
-        result.push(Bc::MoveRange { from: true_ret, to: ret });
+        if !true_ret.ty().is_never() {
+            let true_ret = result.load(self, true_ret)?.0;
+            result.push(Bc::MoveRange { from: true_ret, to: ret });
+        }
         let jump_over_false = result.push(Bc::DebugMarker(Flag::Patch.ident(), Flag::Builtin_If.ident()));
         let false_ip = result.insts.len();
         let false_ret = self.compile_expr(result, if_false)?;
-        let false_ret = result.load(self, false_ret)?.0;
-        result.push(Bc::MoveRange { from: false_ret, to: ret });
+        if !false_ret.ty().is_never() {
+            let false_ret = result.load(self, false_ret)?.0;
+            result.push(Bc::MoveRange { from: false_ret, to: ret });
+        }
 
         result.insts[branch_ip] = Bc::JumpIf {
             // TODO: change to conditional so dont have to store the true_ip
@@ -947,7 +955,7 @@ impl<'p> FnBody<'p> {
                 let slots = self.create_tuple_slots(program, expected, slots)?;
                 (slots, expected)
             }
-            Structured::RuntimeOnly(_) => unreachable!(),
+            Structured::RuntimeOnly(_) => unreachable!("Tried to load Structured::runtimeonly which should only exist in compiler"),
         };
         // TODO: another typecheck?
         Ok((slot, expected))

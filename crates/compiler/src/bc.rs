@@ -96,6 +96,7 @@ pub enum Bc<'p> {
     },
     LastUse(StackRange),
     NoCompile,
+    Unreachable,
 }
 
 #[derive(Clone)]
@@ -362,6 +363,14 @@ impl Value {
 
     pub fn to_overloads(&self) -> Option<usize> {
         if let &Value::OverloadSet(f) = self {
+            Some(f)
+        } else {
+            None
+        }
+    }
+
+    pub fn to_bool(&self) -> Option<bool> {
+        if let &Value::Bool(f) = self {
             Some(f)
         } else {
             None

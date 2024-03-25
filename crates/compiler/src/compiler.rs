@@ -1988,6 +1988,31 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
+
+            // If its constant, don't even bother emitting the other branch
+            // TODO: option to toggle this off for testing.
+            if let Structured::Const(_, val) = cond {
+                let cond = val.single()?.to_bool().unwrap();
+                let cond_index = if cond { 1 } else { 2 };
+                let other_index = if cond { 2 } else { 1 };
+                if let Expr::Closure(_) = parts[cond_index].deref_mut() {
+                    let branch_body = self.promote_closure(result, &mut parts[cond_index])?;
+                    self.program[branch_body].add_tag(Flag::Inline);
+                    let branch_arg = self.infer_arg(branch_body)?;
+                    self.type_check_arg(branch_arg, unit, sig)?;
+                    let ty = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index])?;
+                    self.finish_closure(&mut parts[cond_index]);
+                    // TODO: fully dont emit the branch
+                    let unit = FatExpr::synthetic(Expr::unit(), garbage_loc());
+                    parts[other_index].expr = Expr::SuffixMacro(Flag::Unreachable.ident(), Box::new(unit));
+                    parts[other_index].ty = TypeId::never();
+                    // TODO: stay const if body is const?
+                    return Ok(Structured::RuntimeOnly(ty));
+                } else {
+                    ice!("!if arg must be func not {:?}", parts[cond_index]);
+                };
+            }
+
             let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
                 let if_true = self.promote_closure(result, &mut parts[1])?;
                 self.program[if_true].add_tag(Flag::Inline);
@@ -2009,7 +2034,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             self.finish_closure(&mut parts[1]);
             self.finish_closure(&mut parts[2]);
-            // TODO: if the condition is const, don't emit the branch.
             Ok(Structured::RuntimeOnly(true_ty))
         } else {
             ice!("if args must be tuple not {:?}", arg);

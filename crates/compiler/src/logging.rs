@@ -659,6 +659,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
         let mut f = String::new();
         match self {
             Bc::NoCompile => write!(f, "UNREACHABLE_BODY"),
+            Bc::Unreachable => write!(f, "UNREACHABLE_CODE"),
             Bc::CallDynamic { f: func_slot, ret, arg } | Bc::CallC { f: func_slot, ret, arg, .. } => {
                 write!(f, "{ret:?} = call_c({func_slot:?}, {arg:?});")
             }

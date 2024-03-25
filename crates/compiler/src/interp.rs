@@ -125,6 +125,7 @@ impl<'p> Interp<'p> {
                     self.bump_ip();
                 }
                 Bc::NoCompile => err!("Ran empty function",),
+                Bc::Unreachable => err!("Entered unreachable code",),
                 &Bc::CallDirect { f, ret, arg } => {
                     // preincrement our ip because ret doesn't do it.
                     // this would be different if i was trying to do tail calls?

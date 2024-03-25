@@ -343,6 +343,9 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                 let inst = &(func.insts[i].clone());
                 match inst {
                     Bc::NoCompile => unreachable!(),
+                    Bc::Unreachable => {
+                        LLVMBuildUnreachable(self.llvm.builder);
+                    }
                     Bc::CallDynamic { .. } => todo!(),
                     &Bc::CallDirect { f, ret, arg } => {
                         let ty = self.program.func_type(f);

@@ -340,6 +340,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.dyn_c_call(x16, *arg, *ret, *ty, *comp_ctx);
                     self.release_one(*f);
                 }
+                Bc::Unreachable => {
+                    self.asm.push(brk(123));
+                }
             }
         }
         for (inst, false_ip) in patch_cbz {
