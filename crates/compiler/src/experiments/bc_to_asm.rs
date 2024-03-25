@@ -210,7 +210,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         self.set_slot(x0, *slot);
                     }
                     // These only make sense during comptime execution, but they're also really just numbers.
-                    Value::OverloadSet(i) | Value::GetFn(FuncId(i)) | Value::Type(TypeId(i)) | Value::Symbol(i) => {
+                    Value::OverloadSet(i) | Value::GetFn(FuncId(i)) => {
+                        self.load_imm(x0, *i as u64);
+                        self.set_slot(x0, *slot);
+                    }
+                    Value::Symbol(i) | Value::Type(TypeId(i)) => {
                         self.load_imm(x0, *i as u64);
                         self.set_slot(x0, *slot);
                     }
@@ -650,7 +654,8 @@ impl ConstBytes {
             Value::F64(_) => todo!(),
             &Value::I64(i) => out.push(i),
             &Value::Bool(i) => out.push(i as i64),
-            &Value::OverloadSet(i) | &Value::Symbol(i) | &Value::Type(TypeId(i)) | &Value::GetFn(FuncId(i)) => out.push(i as i64),
+            &Value::OverloadSet(i) | &Value::GetFn(FuncId(i)) => out.push(i as i64),
+            &Value::Symbol(i) | &Value::Type(TypeId(i)) => out.push(i as i64),
             Value::Unit => out.push(0), // TODO
             Value::Poison | Value::InterpAbsStackAddr(_) => unreachable!(),
             Value::GetNativeFnPtr(_) => todo!(),

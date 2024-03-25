@@ -5,6 +5,7 @@ macro_rules! jit_test {
             ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
                 #[test]
                 fn $name() {
+                    $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
                     $test_func(stringify!($name), $src, |f| {
                         let ret: i64 = f($arg);
                         assert_eq!(ret, $ret);
@@ -80,6 +81,7 @@ macro_rules! jit_test {
 
         #[test]
         fn use_ptr() {
+            $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
             $test_func(
                 "use_ptr",
                 r#"@c_call fn main(a: Ptr(i64), b: Ptr(i64)) i64 = {
@@ -100,10 +102,11 @@ macro_rules! jit_test {
 
         #[test]
         fn ffi_ptr() {
+            $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
             $test_func(
                 "ffi_ptr",
                 r#"@c_call fn main(a: Ptr(SuperSimple)) i64 = {
-                        let c = sub(a.b[], a.a[]);
+                        let c: i64 = sub(a.b[], a.a[]);
                         a.a[] = 1;
                         a.b[] = 2;
                         c
@@ -129,6 +132,7 @@ macro_rules! jit_test_aarch_only {
             ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
                 #[test]
                 fn $name() {
+                    $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
                     $test_func(stringify!($name), $src, |f| {
                         let ret: i64 = f($arg);
                         assert_eq!(ret, $ret);
@@ -206,5 +210,36 @@ macro_rules! jit_test_aarch_only {
     };
 }
 
+#[macro_export]
+macro_rules! jit_test_llvm_only {
+    ($test_func:ident) => {
+        macro_rules! simple {
+            ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
+                #[test]
+                fn $name() {
+                    $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
+                    $test_func(stringify!($name), $src, |f| {
+                        let ret: i64 = f($arg);
+                        assert_eq!(ret, $ret);
+                    })
+                    .unwrap();
+                }
+            };
+        }
+
+        simple!(
+            add_floats,
+            3,
+            3,
+            r#"
+            @c_call fn main(n: i64) i64 = {
+                let a: f64 = add(1.0, 2.5);
+                n
+            }"#
+        );
+    };
+}
+
 pub use jit_test;
 pub(crate) use jit_test_aarch_only;
+pub use jit_test_llvm_only;

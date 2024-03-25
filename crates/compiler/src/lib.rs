@@ -13,7 +13,7 @@
 #![feature(try_trait_v2_yeet)]
 extern crate core;
 
-use std::fs;
+use std::{fs, sync::atomic::Ordering};
 
 use ast::FuncId;
 use bc::Value;
@@ -50,9 +50,8 @@ pub mod pool;
 pub mod scope;
 
 use crate::{
-    ast::{garbage_loc, Expr, FatExpr, FatStmt, Flag, Func, ModuleId, Program, TargetArch, TypeId},
+    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId, EXPR_COUNT},
     compiler::{Compile, CompileError, ExecTime, Executor},
-    interp::Interp,
     logging::{
         get_logs, log_tag_info, save_logs,
         LogTag::{ShowErr, *},
@@ -97,7 +96,7 @@ test_file!(backpassing);
 test_file!(dispatch);
 test_file!(modules);
 
-pub fn load_program<'a, 'p>(comp: &mut Compile<'a, 'p>, src: &str) -> Res<'p, FuncId> {
+pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId> {
     // TODO: this will get less dumb when I have first class modules.
     let file = comp
         .program
@@ -134,7 +133,7 @@ pub fn run_main<'a: 'p, 'p>(
     executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
 ) -> bool {
     log_tag_info();
-    let start = timestamp();
+    // let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, executor);
     let result = load_program(&mut comp, &src);
@@ -160,23 +159,23 @@ pub fn run_main<'a: 'p, 'p>(
                             return false;
                         }
                         Ok(_) => {
-                            let end = timestamp();
-                            let seconds = end - start;
+                            // let end = timestamp();
+                            // let seconds = end - start;
                             // outln!(ShowPrint, "===============");
                             // outln!(ShowPrint,
                             //     "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
                             //     lines as f64 / seconds
                             // );
                             // outln!(ShowPrint, "===============");
-                            let start = timestamp();
+                            // let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
                                     log_err(&comp, e, save);
                                     return false;
                                 }
                                 Ok(result) => {
-                                    let end = timestamp();
-                                    let seconds = end - start;
+                                    // let end = timestamp();
+                                    // let seconds = end - start;
                                     // outln!(ShowPrint, "===============");
                                     // outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
                                     debug_assert_eq!(result, expect.into());
@@ -200,6 +199,7 @@ pub fn run_main<'a: 'p, 'p>(
 
     outln!(ShowPrint, "===============");
     log_dbg(&comp, save);
+    println!("Created {} AST nodes.", EXPR_COUNT.load(Ordering::Acquire));
     true
 }
 
@@ -379,7 +379,7 @@ macro_rules! impl_index_imm {
             type Output = $elem;
 
             fn index(&self, index: $idx) -> &Self::Output {
-                &self.$field[index.0]
+                &self.$field[index.0 as usize]
             }
         }
     };

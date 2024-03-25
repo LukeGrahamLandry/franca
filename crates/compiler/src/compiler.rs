@@ -79,7 +79,7 @@ pub struct Compile<'a, 'p> {
     pub save_bootstrap: Vec<FuncId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum DebugState<'p> {
     Compile(FuncId),
     EnsureCompiled(FuncId, ExecTime),
@@ -785,7 +785,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.intern_type(ty);
-                    assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
+                    assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
                     func.ret = LazyType::Finished(ty);
                     func.finished_ret = Some(ty);
                     if let Some(name) = func.var_name {
@@ -815,7 +815,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(result, &mut func.arg)?;
                     let ty = self.program.to_enum(ty);
-                    assert_eq!(func.ret, LazyType::Infer, "remove type annotation on struct initilizer");
+                    assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
                     func.ret = LazyType::Finished(ty);
                     func.finished_ret = Some(ty);
                     if let Some(name) = func.var_name {
@@ -1317,7 +1317,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Note: we expand target to an anonamus struct literal, not a type.
                         for b in &mut pattern.bindings {
                             assert!(b.default.is_some());
-                            assert_eq!(b.lazy(), &LazyType::Infer);
+                            assert!(matches!(b.lazy(), LazyType::Infer));
                             b.ty = LazyType::PendingEval(unwrap!(b.default.take(), ""));
                             the_type.bindings.push(Binding {
                                 name: b.name,
@@ -1439,7 +1439,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // assert_eq!(self.program.slot_count(ty), value.len());
                 if ty == TypeId::ty() {
                     if let Ok(id) = value.clone().single()?.to_int() {
-                        value = Values::One(Value::Type(TypeId(id as usize)))
+                        value = Values::One(Value::Type(TypeId(id as u32)))
                     }
                 }
                 let result = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());

@@ -1,4 +1,4 @@
-use codemap::{CodeMap, Span};
+use codemap::Span;
 use std::collections::HashMap;
 use std::ops::Deref;
 
@@ -7,17 +7,15 @@ use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
-use crate::parse::Parser;
 use crate::pool::StringPool;
-use crate::scope::ResolveScope;
-use crate::{bc::*, load_program, make_toplevel};
+use crate::{bc::*, load_program};
 use crate::{err, unwrap};
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
-    let result = load_program(&mut comp, "");
+    load_program(&mut comp, "").unwrap();
 
     let (rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
 
@@ -226,13 +224,17 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             }
             Stmt::DeclVarPattern { binding, value } => {
                 // Args of inlined function.
-                if binding.bindings.len() == 1
-                    && binding.bindings[0].name == Name::None
-                    && binding.bindings[0].ty == LazyType::Finished(TypeId::unit())
-                {
-                    // Probably an if branch. But it could be a call with side-effects so should emit it anyway.
-                    let value = value.as_ref().map(|value| self.compile_expr(value)).unwrap_or(Ok(String::new()));
-                    format!("{};", value?)
+                if binding.bindings.len() == 1 && binding.bindings[0].name == Name::None {
+                    if let LazyType::Finished(ty) = binding.bindings[0].ty {
+                        if !ty.is_unit() {
+                            todo!()
+                        }
+                        // Probably an if branch. But it could be a call with side-effects so should emit it anyway.
+                        let value = value.as_ref().map(|value| self.compile_expr(value)).unwrap_or(Ok(String::new()));
+                        format!("{};", value?)
+                    } else {
+                        todo!()
+                    }
                 } else {
                     todo!()
                 }

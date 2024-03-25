@@ -46,9 +46,9 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
+    ("fn assert_eq(_: Type, __: Type) Unit", assert_equ32 as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
+    ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_equ32 as *const u8), // TODO: subtyping
     ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
 ];
 
@@ -126,6 +126,11 @@ pub extern "C" fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_val
 // Supports bool, i64, and Type which all have the same repr.
 // TODO: track call site
 pub extern "C" fn assert_eq(program: &mut Program, a: i64, b: i64) {
+    hope(|| Ok(assert_eq!(a, b)));
+    program.assertion_count += 1;
+}
+
+pub extern "C" fn assert_equ32(program: &mut Program, a: u32, b: u32) {
     hope(|| Ok(assert_eq!(a, b)));
     program.assertion_count += 1;
 }

@@ -23,6 +23,7 @@ pub struct Token<'p> {
 pub enum TokenType<'p> {
     Symbol(Ident<'p>),
     Number(i64),
+    Float(f64),
     Quoted(Ident<'p>),
     DotLeftSquiggle,
     LeftSquiggle,
@@ -212,18 +213,31 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     fn lex_num(&mut self) -> Token<'p> {
+        let mut is_float = false;
         loop {
             let done = match self.peek_c() {
                 '\0' => true,
-                c => !c.is_numeric() && c != '.',
+                '.' => {
+                    is_float = true;
+                    false
+                }
+                c => !c.is_numeric(),
             };
             if done {
                 let text = &self.src.source()[self.start..self.current];
-                let n = match text.parse::<i64>() {
-                    Ok(n) => n,
-                    Err(_) => return self.err(LexErr::NumParseErr),
-                };
-                return self.token(Number(n), self.start, self.current);
+                if is_float {
+                    let n = match text.parse::<f64>() {
+                        Ok(n) => n,
+                        Err(_) => return self.err(LexErr::NumParseErr),
+                    };
+                    return self.token(Float(n), self.start, self.current);
+                } else {
+                    let n = match text.parse::<i64>() {
+                        Ok(n) => n,
+                        Err(_) => return self.err(LexErr::NumParseErr),
+                    };
+                    return self.token(Number(n), self.start, self.current);
+                }
             }
             self.pop();
         }

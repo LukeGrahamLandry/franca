@@ -1,3 +1,31 @@
+## Feature Ideas
+
+- fold infinite loops so it knows when you dont need a return at the end of the function to typecheck
+- mix named and positional args
+- default arg values (any const expr and inject at callsite? or based on other args so generate shims)
+- anon structs for named return values. maybe commit to no !struct but what if you want an enum maybe its better to have no blessed default case
+- maybe anon struct literals with inferred type should be fine.
+- !defer
+- Box(T) and box(t) for quick allocations
+- fix impl generics now that public vars work
+- give macros access to type info for auto debug printing
+- const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
+  safety(Bounds, fn() = lt(i, len(self));
+- deref for constants,
+- inferred container type for constants. so fn a(b: @enum(A, B)); can be called like a(.A);
+- enum bitset
+- c style flags: fn Enum(Arr(Symbol)) Type; so Enum(A, B, C) === @enum(i64) (A = 0, B = 1, C = 2). could be macro so don't have to deal with passing symbols.
+- quick union types: fn Enum(Arr(Type)) Type; so Enum(A, B, C) === (A: A, B: B, C: C)!enum;
+- user defined operators so you can pick what meaning of &T makes sense for you (per module)
+- some sort of prefix call syntax because brackets are annoying.
+  - maybe Rc(RefCell(T)) === Rc$ RefCell$ T
+  - tho I do already have T.RefCell().Rc() but that seems backwards from how I want to think about it but I'm not sure why.
+    "an Rc containing a RefCell containing a T" vs "a T in a RefCell in an Rc"
+    Ptr$T "a pointer to a T" vs T.Ptr() "a T that is behind a pointer"
+  - Rc$ T.RefCell() === Rc(RefCell(T))
+- function that take a slice of args called like variadic functions.
+- field auto ref/deref for primitive types?
+
 ## Sema
 
 - remove the need for forward declarations

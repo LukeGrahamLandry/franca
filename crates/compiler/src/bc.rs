@@ -149,7 +149,7 @@ pub enum Value {
         physical_first: usize,
         physical_count: usize,
     },
-    Symbol(usize), // TODO: this is an Ident<'p> but i really dont want the lifetime
+    Symbol(u32), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(usize),
     /// TODO: Different from GetFn because this must be compiled and produces a real native function pointer that can be passed to ffi code.
     GetNativeFnPtr(FuncId),

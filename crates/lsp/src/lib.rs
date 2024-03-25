@@ -167,7 +167,7 @@ impl<'p> Lsp<'p> {
                 TokenType::BinaryNum { .. } | TokenType::Number(_) => 0,
                 TokenType::Quoted(_) => 1,
                 TokenType::Symbol(i) => {
-                    if i.0 < Flag::_Reserved_Count_ as usize {
+                    if i.0 < Flag::_Reserved_Count_ as u32 {
                         3
                     } else {
                         2

@@ -829,8 +829,8 @@ impl SizeCache {
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub fn slot_count(&mut self, program: &Program, ty: TypeId) -> usize {
-        extend_options(&mut self.known, ty.0);
-        if let Some(size) = self.known[ty.0] {
+        extend_options(&mut self.known, ty.0 as usize);
+        if let Some(size) = self.known[ty.0 as usize] {
             return size;
         }
         let ty = program.raw_type(ty);
@@ -853,7 +853,7 @@ impl SizeCache {
             | TypeInfo::Unit => 1,
             TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };
-        self.known[ty.0] = Some(size);
+        self.known[ty.0 as usize] = Some(size);
         size
     }
 }

@@ -510,10 +510,11 @@ pub mod c {
 
     impl<'p> Program<'p> {
         pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
-            Ok(match &self.types[ty.0] {
+            Ok(match &self[ty] {
                 TypeInfo::F64 => CTy::f64(),
-                TypeInfo::Type | TypeInfo::Int(_) => CTy::i64(), // TODO: actually different int types
-                TypeInfo::Bool => CTy::c_uchar(),                // Not a whole word!
+                TypeInfo::Type => CTy::u32(),
+                TypeInfo::Int(_) => CTy::i64(),   // TODO: actually different int types
+                TypeInfo::Bool => CTy::c_uchar(), // Not a whole word!
                 TypeInfo::Tuple(_) => {
                     todo!()
                 }
@@ -575,7 +576,7 @@ pub mod c {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
         } else if f_ty.ret == TypeId::ty() {
-            let result: usize = unsafe { b.into_cif().call(ptr, &args) };
+            let result: u32 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Type(TypeId(result)).into()
         } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
@@ -586,7 +587,7 @@ pub mod c {
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Bool(result != 0).into()
         } else if f_ty.ret == sym {
-            let result: usize = unsafe { b.into_cif().call(ptr, &args) };
+            let result: u32 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Symbol(result).into()
         } else if f_ty.ret.is_never() {
             let _: () = unsafe { b.into_cif().call(ptr, &args) };

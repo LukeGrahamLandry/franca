@@ -1,17 +1,16 @@
 //! Convert a stream of tokens into ASTs.
-use std::ops::{FromResidual, Yeet};
+use std::sync::atomic::Ordering;
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{CodeMap, File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType};
+use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType, EXPR_COUNT};
 use crate::bc::Values;
-use crate::compiler::CompileError;
 use crate::export_ffi::get_include_std;
 use crate::outln;
 use crate::{
-    ast::{Annotation, Expr, FatExpr, FatStmt, Func, Known, LazyType, Pattern, Stmt},
+    ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
     bc::Value,
     lex::{Lexer, Token, TokenType},
     logging::{LogTag::Parsing, PoolLog},
@@ -152,6 +151,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                 Ok(self.expr(Expr::Value {
                     ty: TypeId::i64(),
                     value: Value::I64(f).into(),
+                }))
+            }
+            Float(f) => {
+                self.start_subexpr();
+                self.pop();
+                Ok(self.expr(Expr::Value {
+                    ty: TypeId::f64(),
+                    value: Value::F64(f.to_bits()).into(),
                 }))
             }
             BinaryNum { bit_count, value } => {
@@ -638,12 +645,11 @@ impl<'a, 'p> Parser<'a, 'p> {
             expr.log(self.pool)
         );
         self.expr_id += 1;
+        EXPR_COUNT.fetch_add(1, Ordering::AcqRel);
         FatExpr {
             expr,
             loc: self.end_subexpr(),
-            id: self.expr_id,
             ty: TypeId::unknown(),
-            known: Known::Maybe,
         }
     }
 

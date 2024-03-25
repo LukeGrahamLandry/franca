@@ -3,11 +3,11 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, mem
 use crate::{ast::Flag, bc::Value, ffi::InterpSend};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Ident<'pool>(pub usize, pub PhantomData<&'pool str>);
+pub struct Ident<'pool>(pub u32, pub PhantomData<&'pool str>);
 
 impl Flag {
     pub const fn ident<'p>(self) -> Ident<'p> {
-        Ident(self as usize, PhantomData)
+        Ident(self as u32, PhantomData)
     }
 }
 
@@ -40,12 +40,12 @@ impl<'pool> StringPool<'pool> {
         let v = self.values.read().unwrap();
         // # Safety
         // Strings are not removed from the pool until its dropped.
-        unsafe { &*(v.get(i.0).expect("Valid Ident").0) }
+        unsafe { &*(v.get(i.0 as usize).expect("Valid Ident").0) }
     }
 
     pub fn upcast(&self, i: i64) -> Option<Ident<'pool>> {
         if i > 0 && (i as usize) < self.values.read().unwrap().len() {
-            Some(Ident(i as usize, PhantomData))
+            Some(Ident(i as u32, PhantomData))
         } else {
             None
         }
@@ -68,7 +68,7 @@ impl<'pool> StringPool<'pool> {
 
         // Delay taking this lock as long as possible to not block calls to get().
         let mut values = self.values.write().unwrap();
-        let i = Ident(values.len(), PhantomData);
+        let i = Ident(values.len() as u32, PhantomData);
         values.push(alloc);
         lookup.insert(alloc, i);
         i
@@ -101,7 +101,7 @@ impl<'p> Default for StringPool<'p> {
             debug_assert!(!name.contains("::") && !name.contains("Flag") && !name.contains('{')); // TODO: debug formating is unspecified but happens to be what I want
             name.make_ascii_lowercase();
             let name = this.intern(&name);
-            assert_eq!(i, name.0);
+            assert_eq!(i as u32, name.0);
         }
         this
     }
@@ -171,13 +171,13 @@ impl<'p> InterpSend<'p> for Ident<'p> {
                 if i < 0 {
                     return None;
                 }
-                i as usize
+                i as u32
             }
             Value::Symbol(i) => i,
             _ => return None,
         };
 
-        Some(Ident(i, PhantomData))
+        Some(Ident(i as u32, PhantomData))
     }
 
     fn size() -> usize {

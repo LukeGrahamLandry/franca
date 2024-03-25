@@ -217,7 +217,7 @@ use crate::ast::safe_rec;
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
         safe_rec!(self, t, format!("{t:?}"), {
-            match &self.types[t.0] {
+            match &self[t] {
                 TypeInfo::Unknown => "Unknown".to_owned(),
                 TypeInfo::Any => "Any".to_owned(),
                 TypeInfo::Never => "Never".to_owned(),
@@ -268,7 +268,7 @@ impl<'p> Program<'p> {
         let mut s = String::new();
         writeln!(s, "=== {} CACHED TYPES ===", self.types.len());
         for (i, ty) in self.types.iter().enumerate() {
-            writeln!(s, "- {:?} = {} = {:?};", TypeId(i), self.log_type(TypeId(i)), ty,);
+            writeln!(s, "- {:?} = {} = {:?};", TypeId(i as u32), self.log_type(TypeId(i as u32)), ty,);
         }
         writeln!(s, "====================");
         s
@@ -320,17 +320,17 @@ impl<'p> Program<'p> {
     pub fn find_ffi_type(&self, name: Ident<'p>) -> Option<TypeId> {
         let mut found = None;
         for ty in self.ffi_types.values() {
-            if let TypeInfo::Unique(ty, _) = &self.types[ty.0] {
-                if let &TypeInfo::Named(ty, check) = &self.types[ty.0] {
+            if let TypeInfo::Unique(ty, _) = &self[*ty] {
+                if let &TypeInfo::Named(ty, check) = &self[*ty] {
                     if name == check {
                         if found.is_some() {
                             outln!(LogTag::ShowErr, "duplicate ffi name {}", self.pool.get(name));
                             return None;
                         }
                         found = Some(ty);
-                    } else if let TypeInfo::Enum { cases, .. } = &self.types[ty.0] {
+                    } else if let TypeInfo::Enum { cases, .. } = &self[ty] {
                         for (_, ty) in cases {
-                            if let &TypeInfo::Named(inner, case_name) = &self.types[ty.0] {
+                            if let &TypeInfo::Named(inner, case_name) = &self[*ty] {
                                 // TODO: ffi cases that are akreayd named types
                                 if case_name == name {
                                     if found.is_some() {
@@ -353,11 +353,11 @@ impl<'p> Program<'p> {
 
         for info in &self.types {
             if let TypeInfo::Unique(ty, _) = info {
-                if let &TypeInfo::Named(ty, name) = &self.types[ty.0] {
-                    if let TypeInfo::Enum { cases, .. } = &self.types[ty.0] {
+                if let &TypeInfo::Named(ty, name) = &self[*ty] {
+                    if let TypeInfo::Enum { cases, .. } = &self[ty] {
                         writeln!(out, "const {} = Unique({{", self.pool.get(name),).unwrap();
                         for (name, mut ty) in cases {
-                            if let &TypeInfo::Named(inner, _) = &self.types[ty.0] {
+                            if let &TypeInfo::Named(inner, _) = &self[ty] {
                                 // Not unique, name is probably just name of the case.
                                 ty = inner;
                             }

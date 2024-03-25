@@ -16,11 +16,12 @@ use std::{
     hash::Hash,
     mem::{self, transmute},
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
-pub struct TypeId(pub usize);
+pub struct TypeId(pub u32);
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
@@ -77,7 +78,7 @@ pub struct Field<'p> {
     pub ffi_byte_offset: Option<usize>,
 }
 
-#[derive(Clone, PartialEq, Hash, Debug, InterpSend)]
+#[derive(Clone, Debug, InterpSend)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
     pub args: Option<FatExpr<'p>>,
@@ -118,6 +119,8 @@ pub enum Expr<'p> {
         index: Box<FatExpr<'p>>,
     },
 }
+
+pub static EXPR_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub trait WalkAst<'p> {
     fn walk_expr(&mut self, _: &mut FatExpr<'p>) {}
@@ -284,25 +287,13 @@ impl<'p> FatExpr<'p> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, InterpSend)]
-pub enum Known {
-    // Known at comptime but could be computed at runtime too.
-    Foldable,
-    RuntimeOnly,
-    Maybe,
-    // Types, function literals (can convert to FnPtr for runtime if no captures)
-    ComptimeOnly,
-}
-
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Span,
-    pub id: usize,
     pub ty: TypeId,
-    pub known: Known,
 }
 
 impl<'p> FatExpr<'p> {
@@ -486,12 +477,11 @@ pub const MY_SECRET_VALUE: u64 = 0xDEADBEEFCAFEBABE;
 
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
+        EXPR_COUNT.fetch_add(1, Ordering::AcqRel);
         FatExpr {
             expr,
             loc,
-            id: 123456789,
             ty: TypeId::unknown(),
-            known: Known::ComptimeOnly,
         }
     }
     // used for moving out of ast
@@ -523,18 +513,6 @@ impl<'p> FatExpr<'p> {
             Expr::Closure(f) => Ok(*f),
             _ => err!("expected function expression",),
         }
-    }
-}
-
-impl PartialEq for FatExpr<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Hash for FatExpr<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_usize(self.id)
     }
 }
 
@@ -726,7 +704,7 @@ impl<'p> Func<'p> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Default, InterpSend)]
+#[derive(Clone, Debug, Default, InterpSend)]
 pub enum LazyType<'p> {
     #[default]
     EvilUnit,
@@ -914,7 +892,7 @@ impl<'p> Program<'p> {
         };
 
         for (i, ty) in program.types.iter().enumerate() {
-            program.type_lookup.insert(ty.clone(), TypeId(i));
+            program.type_lookup.insert(ty.clone(), TypeId(i as u32));
         }
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -930,7 +908,7 @@ impl<'p> Program<'p> {
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            let ty_final = TypeId(placeholder);
+            let ty_final = TypeId(placeholder as u32);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::simple_struct(vec![], n));
@@ -943,12 +921,19 @@ impl<'p> Program<'p> {
 
     pub fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
         use crate::experiments::reflect::*;
+        // TODO: think more about this but need same int type
+        if let RsData::Opaque = type_info.data {
+            return self.intern_type(TypeInfo::Int(IntType {
+                bit_count: (type_info.stride * 8) as i64,
+                signed: true, // TODO
+            }));
+        }
         let id = type_info as *const RsType as usize as u128;
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            let ty_final = TypeId(placeholder);
+            let ty_final = TypeId(placeholder as u32);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::Struct {
@@ -985,10 +970,7 @@ impl<'p> Program<'p> {
                     let inner = self.get_rs_type(inner);
                     self.ptr_type(inner)
                 }
-                RsData::Opaque => self.intern_type(TypeInfo::Int(IntType {
-                    bit_count: (type_info.stride * 8) as i64,
-                    signed: false,
-                })),
+                RsData::Opaque => unreachable!(),
             };
 
             let named = self.intern_type(TypeInfo::Named(ty, self.pool.intern(type_info.name)));
@@ -1012,7 +994,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
-        while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) = &self.types[ty.0] {
+        while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) = &self[ty] {
             ty = inner
         }
         ty
@@ -1020,7 +1002,7 @@ impl<'p> Program<'p> {
 
     pub fn get_enum(&self, enum_ty: TypeId) -> Option<&[(Ident<'p>, TypeId)]> {
         let enum_ty = self.raw_type(enum_ty);
-        if let TypeInfo::Enum { cases, .. } = &self.types[enum_ty.0] {
+        if let TypeInfo::Enum { cases, .. } = &self[enum_ty] {
             Some(cases)
         } else {
             None
@@ -1055,7 +1037,7 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
         let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
-        TypeId(id)
+        TypeId(id as u32)
     }
 
     pub fn emit_inline_llvm_ir(&mut self) -> String {
@@ -1085,8 +1067,9 @@ impl<'p> Program<'p> {
     }
 
     pub fn for_llvm_ir(&self, ty: TypeId) -> &str {
-        match &self.types[ty.0] {
-            TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!(),
+        match &self[ty] {
+            TypeInfo::F64 => "double",
+            TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
             TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
@@ -1112,7 +1095,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn flat_types(&self, ty: TypeId) -> Option<&[TypeId]> {
-        match &self.types[ty.0] {
+        match &self[ty] {
             TypeInfo::Tuple(t) => Some(t),
             &TypeInfo::Struct { as_tuple, .. } => self.flat_types(as_tuple),
             _ => None,
@@ -1126,11 +1109,11 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
-            if self.calc_is_comptime_only_type(TypeId(id)) {
+            if self.calc_is_comptime_only_type(TypeId(id as u32)) {
                 self.comptime_only.set(id);
             }
-            self.type_lookup.insert(ty, TypeId(id));
-            TypeId(id)
+            self.type_lookup.insert(ty, TypeId(id as u32));
+            TypeId(id as u32)
         })
         // let id = self.types.iter().position(|check| check == &ty).unwrap_or_else(|| {
         //
@@ -1149,7 +1132,7 @@ impl<'p> Program<'p> {
     pub fn returns_type(&self, f: FuncId) -> bool {
         let func = &self.funcs[f.0];
         let ret = func.ret.unwrap();
-        let ty = &self.types[ret.0];
+        let ty = &self[ret];
         ty == &TypeInfo::Type
     }
 
@@ -1179,11 +1162,11 @@ impl<'p> Program<'p> {
     }
 
     pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
-        self.types[ty.0] == expect
+        self[ty] == expect
     }
 
     pub fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
-        if let TypeInfo::Fn(ty) = self.types[id.0] {
+        if let TypeInfo::Fn(ty) = self[id] {
             Some(ty)
         } else {
             None
@@ -1206,7 +1189,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
-        let ptr_ty = &self.types[ptr_ty.0];
+        let ptr_ty = &self[ptr_ty];
         if let TypeInfo::Ptr(ty) = ptr_ty {
             Some(*ty)
         } else {
@@ -1215,7 +1198,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn tuple_types(&self, ty: TypeId) -> Option<&[TypeId]> {
-        match &self.types[ty.0] {
+        match &self[ty] {
             TypeInfo::Tuple(types) => Some(types),
             &TypeInfo::Struct { as_tuple, .. } => self.tuple_types(as_tuple),
             &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
@@ -1227,7 +1210,7 @@ impl<'p> Program<'p> {
     pub fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
         ptr_ty = self.raw_type(ptr_ty);
         let mut d = 0;
-        while let &TypeInfo::Ptr(inner) = &self.types[ptr_ty.0] {
+        while let &TypeInfo::Ptr(inner) = &self[ptr_ty] {
             d += 1;
             ptr_ty = self.raw_type(inner);
         }
@@ -1254,13 +1237,13 @@ impl<'p> Program<'p> {
 
     pub fn enum_type(&mut self, name: &str, varients: &[TypeId]) -> TypeId {
         let as_tuple = self.tuple_of(varients.to_vec());
-        let ty = self.to_enum(self.types[as_tuple.0].clone());
+        let ty = self.to_enum(self[as_tuple].clone());
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
     pub fn synth_name(&mut self, ty: TypeId) -> Ident<'p> {
-        match self.types[ty.0] {
+        match self[ty] {
             TypeInfo::Named(_, name) => name,
             TypeInfo::Unique(ty, _) => self.synth_name(ty),
             _ => self.pool.intern(&format!("__anon_ty{}", ty.0)),
@@ -1298,11 +1281,11 @@ impl<'p> Program<'p> {
 
     // All TypeId must have gone through intern_type, so it will always be here.
     pub fn is_comptime_only_type(&self, ty: TypeId) -> bool {
-        self.comptime_only.get(ty.0)
+        self.comptime_only.get(ty.0 as usize)
     }
 
     fn calc_is_comptime_only_type(&self, ty: TypeId) -> bool {
-        match &self.types[ty.0] {
+        match &self[ty] {
             TypeInfo::Unit
             | TypeInfo::Any
             | TypeInfo::Unknown
@@ -1655,7 +1638,7 @@ impl<'p> TryFrom<Ident<'p>> for Flag {
         // # Safety
         // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
         // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
-        if value.0 > Flag::_Reserved_Null_ as usize && value.0 < Flag::_Reserved_Count_ as usize {
+        if value.0 > Flag::_Reserved_Null_ as u32 && value.0 < Flag::_Reserved_Count_ as u32 {
             Ok(unsafe { transmute(value.0 as u8) })
         } else {
             err!("Unknown Ident",)
@@ -1671,7 +1654,7 @@ impl<'p> TryFrom<Ident<'p>> for TargetArch {
         // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
         // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
         // I defined thier values to be the values in Flag (where I made sure they're consecutive)
-        if value.0 > Flag::_Reserved_Null_ as usize && value.0 < Flag::_Reserved_End_Arch_ as usize {
+        if value.0 > Flag::_Reserved_Null_ as u32 && value.0 < Flag::_Reserved_End_Arch_ as u32 {
             Ok(unsafe { transmute(value.0 as u8) })
         } else {
             Err(())

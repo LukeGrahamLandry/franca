@@ -178,14 +178,15 @@ impl JittedLlvm {
     }
 
     fn get_type(&mut self, program: &mut Program, ty: TypeId) -> LLVMTypeRef {
-        extend_options(&mut self.types, ty.0);
-        if let Some(ty) = self.types[ty.0] {
+        extend_options(&mut self.types, ty.0 as usize);
+        if let Some(ty) = self.types[ty.0 as usize] {
             return ty;
         }
 
         let result = unsafe {
             match &program[ty] {
-                TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::F64 => todo!("llvm type: {}", program.log_type(ty)),
+                TypeInfo::F64 => LLVMDoubleTypeInContext(self.context),
+                TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => todo!("llvm type: {}", program.log_type(ty)),
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
                 TypeInfo::OverloadSet | TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
@@ -201,7 +202,7 @@ impl JittedLlvm {
                 TypeInfo::Ptr(_) | TypeInfo::VoidPtr => self.ptr_ty,
             }
         };
-        self.types[ty.0] = Some(result);
+        self.types[ty.0 as usize] = Some(result);
         result
     }
 
@@ -366,16 +367,18 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                         let value = match value {
                             Value::I64(n) => LLVMConstInt(ty, u64::from_le_bytes(n.to_le_bytes()), LLVMBool::from(false)),
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
-                            Value::Type(TypeId(n)) | Value::OverloadSet(n) | Value::GetFn(FuncId(n)) | Value::Symbol(n) => {
-                                LLVMConstInt(ty, n as u64, LLVMBool::from(false))
-                            }
+                            Value::OverloadSet(n) | Value::GetFn(FuncId(n)) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
+                            Value::Type(TypeId(n)) | Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
                             Value::GetNativeFnPtr(ff) => {
                                 ty = self.func_type(ff);
                                 unwrap!(self.llvm.get_fn(f), "GetNativeFnPtr on uncompiled {f:?}")
                             }
                             Value::Bool(b) => LLVMConstInt(ty, b as u64, LLVMBool::from(false)),
                             Value::Unit => LLVMConstInt(ty, 0, LLVMBool::from(false)),
-                            Value::F64(_) => todo!(),
+                            Value::F64(bits) => {
+                                let f = f64::from_bits(bits);
+                                LLVMConstReal(LLVMDoubleTypeInContext(self.llvm.context), f)
+                            }
                             Value::Poison | Value::InterpAbsStackAddr(_) => err!("intrp constant in llvm",),
                             Value::Heap {
                                 value,
@@ -523,7 +526,6 @@ mod tests {
     use compiler::experiments::arena::Arena;
     use compiler::experiments::emit_ir::EmitIr;
     use compiler::experiments::tests::jit_test;
-    use compiler::load_program;
     use compiler::{
         ast::{garbage_loc, Program},
         compiler::{Compile, ExecTime, Res},
@@ -535,6 +537,7 @@ mod tests {
         scope::ResolveScope,
         unwrap,
     };
+    use compiler::{jit_test_llvm_only, load_program};
     use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
     use llvm_sys::core::{LLVMDisposeBuilder, LLVMDisposeMessage, LLVMPrintModuleToString};
     use llvm_sys::error::{LLVMCreateStringError, LLVMGetErrorMessage};
@@ -583,6 +586,7 @@ mod tests {
     }
 
     jit_test!(jit_main);
+    jit_test_llvm_only!(jit_main);
 }
 
 fn verify_module<'p>(module: LLVMModuleRef) -> Res<'p, ()> {
