@@ -21,32 +21,14 @@ struct SRet<'a, 'p> {
     size_cache: SizeCache,
 }
 
-impl<'a, 'p> SRet<'a, 'p> {
-    fn transform(&mut self, expr: &mut FatExpr<'p>, result_ptr: FatExpr<'p>) -> Res<'p, ()> {
-        if self.size_cache.slot_count(self.program, expr.ty) <= 1 {
-            return Ok(());
-        }
-
-        match &mut expr.expr {
-            Expr::Block { body, result, locals } => self.transform(result, result_ptr)?,
-            Expr::Value { ty, value } => todo!(),
-            Expr::WipFunc(_) => todo!(),
-            Expr::Call(_, _) => todo!(),
-            Expr::Tuple(_) => todo!(),
-            Expr::Closure(_) => todo!(),
-            Expr::SuffixMacro(_, _) => todo!(),
-            Expr::FieldAccess(_, _) => todo!(),
-            Expr::StructLiteralP(_) => todo!(),
-            Expr::PrefixMacro { name, arg, target } => todo!(),
-            Expr::GetVar(_) => todo!(),
-            Expr::GetNamed(_) => todo!(),
-            Expr::String(_) => todo!(),
-            Expr::Index { ptr, index } => todo!(),
-        };
-
-        Ok(())
-    }
-}
+// impl<'a, 'p> SRet<'a, 'p> {
+//     fn transform(&mut self, expr: &mut FatExpr<'p>, result_ptr: FatExpr<'p>) -> Res<'p, ()> {
+//         if self.size_cache.slot_count(self.program, expr.ty) <= 1 {
+//             return Ok(());
+//         }
+//         todo!()
+//     }
+// }
 
 impl<'a, 'p> WalkAst<'p> for SRet<'a, 'p> {
     fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {

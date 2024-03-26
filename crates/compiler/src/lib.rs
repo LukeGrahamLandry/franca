@@ -14,6 +14,7 @@
 extern crate core;
 
 use std::{fs, sync::atomic::Ordering};
+use std::mem::ManuallyDrop;
 
 use ast::FuncId;
 use bc::Value;
@@ -124,6 +125,8 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
     comp.compile_module(global)
 }
 
+// If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
+// I should really just use arenas for everything.
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
     src: String,
@@ -131,6 +134,7 @@ pub fn run_main<'a: 'p, 'p>(
     expect: Value,
     save: Option<&str>,
     executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
+    leak: bool
 ) -> bool {
     log_tag_info();
     // let start = timestamp();
@@ -200,6 +204,10 @@ pub fn run_main<'a: 'p, 'p>(
     outln!(ShowPrint, "===============");
     log_dbg(&comp, save);
     println!("Created {} AST nodes.", EXPR_COUNT.load(Ordering::Acquire));
+    if leak {
+        let _ = ManuallyDrop::new(comp);
+        let _ = ManuallyDrop::new(program);
+    }
     true
 }
 

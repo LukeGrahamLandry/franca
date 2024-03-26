@@ -178,5 +178,54 @@ let out = add(a&.a[], 7);
 asser t_eq(out, 10);
 */
 
+//////
+/// Tricky result slot aliasing
+
+@struct fn A(a: i64, b: i64);
+
+var s: A = (a: 1, b: 2);
+assert_eq(s&.a[], 1);
+// This initilization happens in place... 
+s = (a: s&.b[], b: s&.a[]);
+assert_eq(s&.a[], 2);
+// BUG. Oh shit, you done did aliased! This is kinda a massive problem. 
+assert_eq(s&.b[], 2); // You'd expect this to be 1. It would be great if you break this test somehow. 
+
+var s: A = init(a: 1, b: 2);
+assert_eq(s&.a[], 1); assert_eq(s&.b[], 2);
+// The argument to the function call are evaluated up front so this behaves as expected. 
+s = init(a: s&.b[], b: s&.a[]);
+assert_eq(s&.a[], 2); assert_eq(s&.b[], 1);
+
+var s: A = init(a: 1, b: 2);
+s = {
+    let a = 5;
+    let b = s&.a[].add(s&.b[]);
+    (a: a, b: b)
+};
+// 'b' would be 7 if it forwarded to the final output location.   
+assert_eq(s&.a[], 5); assert_eq(s&.b[], 3);
+
+var s: A = init(a: 1, b: 2);
+s = {
+    (a: 5, b: s&.a[].add(s&.b[]))
+};
+// BUG. You'd expect this to be the same as above (b=3)
+assert_eq(s&.a[], 5); assert_eq(s&.b[], 7);
+
+// This is what you're really doing
+var s: A = init(a: 1, b: 2);
+s&.a[] = 5;
+s&.b[] = s&.a[].add(s&.b[]);
+assert_eq(s&.a[], 5); assert_eq(s&.b[], 7);  // Here it makes sense
+
+var s: A = init(a: 1, b: 2);
+s = {
+    init(a: 5, b: s&.a[].add(s&.b[]))
+};
+// Again this is fine because I don't do it for function calls. 
+assert_eq(s&.a[], 5); assert_eq(s&.b[], 3);
+
 _canary
 }
+

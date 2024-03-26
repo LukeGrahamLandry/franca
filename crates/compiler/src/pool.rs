@@ -177,7 +177,7 @@ impl<'p> InterpSend<'p> for Ident<'p> {
             _ => return None,
         };
 
-        Some(Ident(i as u32, PhantomData))
+        Some(Ident(i, PhantomData))
     }
 
     fn size() -> usize {

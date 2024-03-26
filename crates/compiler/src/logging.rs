@@ -4,6 +4,7 @@ use core::fmt;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::{Debug, Write};
+use std::ops::Deref;
 use std::{fs, mem};
 
 #[macro_export]
@@ -150,7 +151,7 @@ pub fn save_logs(folder: &str) {
             unsafe { crate::web::show_log(i, s.as_ptr(), s.len()) };
         }
         #[cfg(not(target_arch = "wasm32"))]
-        {
+        if !s.is_empty() {
             fs::write(format!("{folder}/{tag:?}.log"), s).unwrap();
         }
     }
@@ -475,7 +476,7 @@ impl<'p> PoolLog<'p> for Interp<'p> {
 impl<'p> Program<'p> {
     pub fn log_consts(&self, c: &Constants<'p>) -> String {
         let mut s = String::new();
-        for (name, (v, ty)) in &c.local {
+        for (name, (v, ty)) in c.local.deref() {
             writeln!(s, "   - {} = {:?} is {}", name.log(self.pool), v, self.log_type(*ty));
         }
 

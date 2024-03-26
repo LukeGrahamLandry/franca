@@ -50,6 +50,7 @@ fn main() {
                 Value::I64(0),
                 Some(&name),
                 Box::new(Interp::new(pool)),
+                true,
             );
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
@@ -60,6 +61,7 @@ fn main() {
                 Value::I64(0),
                 Some(&name),
                 Box::new(Interp::new(pool)),
+                true
             );
         }
     } else {
@@ -76,6 +78,7 @@ fn main() {
                 Value::I64(0),
                 Some(case.file_name().to_str().unwrap().strip_suffix(".fr").unwrap()),
                 Box::new(Interp::new(pool)),
+                false // doesnt matter because its in a loop so not freeing means you need get new memory? 
             );
         }
         assert!(passed);

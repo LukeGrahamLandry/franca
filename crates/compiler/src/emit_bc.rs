@@ -1,6 +1,8 @@
 //! Converts simple ASTs into my bytecode-ish format.
 
 #![allow(clippy::wrong_self_convention)]
+
+use std::borrow::Cow;
 use codemap::Span;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -145,7 +147,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // Functions without a body are always builtins.
             // It's convient to give them a FuncId so you can put them in a variable,
             // but just force inline call.
-            let ret_ty = func.ret.unwrap();
 
             if func.comptime_addr.is_some() || func.llvm_ir.is_some() {
                 // You should never actually try to run this code, the caller should have just done the call,
@@ -385,7 +386,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else {
                         result.push(Bc::CloneRange { from, to: output });
                     }
-                } else if let Some((value, ty)) = result.constants.get(*var) {
+                } else if let Some((value, _)) = result.constants.get(*var) {
                     for (i, value) in value.vec().into_iter().enumerate() {
                         result.push(Bc::LoadConstant {
                             slot: output.offset(i),
@@ -396,7 +397,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     ice!("Missing resolved variable {:?}", var.log(self.program.pool),)
                 }
             }
-            Expr::Value { ty, value } => {
+            Expr::Value { value, .. } => {
                 for (i, value) in value.clone().vec().into_iter().enumerate() {
                     result.push(Bc::LoadConstant {
                         slot: output.offset(i),
@@ -413,7 +414,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    Flag::If => self.emit_call_if(result, arg, expr.ty, output)?,
+                    Flag::If => self.emit_call_if(result, arg, output)?,
                     Flag::While => self.emit_call_while(result, arg, output)?,
                     Flag::Addr => self.addr_macro(result, arg, expr.ty, output)?,
                     Flag::Quote => unreachable!(),
@@ -428,7 +429,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         } else {
                             (container_ty, 1)
                         };
-                        let slice_ty = expr.ty;
                         for i in container {
                             result.slot_is_var.set(i);
                         }
@@ -445,9 +445,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
                     Flag::Deref => {
+                        debug_assert_eq!(self.program[arg.ty], TypeInfo::Ptr(expr.ty));
                         let ptr = result.reserve_slots(self, arg.ty)?;
                         self.compile_expr(result, arg, ptr)?;
-                        let ty = expr.ty;
                         result.push(Bc::Load {
                             from: ptr.single(),
                             to: output,
@@ -455,7 +455,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::Reflect_Print => {
                         let arg_slot = result.reserve_slots(self, arg.ty)?;
-                        let arg = self.compile_expr(result, arg, arg_slot)?;
+                        self.compile_expr(result, arg, arg_slot)?;
                         result.push(Bc::CallBuiltin {
                             name: *macro_name,
                             ret: output,
@@ -496,7 +496,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let container_ptr = result.reserve_slots(self, ptr.ty)?;
                 self.compile_expr(result, ptr, container_ptr)?;
                 let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
-                self.index_expr(result, ptr.ty, container_ptr, index, expr.ty, output)?
+                self.index_expr(result, ptr.ty, container_ptr, index, output)?
             }
             Expr::StructLiteralP(pattern) => {
                 let requested = expr.ty;
@@ -558,7 +558,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     // TODO: make this not a special case.
     /// This swaps out the closures for function accesses.
-    fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, out_ty: TypeId, ret: StackRange) -> Res<'p, ()> {
+    fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, ret: StackRange) -> Res<'p, ()> {
         let cond_slot = result.reserve_slots(self, TypeId::bool())?;
         let (if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
             self.compile_expr(result, &parts[0], cond_slot)?;
@@ -663,7 +663,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         container_ptr_ty: TypeId,
         container_ptr: StackRange,
         index: usize,
-        ty: TypeId,
         ret: StackRange,
     ) -> Res<'p, ()> {
         let depth = self.program.ptr_depth(container_ptr_ty);
@@ -916,40 +915,6 @@ impl<'p> FnBody<'p> {
     }
 
     #[track_caller]
-    fn load(&mut self, program: &mut EmitBc<'_, 'p>, value: Structured) -> Res<'p, (StackRange, TypeId)> {
-        let expected = value.ty();
-        let (slot, _ty) = match value {
-            Structured::Emitted(ty, slot) => (slot, ty),
-            Structured::Const(ty, value) => self.load_constant(program, value, ty)?,
-            Structured::TupleDifferent(_, values) => {
-                let slots: Res<'p, Vec<_>> = values.into_iter().map(|value| self.load(program, value)).collect();
-                let slots = slots?;
-                let slots = self.create_tuple_slots(program, expected, slots)?;
-                (slots, expected)
-            }
-            Structured::RuntimeOnly(_) => unreachable!("Tried to load Structured::runtimeonly which should only exist in compiler"),
-        };
-        // TODO: another typecheck?
-        Ok((slot, expected))
-    }
-
-    fn drop(&mut self, _program: &EmitBc<'_, 'p>, ret: Structured) -> Res<'p, ()> {
-        match ret {
-            Structured::Emitted(_, slots) => {
-                self.push(Bc::Drop(slots));
-            }
-            Structured::Const(_, _) => {} // noop
-            Structured::TupleDifferent(_, s) => {
-                for s in s {
-                    self.drop(_program, s)?;
-                }
-            }
-            Structured::RuntimeOnly(_) => unreachable!(),
-        }
-        Ok(())
-    }
-
-    #[track_caller]
     fn push(&mut self, inst: Bc<'p>) -> usize {
         let ip = self.insts.len();
         self.insts.push(inst);
@@ -965,77 +930,4 @@ impl<'p> FnBody<'p> {
         }
         ip
     }
-
-    fn produce_tuple(&mut self, program: &mut EmitBc<'_, 'p>, owned_values: Vec<Structured>, tuple_ty: TypeId) -> Res<'p, Structured> {
-        let mut all_stack = true;
-        let mut all_const = true;
-        for v in &owned_values {
-            match v {
-                Structured::Emitted(_, _) => all_const = false,
-                Structured::Const(_, _) => all_stack = false,
-                Structured::TupleDifferent(_, _) => {
-                    all_const = false;
-                    all_stack = false;
-                }
-                Structured::RuntimeOnly(_) => unreachable!(),
-            }
-        }
-
-        assert!(!(all_const && all_stack), "todo empty");
-        if all_const {
-            let values: Vec<_> = owned_values.into_iter().map(|v| v.get().unwrap()).collect();
-            return Ok(Structured::Const(tuple_ty, values.into()));
-        }
-
-        if !all_stack {
-            return Ok(Structured::TupleDifferent(tuple_ty, owned_values));
-        }
-
-        let owned_values: Vec<_> = owned_values.into_iter().map(|v| self.load(program, v).unwrap()).collect();
-        let ret = self.create_tuple_slots(program, tuple_ty, owned_values)?;
-        Ok(Structured::Emitted(tuple_ty, ret))
-    }
-
-    fn create_tuple_slots(&mut self, program: &mut EmitBc<'_, 'p>, tuple_ty: TypeId, owned_values: Vec<(StackRange, TypeId)>) -> Res<'p, StackRange> {
-        // They might already be consecutive
-
-        debug_assert!(!owned_values.is_empty());
-        let mut next = (owned_values[0].0).first;
-        let mut ok = true;
-        for (r, _) in &owned_values {
-            if r.first != next {
-                ok = false;
-                break;
-            }
-            next.0 += r.count;
-        }
-        let ret = if ok {
-            StackRange {
-                first: (owned_values[0].0).first,
-                count: program.slot_count(tuple_ty),
-            }
-        } else {
-            let ret = self.reserve_slots(program, tuple_ty)?;
-            // TODO: they might already be consecutive. kinda want to have something to profile before fixing.
-            let base = ret.first.0;
-            let mut count = 0;
-            for (v, _) in owned_values {
-                for i in 0..v.count {
-                    self.push(Bc::Move {
-                        from: StackOffset(v.first.0 + i),
-                        to: StackOffset(base + count),
-                    });
-                    count += 1;
-                }
-            }
-            assert_eq!(count, ret.count);
-            ret
-        };
-        Ok(ret)
-    }
-}
-
-/// https://users.rust-lang.org/t/convenience-method-for-flipping-option-result-to-result-option/13695
-fn invert<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
-    x.map_or(Ok(None), |v| v.map(Some))
 }

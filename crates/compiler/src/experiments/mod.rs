@@ -12,3 +12,4 @@ pub mod macho;
 pub mod reflect;
 pub mod s_ret;
 pub mod tests;
+pub mod crc;

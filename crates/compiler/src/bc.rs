@@ -1,5 +1,6 @@
 //! Low level instructions that the interpreter can execute.
 use crate::emit_bc::DebugInfo;
+use crate::experiments::crc::CRc;
 use crate::experiments::reflect::BitSet;
 use crate::impl_index;
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 
 #[derive(Clone, InterpSend)]
 pub enum Bc<'p> {
@@ -273,13 +274,13 @@ impl std::fmt::Debug for ConstId {
 
 #[derive(Debug, Clone, Default, InterpSend)]
 pub struct Constants<'p> {
-    pub local: HashMap<Var<'p>, (Values, TypeId)>,
+    pub local: CRc<HashMap<Var<'p>, (Values, TypeId)>>,
     pub is_valid: bool,
 }
 
 impl<'p> Constants<'p> {
     #[track_caller]
-    pub fn close(&self, vars: &[Var<'p>]) -> crate::compiler::Res<'p, Self> {
+    pub fn close(&self, vars: &[Var<'p>]) -> Res<'p, Self> {
         debug_assert!(self.is_valid);
         let mut new = Self::empty();
         for k in vars {
@@ -296,7 +297,7 @@ impl<'p> Constants<'p> {
 
     pub fn add_all(&mut self, other: &Self) {
         debug_assert!(self.is_valid && other.is_valid);
-        self.local.extend(other.local.clone())
+        self.local.extend(other.local.deref().deref().iter().map(|(k, v)| (*k, v.clone())))
     }
 
     pub fn get(&self, k: Var<'p>) -> Option<(Values, TypeId)> {
