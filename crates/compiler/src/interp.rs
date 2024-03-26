@@ -313,7 +313,9 @@ impl<'p> Interp<'p> {
                 assert_eq!(values.len(), target.count);
                 let base = target.first.0;
                 for (i, v) in values.into_iter().enumerate() {
-                    assert_eq!(self.value_stack[base + i], Value::Poison);
+                    // I think this is fine.
+                    // it happens now that i added expr result pointers so it skips a copy when setting var to return value (ret uses this but MoveRange doesn't)
+                    // assert_eq!(self.value_stack[base + i], Value::Poison, "write {v:?} to abs slot {}", base + i);
                     self.value_stack[base + i] = v;
                 }
             }

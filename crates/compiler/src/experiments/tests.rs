@@ -237,6 +237,8 @@ macro_rules! jit_test_llvm_only {
                 n
             }"#
         );
+
+        // simple!(mandelbrot, (), 40, include_str!("../../../examples/mandelbrot.fr"));
     };
 }
 

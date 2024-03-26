@@ -246,6 +246,14 @@ impl StackRange {
         debug_assert_eq!(self.count, 1, "{self:?}");
         self.first
     }
+
+    pub fn range(&self, offset: usize, count: usize) -> StackRange {
+        debug_assert!(self.count >= offset + count, "{self:?}[{offset}..{}]", offset + count);
+        StackRange {
+            first: self.offset(offset),
+            count,
+        }
+    }
 }
 
 pub struct InterpBox {

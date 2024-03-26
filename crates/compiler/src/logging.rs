@@ -161,7 +161,6 @@ macro_rules! outln {
     ($tag:expr, $($arg:tt)*) => {{
         if cfg!(feature = "println_now") && $tag == $crate::logging::LogTag::ShowPrint {
             println!($($arg)*);
-
         } else if cfg!(feature = "some_log") {
             let tag: $crate::logging::LogTag = $tag;
             $crate::logging::LOG.with(|settings| {
