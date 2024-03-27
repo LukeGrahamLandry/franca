@@ -279,7 +279,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
 
     #[track_caller]
     fn slot_type(&self, slot: StackOffset) -> TypeId {
-        self.interp.ready[self.f.0].as_ref().unwrap().slot_types[slot.0]
+        self.interp.ready[self.f].as_ref().unwrap().slot_types[slot.0]
     }
 
     // TODO: change name? make this whole thing a trait so i dont have to keep writing the shitty glue.
@@ -289,7 +289,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             let ff = &self.program[f];
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
-            let func = self.interp.ready[f.0].as_ref().unwrap();
+            let func = self.interp.ready[f].as_ref().unwrap();
             println!("{}", func.log(self.program.pool));
             self.slots.clear();
             self.slots.extend(vec![None; func.stack_slots]);
@@ -325,10 +325,10 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                 self.write_slot(StackOffset(i), value);
             }
 
-            let func = self.interp.ready[f.0].as_ref().unwrap();
+            let func = self.interp.ready[f].as_ref().unwrap();
             let mut block_finished = true;
             for i in 0..func.insts.len() {
-                let func = &self.interp.ready[f.0].as_ref().unwrap();
+                let func = &self.interp.ready[f].as_ref().unwrap();
                 if func.jump_targets.get(i) {
                     let block = *self.blocks.get(&(i)).unwrap();
                     // Fallthrough (false branch of an if)
@@ -499,7 +499,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.interp.ready[self.f.0].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.interp.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
 
     fn llvm_type(&mut self, slot: StackOffset) -> LLVMTypeRef {
@@ -520,7 +520,7 @@ pub fn null_terminate(bytes: &str) -> CString {
 }
 
 #[allow(unused)]
-mod tests {
+pub mod tests {
     use codemap::CodeMap;
     use compiler::ast::{Flag, FuncId, SuperSimple, TargetArch};
     use compiler::experiments::arena::Arena;
@@ -551,15 +551,15 @@ mod tests {
     use super::{print_module, verify_module, BcToLlvm};
 
     // TODO: this is an ugly copy paste
-    fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
+    pub fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Llvm);
-        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
+        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
         load_program(&mut comp, src)?;
         let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
         comp.compile(main, ExecTime::Runtime)?;
 
-        let mut interp = comp.executor.to_interp().unwrap();
+        let mut interp = comp.runtime_executor.to_interp().unwrap();
         let mut asm = BcToLlvm::new(&mut interp, &mut program);
 
         asm.compile(main)?;

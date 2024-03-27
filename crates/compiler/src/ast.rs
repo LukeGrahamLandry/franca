@@ -118,20 +118,25 @@ pub enum Expr<'p> {
         ptr: Box<FatExpr<'p>>,
         index: Box<FatExpr<'p>>,
     },
+    Either {
+        runtime: Box<FatExpr<'p>>,
+        comptime: Box<FatExpr<'p>>,
+    },
 }
 
 pub static EXPR_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub trait WalkAst<'p> {
-    fn walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
     fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
-    fn walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
+    fn pre_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
+    fn post_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
     fn walk_func(&mut self, _: &mut Func<'p>) {}
     fn walk_pattern(&mut self, _: &mut Pattern<'p>) {}
     fn walk_ty(&mut self, _: &mut LazyType<'p>) {}
 
     fn expr(&mut self, expr: &mut FatExpr<'p>) {
-        self.walk_expr(expr);
+        self.pre_walk_expr(expr);
         match &mut expr.expr {
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.expr(fst);
@@ -139,9 +144,20 @@ pub trait WalkAst<'p> {
             }
             Expr::Block { body, result, .. } => {
                 for stmt in body {
-                    self.walk_stmt(stmt);
+                    self.pre_walk_stmt(stmt);
+                    for a in &mut stmt.annotations {
+                        if let Some(args) = &mut a.args {
+                            self.expr(args)
+                        }
+                    }
                     match &mut stmt.stmt {
-                        Stmt::Noop | Stmt::DeclNamed { .. } | Stmt::DoneDeclFunc(_) => {}
+                        Stmt::DeclNamed { ty, value, .. } => {
+                            if let Some(value) = value {
+                                self.expr(value);
+                            }
+                            self.ty(ty);
+                        }
+                        Stmt::Noop | Stmt::DoneDeclFunc(_) => {}
                         Stmt::Eval(arg) => self.expr(arg),
                         Stmt::DeclFunc(func) => self.walk_func(func), // TODO: more maybe?
                         Stmt::DeclVar { ty, value, .. } => {
@@ -161,6 +177,7 @@ pub trait WalkAst<'p> {
                             self.expr(value);
                         }
                     }
+                    self.post_walk_stmt(stmt);
                 }
                 self.expr(result);
             }
@@ -190,6 +207,11 @@ pub trait WalkAst<'p> {
             }
             Expr::WipFunc(_) => todo!("walkwip"),
             Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
+            Expr::Either { runtime, comptime } => {
+                // TODO
+                self.expr(runtime);
+                self.expr(comptime);
+            }
         }
         self.post_walk_expr(expr);
     }
@@ -223,7 +245,7 @@ struct RenumberVars<'a, 'p> {
 }
 
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
-    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
         match &mut expr.expr {
             Expr::GetVar(v) => {
                 if let Some(new) = self.mapping.get(v) {
@@ -249,7 +271,7 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
         }
     }
 
-    fn walk_stmt(&mut self, stmt: &mut FatStmt<'p>) {
+    fn pre_walk_stmt(&mut self, stmt: &mut FatStmt<'p>) {
         if let Stmt::DeclVar { name, dropping, .. } = &mut stmt.stmt {
             self.decl(name);
             if let Some(dropping) = dropping {
@@ -1472,7 +1494,7 @@ pub fn garbage_loc() -> Span {
 // TODO: replace with new walk
 
 impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
-    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
         self(&mut expr.expr)
     }
 }

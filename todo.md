@@ -2,7 +2,7 @@
 
 - fold infinite loops so it knows when you dont need a return at the end of the function to typecheck
 - mix named and positional args
-- default arg values (any const expr and inject at callsite? or based on other args so generate shims)
+- default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
 - anon structs for named return values. maybe commit to no !struct but what if you want an enum maybe its better to have no blessed default case
 - maybe anon struct literals with inferred type should be fine.
 - !defer
@@ -25,6 +25,8 @@
   - Rc$ T.RefCell() === Rc(RefCell(T))
 - function that take a slice of args called like variadic functions.
 - field auto ref/deref for primitive types?
+- my expression output thingy broke some struct stuff (aliasing + asm consecutive slots)
+- be able to address a byte so you can use libc for stuff
 
 ## Sema
 
@@ -38,7 +40,10 @@
 ## Replacing Interp
 
 - give executors access to the compiler so dont need the hacky message passing with errors
+- asm stack traces
 - convert bytes + type back to Values
+- asm needs to impl Executor. seperate storing bytecode from interp.
+- fix any_reg. asm backend needs access to an executor
 
 ## Backend
 

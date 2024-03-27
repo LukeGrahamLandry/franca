@@ -1,19 +1,17 @@
-use std::fmt::{Debug, Formatter, Pointer};
-use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 use crate::ast::{Program, TypeId};
 use crate::bc::Value;
 use crate::ffi::InterpSend;
+use std::fmt::{Debug, Formatter};
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 pub struct CRc<T: Clone> {
-    inner: Rc<T>
+    inner: Rc<T>,
 }
 
 impl<T: Clone> CRc<T> {
     pub fn new(t: T) -> Self {
-        Self {
-            inner: Rc::new(t),
-        }
+        Self { inner: Rc::new(t) }
     }
 }
 
@@ -25,22 +23,21 @@ impl<T: Clone> Deref for CRc<T> {
     }
 }
 
-// TODO: do i need UnsafeCell?
 impl<T: Clone> DerefMut for CRc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if Rc::strong_count(&self.inner) != 1 {
+        // This is a dumb way to write this but lifetimes don't work if you try to use match?
+        if Rc::get_mut(&mut self.inner).is_none() {
             let value = self.inner.deref().clone();
             self.inner = Rc::new(value);
+            Rc::get_mut(&mut self.inner).unwrap();
         }
-        unsafe {&mut *(Rc::as_ptr(&self.inner) as *mut T) }
+        Rc::get_mut(&mut self.inner).unwrap()
     }
 }
 
 impl<T: Clone> Clone for CRc<T> {
     fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone()
-        }
+        Self { inner: self.inner.clone() }
     }
 }
 
@@ -57,7 +54,7 @@ impl<'p, T: Clone + InterpSend<'p>> InterpSend<'p> for CRc<T> {
         self.inner.deref().clone().serialize(values)
     }
 
-    fn deserialize(values: &mut impl Iterator<Item=Value>) -> Option<Self> {
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         T::deserialize(values).map(|t| Self::new(t))
     }
 

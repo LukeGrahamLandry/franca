@@ -9,18 +9,16 @@
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 #![feature(pointer_is_aligned)]
-#![feature(try_trait_v2)]
-#![feature(try_trait_v2_yeet)]
 extern crate core;
 
-use std::{fs, sync::atomic::Ordering};
 use std::mem::ManuallyDrop;
+use std::{fs, sync::atomic::Ordering};
 
 use ast::FuncId;
 use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use compiler::{CErr, Res};
+use compiler::{BoxedExec, CErr, Res};
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -52,7 +50,7 @@ pub mod scope;
 
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId, EXPR_COUNT},
-    compiler::{Compile, CompileError, ExecTime, Executor},
+    compiler::{Compile, CompileError, ExecTime},
     logging::{
         get_logs, log_tag_info, save_logs,
         LogTag::{ShowErr, *},
@@ -75,6 +73,8 @@ macro_rules! test_file {
                 Value::I64(3145192),
                 Value::I64(3145192),
                 Some(&stringify!($case)),
+                Box::new(crate::interp::Interp::new(pool)),
+                true,
                 Box::new(crate::interp::Interp::new(pool)),
             );
             if !res {
@@ -127,19 +127,21 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
 
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
 // I should really just use arenas for everything.
+#[allow(clippy::too_many_arguments)]
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
     src: String,
     arg: Value,
     expect: Value,
     save: Option<&str>,
-    executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
-    leak: bool
+    runtime_executor: BoxedExec<'a>,
+    leak: bool,
+    comptime_executor: BoxedExec<'a>,
 ) -> bool {
     log_tag_info();
     // let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
-    let mut comp = Compile::new(pool, &mut program, executor);
+    let mut comp = Compile::new(pool, &mut program, runtime_executor, comptime_executor);
     let result = load_program(&mut comp, &src);
 
     // damn turns out defer would maybe be a good idea
@@ -212,7 +214,7 @@ pub fn run_main<'a: 'p, 'p>(
 }
 
 fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
-    outln!(Bytecode, "{}", comp.executor.log(comp.pool));
+    outln!(Bytecode, "{}", comp.runtime_executor.log(comp.pool));
     if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
         outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
     }

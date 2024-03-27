@@ -8,7 +8,6 @@ use codemap::Span;
 use interp_derive::InterpSend;
 
 use crate::ast::Flag;
-use crate::bc::SizeCache;
 use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
 use crate::emit_bc::EmitBc;
 use crate::ffi::InterpSend;
@@ -39,10 +38,9 @@ pub struct Interp<'p> {
     pub pool: &'p StringPool<'p>,
     pub value_stack: Vec<Value>,
     pub call_stack: Vec<CallFrame<'p>>,
-    pub ready: Vec<Option<FnBody<'p>>>,
+    pub ready: BcReady<'p>,
     pub last_loc: Option<Span>,
     pub messages: Vec<StackAbsoluteRange>,
-    pub sizes: SizeCache,
     pub ffi_stack: Vec<Values>,
 }
 
@@ -52,10 +50,9 @@ impl<'p> Interp<'p> {
             pool,
             value_stack: vec![],
             call_stack: vec![],
-            ready: vec![],
+            ready: BcReady::default(),
             last_loc: None,
             messages: vec![],
-            sizes: SizeCache { known: vec![] },
             ffi_stack: vec![],
         }
     }
@@ -642,7 +639,7 @@ impl<'p> Interp<'p> {
     }
 
     fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, program: &Program<'p>) -> Res<'p, ()> {
-        let func = self.ready[f.0].as_ref();
+        let func = self.ready[f].as_ref();
         assert!(func.is_some(), "ICE: tried to call {f:?} but not compiled.");
         // Calling Convention: arguments passed to a function are moved out of your stack.
         let return_slot = self.range_to_index(ret);
@@ -741,13 +738,13 @@ impl<'p> Interp<'p> {
 
     fn next_inst(&self) -> &Bc<'p> {
         let frame = self.call_stack.last().unwrap();
-        let body = self.ready.get(frame.current_func.0).unwrap().as_ref().unwrap();
+        let body = self.ready[frame.current_func].as_ref().unwrap();
         body.insts.get(frame.current_ip).unwrap()
     }
 
     fn update_debug(&mut self) {
         let frame = self.call_stack.last().unwrap();
-        let body = self.ready.get(frame.current_func.0).unwrap().as_ref().unwrap();
+        let body = self.ready[frame.current_func].as_ref().unwrap();
         // TOOD: @track_caller so you don't just get an error report on the forward declare of assert_eq all the time. HACK:
         if !matches!(body.insts[frame.current_ip], Bc::CallBuiltin { .. }) {
             self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
@@ -756,8 +753,7 @@ impl<'p> Interp<'p> {
 
     fn current_fn_body(&self) -> &FnBody {
         let frame = self.call_stack.last().unwrap();
-        let body = self.ready.get(frame.current_func.0).unwrap();
-        body.as_ref().expect("jit current function")
+        self.ready[frame.current_func].as_ref().expect("jit current function")
     }
 
     fn set_ptr(&mut self, addr: Value, value: Values) -> Res<'p, Value> {
@@ -865,7 +861,7 @@ impl<'p> Executor<'p> for Interp<'p> {
 
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()> {
         let init_heights = (self.call_stack.len(), self.value_stack.len());
-        let result = EmitBc::compile(program, self, f);
+        let result = EmitBc::compile(program, &mut self.ready, f);
         if result.is_ok() {
             let end_heights = (self.call_stack.len(), self.value_stack.len());
             assert_eq!(init_heights, end_heights, "bad stack size");
@@ -886,15 +882,15 @@ impl<'p> Executor<'p> for Interp<'p> {
     }
 
     fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize {
-        self.sizes.slot_count(program, ty)
+        self.ready.sizes.slot_count(program, ty)
     }
 
     fn is_ready(&self, f: FuncId) -> bool {
-        self.ready.len() > f.0 && self.ready[f.0].is_some()
+        self.ready.ready.len() > f.0 && self.ready[f].is_some()
     }
 
     fn dump_repr(&self, _program: &Program<'p>, f: FuncId) -> String {
-        self.ready[f.0]
+        self.ready[f]
             .as_ref()
             .map(|func| func.log(self.pool))
             .unwrap_or_else(|| String::from("NOT READY"))
@@ -916,7 +912,7 @@ impl<'p> Executor<'p> for Interp<'p> {
     }
 
     fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>> {
-        self.ready[f.0].clone()
+        self.ready[f].clone()
     }
 
     fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values> {

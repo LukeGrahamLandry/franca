@@ -125,6 +125,8 @@ pub struct BcReady<'p> {
     pub sizes: SizeCache,
 }
 
+impl_index!(BcReady<'p>, FuncId, Option<FnBody<'p>>, ready);
+
 #[derive(Default, Clone)]
 pub struct SizeCache {
     pub known: Vec<Option<usize>>,
@@ -297,7 +299,7 @@ impl<'p> Constants<'p> {
 
     pub fn add_all(&mut self, other: &Self) {
         debug_assert!(self.is_valid && other.is_valid);
-        self.local.extend(other.local.deref().deref().iter().map(|(k, v)| (*k, v.clone())))
+        self.local.extend(other.local.deref().iter().map(|(k, v)| (*k, v.clone())))
     }
 
     pub fn get(&self, k: Var<'p>) -> Option<(Values, TypeId)> {
@@ -464,5 +466,3 @@ impl IntoIterator for StackRange {
         self.first.0..self.first.0 + self.count
     }
 }
-
-impl_index!(BcReady<'p>, FuncId, Option<FnBody<'p>>, ready);

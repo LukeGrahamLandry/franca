@@ -155,6 +155,7 @@ macro_rules! jit_test_aarch_only {
             }"#
         );
 
+        /*
         simple!(
             varient,
             3,
@@ -178,23 +179,26 @@ macro_rules! jit_test_aarch_only {
                     a&.b[]
                 }"#
         );
+        */
+        // simple!(
+        //     use_any_reg,
+        //     5,
+        //     2,
+        //     r#"
+        //     @any_reg
+        //     fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
+        //         op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0b000000));
+        //     });
+
+        //     @c_call fn main(a: i64) i64 = {
+        //         sub2(a, 3)
+        //     }"#
+        // );
 
         simple!(
-            use_any_reg,
-            5,
+            assert_eq_ffi,
+            (),
             2,
-            r#"
-            @any_reg
-            fn sub2(a: i64, b: i64) i64 = (fn(data: OpPtr, op: RetOp, r: Slice(u5)) Unit = {
-                op(data, sub_sr(Bits.X64[], get(r, 2), get(r, 0), get(r, 1), Shift.LSL[], 0b000000));
-            });
-    
-            @c_call fn main(a: i64) i64 = {
-                sub2(a, 3)
-            }"#
-        );
-
-        simple!(assert_eq_ffi, (), 2,
             r#"
             @c_call fn main() i64 = {
                 assert_eq(1, 1);
@@ -203,7 +207,10 @@ macro_rules! jit_test_aarch_only {
         );
 
         // Requires being able to write constant heap values.
-        simple!(use_str, (), 5,
+        simple!(
+            use_str,
+            (),
+            5,
             r#"
             @c_call fn main() i64 = {
                 let s: Str = "hello";

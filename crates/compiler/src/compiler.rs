@@ -73,7 +73,8 @@ pub struct Compile<'a, 'p> {
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     last_loc: Option<Span>,
-    pub executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
+    pub runtime_executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
+    pub comptime_executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
     pub program: &'a mut Program<'p>,
     pub jitted: Vec<*const u8>,
     pub save_bootstrap: Vec<FuncId>,
@@ -106,8 +107,10 @@ pub struct FnWip<'p> {
     pub module: Option<ModuleId>,
 }
 
+pub type BoxedExec<'p> = Box<dyn Executor<'p, SavedState = (usize, usize)>>;
+
 impl<'a, 'p> Compile<'a, 'p> {
-    pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>, executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>) -> Self {
+    pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>, runtime_executor: BoxedExec<'p>, comptime_executor: BoxedExec<'p>) -> Self {
         Self {
             pool,
             debug_trace: vec![],
@@ -116,7 +119,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: None,
             currently_compiling: vec![],
             program,
-            executor,
+            runtime_executor,
+            comptime_executor,
             jitted: vec![],
             save_bootstrap: vec![],
         }
@@ -203,7 +207,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for id in callees {
                     self.compile(id, when)?;
                 }
-                result = self.executor.compile_func(self.program, f);
+                result = self.runtime_executor.compile_func(self.program, f);
             } else {
                 self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime)?;
             }
@@ -218,7 +222,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn run(&mut self, f: FuncId, arg: Values, _when: ExecTime) -> Res<'p, Values> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
-        let result = self.executor.run_func(self.program, f, arg);
+        let result = self.runtime_executor.run_func(self.program, f, arg);
         let result = self.tag_err(result);
         self.pop_state(state2);
         result
@@ -234,7 +238,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Err(err) = &mut res {
             err.trace = self.log_trace();
             err.loc = self.last_loc;
-            self.executor.tag_error(err);
+            self.runtime_executor.tag_error(err);
         }
         res
     }
@@ -444,6 +448,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: is locals supposed to be just the new ones introduced or recursivly bubbled up?
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
         // TODO: dont bother if its just unit args (which most are because of !if and !while).
+        // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
         expr_out.expr = Expr::Block {
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
@@ -570,7 +575,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let args = func.arg.flatten().into_iter();
         let mut arg_values = arg_value.vec().into_iter();
         for (name, ty, _) in args {
-            let size = self.executor.size_of(self.program, ty); // TODO: better pattern matching
+            let size = self.runtime_executor.size_of(self.program, ty); // TODO: better pattern matching
             let mut values = vec![];
             for _ in 0..size {
                 values.push(unwrap!(arg_values.next(), "ICE: missing arguments"));
@@ -937,6 +942,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
         let res = self.compile_expr_inner(result, expr, requested)?;
         expr.ty = res.ty();
+        // TODO: it seems like this should always work but it doesn't
+        if let Structured::Const(ty, value) = &res {
+            // expr.expr = Expr::Value {
+            //     ty: *ty,
+            //     value: value.clone(),
+            // };
+            // assert!(
+            //     matches!(expr.expr, Expr::Value { .. }),
+            //     "If reduced to constant, that should be saved in the ast.\n{}",
+            //     expr.log(self.pool)
+            // )
+        }
         Ok(res)
     }
 
@@ -1010,6 +1027,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
+            Expr::Either { runtime, comptime } => {
+                // TODO
+                let rt = self.compile_expr(result, runtime, requested)?;
+                let ct = self.compile_expr(result, comptime, requested)?;
+                todo!()
+            }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1119,17 +1142,17 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
                         let ty = self.to_type(ty)?;
-                        let size = self.executor.size_of(self.program, ty);
+                        let size = self.runtime_executor.size_of(self.program, ty);
                         expr.expr = Expr::int(size as i64);
                         self.program.load_value(Value::I64(size as i64))
                     }
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the vm state tho :(
-                        let (saved_res, state) = (result.clone(), self.executor.mark_state());
+                        let (saved_res, state) = (result.clone(), self.runtime_executor.mark_state());
                         let res = self.compile_expr(result, arg, None);
                         assert!(res.is_err());
                         mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
-                        self.executor.restore_state(state);
+                        self.runtime_executor.restore_state(state);
                         *result = saved_res;
 
                         expr.expr = Expr::unit();
@@ -1405,7 +1428,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             CErr::InterpMsgToCompiler(name, arg, _) => {
                                 let name = self.pool.get(name);
                                 let res = self.handle_macro_msg(result, name, arg)?;
-                                response = self.executor.run_continuation(self.program, res);
+                                response = self.runtime_executor.run_continuation(self.program, res);
                             }
                             _ => return Err(msg),
                         },
@@ -1463,7 +1486,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             "unquote_macro_apply_placeholders" => {
                 let (slot, count) = arg.to_pair()?;
-                let mut values = self.executor.deref_ptr_pls(slot)?.vec().into_iter();
+                let mut values = self.runtime_executor.deref_ptr_pls(slot)?.vec().into_iter();
                 let mut arg: Vec<FatExpr<'p>> = vec![];
                 for _ in 0..count.to_int()? {
                     arg.push(unwrap!(FatExpr::deserialize(&mut values), ""));
@@ -1719,6 +1742,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::String(_) => String::get_type(self.program),
+            Expr::Either { runtime, comptime } => {
+                return match result.when {
+                    ExecTime::Comptime => self.type_of(result, comptime),
+                    ExecTime::Runtime => self.type_of(result, runtime),
+                }
+            }
         }))
     }
 
@@ -2239,7 +2268,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }),
                     ) = &container_ptr
                     {
-                        let size = self.executor.size_of(self.program, *f_ty);
+                        let size = self.runtime_executor.size_of(self.program, *f_ty);
                         assert!(physical_count >= size);
                         let value = Values::One(Value::Heap {
                             value,
@@ -2251,7 +2280,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     return Ok(Structured::RuntimeOnly(ty));
                 }
-                count += self.executor.size_of(self.program, *f_ty);
+                count += self.runtime_executor.size_of(self.program, *f_ty);
             }
             err!("unknown index {index} on {:?}", self.program.log_type(container_ty));
         } else {
@@ -2355,11 +2384,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.program.log_type(arg_ty),
                     arg_val
                 ),
-                Structured::Const(_, _) => ice!(
-                    "TODO: fully const comptime arg {:?}. (should be trivial just don't need it yet)",
-                    arg_expr
-                ),
+                Structured::Const(_, _) => {
+                    // Here, might as well just bake all the args, which is equivilent to how I handle closure inlining.
+                    // However, need to update the closed values if an argument is a closure.
+                    // TODO: don't do this duplication if not actually used.
+                    todo!();
+                    // TODO: this will do another clone of the function body even tho we know we're never going to call it again.
+                    return self.emit_capturing_call(result, original_f, expr);
+                }
                 Structured::TupleDifferent(_, arg_values) => {
+                    // TODO: Really what you want is to cache the newly baked function so it can be reused if called multiple times but I don't do that yet.
                     assert_eq!(
                         pattern.len(),
                         arg_values.len(),
@@ -2380,7 +2414,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut removed = 0;
                     for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
                         if self.program.is_comptime_only_type(ty) || kind == VarType::Const {
-                            let id = arg_value.clone().get()?.single()?.to_func(); // TODO: not this
+                            let id = arg_value.clone().get()?.single()?.to_func(); // TODO: not this. assumes its single slot but might not always be
                             let name = unwrap!(name, "arg needs name (unreachable?)");
                             current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
                             // TODO: need to do capturing_call to the ast
@@ -2694,7 +2728,7 @@ pub struct Unquote<'z, 'a, 'p> {
 
 impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
     // TODO: track if we're in unquote mode or placeholder mode.
-    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
         if let Expr::SuffixMacro(name, arg) = &mut expr.expr {
             if *name == Flag::Unquote.ident() {
                 let expr_ty = FatExpr::get_type(self.compiler.program);

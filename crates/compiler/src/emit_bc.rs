@@ -2,7 +2,6 @@
 
 #![allow(clippy::wrong_self_convention)]
 
-use std::borrow::Cow;
 use codemap::Span;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -12,10 +11,9 @@ use std::usize;
 use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
-use crate::compiler::{CErr, FnWip, Res};
+use crate::compiler::{CErr, ExecTime, FnWip, Res};
 use crate::experiments::reflect::BitSet;
 use crate::extend_options;
-use crate::interp::Interp;
 use crate::logging::PoolLog;
 
 use crate::{assert, assert_eq, err, ice, unwrap};
@@ -35,16 +33,14 @@ pub struct EmitBc<'z, 'p: 'z> {
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    pub fn compile(program: &'z Program<'p>, interp: &'z mut Interp<'p>, f: FuncId) -> Res<'p, ()> {
-        while interp.ready.len() <= f.0 {
-            interp.ready.push(None);
-        }
-        if interp.ready[f.0].is_some() {
+    pub fn compile(program: &'z Program<'p>, interp: &'z mut BcReady<'p>, f: FuncId) -> Res<'p, ()> {
+        extend_options(&mut interp.ready, f.0);
+        if interp[f].is_some() {
             return Ok(());
         }
         let mut emit = EmitBc::new(program, &mut interp.sizes);
         let body = emit.compile_inner(f)?;
-        interp.ready[f.0] = Some(body);
+        interp[f] = Some(body);
         Ok(())
     }
 
@@ -505,6 +501,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::String(_) | Expr::PrefixMacro { .. } => {
                 unreachable!("{}", expr.log(self.program.pool))
             }
+            // TODO: the whole point is to not attach when to the result.
+            Expr::Either { runtime, comptime } => match result.when {
+                ExecTime::Comptime => self.compile_expr(result, comptime, output)?,
+                ExecTime::Runtime => self.compile_expr(result, runtime, output)?,
+            },
         };
         Ok(())
     }

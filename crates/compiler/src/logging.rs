@@ -419,6 +419,10 @@ fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
 // TODO: this could use walk_whatever()
 fn collect_func_references<'p>(expr: &Expr<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
     match expr {
+        Expr::Either { runtime, comptime } => {
+            collect_func_references(runtime, refs, const_reads);
+            collect_func_references(comptime, refs, const_reads);
+        }
         Expr::Value { value, .. } => value.clone().vec().iter().for_each(|v| collect_func_references_value(v, refs)),
         Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
             collect_func_references(fst, refs, const_reads);
@@ -459,8 +463,8 @@ impl<'p> PoolLog<'p> for Interp<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut s = String::new();
         // s += &self.program.log_cached_types();
-        writeln!(s, "=== {} FUNCTIONS ===", self.ready.len());
-        for (i, f) in self.ready.iter().enumerate() {
+        writeln!(s, "=== {} FUNCTIONS ===", self.ready.ready.len());
+        for (i, f) in self.ready.ready.iter().enumerate() {
             write!(s, "FuncId({i}): ");
             // s += &self.program.funcs[i].log(pool);
             // s += "\n";

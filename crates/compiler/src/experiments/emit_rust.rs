@@ -14,7 +14,7 @@ use crate::{err, unwrap};
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
-    let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
+    let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
     load_program(&mut comp, "").unwrap();
 
     let (rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
@@ -23,8 +23,8 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
     }
-    let mut interp = comp.executor.to_interp().unwrap();
-    let mut asm = BcToAsm::new(&mut interp, &mut program);
+    let mut interp = comp.runtime_executor.to_interp().unwrap();
+    let mut asm = BcToAsm::new(&mut interp.ready, &mut program);
     asm.asm.reserve(asm.program.funcs.len());
     for f in &bs {
         asm.compile(*f).unwrap();
@@ -298,6 +298,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             Expr::PrefixMacro { .. } | Expr::Closure(_) | Expr::GetNamed(_) | Expr::String(_) => {
                 unreachable!()
             }
+            Expr::Either { runtime, .. } => self.compile_expr(runtime)?,
         })
     }
 

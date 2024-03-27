@@ -31,7 +31,7 @@ struct SRet<'a, 'p> {
 // }
 
 impl<'a, 'p> WalkAst<'p> for SRet<'a, 'p> {
-    fn walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
         if let Expr::Call(f, a) = &mut expr.expr {}
     }
 

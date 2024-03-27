@@ -2,6 +2,7 @@ use std::{mem, ops::DerefMut};
 
 use codemap::Span;
 
+use crate::ast::{Pattern, WalkAst};
 use crate::{
     ast::{Annotation, Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, ModuleBody, Name, Stmt, Var, VarInfo, VarType},
     compiler::{Compile, Res},
@@ -112,7 +113,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         for b in &mut func.arg.bindings {
             self.resolve_binding(b, true, func.loc);
         }
-        self.resolve_type(&mut func.ret);
+        self.walk_ty(&mut func.ret);
         self.push_scope(false);
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)
@@ -159,7 +160,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         match stmt.deref_mut() {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
-                self.resolve_type(ty);
+                self.walk_ty(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value);
                 }
@@ -285,6 +286,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 let _ = self.pop_scope();
             }
             Expr::String(_) => {}
+            Expr::Either { runtime, comptime } => {
+                self.resolve_expr(runtime);
+                self.resolve_expr(comptime);
+            }
         }
     }
 
@@ -339,20 +344,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         (vars, captures)
     }
 
-    fn resolve_type(&mut self, ty: &mut LazyType<'p>) {
-        match ty {
-            LazyType::EvilUnit => panic!(),
-            LazyType::Infer => {}
-            LazyType::PendingEval(e) => self.resolve_expr(e),
-            LazyType::Finished(_) => {}
-            LazyType::Different(parts) => parts.iter_mut().for_each(|t| self.resolve_type(t)),
-        }
-    }
-
     fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) {
         match binding.name {
             Name::Ident(name) => {
-                self.resolve_type(&mut binding.ty);
+                self.walk_ty(&mut binding.ty);
                 if declaring {
                     let (_old, var) = self.decl_var(&name);
                     self.compiler.program.vars.push(VarInfo { kind: VarType::Var, loc });
@@ -365,10 +360,27 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 }
             }
             Name::Var(_) => unreachable!(),
-            Name::None => self.resolve_type(&mut binding.ty),
+            Name::None => self.walk_ty(&mut binding.ty),
         }
         if let Some(expr) = &mut binding.default {
             self.resolve_expr(expr);
+        }
+    }
+}
+
+impl<'z, 'a, 'p> WalkAst<'p> for ResolveScope<'z, 'a, 'p> {
+    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    fn pre_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
+    fn walk_func(&mut self, _: &mut Func<'p>) {}
+    fn walk_pattern(&mut self, _: &mut Pattern<'p>) {}
+    fn walk_ty(&mut self, ty: &mut LazyType<'p>) {
+        match ty {
+            LazyType::EvilUnit => panic!(),
+            LazyType::Infer => {}
+            LazyType::PendingEval(e) => self.resolve_expr(e),
+            LazyType::Finished(_) => {}
+            LazyType::Different(parts) => parts.iter_mut().for_each(|t| self.walk_ty(t)),
         }
     }
 }

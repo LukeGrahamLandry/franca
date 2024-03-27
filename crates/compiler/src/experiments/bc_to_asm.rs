@@ -5,8 +5,8 @@
 #![allow(unused)]
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
-use crate::bc::{Bc, InterpBox, StackOffset, StackRange, Value, Values};
-use crate::compiler::{ExecTime, Res};
+use crate::bc::{Bc, BcReady, InterpBox, StackOffset, StackRange, Value, Values};
+use crate::compiler::{ExecTime, Executor, Res};
 use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
 use crate::{ast::Program, bc::FnBody};
@@ -20,7 +20,7 @@ pub struct SpOffset(usize);
 
 pub struct BcToAsm<'z, 'p> {
     pub program: &'z mut Program<'p>,
-    pub interp: &'z mut Interp<'p>,
+    pub funcs: &'z mut BcReady<'p>,
     pub asm: Jitted,
     pub slots: Vec<Option<SpOffset>>,
     pub open_slots: Vec<(SpOffset, usize)>,
@@ -52,10 +52,10 @@ const sp: i64 = 31;
 const X64: i64 = 0b1;
 
 impl<'z, 'p> BcToAsm<'z, 'p> {
-    pub fn new(interp: &'z mut Interp<'p>, program: &'z mut Program<'p>) -> Self {
+    pub fn new(interp: &'z mut BcReady<'p>, program: &'z mut Program<'p>) -> Self {
         Self {
             program,
-            interp,
+            funcs: interp,
             asm: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
             slots: vec![],
             open_slots: vec![],
@@ -105,12 +105,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     #[track_caller]
     fn slot_type(&self, slot: StackOffset) -> TypeId {
-        self.interp.ready[self.f.0].as_ref().unwrap().slot_types[slot.0]
+        self.funcs[self.f].as_ref().unwrap().slot_types[slot.0]
     }
 
     // TODO: now with my result ptrs i messed ip the order of things? need to handle grouped stack slots. before it worked out because i would always copy into a new chunk.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
-        let func = self.interp.ready[f.0].as_ref().unwrap();
+        let func = self.funcs[f].as_ref().unwrap();
         println!("{}", func.log(self.program.pool));
         let ff = &self.program[func.func];
         self.f = f;
@@ -145,9 +145,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let mut patch_cbz = vec![];
         let mut patch_b = vec![];
 
-        let func = self.interp.ready[f.0].as_ref().unwrap();
+        let func = self.funcs[f].as_ref().unwrap();
         for i in 0..func.insts.len() {
-            let inst = &(self.interp.ready[f.0].as_ref().unwrap().insts[i].clone());
+            let inst = &(self.funcs[f].as_ref().unwrap().insts[i].clone());
             self.asm.mark_next_ip();
             match inst {
                 &Bc::LastUse(slots) => {
@@ -489,41 +489,43 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // TODO: i want to do this though asm but that means i need to bootstrap more stuff.
     fn emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
-        let mut out = Vec::<i64>::new();
-        extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
-            ops.push(op);
-        }
-        let arg = (((&mut out) as *mut Vec<i64> as usize, consume as usize), registers).serialize_one();
-        self.interp.run(template, arg, ExecTime::Comptime, 1, self.program).unwrap();
-        out
+        todo!()
+        // let mut out = Vec::<i64>::new();
+        // extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
+        //     ops.push(op);
+        // }
+        // let arg = (((&mut out) as *mut Vec<i64> as usize, consume as usize), registers).serialize_one();
+        // self.funcs.run(template, arg, ExecTime::Comptime, 1, self.program).unwrap();
+        // out
     }
 
     fn _emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
-        let f = self.asm.get_fn(template).unwrap().as_ptr();
-        // TODO: this relies on my slice layout. use ffi types.
-        type TemplateFn = extern "C" fn(&mut Vec<i64>, extern "C" fn(&mut Vec<i64>, i64), *const i64, usize);
-        let f: TemplateFn = unsafe { transmute(f) };
-        let mut out = Vec::<i64>::new();
-        extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
-            ops.push(op);
-        }
-        self.asm.make_exec();
-        let indirect_fns = self.asm.get_dispatch();
-        unsafe {
-            asm!(
-            "mov x21, {fns}",
-            fns = in(reg) indirect_fns,
-            out("x21") _
-            );
-        }
-        f(&mut out, consume, registers.as_ptr(), registers.len());
-        self.asm.make_write();
-        // TODO: cache these so I don't have to keep doing sys-calls to toggle the permissions every call?
-        out
+        todo!()
+        // let f = self.asm.get_fn(template).unwrap().as_ptr();
+        // // TODO: this relies on my slice layout. use ffi types.
+        // type TemplateFn = extern "C" fn(&mut Vec<i64>, extern "C" fn(&mut Vec<i64>, i64), *const i64, usize);
+        // let f: TemplateFn = unsafe { transmute(f) };
+        // let mut out = Vec::<i64>::new();
+        // extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
+        //     ops.push(op);
+        // }
+        // self.asm.make_exec();
+        // let indirect_fns = self.asm.get_dispatch();
+        // unsafe {
+        //     asm!(
+        //     "mov x21, {fns}",
+        //     fns = in(reg) indirect_fns,
+        //     out("x21") _
+        //     );
+        // }
+        // f(&mut out, consume, registers.as_ptr(), registers.len());
+        // self.asm.make_write();
+        // // TODO: cache these so I don't have to keep doing sys-calls to toggle the permissions every call?
+        // out
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.interp.ready[self.f.0].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.funcs[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
 }
 
@@ -554,7 +556,7 @@ mod tests {
     fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
-        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)));
+        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
         load_program(&mut comp, src)?;
         let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
         if let Err(e) = comp.compile(main, ExecTime::Runtime) {
@@ -579,8 +581,8 @@ mod tests {
         //     }
         // }
 
-        let mut interp: Interp = comp.executor.to_interp().unwrap();
-        let mut asm = BcToAsm::new(&mut interp, &mut program);
+        let mut interp: Interp = comp.runtime_executor.to_interp().unwrap();
+        let mut asm = BcToAsm::new(&mut interp.ready, &mut program);
         asm.asm.reserve(asm.program.funcs.len());
         asm.compile(main)?;
 
@@ -824,3 +826,6 @@ pub fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
     }
     x
 }
+
+// impl<'a, 'p> Executor for  {
+// }
