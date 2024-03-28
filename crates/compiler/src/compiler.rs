@@ -426,7 +426,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Replace a call expr with the body of the target function.
     // The idea is having zero cost (50 cycles) closures :)
-    fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>, make_const: bool) -> Res<'p, Structured> {
+    fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, Structured> {
         let loc = expr_out.loc;
         debug_assert_ne!(f, result.func, "recusive inlining?");
         let state = DebugState::EmitCapturingCall(f);
@@ -443,13 +443,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
 
-        let mut pattern = func.arg.clone();
-        if make_const {
-            for b in &mut pattern.bindings {
-                // TODO: HACK. not doing this creates mixed const which i can't handle yet
-                b.kind = VarType::Const;
-            }
-        }
+        let pattern = func.arg.clone();
         let locals = func.arg.collect_vars();
 
         // TODO: is locals supposed to be just the new ones introduced or recursivly bubbled up?
@@ -637,7 +631,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 self.compile_expr(result, expr, None)?;
             }
-            Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations)?,
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
@@ -771,47 +764,70 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
-            // TODO: unify with and DeclVar
+            // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
+            Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations)?,
             // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn.
+            //       be able to expand this into multiple statements so backend never even sees a DeclVarPattern (and skip constants when doing so)
+            // TODO: this is extremly similar to what bind_const_arg has to do. should be able to express args as this thing?
             Stmt::DeclVarPattern { binding, value } => {
-                let all_const = binding.bindings.iter().all(|b| b.kind == VarType::Const);
-                let all_runtime = binding.bindings.iter().all(|b| b.kind != VarType::Const);
-                assert!(all_const || all_runtime, "TODO: mixed constants");
-                // TODO: do a pattern matching thingy and then just call decl_var
-                if let Some(value) = value {
-                    let ty = binding.ty(self.program);
-                    let res = self.compile_expr(result, value, Some(ty))?;
-                    self.type_check_arg(res.ty(), ty, "DeclVarPattern")?;
-                    // The is_empty skips unit added by !if/!while
-                    if all_const && !binding.bindings.is_empty() {
-                        // TODO: be able to do pattern matching on the expression itself instead of on the Values?
-                        if let Structured::Const(_, values) = res {
-                            let binding = binding.flatten();
-                            assert_eq!(binding.len(), values.len(), "TODO: non-trivial pattern");
-
-                            for ((arg_name, arg_ty, _), arg_value) in binding.into_iter().zip(values.vec().into_iter()) {
-                                if let Some(arg_name) = arg_name {
-                                    // TODO: what about updating self.program.vars?
-                                    result.constants.insert(arg_name, (Values::One(arg_value), arg_ty));
-                                    self.program[result.func]
-                                        .closed_constants
-                                        .insert(arg_name, (Values::One(arg_value), arg_ty));
-                                }
-                            }
-                        } else {
-                            err!("all const but result is {:?}", res)
-                        }
+                if binding.bindings.is_empty() {
+                    assert!(value.is_some() && value.as_ref().unwrap().expr.is_raw_unit());
+                    return Ok(());
+                }
+                let arguments = binding.flatten();
+                if arguments.len() == 1 {
+                    let (name, ty, kind) = arguments.into_iter().next().unwrap();
+                    if kind == VarType::Const {
+                        // TODO: write a test that gets here.
+                        todo!("remove from ast if const");
+                    }
+                    if let Some(name) = name {
+                        return self.decl_var(result, name, &mut LazyType::Finished(ty), value, kind, &stmt.annotations);
+                    } else {
+                        assert!(value.as_mut().unwrap().expr.is_raw_unit(), "var no name not unit");
+                        return Ok(());
                     }
                 }
 
-                if all_runtime {
-                    let arguments = binding.flatten();
-                    for (name, ty, _) in arguments {
-                        if let Some(name) = name {
-                            let _prev = result.vars.insert(name, ty);
-                            // assert!(prev.is_none(), "overwrite arg?");  // TODO: but closures inlined multiple times in the same fn
-                        }
+                let value = unwrap!(value.as_mut(), "currently DeclVarPattern is always added by compiler and has value.");
+                let exprs = if let Expr::Tuple(exprs) = &mut value.expr {
+                    exprs
+                } else {
+                    err!("TODO: more interesting pattern matching\n {}", value.log(self.pool))
+                };
+                assert_eq!(arguments.len(), exprs.len(), "TODO: non-trivial pattern");
+
+                for ((name, ty, kind), expr) in arguments.iter().zip(exprs.iter_mut()) {
+                    if let Some(name) = name {
+                        // TODO: HACK. make value not optional. cant just flip because when missing decl_var wants to put something there for imports. makes it hard. need to have a marker expr for missing value??
+                        let mut value = Some(mem::take(expr));
+                        self.decl_var(result, *name, &mut LazyType::Finished(*ty), &mut value, *kind, &stmt.annotations)?;
+                        *expr = value.unwrap();
+                    } else {
+                        assert!(expr.expr.is_raw_unit(), "var no name not unit");
                     }
+                }
+
+                // Remove constants so the backend doesn't have to deal with them.
+                let mut removed = 0;
+                for (i, (name, _, kind)) in arguments.iter().enumerate() {
+                    if *kind == VarType::Const {
+                        // TODO: do i have to put the expr in local constants somehow?
+                        binding.remove_named(name.unwrap());
+                        exprs.remove(i - removed);
+                        removed += 1; // TODO: this sucks
+                    }
+                }
+                // Fix trivial tuples
+                if exprs.is_empty() {
+                    value.expr = Expr::unit();
+                } else if exprs.len() == 1 {
+                    *value = mem::take(exprs.iter_mut().next().unwrap());
+                }
+                // If we changed stuff, make sure not to give the backend false type info.
+                if removed > 0 && !value.ty.is_unknown() {
+                    value.ty = TypeId::unknown();
+                    self.compile_expr(result, value, None)?;
                 }
             }
         }
@@ -1735,7 +1751,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn infer_arg(&mut self, func: FuncId) -> Res<'p, TypeId> {
-        if let Some(ty) = self.infer_types(func)? {
+        // TODO: this looks redundant but if you just check the arg multiple times you don't want to bother attempting the return type multiple times.
+        if let Some(ty) = self.program[func].finished_arg {
+            Ok(ty)
+        } else if let Some(ty) = self.infer_types(func)? {
             Ok(ty.arg)
         } else {
             Ok(unwrap!(self.program[func].finished_arg, "arg not inferred"))
@@ -1871,7 +1890,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: calling this in infer is wrong because it might fail and lose the function
-    fn promote_closure(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
+    pub fn promote_closure(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
             func.module = result.module;
             let f = self.add_func(mem::take(func), &result.constants)?;
@@ -1899,14 +1918,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // TODO: adding inline to the func is iffy now that i dont require it to be an inline closure. it will affect other callsites. only want that if this is the only one.
     fn emit_call_if(
         &mut self,
         result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
-        _requested: Option<TypeId>, // TODO: allow giving return type to infer
+        requested: Option<TypeId>, // TODO: allow giving return type to infer
     ) -> Res<'p, Structured> {
         let unit = TypeId::unit();
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
+        let mut unit_expr = FatExpr::synthetic(Expr::unit(), arg.loc);
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
@@ -1917,39 +1938,35 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let cond = val.single()?.to_bool().unwrap();
                 let cond_index = if cond { 1 } else { 2 };
                 let other_index = if cond { 2 } else { 1 };
-                if let Expr::Closure(_) = parts[cond_index].deref_mut() {
-                    let branch_body = self.promote_closure(result, &mut parts[cond_index])?;
-                    self.program[branch_body].add_tag(Flag::Inline);
+                if let Some(branch_body) = self.maybe_direct_fn(result, &mut parts[cond_index], &mut unit_expr, requested)? {
                     let branch_arg = self.infer_arg(branch_body)?;
                     self.type_check_arg(branch_arg, unit, sig)?;
-                    let ty = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index])?;
-                    self.finish_closure(&mut parts[cond_index]);
+                    self.program[branch_body].add_tag(Flag::Inline);
+                    let res = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index], requested)?;
+                    assert!(self.program[branch_body].finished_ret.is_some());
                     // TODO: fully dont emit the branch
                     let unit = FatExpr::synthetic(Expr::unit(), garbage_loc());
                     parts[other_index].expr = Expr::SuffixMacro(Flag::Unreachable.ident(), Box::new(unit));
                     parts[other_index].ty = TypeId::never();
-                    // TODO: stay const if body is const?
-                    return Ok(Structured::RuntimeOnly(ty));
+                    return Ok(res);
                 } else {
                     ice!("!if arg must be func not {:?}", parts[cond_index]);
-                };
+                }
             }
 
-            let true_ty = if let Expr::Closure(_) = parts[1].deref_mut() {
-                let if_true = self.promote_closure(result, &mut parts[1])?;
+            let true_ty = if let Some(if_true) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, requested)? {
                 self.program[if_true].add_tag(Flag::Inline);
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
-                self.emit_call_on_unit(result, if_true, &mut parts[1])?
+                self.emit_call_on_unit(result, if_true, &mut parts[1], requested)?.ty()
             } else {
                 ice!("if second arg must be func not {:?}", parts[1]);
             };
-            if let Expr::Closure(_) = parts[2].deref_mut() {
-                let if_false = self.promote_closure(result, &mut parts[2])?;
+            if let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? {
                 self.program[if_false].add_tag(Flag::Inline);
                 let false_arg = self.infer_arg(if_false)?;
                 self.type_check_arg(false_arg, unit, sig)?;
-                let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2])?;
+                let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2], requested)?.ty();
                 self.type_check_arg(true_ty, false_ty, sig)?;
             } else {
                 ice!("if third arg must be func not {:?}", parts[2]);
@@ -1971,7 +1988,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[cond_fn].add_tag(Flag::Inline);
                 let cond_arg = self.infer_arg(cond_fn)?;
                 self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
-                let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0])?;
+                let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0], None)?.ty();
                 self.type_check_arg(cond_ret, TypeId::bool(), sig)?;
             } else {
                 unwrap!(parts[0].as_fn(), "while first arg must be func not {:?}", parts[0]);
@@ -1982,7 +1999,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[body_fn].add_tag(Flag::Inline);
                 let body_arg = self.infer_arg(body_fn)?;
                 self.type_check_arg(body_arg, TypeId::unit(), sig)?;
-                let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1])?;
+                let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1], None)?.ty();
                 self.type_check_arg(body_ret, TypeId::unit(), sig)?;
             } else {
                 unwrap!(parts[1].as_fn(), "while second arg must be func not {:?}", parts[1]);
@@ -2289,7 +2306,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // Here, might as well just bake all the args, which is equivilent to how I handle closure inlining.
                     // TODO: do O need to update the closed values if an argument is a closure?
                     // TODO: this will do another clone of the function body even tho we know we're never going to call it again.
-                    return self.emit_capturing_call(result, original_f, expr, true);
+                    return self.emit_capturing_call(result, original_f, expr);
                 }
                 Structured::TupleDifferent(_, arg_values) => {
                     // TODO: Really what you want is to cache the newly baked function so it can be reused if called multiple times but I don't do that yet.
@@ -2339,7 +2356,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let f_ty = self.program.fn_ty(ty).unwrap();
                     self.type_check_arg(arg_ty, f_ty.arg, "sanity: post bake arg")?;
                     // TODO: only emit_capturing_call if we based a closure
-                    let res = self.emit_capturing_call(result, current_fn, expr, false)?;
+                    let res = self.emit_capturing_call(result, current_fn, expr)?;
                     self.pop_state(state);
                     return Ok(res);
                 }
@@ -2358,7 +2375,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if (!func.capture_vars.is_empty() || will_inline) && func.body.is_some() {
             // TODO: check that you're calling from the same place as the definition.
             assert!(!deny_inline, "capturing calls are always inlined.");
-            self.emit_capturing_call(result, original_f, expr, false)
+            self.emit_capturing_call(result, original_f, expr)
         } else {
             let res = self.emit_runtime_call(result, original_f, arg_expr)?;
             // Since we've called it, we must know the type by now.
@@ -2373,12 +2390,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn emit_call_on_unit(&mut self, result: &mut FnWip<'p>, cond_fn: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, TypeId> {
+    fn emit_call_on_unit(
+        &mut self,
+        result: &mut FnWip<'p>,
+        cond_fn: FuncId,
+        expr_out: &mut FatExpr<'p>,
+        requested: Option<TypeId>,
+    ) -> Res<'p, Structured> {
         let get_fn = FatExpr::synthetic(self.func_expr(cond_fn), expr_out.loc);
         let unit = FatExpr::synthetic(Expr::unit(), expr_out.loc);
         expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
-        let res = self.compile_expr(result, expr_out, None)?;
-        Ok(res.ty())
+        self.compile_expr(result, expr_out, requested)
     }
 
     /// The first two can be used for early bootstrapping since they just look at the ast without comptime eval.

@@ -1412,6 +1412,16 @@ impl<'p> Expr<'p> {
             value: Value::I64(v).into(),
         }
     }
+
+    pub fn is_raw_unit(&self) -> bool {
+        matches!(
+            self,
+            Expr::Value {
+                value: Values::One(Value::Unit),
+                ..
+            }
+        )
+    }
 }
 
 impl<'p> Default for Func<'p> {

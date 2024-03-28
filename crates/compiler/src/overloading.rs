@@ -37,8 +37,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let id = self.resolve_in_overload_set(result, arg, ret, i)?;
                 Some(id)
             }
-            Expr::Closure(func) => {
-                let id = self.add_func(mem::take(func), &result.constants)?;
+            Expr::Closure(_) => {
+                let id = self.promote_closure(result, f)?;
                 self.named_args_to_tuple(result, arg, id)?;
                 Some(id)
             }
