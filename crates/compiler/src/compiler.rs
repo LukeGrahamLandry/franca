@@ -446,12 +446,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut pattern = func.arg.clone();
         if make_const {
             for b in &mut pattern.bindings {
-                // let ty = unwrap!(b.ty.ty(), "arg ty not inferred");
-                // TODO: I guess this should really be happening when the pattern is typechecked, or make const explicit for Fn params.
-                // TODO: doing it this way creates mixed const which i can't handle yet
-                // if self.program.is_comptime_only_type(ty) {
+                // TODO: HACK. not doing this creates mixed const which i can't handle yet
                 b.kind = VarType::Const;
-                // }
             }
         }
         let locals = func.arg.collect_vars();
@@ -641,10 +637,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 self.compile_expr(result, expr, None)?;
             }
-            Stmt::DeclVar { name, ty, value, kind, .. } => {
-                let loc = stmt.loc;
-                self.decl_var(result, *name, ty, value, *kind, &mut stmt.annotations)?
-            }
+            Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations)?,
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
@@ -2271,7 +2264,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
         // TODO: seperate function for this
-        if self.program.is_comptime_only_type(arg_ty) || any_const_args {
+        if any_const_args {
             let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
             self.push_state(&state);
             // Some part of the argument must be known at comptime.
@@ -2319,7 +2312,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut skipped_types = vec![];
                     let mut removed = 0;
                     for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
-                        if self.program.is_comptime_only_type(ty) || kind == VarType::Const {
+                        if kind == VarType::Const {
                             let name = unwrap!(name, "arg needs name (unreachable?)");
                             // bind_const_arg handles adding closure captures.
                             current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
@@ -2552,7 +2545,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         ty: &mut LazyType<'p>,
         value: &mut Option<FatExpr<'p>>,
         kind: VarType,
-        annotations: &Vec<Annotation<'p>>,
+        annotations: &[Annotation<'p>],
     ) -> Res<'p, ()> {
         let no_type = matches!(ty, LazyType::Infer);
         self.infer_types_progress(&result.constants, ty)?;

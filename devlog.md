@@ -1,3 +1,15 @@
+## const args (Mar 28)
+
+You want Fn and Type to be comptime only so when you pass them as an argument it generates a new version of the function specialized for each callsite.
+But some comptime functions want to be able to work on those values without generating a bunch of redundant versions of themselves,
+because they just do stuff to the compiler data structures, they don't actually use the type/func in thier body.
+So maybe it makes more sense to say you have to be explicit about the difference
+and declare the argument 'const' if you want to call the function or have a variable of the type.
+Which is nice because its more clear when calling a function will slowly bloat your binary.
+Plus it means I don't have to deal with some weirdness around which capturing_call args need to be added to 'constants' vs 'vars'.
+So makes the compiler simplier and kinda has a justification in the language.
+I think that was a win, I had to add it in like 6 places and got to delete some compiler code.
+
 ## llvm agragate returns (Mar 22)
 
 LLVM can't return structs by value.

@@ -68,7 +68,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             value
         } else {
-            err!(CErr::VarNotFound(name))
+            // TODO: use self.program.vars[name.1].loc to show the declaration site.
+            err!("Missing constant {} (forgot to make a Fn(A, R) 'const'?)", name.log(self.pool))
         };
 
         // TODO: get rid of any

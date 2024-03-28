@@ -202,7 +202,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.compile_expr(result, arg_expr, arg)?;
         let func = &self.program[f];
         let f_ty = func.unwrap_ty();
-        assert!(!self.program.is_comptime_only_type(f_ty.arg), "{}", arg_expr.log(self.program.pool));
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));

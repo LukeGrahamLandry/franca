@@ -389,7 +389,7 @@ impl<'p> Binding<'p> {
     }
     pub fn var(&self) -> Option<Var<'p>> {
         match self.name {
-            Name::Ident(n) => None,
+            Name::Ident(_) => None,
             Name::Var(n) => Some(n),
             Name::None => None,
         }
@@ -766,7 +766,6 @@ pub struct Program<'p> {
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
-    comptime_only: BitSet, // Index is TypeId
     pub assertion_count: usize,
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
@@ -875,7 +874,6 @@ macro_rules! safe_rec {
     }};
 }
 
-use crate::experiments::reflect::BitSet;
 pub(crate) use safe_rec;
 
 #[repr(C)]
@@ -910,7 +908,6 @@ impl<'p> Program<'p> {
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
-            comptime_only: BitSet::empty(),
             assertion_count: 0,
             runtime_arch,
             comptime_arch,
@@ -1138,16 +1135,9 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
-            if self.calc_is_comptime_only_type(TypeId(id as u32)) {
-                self.comptime_only.set(id);
-            }
             self.type_lookup.insert(ty, TypeId(id as u32));
             TypeId(id as u32)
         })
-        // let id = self.types.iter().position(|check| check == &ty).unwrap_or_else(|| {
-        //
-        // });
-        // TypeId(id)
     }
 
     // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS
@@ -1299,42 +1289,6 @@ impl<'p> Program<'p> {
         let ty = self.tuple_of(types);
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))
-    }
-
-    pub fn is_comptime_only(&self, value: &Structured) -> bool {
-        match value {
-            Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => false, // sure hope not or we're already fucked.
-            Structured::TupleDifferent(ty, _) | Structured::Const(ty, _) => self.is_comptime_only_type(*ty),
-        }
-    }
-
-    // All TypeId must have gone through intern_type, so it will always be here.
-    pub fn is_comptime_only_type(&self, ty: TypeId) -> bool {
-        self.comptime_only.get(ty.0 as usize)
-    }
-
-    fn calc_is_comptime_only_type(&self, ty: TypeId) -> bool {
-        match &self[ty] {
-            TypeInfo::Unit
-            | TypeInfo::Any
-            | TypeInfo::Unknown
-            | TypeInfo::Never
-            | TypeInfo::F64
-            | TypeInfo::VoidPtr
-            | TypeInfo::FnPtr(_)
-            | TypeInfo::Int(_)
-            | TypeInfo::Bool => false,
-            // TODO: supply "runtime" versions of these for macros to work with
-            TypeInfo::Fn(_) => true,
-            // TODO: !!! this is wrong. when true it tries to do it to the builtin shims which is probably fine but need to fix something with the missing name vs body.
-            // but really its just that you cant do the fancy stuff at comptime.
-            // distinguish between const which is your own comptime and @ct which is anytime with access to the compiler context.
-            TypeInfo::OverloadSet | TypeInfo::Type => false,
-            TypeInfo::Tuple(types) => types.iter().any(|ty| self.is_comptime_only_type(*ty)),
-            TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Ptr(ty) => self.is_comptime_only_type(*ty),
-            TypeInfo::Struct { fields, .. } => fields.iter().any(|f| self.is_comptime_only_type(f.ty)),
-            TypeInfo::Enum { cases, .. } => cases.iter().any(|(_, ty)| self.is_comptime_only_type(*ty)),
-        }
     }
 
     #[track_caller]
