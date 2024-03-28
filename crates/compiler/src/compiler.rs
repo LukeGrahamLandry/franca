@@ -746,7 +746,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 pending: vec![id],
                                 public,
                             });
-                            result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::unknown()));
+                            result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::overload_set()));
                         }
                     }
                 }
@@ -1919,6 +1919,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: adding inline to the func is iffy now that i dont require it to be an inline closure. it will affect other callsites. only want that if this is the only one.
+    // TODO: it still doesnt allow the funcs to be any expr because i dont compile them first.
     fn emit_call_if(
         &mut self,
         result: &mut FnWip<'p>,
@@ -2116,7 +2117,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         let container_ptr = self.compile_expr(result, container_ptr, None)?;
         let container_ptr_ty = self.program.raw_type(container_ptr.ty());
         let depth = self.program.ptr_depth(container_ptr_ty);
-        assert_eq!(depth, 1, "index expr ptr must be one level of indirection. {:?}", container_ptr_ty);
+        assert_eq!(
+            depth,
+            1,
+            "index expr ptr must be one level of indirection. {:?} {:?}",
+            self.program.log_type(container_ptr_ty),
+            container_ptr
+        );
         let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "",);
 
         let raw_container_ty = self.program.raw_type(container_ty);
@@ -2514,11 +2521,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
-    fn resolve_import(&mut self, module: ModuleId, name: Ident<'_>) -> Res<'p, Values> {
+    fn resolve_import(&mut self, module: ModuleId, name: Ident<'_>) -> Res<'p, (Values, TypeId)> {
         let module_f = self.get_module(module)?;
         if let Some(var) = self.program[module].exports.get(&name) {
-            let value = unwrap!(self.program[module_f].closed_constants.get(*var), "missing export");
-            Ok(value.0) // TODO: include type
+            let value = unwrap!(
+                self.program[module_f].closed_constants.get(*var),
+                "missing export: {}",
+                var.log(self.pool)
+            );
+            Ok(value) // TODO: include type
         } else {
             err!("Module {} does not export {}", module.0, self.pool.get(name))
         }
@@ -2594,7 +2605,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 let import_path = import_path.parse_dot_chain()?;
                                 self.resolve_module(result.module.unwrap(), &import_path)?
                             };
-                            self.resolve_import(module, name.0)?
+                            let (val, found_ty) = self.resolve_import(module, name.0)?;
+                            // This fixes importing const @enum(T) being seen as VoidPtr
+                            if let LazyType::Infer = ty {
+                                *ty = LazyType::Finished(found_ty);
+                            }
+                            val
                         } else {
                             let name = self.pool.get(name.0);
                             unwrap!(self.builtin_constant(name), "uninit (non-blessed) const: {:?}", name).0.into()
@@ -2611,8 +2627,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // TODO: fn name instead of var name in messages?
                             let f_ty = unwrap!(
                                 self.program.fn_ty(ty),
-                                "const {} OverloadSet must have function type",
-                                name.log(self.pool)
+                                "const {} OverloadSet must have function type not {:?}",
+                                name.log(self.pool),
+                                ty
                             );
 
                             self.compute_new_overloads(i)?;
