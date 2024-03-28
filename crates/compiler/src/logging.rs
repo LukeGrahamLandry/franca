@@ -509,6 +509,15 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
             Stmt::Set { place, value } => {
                 format!("{} = {};", place.log(pool), value.log(pool))
             }
+            Stmt::DeclVarPattern { binding, value } => {
+                let body: String = binding
+                    .bindings
+                    .iter()
+                    .map(|b| format!("{}: ({}), ", b.var().map_or("_".to_string(), |n| n.log(pool)), b.lazy().log(pool)))
+                    .collect();
+
+                format!("({body}) = {:?};", value.as_ref().map(|v| v.log(pool)))
+            }
             _ => format!("{:?}", self),
         }
     }

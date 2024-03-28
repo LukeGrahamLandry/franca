@@ -387,6 +387,13 @@ impl<'p> Binding<'p> {
             Name::None => None,
         }
     }
+    pub fn var(&self) -> Option<Var<'p>> {
+        match self.name {
+            Name::Ident(n) => None,
+            Name::Var(n) => Some(n),
+            Name::None => None,
+        }
+    }
     pub fn lazy(&self) -> &LazyType<'p> {
         &self.ty
     }

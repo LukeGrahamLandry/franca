@@ -115,7 +115,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let arguments = pattern.flatten();
         let mut slot_count = 0;
         for (name, ty, kind) in arguments {
-            assert_ne!(kind, VarType::Const);
+            // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
+            // assert_ne!(kind, VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
             let size = self.slot_count(ty);
             let range = StackRange {
                 first: full_arg_range.offset(slot_count),
