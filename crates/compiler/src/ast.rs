@@ -485,6 +485,14 @@ impl<'p> Pattern<'p> {
             _ => true,
         });
         debug_assert_ne!(start, self.bindings.len());
+        if self.bindings.is_empty() {
+            self.bindings.push(Binding {
+                name: Name::None,
+                ty: LazyType::Finished(TypeId::unit()),
+                default: None,
+                kind: VarType::Let,
+            })
+        }
     }
 
     pub fn ty(&self, program: &mut Program<'p>) -> TypeId {

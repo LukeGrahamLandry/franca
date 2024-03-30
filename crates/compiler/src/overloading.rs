@@ -20,6 +20,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             &mut Expr::GetVar(i) => {
                 // TODO: only grab here if its a constant, might be a function pointer.
                 let id = self.resolve_function(result, i, arg, ret)?; // TODO: error here is probably fine, just return None
+                                                                      // println!("Choose {id:?} for {}", f.log(self.pool));
                 Some(id)
             }
             &mut Expr::Value {

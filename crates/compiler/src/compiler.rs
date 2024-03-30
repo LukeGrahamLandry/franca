@@ -261,11 +261,15 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Any environment constants must already be in the function.
     fn eval_and_close_local_constants(&mut self, f: FuncId) -> Res<'p, ()> {
+        debug_assert!(!self.program[f].evil_uninit);
+        debug_assert!(!self.program[f].evil_uninit);
+        if self.program[f].local_constants.is_empty() {
+            // Maybe no consts, or maybe we've already compiled them.
+            return Ok(());
+        }
         let state = DebugState::EvalConstants(f);
         self.push_state(&state);
         let loc = self.program[f].loc;
-        debug_assert!(!self.program[f].evil_uninit);
-        debug_assert!(self.program[f].closed_constants.is_valid);
         let module = self.program[f].module;
 
         mut_replace!(self.program[f].closed_constants, |constants| {
@@ -281,7 +285,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for stmt in &mut local_constants {
                     self.compile_stmt(&mut result, stmt)?;
                 }
-                Ok((local_constants, ()))
+                // Note: not putting local_constants back. We only need to evaluate them once (even if capturing_call runs many times)
+                //      and they get moved into result.constants, which becomes the closed_constants of 'f' (but as values instead of statements)
+                Ok((vec![], ()))
             });
 
             self.pop_state(state);
@@ -338,8 +344,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
                 assert!(kind != VarType::Const, "Tried to emit before binding const args.");
                 if let Some(name) = name {
-                    let _prev = result.vars.insert(name, ty);
-                    // assert!(prev.is_none(), "overwrite arg?");  // TODO: but closures inlined multiple times in the same fn
+                    let prev = result.vars.insert(name, ty);
+                    assert!(prev.is_none(), "overwrite arg?");
                 }
             }
             Ok((func, ()))
@@ -423,12 +429,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         let arg_expr = if let Expr::Call(_, arg) = expr_out.deref_mut() { arg } else { ice!("") };
 
-        self.infer_types(f)?;
         assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
         self.currently_inlining.push(f);
 
-        // We close them into f's Func, but we need to emit into the caller's body.
-        self.eval_and_close_local_constants(f)?;
+        // We close them into f's Func, but we need to emit
+        // into the caller's body.
+        self.eval_and_close_local_constants(f)?; // TODO: only if this is the first time calling 'f'
         let func = &self.program.funcs[f.0];
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
@@ -440,6 +446,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
         // TODO: dont bother if its just unit args (which most are because of !if and !while).
         // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
+        // TODO: need to move the const args to the top before eval_and_close_local_constants
         expr_out.expr = Expr::Block {
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
@@ -542,6 +549,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             let arg_value = self.immediate_eval_expr(&constants, arg_expr.clone(), arg_ty)?;
             Ok((constants, arg_value))
         });
+
+        assert!(!arg_expr.ty.is_unknown());
+        arg_expr.expr = Expr::Value {
+            ty: arg_expr.ty,
+            value: arg_value.clone(),
+        };
 
         // TODO: !!!! now Unique doesnt work maybe?
         // if func.body.is_none() {
@@ -876,6 +889,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Call(f, arg) => {
                 // self.compile_expr(result, arg, None)?; // TODO: infer arg type from fn??
+
                 if let Some(ty) = self.type_of(result, f)? {
                     if let TypeInfo::FnPtr(f_ty) = self.program[ty] {
                         self.compile_expr(result, f, Some(ty))?;
@@ -1031,15 +1045,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     "type" => {
                         // Note: this does not evaluate the expression.
-                        // TODO: warning if it has side effects.
-                        let ty = unwrap!(self.type_of(result, arg)?, "could not infer yet");
+                        // TODO: warning if it has side effects. especially if it does const stuff.
+                        let ty = self.compile_expr(result, arg, None)?.ty();
                         expr.expr = Expr::ty(ty);
                         self.program.load_value(Value::Type(ty))
                     }
                     "size_of" => {
-                        // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects.
-
                         let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
                         let ty = self.to_type(ty)?;
                         let size = self.runtime_executor.size_of(self.program, ty);
@@ -1798,9 +1810,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         match e.deref_mut() {
             Expr::Value { value, .. } => return Ok(value.clone()),
             Expr::GetVar(var) => {
-                // fast path for builtin type identifiers
                 if let Some((value, _)) = constants.get(*var) {
-                    // debug_assert_ne!(value, Value::Poison);
+                    debug_assert_ne!(value, Values::One(Value::Poison));
                     return Ok(value);
                 }
                 // fallthrough
@@ -1813,6 +1824,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     unreachable!("{}", self.program.log_type(ret_ty))
                 };
+                // TODO: this only helps if some can be quick-evaled by special cases above, otherwise makes it worse.
                 let values: Res<'p, Vec<Values>> = elements
                     .iter()
                     .zip(types)
@@ -2260,12 +2272,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(Structured::Const(ty, ret_val));
         }
 
-        // Note: f will be compiled differently depending on the calling convention.
-        // But, we do need to know how many values it returns. If there's no type annotation, this might end up compiling the function to figure it out.
-        self.infer_types(original_f)?;
-
-        let arg_ty = self.program[original_f].finished_arg.unwrap();
-
+        let arg_ty = self.infer_arg(original_f)?;
         let mut arg_val = self.compile_expr(result, arg_expr, Some(arg_ty))?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
         if arg_val.is_empty() {
@@ -2286,26 +2293,42 @@ impl<'a, 'p> Compile<'a, 'p> {
             // You better compile_expr noticed and didn't put it in a stack slot.
             let func = &self.program[original_f];
             let pattern = func.arg.flatten();
+
+            if pattern.len() == 1 {
+                let (name, _, kind) = pattern.into_iter().next().unwrap();
+                debug_assert_eq!(kind, VarType::Const);
+                let name = unwrap!(name, "arg needs name (unreachable?)");
+                let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
+                arg_expr.expr = Expr::unit();
+                arg_expr.ty = TypeId::unit();
+                let res = self.emit_capturing_call(result, current_fn, expr)?;
+                self.pop_state(state);
+                return Ok(res);
+            }
+
+            if let Structured::Const(ty, values) = arg_val {
+                assert_eq!(
+                    pattern.len(),
+                    values.len(),
+                    "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
+                    pattern,
+                    values,
+                    func.synth_name(self.pool)
+                );
+                arg_val = Structured::TupleDifferent(
+                    ty,
+                    values
+                        .vec()
+                        .into_iter()
+                        .zip(pattern.iter())
+                        .map(|(val, (_, ty, _))| Structured::Const(*ty, Values::One(val)))
+                        .collect(),
+                )
+            }
+
             match arg_val {
-                Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!(
-                    "{:?} is comptime only but {:?} is only known at runtime.",
-                    self.program.log_type(arg_ty),
-                    arg_val
-                ),
-                Structured::Const(_, values) => {
-                    assert_eq!(
-                        pattern.len(),
-                        values.len(),
-                        "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
-                        pattern,
-                        values,
-                        func.synth_name(self.pool)
-                    );
-                    // Here, might as well just bake all the args, which is equivilent to how I handle closure inlining.
-                    // TODO: do O need to update the closed values if an argument is a closure?
-                    // TODO: this will do another clone of the function body even tho we know we're never going to call it again.
-                    return self.emit_capturing_call(result, original_f, expr);
-                }
+                Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!("const arg but {:?} is only known at runtime.", arg_val),
+                Structured::Const(_, _) => unreachable!(),
                 Structured::TupleDifferent(_, arg_values) => {
                     // TODO: Really what you want is to cache the newly baked function so it can be reused if called multiple times but I don't do that yet.
                     assert_eq!(
@@ -2323,7 +2346,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     };
                     assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
                     let mut current_fn = original_f;
-                    let mut skipped_args = vec![]; // TODO: need to remove these baked ones from the arg expr as well!
+                    let mut skipped_args = vec![];
                     let mut skipped_types = vec![];
                     let mut removed = 0;
                     for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
@@ -2331,6 +2354,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let name = unwrap!(name, "arg needs name (unreachable?)");
                             // bind_const_arg handles adding closure captures.
                             current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
+                            // TODO: this would be better if i was iterating backwards
                             arg_exprs.remove(i - removed);
                             removed += 1; // TODO: this sucks
                         } else {
@@ -2684,7 +2708,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: use stmt.loc
                     *value = Some(FatExpr::synthetic(val_expr, garbage_loc()));
                 }
-                result.constants.insert(name, (val, final_ty));
+                let prev = result.constants.insert(name, (val, final_ty));
+                assert!(prev.is_none());
                 // println!("{}", self.program.log_consts(&result.constants));
             }
             VarType::Let | VarType::Var => {
