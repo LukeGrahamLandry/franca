@@ -32,7 +32,7 @@ type Res<T> = Result<T, ParseErr>;
 
 #[derive(Debug)]
 pub struct ParseErr {
-    pub loc: &'static Location<'static>,
+    pub loc: Option<&'static Location<'static>>,
     pub file: Arc<File>,
     pub diagnostic: Vec<Diagnostic>,
 }
@@ -680,7 +680,11 @@ impl<'a, 'p> Parser<'a, 'p> {
             self.spans[self.spans.len() - 1]
         };
         ParseErr {
-            loc: Location::caller(),
+            loc: if cfg!(feature = "trace_errors") {
+                Some(std::panic::Location::caller())
+            } else {
+                None
+            },
             diagnostic: vec![Diagnostic {
                 level: Level::Error,
                 message,

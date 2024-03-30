@@ -21,12 +21,11 @@ impl<'p> BuildExec<'p> {
     }
 }
 
-
 pub struct Segment {
     pub name: &'static [u8],
     pub v_addr: usize,
     pub v_size: usize, // if larger than bytes of all sections, loader pads with zeros.
-    pub sections: Vec<Section>
+    pub sections: Vec<Section>,
 }
 
 pub struct Section {
@@ -34,5 +33,4 @@ pub struct Section {
     // must fit inside the segment and not overlap.
     pub v_addr: usize,
     pub v_size: usize, // if larger than bytes of all sections, loader pads with zeros.
-
 }

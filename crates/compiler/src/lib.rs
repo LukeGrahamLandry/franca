@@ -250,7 +250,9 @@ fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>
         outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
     }
 
-    outln!(ShowErr, "Internal: {}", e.internal_loc);
+    if cfg!(feature = "trace_errors") {
+        outln!(ShowErr, "Internal: {}", e.internal_loc.unwrap());
+    }
     outln!(ShowErr, "{}", e.trace);
     outln!(ShowErr, "{}", e.call_stack);
     log_dbg(interp, save);

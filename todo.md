@@ -27,6 +27,8 @@
 - field auto ref/deref for primitive types?
 - my expression output thingy broke some struct stuff (aliasing + asm consecutive slots)
 - be able to address a byte so you can use libc for stuff
+- let macros code generate a string and compile that
+- asm stack traces. can i have panics walk across languages?
 
 ## Sema
 

@@ -84,22 +84,24 @@ pub struct Lexer<'a, 'p> {
     peeked: VecDeque<Token<'p>>,
     pub(crate) line: usize,
     pub(crate) comment_lines: usize,
+    hack: Option<Token<'p>>,
 }
 
 impl<'a, 'p> Lexer<'a, 'p> {
     pub fn new(src: Arc<File>, pool: &'p StringPool<'p>, root: Span) -> Self {
         // Safety: its in an arc which is dropped at the same time as the iterator.
-        let fuck = unsafe { &*(src.source() as *const str) };
+        let hack = unsafe { &*(src.source() as *const str) };
         Self {
             src,
             start: 0,
             current: 0,
             peeked: VecDeque::with_capacity(10),
-            chars: fuck.chars().peekable(),
+            chars: hack.chars().peekable(),
             root,
             pool,
             line: 0,
             comment_lines: 0,
+            hack: None,
         }
     }
 
@@ -110,7 +112,11 @@ impl<'a, 'p> Lexer<'a, 'p> {
             return prev;
         }
 
-        self.do_next()
+        let t = self.do_next();
+        if let Some(t) = self.hack.take() {
+            self.peeked.push_back(t);
+        }
+        t
     }
 
     fn do_next(&mut self) -> Token<'p> {
@@ -179,6 +185,9 @@ impl<'a, 'p> Lexer<'a, 'p> {
         while self.peeked.len() <= i {
             let t = self.do_next();
             self.peeked.push_back(t);
+            if let Some(t) = self.hack.take() {
+                self.peeked.push_back(t);
+            }
         }
         self.peeked[i].clone()
     }
@@ -215,31 +224,45 @@ impl<'a, 'p> Lexer<'a, 'p> {
     fn lex_num(&mut self) -> Token<'p> {
         let mut is_float = false;
         loop {
-            let done = match self.peek_c() {
-                '\0' => true,
+            match self.peek_c() {
                 '.' => {
-                    is_float = true;
-                    false
+                    if is_float {
+                        return self.end_num(true);
+                    }
+                    // TODO: this would be easier if i could just peek a char.
+                    let int = self.end_num(false);
+                    self.pop();
+                    if self.peek_c().is_numeric() {
+                        is_float = true;
+                    } else {
+                        self.start = self.current;
+                        debug_assert!(self.hack.is_none());
+                        // cant just use self.peeked because self.nth will push whatever we return.
+                        self.hack = Some(self.token(TokenType::Dot, self.start, self.current));
+                        return int;
+                    }
                 }
-                c => !c.is_numeric(),
-            };
-            if done {
-                let text = &self.src.source()[self.start..self.current];
-                if is_float {
-                    let n = match text.parse::<f64>() {
-                        Ok(n) => n,
-                        Err(_) => return self.err(LexErr::NumParseErr),
-                    };
-                    return self.token(Float(n), self.start, self.current);
-                } else {
-                    let n = match text.parse::<i64>() {
-                        Ok(n) => n,
-                        Err(_) => return self.err(LexErr::NumParseErr),
-                    };
-                    return self.token(Number(n), self.start, self.current);
-                }
+                '0'..='9' => {}
+                _ => return self.end_num(is_float),
             }
             self.pop();
+        }
+    }
+
+    fn end_num(&mut self, is_float: bool) -> Token<'p> {
+        let text = &self.src.source()[self.start..self.current];
+        if is_float {
+            let n = match text.parse::<f64>() {
+                Ok(n) => n,
+                Err(_) => return self.err(LexErr::NumParseErr),
+            };
+            return self.token(Float(n), self.start, self.current);
+        } else {
+            let n = match text.parse::<i64>() {
+                Ok(n) => n,
+                Err(_) => return self.err(LexErr::NumParseErr),
+            };
+            return self.token(Number(n), self.start, self.current);
         }
     }
 

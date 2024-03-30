@@ -20,7 +20,7 @@ use crate::{assert, assert_eq, err, ice, unwrap};
 
 #[derive(Debug, Clone)]
 pub struct DebugInfo<'p> {
-    pub internal_loc: &'static Location<'static>,
+    pub internal_loc: Option<&'static Location<'static>>,
     pub src_loc: Span,
     pub p: PhantomData<&'p str>,
 }
@@ -274,18 +274,21 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclVarPattern { binding, value } => {
-                let value = value.as_ref().unwrap();
-                let full_arg_range = result.reserve_slots(self, value.ty)?;
-                self.compile_expr(result, value, full_arg_range)?;
-                for i in full_arg_range {
-                    result.slot_is_var.set(i);
-                }
-                self.locals.last_mut().unwrap().push(full_arg_range);
-                let args_to_drop = self.bind_args(result, full_arg_range, binding)?;
-                for (name, slot, _) in args_to_drop {
-                    if name.is_none() {
-                        result.push(Bc::Drop(slot));
+                if let Some(value) = value.as_ref() {
+                    let full_arg_range = result.reserve_slots(self, value.ty)?;
+                    self.compile_expr(result, value, full_arg_range)?;
+                    for i in full_arg_range {
+                        result.slot_is_var.set(i);
                     }
+                    self.locals.last_mut().unwrap().push(full_arg_range);
+                    let args_to_drop = self.bind_args(result, full_arg_range, binding)?;
+                    for (name, slot, _) in args_to_drop {
+                        if name.is_none() {
+                            result.push(Bc::Drop(slot));
+                        }
+                    }
+                } else {
+                    assert!(binding.bindings.is_empty());
                 }
             }
             Stmt::Noop => {}
@@ -924,7 +927,11 @@ impl<'p> FnBody<'p> {
         #[cfg(feature = "some_log")]
         {
             self.debug.push(DebugInfo {
-                internal_loc: Location::caller(),
+                internal_loc: if cfg!(feature = "trace_errors") {
+                    Some(std::panic::Location::caller())
+                } else {
+                    None
+                },
                 src_loc: self.last_loc,
                 p: Default::default(),
             });

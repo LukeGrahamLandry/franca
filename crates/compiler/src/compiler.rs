@@ -38,7 +38,7 @@ use crate::{assert, assert_eq, err, ice, logln, unwrap};
 
 #[derive(Clone)]
 pub struct CompileError<'p> {
-    pub internal_loc: &'static Location<'static>,
+    pub internal_loc: Option<&'static Location<'static>>,
     pub loc: Option<Span>,
     pub reason: CErr<'p>,
     pub trace: String,
@@ -349,16 +349,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ret = mut_replace!(self.program[f], |mut func: Func<'p>| {
                 // Functions without a body are always builtins.
                 // It's convient to give them a FuncId so you can put them in a variable,
-                // TODO: but just force inline call.
-                logln!(
-                    "builtin shim for {} has constants {}",
-                    self.program[f].synth_name(self.pool),
-                    self.program.log_consts(&func.closed_constants)
-                );
-                // func.annotations.push(Annotation {
-                //     name: self.pool.intern("inline"),
-                //     args: None,
-                // });
                 if let Some(tag) = func.annotations.iter().find(|c| c.name == Flag::Comptime_Addr.ident()) {
                     let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
                     func.comptime_addr = Some(addr.to_bytes());
@@ -392,7 +382,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let hint = self.program[f].finished_ret;
             let res = self.compile_expr(result, body_expr, hint)?;
             if self.program[f].finished_ret.is_none() {
-                // assert_eq!(self.program[f].ret, LazyType::Infer);
+                assert!(matches!(self.program[f].ret, LazyType::Infer));
                 self.program[f].finished_ret = Some(res.ty());
                 self.program[f].ret = LazyType::Finished(res.ty());
             }
@@ -405,7 +395,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ret_val)
     }
 
-    // This is a normal function call. No comptime args, no runtime captures. TODO WIP
+    // This is a normal function call. No comptime args, no runtime captures.
     fn emit_runtime_call(&mut self, result: &mut FnWip<'p>, f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Structured> {
         let arg_ty = unwrap!(self.program[f].finished_arg, "fn arg");
         self.compile_expr(result, arg_expr, Some(arg_ty))?;
@@ -553,7 +543,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Ok((constants, arg_value))
         });
 
-        // TODO
+        // TODO: !!!! now Unique doesnt work maybe?
         // if func.body.is_none() {
         //     // TODO: don't re-eval the arg type every time.
         //     let name = func.synth_name(self.pool);
@@ -753,12 +743,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let func = &self.program.funcs[id.0];
                 if func.has_tag(Flag::Impl) {
-                    // TODO: maybe this should be going into the overload set somehow instead?
                     for stmt in &func.local_constants {
                         if let Stmt::DeclFunc(new) = &stmt.stmt {
                             if new.referencable_name {
-                                // hey, if you're ever looking for this name, try calling me and I might give you one.
-                                insert_multi(&mut self.program.impls, new.name, id);
+                                // TODO: put 'id' in an impls list in the overload set of 'new' somehow
                             }
                         }
                     }
@@ -769,20 +757,23 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn.
             //       be able to expand this into multiple statements so backend never even sees a DeclVarPattern (and skip constants when doing so)
             // TODO: this is extremly similar to what bind_const_arg has to do. should be able to express args as this thing?
+            // TODO: remove useless statements
             Stmt::DeclVarPattern { binding, value } => {
                 if binding.bindings.is_empty() {
-                    assert!(value.is_some() && value.as_ref().unwrap().expr.is_raw_unit());
+                    assert!(value.is_none() || value.as_ref().unwrap().expr.is_raw_unit());
                     return Ok(());
                 }
                 let arguments = binding.flatten();
                 if arguments.len() == 1 {
                     let (name, ty, kind) = arguments.into_iter().next().unwrap();
-                    if kind == VarType::Const {
-                        // TODO: write a test that gets here.
-                        todo!("remove from ast if const");
-                    }
                     if let Some(name) = name {
-                        return self.decl_var(result, name, &mut LazyType::Finished(ty), value, kind, &stmt.annotations);
+                        self.decl_var(result, name, &mut LazyType::Finished(ty), value, kind, &stmt.annotations)?;
+                        if kind == VarType::Const {
+                            debug_assert_eq!(binding.bindings.len(), 1);
+                            binding.bindings.clear();
+                            *value = None;
+                        }
+                        return Ok(());
                     } else {
                         assert!(value.as_mut().unwrap().expr.is_raw_unit(), "var no name not unit");
                         return Ok(());

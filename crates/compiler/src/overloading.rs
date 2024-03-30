@@ -156,7 +156,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
                     );
                 }
-                outln!(ShowErr, "Impls: {:?}", self.program.impls.get(&name));
                 outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
 
                 err!(CErr::AmbiguousCall)

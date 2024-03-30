@@ -1,9 +1,6 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::{quote, quote_spanned};
-use syn::{
-    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed,
-    FieldsUnnamed, GenericParam, Generics, TypeParamBound,
-};
+use syn::{parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed, FieldsUnnamed, GenericParam, Generics, TypeParamBound};
 
 #[proc_macro_derive(InterpSend)]
 pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -59,10 +56,7 @@ fn get_type(name: &Ident, data: &Data) -> TokenStream {
     match data {
         syn::Data::Struct(data) => get_type_fields(name, &data.fields),
         syn::Data::Enum(data) => {
-            let recurse = data
-                .variants
-                .iter()
-                .map(|f| get_type_fields(&f.ident, &f.fields));
+            let recurse = data.variants.iter().map(|f| get_type_fields(&f.ident, &f.fields));
             let name_str = name.to_string();
             quote! {
                 let mut fields = vec![];
@@ -159,9 +153,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
 
 fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream {
     match fields {
-        syn::Fields::Named(FieldsNamed {
-            named: ref fields, ..
-        }) => {
+        syn::Fields::Named(FieldsNamed { named: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {
                 let name = &f.ident;
                 quote_spanned! {f.span()=>
@@ -174,10 +166,7 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
                 })
             }
         }
-        syn::Fields::Unnamed(FieldsUnnamed {
-            unnamed: ref fields,
-            ..
-        }) => {
+        syn::Fields::Unnamed(FieldsUnnamed { unnamed: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {
                 quote_spanned! {f.span()=>
                     Value::deserialize_from(values)?,

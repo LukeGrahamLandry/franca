@@ -11,7 +11,7 @@ use std::{fs, mem};
 macro_rules! err {
     ($payload:expr) => {{
         return Err($crate::compiler::CompileError {
-            internal_loc: std::panic::Location::caller(),
+            internal_loc: if cfg!(feature="trace_errors") {Some(std::panic::Location::caller())} else {None},
             loc: None,
             reason: $payload,
             trace: String::new(),
@@ -639,7 +639,11 @@ impl<'p> PoolLog<'p> for Func<'p> {
 
 impl<'p> PoolLog<'p> for DebugInfo<'p> {
     fn log(&self, _: &StringPool<'p>) -> String {
-        format!("// {} ", self.internal_loc)
+        if cfg!(feature = "trace_errors") {
+            format!("// {} ", self.internal_loc.unwrap())
+        } else {
+            String::new()
+        }
     }
 }
 
@@ -784,7 +788,9 @@ impl<'p> Debug for CompileError<'p> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "COMPILATION ERROR:")?;
         writeln!(f, "{:?}", self.reason)?;
-        writeln!(f, "Internal: {}", self.internal_loc)?;
+        if cfg!(feature = "trace_errors") {
+            writeln!(f, "Internal: {}", self.internal_loc.unwrap())?;
+        }
         write!(f, "{}", self.trace)
     }
 }

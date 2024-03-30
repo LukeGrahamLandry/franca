@@ -1,3 +1,11 @@
+## How small can it get?
+
+```
+RUSTFLAGS="-Zlocation-detail=none --remap-path-prefix $HOME=~" cargo +nightly bloat -Z build-std=std,panic_abort -Z build-std-features=panic_immediate_abort --target aarch64-apple-darwin --release --no-default-features -n 50
+```
+
+Surely I can do libffi in less than 30KB given I have to do it anyway for my own asm backend.
+
 ## const args (Mar 28)
 
 You want Fn and Type to be comptime only so when you pass them as an argument it generates a new version of the function specialized for each callsite.
