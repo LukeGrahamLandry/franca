@@ -1445,6 +1445,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let loc = a.loc;
                 Ok(FatExpr::synthetic(Expr::Call(Box::new(a), Box::new(b)), loc).serialize_one())
             }
+            "compile_ast" => {
+                let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
+                self.compile_expr(result, &mut expr, None)?;
+                Ok(expr.serialize_one())
+            }
+            // TODO: need to be able to have generics like  fn const_eval_ast(T) Fn(AstExpr, T);
+            "const_eval_string" => {
+                let mut expr: FatExpr = unwrap!(arg.deserialize(), "");
+                let ty = String::get_type(self.program);
+                let result = self.compile_expr(result, &mut expr, Some(ty))?;
+                result.get()
+            }
             _ => err!("Macro send unknown message: {name} with {arg:?}",),
         }
     }
@@ -2658,15 +2670,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let found = match overloads.ready.len() {
                                 0 => err!("Missing overload",),
                                 1 => overloads.ready[0].func,
-                                _ => err!(
-                                    "Ambigous overload \n{:?}",
-                                    overloads
-                                        .ready
-                                        .iter()
-                                        .map(|o| self.program[o.func].log(self.pool))
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                ),
+                                _ => err!("Ambigous overload \n{:?}", overloads.ready),
                             };
                             val = Values::One(Value::GetFn(found));
                         }
@@ -2682,7 +2686,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // HACK. todo: general overloads for cast()
                         val = Value::Type(self.to_type(val)?).into()
                     } else {
-                        self.type_check_arg(found_ty, expected_ty, "const decl")?;
+                        // TODO: you want the type check but doing it against type_of_raw is worthless
+                        // self.type_check_arg(found_ty, expected_ty, "const decl")?;
                     }
 
                     expected_ty

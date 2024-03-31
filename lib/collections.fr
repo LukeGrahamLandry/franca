@@ -18,6 +18,7 @@
 @pub fn get() Unit = {unit};
 @pub fn set() Unit = {unit};
 @pub fn reserve() Unit = {unit};
+@pub fn rest() Unit = {unit};
 
 // TODO: return slice so the result may have more room than you asked for (which is useful for growable collections in allocators that use fixed size blocks). 
 @interp @pub fn alloc(Element: Type, count: i64) VoidPtr; 
@@ -33,6 +34,7 @@ fn Slice(const T: Type) Type = {
     // TODO: @pub fn empty() Self = (ptr: zeroed(), len: 0);
     @pub fn slice(ptr: *T, count: i64) Self = (ptr: ptr, len: count);
     @pub fn len(self: Self) i64 = self&.len[];
+    @pub fn assume(ptr: *T, len: i64) Self = (ptr: ptr, len: len);
     
     @pub fn get(self: Self, i: i64) T = {
         // assert(lt(i, len(self)), "OOB"); // TODO: asm
@@ -61,6 +63,11 @@ fn Slice(const T: Type) Type = {
     
     @pub fn subslice(ptr: Self, first: i64, count: i64) Self = {
         slice(ptr, first, add(first, count))
+    }
+    
+    
+    @pub fn rest(self: Self, first: i64) Self = {
+        slice(self, first, self.len())
     }
     
     // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
@@ -102,18 +109,21 @@ fn Slice(const T: Type) Type = {
     // TODO: have eq be generic and do something sane but currently its just in the vm and does addr_eq which should be a seperate thing. 
     @pub fn slice_eq(lhs: Self, rhs: Self) bool = {
         (eq(len(lhs), len(rhs)), fn() bool = {
-            var i = 0;
-            var prev = true;  // TODO: this is weird because 'and' doesn't short circuit  
-            (
-                fn() bool = { 
-                    and(lt(i, len(lhs)), prev) 
-                }, 
-                fn() Unit = { 
-                    prev = eq(get(lhs, i), get(rhs, i)); 
-                    i = add(i, 1); 
-                },
-            )!while;
-            and(prev, eq(i, len(lhs)))
+            (len(lhs).eq(0), fn() = true, fn() = {
+                var i = 0;
+                var prev = true;  // TODO: this is weird because 'and' doesn't short circuit  
+                (
+                    fn() bool = { 
+                        and(lt(i, len(lhs)), prev) 
+                    }, 
+                    fn() Unit = { 
+                        prev = eq(get(lhs, i), get(rhs, i)); 
+                        i = add(i, 1); 
+                    },
+                )!while;
+                and(prev, eq(i, len(lhs)))
+            })!if
+            
         }, fn() bool = false)!if
     }
     
@@ -124,6 +134,7 @@ fn Slice(const T: Type) Type = {
 fn List(const T: Type) Type = {
     const Self: Type = (maybe_uninit: Slice(T), len: i64)!struct;
     @pub fn list(cap: i64) Self = (maybe_uninit: (ptr: alloc(T, cap), len: cap), len: 0);
+    @pub fn list() Self = list(0);
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
     @pub fn list_clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
@@ -148,6 +159,7 @@ fn List(const T: Type) Type = {
     @pub fn reserve(self: *Self, extra: i64) Unit = {
         let total = add(self.len[], extra);
         let old_cap: i64 = len(self.maybe_uninit[]);
+        // TODO: why can't I use @if here? 
         (lt(old_cap, total), fn() = {
             let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
             var new: Self = list(cap);
@@ -205,7 +217,7 @@ fn List(const T: Type) Type = {
     var i = 0;
     let last = sub(len(haystack), len(needle));
     var start = 0;
-    (fn() bool = lt(i, last), fn() Unit = {
+    (fn() bool = le(i, last), fn() Unit = {
         (eq(get(haystack, i), get(needle, 0)), fn() Unit = {
             let check: Str = subslice(haystack, i, len(needle));
             (slice_eq(check, needle), fn() Unit = {
@@ -321,3 +333,12 @@ fn List(const T: Type) Type = {
     let len: Ptr(i64) = raw_slice(s&, size_of(i64), mul(2, size_of(i64)));
     slice(ptr[], len[])
 };
+
+@pub
+fn range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
+    var i = start;
+    (fn()=lt(i, end), fn()={  // TODO: fix vm poison when no brackets.
+        yield(i);
+        i = add(i, 1);
+    })!while;
+}

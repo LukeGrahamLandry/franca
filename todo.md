@@ -28,7 +28,17 @@
 - my expression output thingy broke some struct stuff (aliasing + asm consecutive slots)
 - be able to address a byte so you can use libc for stuff
 - let macros code generate a string and compile that
-- asm stack traces. can i have panics walk across languages?
+- panics show stack trace
+- super cold calling convention for panics with constant args where you use return address to lookup arg values (i feel like i can do better than rustc which is really strange)
+- asm panic on invalid enum field instead of faulting
+- explicit runtime data struct.
+- feature to turn off backtracers dependency
+- u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
+- command line argument parser
+- debug printing. fn debug_log(out: Writer);
+  - @print("Hello %! %", "World", 42); @fmt("Hello %! %", "World", 42)
+  - 1. parse where the % signs are. 2. resolve overloads for the args. 3. print everything in order.
+  - @struct fn Writer(data: VoidPtr, write: FnPtr(Ty(VoidPtr, Slice(u8)), Unit));
 
 ## Sema
 

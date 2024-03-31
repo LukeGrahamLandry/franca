@@ -21,7 +21,7 @@ use std::{
 };
 
 #[repr(transparent)]
-#[derive(Copy, Clone, PartialEq, Hash, Eq, InterpSend, Default)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
 pub struct TypeId(pub u32);
 
 #[repr(C)]
@@ -1138,7 +1138,6 @@ impl<'p> Program<'p> {
 }
 
 impl<'p> Program<'p> {
-    // TODO: this is O(n), at the very least make sure the common types are at the beginning.
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();

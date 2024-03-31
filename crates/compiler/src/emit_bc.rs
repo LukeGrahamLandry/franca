@@ -268,7 +268,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
                     // But need to change my debugging check that everything was dropped.
                     // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
-                    let (slot, _) = unwrap!(result.vars.remove(dropping), "missing shadow");
+                    let (slot, _) = unwrap!(result.vars.remove(dropping), "missing shadow {}", name.log(self.program.pool));
                     result.push(Bc::Drop(slot));
                 }
             }

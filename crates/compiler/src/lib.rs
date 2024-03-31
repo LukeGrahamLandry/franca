@@ -97,8 +97,9 @@ test_file!(aarch64_jit);
 test_file!(backpassing);
 test_file!(dispatch);
 test_file!(modules);
+test_file!(fmt);
 
-pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId> {
+pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncId, usize)> {
     // TODO: this will get less dumb when I have first class modules.
     let file = comp
         .program
@@ -123,7 +124,8 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
     let current = comp.add_module(Flag::TopLevel.ident(), None)?;
     global.module = Some(current);
     ResolveScope::of(&mut global, comp, parsed.directives)?;
-    comp.compile_module(global)
+    let f = comp.compile_module(global)?;
+    Ok((f, parsed.lines))
 }
 
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
@@ -140,7 +142,7 @@ pub fn run_main<'a: 'p, 'p>(
     comptime_executor: BoxedExec<'a>,
 ) -> bool {
     log_tag_info();
-    // let start = timestamp();
+    let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let mut comp = Compile::new(pool, &mut program, runtime_executor, comptime_executor);
     let result = load_program(&mut comp, &src);
@@ -152,7 +154,7 @@ pub fn run_main<'a: 'p, 'p>(
             log_err(&comp, e, save);
             return false;
         }
-        Ok(_toplevel) => {
+        Ok((_, lines)) => {
             match comp.program.find_unique_func(Flag::Main.ident()) {
                 None => {
                     outln!(ShowErr, "'fn main' NOT FOUND");
@@ -166,14 +168,14 @@ pub fn run_main<'a: 'p, 'p>(
                             return false;
                         }
                         Ok(_) => {
-                            // let end = timestamp();
-                            // let seconds = end - start;
-                            // outln!(ShowPrint, "===============");
-                            // outln!(ShowPrint,
-                            //     "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                            //     lines as f64 / seconds
-                            // );
-                            // outln!(ShowPrint, "===============");
+                            let end = timestamp();
+                            let seconds = end - start;
+                            outln!(ShowPrint, "===============");
+                            outln!(ShowPrint,
+                                "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
+                                lines as f64 / seconds
+                            );
+                            outln!(ShowPrint, "===============");
                             // let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {

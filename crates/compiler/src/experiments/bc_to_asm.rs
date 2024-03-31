@@ -338,7 +338,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.get_slot(x0, enum_ptr); // x0 = ptr
                     self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
                     self.asm.push(cmp_im(X64, x0, value, 0));
-                    self.asm.push(b_cond(9999, CmpFlags::NE as i64)); // TODO: do better than just hoping to jump into garbage
+                    self.asm.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                    self.asm.push(brk(456));
                 }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                     self.get_slot(x16, *f);
@@ -605,7 +606,6 @@ pub mod tests {
         asm.asm.make_exec();
         let code = asm.asm.get_fn(main).unwrap().as_ptr();
 
-        println!("code ptr is {}", code as usize);
         let code: extern "C-unwind" fn(Arg) -> Ret = unsafe { transmute(code) };
         let indirect_fns = asm.asm.get_dispatch();
         unsafe {

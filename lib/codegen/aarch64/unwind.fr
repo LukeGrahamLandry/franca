@@ -5,10 +5,14 @@ fn hackheap(ops: Slice(u32)) Slice(u32) = {
     out
 }
 
+const AsmInst = Unique(u32);
+const InstPtr = *AsmInst;  // TODO: **AsmInst as return type doesnt work?? 
+
 // The first 16 bytes of a stack frame is always one of these. 
 const Frame = (
-    fp: VoidPtr,  // Pointer to the previous Frame (start of its stack)
-    lr: i64  // Saved instruction pointer value. 
+    // TODO: be able to say this type is *Frame. this is harder than fixing the forward declarations thing i feel. 
+    fp: VoidPtr,  // Pointer to the previous Frame (start of its stack). 
+    lr: InstPtr  // Saved instruction pointer value. 
 )!struct;
 
 @no_interp @aarch64 
@@ -19,9 +23,9 @@ fn get_fp() *Frame = hackheap((
 
 /// An array of compiled asm function pointers. Indices are FuncId and missing entries are 0. 
 @no_interp @aarch64
-fn get_indirect_fn_array() Slice(i64) = {
+fn get_indirect_fn_array() Slice(InstPtr) = {
     @no_interp @aarch64 
-    fn get_indirect_fn_array_ptr() *i64 = hackheap((
+    fn get_indirect_fn_array_ptr() *InstPtr = hackheap((
         mov(Bits.X64[], x0, x21),
         ret(),
     )!slice)!asm;
@@ -42,49 +46,41 @@ fn int_to_ptr(ptr: i64) VoidPtr = hackheap((
 )!slice)!asm;
 
 /// Guess which function contains the instruction pointer 'ip'.
-/// 'func_id' will be the one that starts closest to 'ip' but before it. 
+/// 'f' will be the one that starts closest to 'ip' but before it. 
 /// 'rel_ip' is how many bytes into the function 'ip' is (1 asm instruction is 4 bytes). 
 /// If 'ip' is in an ffi (or compiler builtin) function, 'rel_ip' will be very large. 
 @no_interp @aarch64
-fn get_func_id(ip: i64) (func_id: i64, rel_ip: i64)!struct = {
+fn get_func_id(ip: InstPtr) (f: FuncId, rel_ip: i64)!struct = {
     var functions = get_indirect_fn_array();
-    var i = 0;
-    let func_count = number_of_functions();
-    var best_index = func_count;
+    var best_index: FuncId = number_of_functions();
     var best_distance = 99999999;
     
     // Check every function id. 
-    (fn() = i.lt(functions&.len[]), fn() = {
-        let func = functions&.ptr[].ptr_to_int().add(i.mul(8));
-        let func: *i64 = func.int_to_ptr();
-        
+    functions.enumerate(fn(i: i64, func: *InstPtr) Unit = {
+        let func = func[].ptr_to_int();
         // Skip missing functions (null start ptr).  
-        (func[].ne(0), fn() = {
-            let dist = ip.sub(func[]);
+        @if(func.ne(0)) {
+            let dist = ip.ptr_to_int().sub(func);
             // If distance is negative, 'ip' is before 'func' so can't be inside it (don't care if its closer). 
-            (dist.lt(best_distance).and(dist.ge(0)), fn() = {
+            @if(dist.lt(best_distance).and(dist.ge(0))) {
                 best_distance = dist;
                 best_index = i;
-            }, fn()=())!if;
-        }, fn()=())!if;
-        
-        i = i.add(1);
-    })!while;
+            };
+        };
+    });
     
     // TODO: return optional. 
-    (func_id: best_index, rel_ip: best_distance)
+    (f: best_index, rel_ip: best_distance)
 }
 
+/// Note: This relies on the stack frame layout used by bc_to_asm and rustc matching. 
 @no_interp @aarch64 @pub
 fn collect_backtrace() Unit = {
     var addr: *Frame = get_fp();
-    print_int(addr.ptr_to_int());
-    print_int(123);
     var i = 0;
     var info: RsResolvedSymbol;
     (fn() = addr.fp[].ptr_to_int().ne(0), fn() = {
-        print_int(addr.lr[]);
-        (resolve_backtrace_symbol(addr.lr[].int_to_ptr(), info&), fn() = {
+        (resolve_backtrace_symbol(addr.lr[], info&), fn() = {
             let len = info&.name_len[];
             (len.ne(0), fn() = {
                 // TODO: HACK. be able to address bytes so puts doesnt .div(8)
@@ -94,10 +90,10 @@ fn collect_backtrace() Unit = {
                 puts("Rust found but len=0.");
             })!if;
         }, fn()= {
-            puts("Rust could not find.");
-            var func = get_func_id(addr.lr[]);
-            print_int(func&.func_id[]);
-            print_int(func&.rel_ip[]);
+            // TODO: check that its not some other ffi thing that rust couldn't find a name for. 
+            var func = addr.lr[].get_func_id();
+            let name = func&.f[].name().str();
+            puts(name);
         })!if;
         putchar(10);
         
@@ -106,3 +102,32 @@ fn collect_backtrace() Unit = {
         i = i.add(1);
     })!while;
 }
+
+
+// TODO: deduplicate if same function, same args (ie. panic("OOB") probably gets called a lot)
+@struct fn ColdFn(callsite: InstPtr, f: InstPtr);
+@struct fn RuntimeData(functions: Slice(InstPtr), cold_calls: Slice(ColdFn));
+
+fn get_runtime_data() *RuntimeData;
+
+// TODO: allow declaring any function @cc(SuperColdIndirect). save registers. reserve some scratch memory for the runtime? 
+@no_interp @aarch64 @pub
+fn do_very_cold_call() Never = {
+    var myself = get_fp();
+    var caller = myself.lr[];
+    var found = false;
+    let cold_calls = get_runtime_data().cold_calls;
+    foreach(cold_calls, fn(check: *ColdFn) Unit = {
+        @if(check.callsite[].eq(caller)) {
+            found = true; // for later. currently unused. 
+            
+            // TODO: actually call
+            panic("Cold call returned");
+        };
+    });
+    
+    @if(found.not()) { 
+        panic("Missing cold call") 
+    };
+}
+

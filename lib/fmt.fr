@@ -1,0 +1,88 @@
+fn todo() Never = panic("Not Yet Implemented");
+
+@struct fn Write(data: VoidPtr, write: FnPtr(Ty(VoidPtr, Slice(u8)), Unit));
+
+@pub fn write(self: Write, bytes: Slice(u8)) Unit = 
+    (self&.write[])(self&.data[], bytes);
+
+@pub fn write(fd: *Fd, bytes: Slice(u8)) Unit = {
+    let len = bytes.len().mul(8);
+    let written: isize = write(fd[], bytes&.ptr[], len);
+    assert(written.eq(len), "Failed Write");
+}
+
+const KnownFd = @enum(Fd) (
+    StdOut = 1,
+);
+
+fn as(self: *List(u8)) Write = {
+    const w: Fn(Ty(*List(u8), Slice(u8)), Unit) = push_all;
+    init(data: self, write: w!fn_ptr)
+}
+
+fn as(self: *Fd) Write = {
+    const w: Fn(Ty(*Fd, Slice(u8)), Unit) = write;
+    init(data: self, write: w!fn_ptr)
+}
+
+fn as(self: *KnownFd.T[]) Write = {
+    const w: Fn(Ty(*Fd, Slice(u8)), Unit) = write;
+    init(data: self, write: w!fn_ptr)
+}
+
+// const stdout: Write = KnownFd.StdOut.as();
+
+/*
+@annotation @pub
+fn print(arg: AstExpr, target: AstExpr) AstExpr = {
+    todo()
+}
+*/
+
+fn const_eval_string(value: AstExpr) Str;
+
+// TODO: HACK! i broke comptime caching so calling this multiple times adds the same functions to overload set repeatedly?? 
+//       symptom: ambigous overload when trying to do write_fn = push_all
+@pub const List_u8 = List(u8);
+
+@annotation @pub
+fn fmt(arg: AstExpr, target: AstExpr) AstExpr = {
+    let args: Slice(AstExpr) = arg&.expr.Tuple[];
+    let writer: *AstExpr = args.index(0);
+    let fmt_string: *AstExpr = args.index(1);
+    let params = args.rest(2);  // TODO: fix bounds check when this is one long?
+    
+    let fmt_string = const_eval_string(fmt_string[]);
+    var parts: List(Str) = fmt_string.split("%");
+    var parts: Slice(Str) = parts&.items();
+    puts("Hello World");
+    print_int(parts&.len[]);
+    parts.len().eq(params.len().add(1)).assert("Fmt specifier count mismatch");
+    
+    let count = parts.len().add(params.len());
+    var actions: List(AstExpr) = list(count);
+    
+    const write_fn: Fn(Ty(*List_u8, Slice(u8)), Unit) = push_all;
+    const WriteFnPtr = FnPtr(Ty(*List_u8, Slice(u8)), Unit);
+    var write = write_fn!fn_ptr;  // TODO: fix var shadowing const
+    let write = literal_ast(WriteFnPtr, write&);
+    parts.foreach(fn(s: Str) Unit = {
+        puts(s);
+        let s: AstExpr = literal_ast(Str, s&);
+        let action: FatExpr = (write!unquote(writer[]!unquote, s!unquote))!quote;
+        actions&.push(action);
+    });
+    
+    var actions: Slice(AstExpr) = actions&.items();
+    print_int(actions&.len[]);
+    arg&.expr.Tuple[] = actions;
+    arg
+}
+
+
+/*
+- debug printing. fn debug_log(out: Writer);
+  - @print("Hello %! %", "World", 42); @fmt(writer&, "Hello %! %", "World", 42)
+  - 1. parse where the % signs are. 2. resolve overloads for the args. 3. print everything in order.
+  - @struct fn Writer(data: VoidPtr, write: FnPtr(Ty(VoidPtr, Slice(u8)), Unit));
+*/

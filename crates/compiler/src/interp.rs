@@ -573,10 +573,6 @@ impl<'p> Interp<'p> {
                 let args: Vec<_> = args.collect();
                 args.serialize_one()
             }
-            "type_id" => {
-                let ty = program.to_type(arg)?;
-                Value::I64(ty.0 as i64).into()
-            }
             "IntType" => {
                 let (bit_count, signed) = arg.to_pair()?;
                 let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);

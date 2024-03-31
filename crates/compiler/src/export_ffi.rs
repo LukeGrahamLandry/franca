@@ -3,7 +3,7 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{Program, TypeId, TypeInfo};
+use crate::ast::{FuncId, Program, TypeId, TypeInfo};
 use crate::compiler::Res;
 use crate::experiments::bc_to_asm;
 use crate::logging::unwrap;
@@ -32,6 +32,7 @@ static LIB: &[(&str, &str)] = &[
     stdlib!("codegen/aarch64/basic"),
     stdlib!("codegen/aarch64/unwind"),
     stdlib!("codegen/wasm/instructions"),
+    stdlib!("fmt"),
 ];
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
@@ -62,6 +63,8 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ),
     ("fn print_int(v: i64) Unit", print_int as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
+    // TODO: make FuncId a unique type
+    ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8)];
@@ -157,9 +160,10 @@ pub extern "C-unwind" fn array_type(program: &mut Program, ty: TypeId, count: us
 // TODO: test abi
 pub extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*const u8, i64) {
     hope(|| {
-        let _symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
-        todo!(); // TODO: bytes or expand into int array
-                 // Ok(("abcd".as_ptr(), 1))
+        let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
+        let s = program.pool.get(symbol);
+        // TODO: fix len stuff
+        Ok((s.as_ptr(), (s.len()) as i64 / 2 - 1))
     })
 }
 
@@ -203,6 +207,10 @@ pub extern "C-unwind" fn print_int(_: &mut Program, a: i64) {
 
 pub extern "C-unwind" fn number_of_functions(program: &mut Program) -> i64 {
     program.funcs.len() as i64
+}
+
+pub extern "C-unwind" fn function_name<'p>(program: &mut Program<'p>, f: FuncId) -> Ident<'p> {
+    program[f].name
 }
 
 #[cfg(target_arch = "aarch64")]

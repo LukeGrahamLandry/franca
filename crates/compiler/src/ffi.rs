@@ -125,6 +125,31 @@ impl<'p> InterpSend<'p> for bool {
     }
 }
 
+impl<'p> InterpSend<'p> for TypeId {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn create_type(_program: &mut Program<'p>) -> TypeId {
+        TypeId::ty()
+    }
+
+    fn serialize(self, values: &mut Vec<Value>) {
+        values.push(Value::Type(self))
+    }
+
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        if let Value::Type(i) = values.next()? {
+            Some(i)
+        } else {
+            None
+        }
+    }
+
+    fn size() -> usize {
+        1
+    }
+}
+
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     fn get_type_key() -> u128 {
         mix::<A, B>(6749973390999)
@@ -141,7 +166,9 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-        Some((A::deserialize(values)?, B::deserialize(values)?))
+        let a = A::deserialize(values)?;
+        let b = B::deserialize(values)?;
+        Some((a, b))
     }
 
     fn size() -> usize {
