@@ -38,6 +38,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let id = self.resolve_in_overload_set(result, arg, ret, i)?;
                 Some(id)
             }
+            // TODO: this shouldn't be nessisary. Values::Many should collapse. You get here when a macro tries to literal_ast(OverloadSet)!unquote?
+            Expr::Value {
+                value: Values::Many(vals), ..
+            } => {
+                if vals.len() == 1 {
+                    if let Value::OverloadSet(i) = vals[0] {
+                        let id = self.resolve_in_overload_set(result, arg, ret, i)?;
+                        return Ok(Some(id));
+                    }
+                }
+                None
+            }
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, f)?;
                 self.named_args_to_tuple(result, arg, id)?;

@@ -1,3 +1,8 @@
+// TODO: 
+//     - fix @print
+//     - be able to declare fn display for anything with a write method. really I want my old @impl syntax. 
+//     - derive fn display for structs based on fields. 
+
 fn todo() Never = panic("Not Yet Implemented");
 
 @struct fn Write(data: VoidPtr, write: FnPtr(Ty(VoidPtr, Slice(u8)), Unit));
@@ -32,57 +37,89 @@ fn as(self: *KnownFd.T[]) Write = {
 
 // const stdout: Write = KnownFd.StdOut.as();
 
-/*
-@annotation @pub
-fn print(arg: AstExpr, target: AstExpr) AstExpr = {
-    todo()
-}
-*/
-
-fn const_eval_string(value: AstExpr) Str;
-
 // TODO: HACK! i broke comptime caching so calling this multiple times adds the same functions to overload set repeatedly?? 
 //       symptom: ambigous overload when trying to do write_fn = push_all
-@pub const List_u8 = List(u8);
+@pub const List_i64 = List(i64);
 
+@pub fn write(self: *List_i64, bytes: Str) Unit = self.push_all(bytes);
+@pub fn display(self: Str, writer: *List_i64) Unit = writer.write(self);
+
+/// (@fmt(Writer, fmt_spec_str, ...Args))
+/// Currently display is only implemented with 'Writer' being *List_i64 (TODO: need better generics). 
+/// 'Args' can be any types that have fn display(Self, Writer) Unit;
+/// 'fmt_spec_str' must be a const string value. '%' characters will be replaced. 
 @annotation @pub
 fn fmt(arg: AstExpr, target: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
-    let writer: *AstExpr = args.index(0);
+    let writer: *AstExpr = args.index(0);  // TODO: assert no side effects or use variable so it doesn't run many times. 
+    var writer = compile_ast(writer[]);
+    
     let fmt_string: *AstExpr = args.index(1);
     let params = args.rest(2);  // TODO: fix bounds check when this is one long?
     
     let fmt_string = const_eval_string(fmt_string[]);
-    var parts: List(Str) = fmt_string.split("%");
+    var parts: List(Str) = fmt_string.split("%");  // TODO: dont leak
     var parts: Slice(Str) = parts&.items();
-    puts("Hello World");
-    print_int(parts&.len[]);
     parts.len().eq(params.len().add(1)).assert("Fmt specifier count mismatch");
     
     let count = parts.len().add(params.len());
-    var actions: List(AstExpr) = list(count);
+    var actions: List(AstExpr) = list(count);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
     
-    const write_fn: Fn(Ty(*List_u8, Slice(u8)), Unit) = push_all;
-    const WriteFnPtr = FnPtr(Ty(*List_u8, Slice(u8)), Unit);
-    var write = write_fn!fn_ptr;  // TODO: fix var shadowing const
-    let write = literal_ast(WriteFnPtr, write&);
-    parts.foreach(fn(s: Str) Unit = {
-        puts(s);
-        let s: AstExpr = literal_ast(Str, s&);
-        let action: FatExpr = (write!unquote(writer[]!unquote, s!unquote))!quote;
+    // TODO: make calling literal_ast less painful. The problem is can't use generics in compiler ffi 
+    //       so have to pass by void ptr but currently can't just make lvalue refernce like rust
+    var display_fn: OverloadSet = display;
+    let display_fn = literal_ast(OverloadSet, display_fn&);
+    
+    fn emit(msg: AstExpr) Unit = {
+        let action: FatExpr = (display_fn!unquote(msg!unquote, writer!unquote))!quote;
         actions&.push(action);
+    }
+    
+    let s: *Str = parts.index(0);
+    emit(literal_ast(Str, s));
+    
+    // TODO: zip iterators 
+    params.enumerate(fn(i: i64, param: *AstExpr) Unit = {
+        emit(param[]);
+        let s: *Str = parts.index(i.add(1));
+        emit(compile_ast(literal_ast(Str, s)));
     });
     
     var actions: Slice(AstExpr) = actions&.items();
-    print_int(actions&.len[]);
     arg&.expr.Tuple[] = actions;
     arg
 }
 
-
 /*
-- debug printing. fn debug_log(out: Writer);
-  - @print("Hello %! %", "World", 42); @fmt(writer&, "Hello %! %", "World", 42)
-  - 1. parse where the % signs are. 2. resolve overloads for the args. 3. print everything in order.
-  - @struct fn Writer(data: VoidPtr, write: FnPtr(Ty(VoidPtr, Slice(u8)), Unit));
+@annotation @pub
+fn print(arg: AstExpr, target: AstExpr) AstExpr = {
+    {  // TODO: do I call resolve on this already? 
+        puts("Did Print");
+        var output: List_i64 = list();
+        // TODO: without brackets it parses as anotation on stmt and doesnt call the macro
+        // TODO: need to flatten the tuple so we supply the writer and caller supplies the fmt_string. 
+        (@fmt(output&, arg!unquote));
+        var words = output&.items();
+        puts(words);
+        output&.drop();
+    }!quote
+}
 */
+
+// TODO: HACK. Compiler doesn't know about Slice(_) so string literals are the wrong type. 
+@pub fn display(self: ""!type, writer: *List_i64) Unit = {
+    let ptr: Ptr(Ptr(i64)) = self&[0];
+    let len: Ptr(i64) = self&[1];
+    let s: Str = (ptr: ptr[], len: len[]);  // TODO: why can't I call assume(_, _)
+    display(s, writer);
+}
+
+@pub fn display(self: i64, writer: *List_i64) Unit = {
+    // TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
+    let s = self.str();
+    display(s, writer);
+}
+
+// TODO: this whole model of resolving the overload up front doesn't work because you need to call different functions 
+//       at compiletime or runtime depending on the target arch. So need to delay as long as possible by passing in the overload set. 
+//       Alternatively, I could go through with the Expr::Either but that feels like special casing just for the ct/rt. 

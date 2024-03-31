@@ -2727,9 +2727,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     Some(value) => {
                         let value = self.compile_expr(result, value, ty.ty())?;
-                        if matches!(value, Structured::Const(_, Values::One(Value::OverloadSet(_)))) {
-                            err!("Runtime var {} cannot hold OverloadSet.", name.log(self.pool))
-                        }
                         if no_type {
                             *ty = LazyType::Finished(value.ty());
                             value.ty()
