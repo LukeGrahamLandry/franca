@@ -1,10 +1,16 @@
 #![allow(improper_ctypes_definitions)]
 
+use interp_derive::Reflect;
+use libc::c_void;
+
 use crate::ast::{Program, TypeId, TypeInfo};
 use crate::compiler::Res;
+use crate::experiments::bc_to_asm;
 use crate::logging::unwrap;
 use crate::pool::Ident;
+use std::ffi::CString;
 use std::fmt::Write;
+use std::ptr::null;
 use std::slice;
 
 macro_rules! stdlib {
@@ -24,6 +30,7 @@ static LIB: &[(&str, &str)] = &[
     stdlib!("macros"),
     stdlib!("codegen/aarch64/instructions"),
     stdlib!("codegen/aarch64/basic"),
+    stdlib!("codegen/aarch64/unwind"),
     stdlib!("codegen/wasm/instructions"),
 ];
 
@@ -49,7 +56,12 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: Type, __: Type) Unit", assert_equ32 as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_equ32 as *const u8), // TODO: subtyping
-    ("fn Array(T: Type, count: usize) Type", array_type as *const u8),
+    (
+        "fn resolve_backtrace_symbol(addr: VoidPtr, out: *RsResolvedSymbol) bool",
+        resolve_backtrace_symbol as *const u8,
+    ),
+    ("fn print_int(v: i64) Unit", print_int as *const u8),
+    ("fn number_of_functions() i64", number_of_functions as *const u8),
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8)];
@@ -63,11 +75,6 @@ pub fn get_include_std(name: &str) -> Option<String> {
     writeln!(out, "//! IMPORTANT: don't try to save @comptime_addr('ASLR junk'), it won't go well. \n").unwrap();
     match name {
         "libc" => {
-            for (sig, ptr) in LIBC {
-                writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
-            }
-        }
-        "compiler" => {
             writeln!(
                 out,
                 "@pub const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
@@ -76,6 +83,11 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::O_RDWR
             )
             .unwrap();
+            for (sig, ptr) in LIBC {
+                writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
+            }
+        }
+        "compiler" => {
             for (sig, ptr) in COMPILER {
                 writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
@@ -110,14 +122,14 @@ fn hope<'p, T>(res: impl Fn() -> Res<'p, T>) -> T {
     res().unwrap_or_else(|e| panic!("{e:?}"))
 }
 
-pub extern "C" fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
+pub extern "C-unwind" fn tag_value<'p>(program: &Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
     let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
     let index = cases.iter().position(|f| f.0 == name);
     let index = hope(|| Ok(unwrap!(index, "bad case name")));
     index as i64
 }
 
-pub extern "C" fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_val: i64) -> Ident<'p> {
+pub extern "C-unwind" fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_val: i64) -> Ident<'p> {
     let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
     let case = hope(|| Ok(unwrap!(cases.get(tag_val as usize), "enum tag too high")));
     case.0
@@ -125,30 +137,72 @@ pub extern "C" fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_val
 
 // Supports bool, i64, and Type which all have the same repr.
 // TODO: track call site
-pub extern "C" fn assert_eq(program: &mut Program, a: i64, b: i64) {
+pub extern "C-unwind" fn assert_eq(program: &mut Program, a: i64, b: i64) {
     hope(|| Ok(assert_eq!(a, b)));
     program.assertion_count += 1;
 }
 
-pub extern "C" fn assert_equ32(program: &mut Program, a: u32, b: u32) {
+pub extern "C-unwind" fn assert_equ32(program: &mut Program, a: u32, b: u32) {
     hope(|| Ok(assert_eq!(a, b)));
     program.assertion_count += 1;
 }
 
 // TODO: test. need to allow indexing tuple elements for this to be usable.
 // TODO: more efficient storage. TypeInfo::Array(Type, usize) but then need to cleanup everywhere that specifically handles a tuple.
-pub extern "C" fn array_type(program: &mut Program, ty: TypeId, count: usize) -> TypeId {
+pub extern "C-unwind" fn array_type(program: &mut Program, ty: TypeId, count: usize) -> TypeId {
     let types = vec![ty; count];
     program.intern_type(TypeInfo::Tuple(types))
 }
 
 // TODO: test abi
-pub extern "C" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*const u8, i64) {
+pub extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*const u8, i64) {
     hope(|| {
         let _symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
         todo!(); // TODO: bytes or expand into int array
                  // Ok(("abcd".as_ptr(), 1))
     })
+}
+
+#[repr(C)]
+#[derive(Reflect)]
+pub struct RsResolvedSymbol {
+    line: i64,
+    col: i64,
+    owned_name: *const u8,
+    name_len: i64,
+}
+
+pub extern "C-unwind" fn resolve_backtrace_symbol(_: &mut Program, addr: *mut c_void, out: &mut RsResolvedSymbol) -> i64 {
+    let mut success = 0;
+    backtrace::resolve(addr, |symbol| {
+        out.line = symbol.lineno().map(|v| v as i64).unwrap_or(-1);
+        out.col = symbol.colno().map(|v| v as i64).unwrap_or(-1);
+        if let Some(name) = symbol.name() {
+            let mut bytes = name.to_string().into_bytes();
+            if bytes.is_empty() {
+                out.owned_name = null();
+                out.name_len = 0;
+            } else {
+                bytes.shrink_to_fit();
+                out.name_len = bytes.len() as i64;
+                out.owned_name = Box::leak(bytes.into_boxed_slice()).as_ptr()
+            }
+        } else {
+            out.owned_name = null();
+            out.name_len = 0;
+        }
+        success = 1;
+    });
+    success
+}
+
+// TODO: fix alloc overload selection on asm
+pub extern "C-unwind" fn print_int(_: &mut Program, a: i64) {
+    println!("{a}");
+}
+
+pub extern "C-unwind" fn number_of_functions(program: &mut Program) -> i64 {
+    program.funcs.len() as i64
 }
 
 #[cfg(target_arch = "aarch64")]

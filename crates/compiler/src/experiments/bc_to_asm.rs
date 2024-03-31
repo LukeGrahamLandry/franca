@@ -111,7 +111,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     // TODO: now with my result ptrs i messed ip the order of things? need to handle grouped stack slots. before it worked out because i would always copy into a new chunk.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let func = self.funcs[f].as_ref().unwrap();
-        println!("{}", func.log(self.program.pool));
+        // println!("{}", func.log(self.program.pool));
         let ff = &self.program[func.func];
         self.f = f;
         self.next_slot = SpOffset(0);
@@ -392,7 +392,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             return slot;
         }
 
-        debug_assert!(allow_create);
+        // debug_assert!(allow_create);
         // TODO: consecutive when required
         // for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
         //     if size == slot.count * 8 {
@@ -531,9 +531,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
 #[allow(unused)]
 #[cfg(target_arch = "aarch64")]
-mod tests {
+pub mod tests {
     use super::{BcToAsm, Jitted};
-    use crate::ast::{Flag, SuperSimple, TargetArch};
+    use crate::ast::{Flag, FuncId, SuperSimple, TargetArch};
     use crate::experiments::arena::Arena;
     use crate::experiments::emit_ir::EmitIr;
     use crate::experiments::tests::{jit_test, jit_test_aarch_only};
@@ -553,7 +553,7 @@ mod tests {
     use std::ptr::addr_of;
     use std::{arch::asm, fs, mem::transmute};
 
-    fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
+    pub fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C-unwind" fn(Arg) -> Ret)) -> Res<'static, ()> {
         let pool = Box::leak(Box::<StringPool>::default());
         let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
         let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
@@ -601,9 +601,12 @@ mod tests {
             fs::write(&path, dis).unwrap();
         }
 
+        asm.asm.reserve(asm.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
         asm.asm.make_exec();
         let code = asm.asm.get_fn(main).unwrap().as_ptr();
-        let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
+
+        println!("code ptr is {}", code as usize);
+        let code: extern "C-unwind" fn(Arg) -> Ret = unsafe { transmute(code) };
         let indirect_fns = asm.asm.get_dispatch();
         unsafe {
             asm!(

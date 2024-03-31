@@ -4,6 +4,7 @@ use crate::{
     compiler::{CErr, CompileError, FnWip, Res},
     err,
     experiments::reflect::{Reflect, RsType},
+    export_ffi::RsResolvedSymbol,
     ffi::{init_interp_send, InterpSend},
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
@@ -930,6 +931,7 @@ impl<'p> Program<'p> {
         init_interp_send!(&mut program, FatStmt, TypeInfo);
         init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
         program.get_rs_type(SuperSimple::get_ty());
+        program.get_rs_type(RsResolvedSymbol::get_ty());
 
         program
     }

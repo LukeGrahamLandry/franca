@@ -1,0 +1,108 @@
+fn hackheap(ops: Slice(u32)) Slice(u32) = {
+    var out: List(u32) = list(ops&.len[]);
+    push_all(out!addr, ops);
+    var out: Slice(u32) = items(out!addr);
+    out
+}
+
+// The first 16 bytes of a stack frame is always one of these. 
+const Frame = (
+    fp: VoidPtr,  // Pointer to the previous Frame (start of its stack)
+    lr: i64  // Saved instruction pointer value. 
+)!struct;
+
+@no_interp @aarch64 
+fn get_fp() *Frame = hackheap((
+    mov(Bits.X64[], x0, fp),
+    ret(),
+)!slice)!asm;
+
+/// An array of compiled asm function pointers. Indices are FuncId and missing entries are 0. 
+@no_interp @aarch64
+fn get_indirect_fn_array() Slice(i64) = {
+    @no_interp @aarch64 
+    fn get_indirect_fn_array_ptr() *i64 = hackheap((
+        mov(Bits.X64[], x0, x21),
+        ret(),
+    )!slice)!asm;
+
+    (ptr: get_indirect_fn_array_ptr(), len: number_of_functions())
+}
+
+@no_interp @aarch64 
+fn ptr_to_int(ptr: VoidPtr) i64 = hackheap((
+    ret(),
+    ret(),
+)!slice)!asm;
+
+@no_interp @aarch64 
+fn int_to_ptr(ptr: i64) VoidPtr = hackheap((
+    ret(),
+    ret(),
+)!slice)!asm;
+
+/// Guess which function contains the instruction pointer 'ip'.
+/// 'func_id' will be the one that starts closest to 'ip' but before it. 
+/// 'rel_ip' is how many bytes into the function 'ip' is (1 asm instruction is 4 bytes). 
+/// If 'ip' is in an ffi (or compiler builtin) function, 'rel_ip' will be very large. 
+@no_interp @aarch64
+fn get_func_id(ip: i64) (func_id: i64, rel_ip: i64)!struct = {
+    var functions = get_indirect_fn_array();
+    var i = 0;
+    let func_count = number_of_functions();
+    var best_index = func_count;
+    var best_distance = 99999999;
+    
+    // Check every function id. 
+    (fn() = i.lt(functions&.len[]), fn() = {
+        let func = functions&.ptr[].ptr_to_int().add(i.mul(8));
+        let func: *i64 = func.int_to_ptr();
+        
+        // Skip missing functions (null start ptr).  
+        (func[].ne(0), fn() = {
+            let dist = ip.sub(func[]);
+            // If distance is negative, 'ip' is before 'func' so can't be inside it (don't care if its closer). 
+            (dist.lt(best_distance).and(dist.ge(0)), fn() = {
+                best_distance = dist;
+                best_index = i;
+            }, fn()=())!if;
+        }, fn()=())!if;
+        
+        i = i.add(1);
+    })!while;
+    
+    // TODO: return optional. 
+    (func_id: best_index, rel_ip: best_distance)
+}
+
+@no_interp @aarch64 @pub
+fn collect_backtrace() Unit = {
+    var addr: *Frame = get_fp();
+    print_int(addr.ptr_to_int());
+    print_int(123);
+    var i = 0;
+    var info: RsResolvedSymbol;
+    (fn() = addr.fp[].ptr_to_int().ne(0), fn() = {
+        print_int(addr.lr[]);
+        (resolve_backtrace_symbol(addr.lr[].int_to_ptr(), info&), fn() = {
+            let len = info&.name_len[];
+            (len.ne(0), fn() = {
+                // TODO: HACK. be able to address bytes so puts doesnt .div(8)
+                let s: Str = (info&.owned_name[], len.mul(8));
+                puts(s);
+            }, fn()= {
+                puts("Rust found but len=0.");
+            })!if;
+        }, fn()= {
+            puts("Rust could not find.");
+            var func = get_func_id(addr.lr[]);
+            print_int(func&.func_id[]);
+            print_int(func&.rel_ip[]);
+        })!if;
+        putchar(10);
+        
+        let fp: *Frame = addr.fp[];
+        addr = fp;
+        i = i.add(1);
+    })!while;
+}

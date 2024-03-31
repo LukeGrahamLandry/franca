@@ -227,6 +227,24 @@ macro_rules! jit_test_aarch_only {
         simple!(generics, 5, 5, include_str!("../../../../tests/generics.fr"));
         simple!(basic, 5, 5, include_str!("../../../../tests/basic.fr"));
         // simple!(collections, 5, 5, include_str!("../../tests/collections.fr"));
+
+        simple!(
+            backtrace,
+            (),
+            123,
+            r#"
+            @c_call fn thing2() i64 = {
+                // TODO: return a data structure and actually test stuff with it. 
+                collect_backtrace();
+                123
+            }
+            @c_call fn thing1() i64 = {
+                let _ = 1.add(2);
+                thing2()
+            }
+            @c_call fn main() i64 = thing1();
+            "#
+        );
     };
 }
 
