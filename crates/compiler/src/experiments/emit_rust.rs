@@ -7,6 +7,7 @@ use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
+use crate::logging::PoolLog;
 use crate::pool::StringPool;
 use crate::{bc::*, load_program};
 use crate::{err, unwrap};
@@ -236,7 +237,11 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                         todo!()
                     }
                 } else {
-                    todo!()
+                    todo!(
+                        "{binding:?} {:?} {}",
+                        value.as_ref().map(|v| v.log(self.comp.pool)),
+                        self.comp.pool.get(binding.bindings[0].name().unwrap())
+                    )
                 }
             }
             Stmt::Set { .. } => todo!(),

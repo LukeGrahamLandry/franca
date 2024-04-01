@@ -111,7 +111,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     // TODO: now with my result ptrs i messed ip the order of things? need to handle grouped stack slots. before it worked out because i would always copy into a new chunk.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let func = self.funcs[f].as_ref().unwrap();
-        // println!("{}", func.log(self.program.pool));
+        println!("{}", func.log(self.program.pool));
         let ff = &self.program[func.func];
         self.f = f;
         self.next_slot = SpOffset(0);
@@ -132,13 +132,23 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let arg_range = func.arg_range;
         // if is_c_call {
         assert!(func.arg_range.count <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
+        let mut floats = 0;
+        let mut ints = 0;
         for i in arg_range {
             // TODO: removing this fixes allow_create debug check for enum init when payload is unit.
             //       in general need to just handle unit better so im not special casing everywhere.
             // if self.slot_type(StackOffset(i)).is_unit() {
             //     continue;
             // }
-            self.set_slot((i - arg_range.first.0) as i64, StackOffset(i));
+
+            let ty = self.slot_type(StackOffset(i));
+            if ty == TypeId::f64() {
+                self.set_slot_f(floats, StackOffset(i));
+                floats += 1;
+            } else {
+                self.set_slot(ints as i64, StackOffset(i));
+                ints += 1
+            }
         }
         // }
 
@@ -163,6 +173,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     let target_c_call = target.has_tag(Flag::C_Call);
                     let comp_ctx = target.has_tag(Flag::Ct);
                     if let Some(template) = target.any_reg_template {
+                        // TODO: this is just a POC
                         let registers = vec![0, 1, 0];
                         let ops = self.emit_any_reg(template, registers);
                         for i in 0..arg.count {
@@ -197,7 +208,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
                         // } else {
                         // TODO: have a mapping. funcs for other arches take up slots.
-                        // assert!(f.0 < 512);  // TODO?
+                        assert!(f.0 < 4096);
                         self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
                         self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty(), comp_ctx);
                         // }
@@ -208,7 +219,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                 Bc::LoadConstant { slot, value } => match value {
-                    Value::F64(_) => todo!(),
+                    &Value::F64(n) => {
+                        // Don't care that its a float since we always write it to memory anyway.
+                        self.load_imm(x0, n);
+                        self.set_slot(x0, *slot);
+                    }
                     Value::I64(n) => {
                         self.load_imm(x0, u64::from_le_bytes(n.to_le_bytes()));
                         self.set_slot(x0, *slot);
@@ -257,17 +272,26 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.asm.push(brk(0));
                     patch_b.push((self.asm.prev(), ip));
                 }
-                Bc::Ret(slot) => {
+                &Bc::Ret(slot) => {
                     // if is_c_call {
                     match slot.count {
                         0 => {}
                         1..=7 => {
-                            for i in 0..slot.count {
-                                let slot = StackOffset(slot.first.0 + i);
-                                if self.slot_type(slot).is_unit() {
+                            let mut floats = 0;
+                            let mut ints = 0;
+                            for i in slot {
+                                let slot = StackOffset(i);
+                                let ty = self.slot_type(slot);
+                                if ty.is_unit() {
                                     continue;
                                 }
-                                self.get_slot(i as i64, slot);
+                                if ty == TypeId::f64() {
+                                    self.get_slot_f(floats, slot);
+                                    floats += 1;
+                                } else {
+                                    self.get_slot(ints, slot);
+                                    ints += 1
+                                }
                             }
                         }
                         _ => err!("c_call only supports 7 return value. TODO: structs",),
@@ -390,8 +414,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.asm.push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
     }
 
+    fn set_slot_f(&mut self, src_reg: i64, slot: StackOffset) {
+        let offset = self.find_one(slot, true);
+        self.asm.push(f_str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
+    }
+
+    #[track_caller]
+    fn get_slot_f(&mut self, dest_reg: i64, slot: StackOffset) {
+        let offset = self.find_one(slot, false);
+        self.asm.push(f_ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
+    }
+
     fn find_many(&mut self, slot: StackRange, allow_create: bool) -> SpOffset {
-        // SpOffset(slot.first.0 * 8)
         if slot.count == 1 {
             return self.find_one(slot.single(), allow_create);
         }
@@ -400,14 +434,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
 
         debug_assert!(allow_create);
-        // TODO: consecutive when required
-        // for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
-        //     if size == slot.count * 8 {
-        //         let found = self.open_slots.remove(i);
-        //         self.slots[slot.first.0] = Some(found.0);
-        //         return found.0;
-        //     }
-        // }
+        for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
+            if size == slot.count * 8 {
+                let mut found = self.open_slots.remove(i);
+                let out = found.0;
+                for i in slot {
+                    debug_assert!(self.slots[i].is_none());
+                    self.slots[i] = Some(found.0);
+                    found.0 .0 += 8;
+                }
+                return out;
+            }
+        }
 
         let made = self.next_slot;
         for i in slot {
@@ -419,11 +457,22 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     fn release_many(&mut self, slot: StackRange) {
-        for i in slot {
-            self.slots[i].take();
+        if slot.count == 1 {
+            self.release_one(slot.single())
+        } else {
+            let mut first = None;
+            let mut prev: Option<SpOffset> = None;
+            for i in slot {
+                let r = self.slots[i].take().unwrap();
+                if first.is_none() {
+                    first = Some(r);
+                } else {
+                    assert_eq!(prev.unwrap().0 + 8, r.0)
+                }
+                prev = Some(r);
+            }
+            self.open_slots.push((first.unwrap(), slot.count * 8));
         }
-
-        // self.open_slots.push((r, slot.count * 8));
     }
 
     #[track_caller]
@@ -432,15 +481,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         if let Some(slot) = self.slots[slot.0] {
             slot
-        // }
-        // TODO: consecutive when required
-        // else if let Some((made, size)) = self.open_slots.pop() {
-        //     debug_assert!(allow_create, "!allow_create {slot:?}");
-        //     if size > 8 {
-        //         self.open_slots.push((SpOffset(made.0 + 8), size - 8));
-        //     }
-        //     self.slots[slot.0] = Some(made);
-        //     made
+        } else if let Some((made, size)) = self.open_slots.pop() {
+            debug_assert!(allow_create, "!allow_create {slot:?}");
+            if size > 8 {
+                self.open_slots.push((SpOffset(made.0 + 8), size - 8));
+            }
+            self.slots[slot.0] = Some(made);
+            made
         } else {
             debug_assert!(allow_create, "!allow_create {slot:?}");
             let made = self.next_slot;
@@ -451,9 +498,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     fn release_one(&mut self, slot: StackOffset) {
-        // if let Some(slot) = self.slots[slot.0].take() {
-        //     self.open_slots.push((slot, 8));
-        // }
+        if let Some(slot) = self.slots[slot.0].take() {
+            self.open_slots.push((slot, 8));
+        }
     }
 
     fn load_imm(&mut self, reg: i64, mut value: u64) {
@@ -475,11 +522,22 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
         assert!(arg.count <= 7, "indirect c_call only supports 7 arguments. TODO: pass on stack");
         assert!(ret.count <= 7, "indirect c_call only supports 7 returns. TODO: pass on stack");
-        for i in 0..arg.count {
-            if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
+
+        let mut floats = 0;
+        let mut ints = reg_offset;
+        for i in arg {
+            let slot = StackOffset(i);
+            let ty = self.slot_type(slot);
+            if ty.is_unit() {
                 continue;
             }
-            self.get_slot(i as i64 + reg_offset, StackOffset(arg.first.0 + i));
+            if ty == TypeId::f64() {
+                self.get_slot_f(floats, slot);
+                floats += 1;
+            } else {
+                self.get_slot(ints, slot);
+                ints += 1;
+            }
         }
         if comp_ctx {
             self.load_imm(x0, self.program as *const Program as u64);
@@ -492,12 +550,22 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.release_one(StackOffset(i));
         }
 
-        for i in 0..ret.count {
-            let slot = StackOffset(ret.first.0 + i);
-            if self.slot_type(slot).is_unit() {
+        let mut floats = 0;
+        let mut ints = 0;
+        for i in ret {
+            let slot = StackOffset(i);
+            let ty = self.slot_type(slot);
+            if ty.is_unit() {
                 continue;
             }
-            self.set_slot(i as i64, slot);
+
+            if ty == TypeId::f64() {
+                self.set_slot_f(floats, slot);
+                floats += 1;
+            } else {
+                self.set_slot(ints as i64, slot);
+                ints += 1
+            }
         }
     }
 

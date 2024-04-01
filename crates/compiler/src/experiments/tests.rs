@@ -141,6 +141,19 @@ macro_rules! jit_test_aarch_only {
                 }
             };
         }
+        macro_rules! simple_f {
+            ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
+                #[test]
+                fn $name() {
+                    $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
+                    $test_func(stringify!($name), $src, |f| {
+                        let ret: f64 = f($arg);
+                        assert_eq!(ret, $ret);
+                    })
+                    .unwrap();
+                }
+            };
+        }
 
         simple!(
             fields,
@@ -207,31 +220,54 @@ macro_rules! jit_test_aarch_only {
         );
 
         simple!(backpassing, 5, 5, include_str!("../../../../tests/backpassing.fr"));
-        // TODO: this relies on structs being in consecutive stack slots so had to disable reusing them.
         simple!(structs, 5, 5, include_str!("../../../../tests/structs.fr"));
         simple!(overloading, 5, 5, include_str!("../../../../tests/overloading.fr"));
         simple!(closures, 5, 5, include_str!("../../../../tests/closures.fr"));
         simple!(macros, 5, 5, include_str!("../../../../tests/macros.fr"));
         simple!(generics, 5, 5, include_str!("../../../../tests/generics.fr"));
         simple!(basic, 5, 5, include_str!("../../../../tests/basic.fr"));
-        // simple!(collections, 5, 5, include_str!("../../tests/collections.fr"));
+        simple!(modules, 5, 5, include_str!("../../../../tests/modules.fr"));
+        // simple!(dispatch, 5, 5, include_str!("../../../../tests/dispatch.fr"));
+        // simple!(aarch64_jit, 5, 5, include_str!("../../../../tests/aarch64_jit.fr")); // builtin: copy_to_mmap_exec
+        // simple!(ffi, 5, 5, include_str!("../../../../tests/ffi.fr")); // builtin: system
+        // simple!(collections, 5, 5, include_str!("../../../../tests/collections.fr"));
+        // simple!(fmt, 5, 5, include_str!("../../../../tests/fmt.fr")); // buildin: raw_slice?? the thing about differetn funcs per executor probably.
 
         simple!(
             backtrace,
             (),
             123,
             r#"
-            @c_call fn thing2() i64 = {
+            @no_inline fn thing2() i64 = {
                 // TODO: return a data structure and actually test stuff with it. 
                 collect_backtrace();
                 123
             }
-            @c_call fn thing1() i64 = {
+            @no_inline fn thing1() i64 = {
                 let _ = 1.add(2);
                 thing2()
             }
             @c_call fn main() i64 = thing1();
             "#
+        );
+
+        simple_f!(
+            float_calling_conv1,
+            (1.0f64, 2.0f64),
+            1.0f64,
+            r#"
+            @c_call fn main(a: f64, b: f64) f64 = {
+                a
+            }"#
+        );
+        simple_f!(
+            float_calling_conv2,
+            (1.0f64, 2.0f64),
+            2.0f64,
+            r#"
+            @c_call fn main(a: f64, b: f64) f64 = {
+                b
+            }"#
         );
     };
 }
