@@ -35,10 +35,6 @@
 - feature to turn off backtracers dependency
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
 - command line argument parser
-- debug printing. fn debug_log(out: Writer);
-  - @print("Hello %! %", "World", 42); @fmt("Hello %! %", "World", 42)
-  - 1. parse where the % signs are. 2. resolve overloads for the args. 3. print everything in order.
-  - @struct fn Writer(data: VoidPtr, write: FnPtr(Ty(VoidPtr, Slice(u8)), Unit));
 
 ## Sema
 

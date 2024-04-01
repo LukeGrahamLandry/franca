@@ -46,6 +46,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
     ("@env fn open(null_terminated_path: Ptr(u8), flags: i32) Fd", libc::open as *const u8),
     ("@env fn close(fd: Fd) i32", libc::close as *const u8),
+    ("@env fn rand() i32", libc::rand as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[

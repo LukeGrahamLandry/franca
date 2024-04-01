@@ -907,10 +907,6 @@ impl<'p> Executor<'p> for Interp<'p> {
         drops(&mut self.value_stack, vs);
     }
 
-    fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>> {
-        self.ready[f].clone()
-    }
-
     fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values> {
         self.deref_ptr(slot)
     }

@@ -1961,7 +1961,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let res = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index], requested)?;
                     assert!(self.program[branch_body].finished_ret.is_some());
                     // TODO: fully dont emit the branch
-                    let unit = FatExpr::synthetic(Expr::unit(), garbage_loc());
+                    let unit = FatExpr::synthetic(Expr::unit(), parts[other_index].loc);
                     parts[other_index].expr = Expr::SuffixMacro(Flag::Unreachable.ident(), Box::new(unit));
                     parts[other_index].ty = TypeId::never();
                     return Ok(res);
@@ -2792,6 +2792,7 @@ fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTy
 pub trait Executor<'p>: PoolLog<'p> {
     type SavedState;
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()>;
+
     fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values>;
     fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values>;
     fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize;
@@ -2800,7 +2801,6 @@ pub trait Executor<'p>: PoolLog<'p> {
     fn tag_error(&self, err: &mut CompileError<'p>);
     fn mark_state(&self) -> Self::SavedState;
     fn restore_state(&mut self, state: Self::SavedState);
-    fn get_bc(&self, f: FuncId) -> Option<FnBody<'p>>; // asadas
     fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values>; //  HACK
     fn to_interp(self: Box<Self>) -> Option<Interp<'p>>;
 }

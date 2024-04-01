@@ -13,7 +13,7 @@ use crate::{
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
-use std::ops::{Deref, Range};
+use std::ops::Range;
 
 #[derive(Clone, InterpSend)]
 pub enum Bc<'p> {
