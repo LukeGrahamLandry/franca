@@ -15,7 +15,7 @@ use interp_derive::InterpSend;
 use std::collections::HashMap;
 use std::ops::Range;
 
-#[derive(Clone, InterpSend)]
+#[derive(Clone, InterpSend, Debug)]
 pub enum Bc<'p> {
     // Call through a runtime known function pointer.
     CallDynamic {
@@ -98,6 +98,7 @@ pub enum Bc<'p> {
     LastUse(StackRange),
     NoCompile,
     Unreachable,
+    MarkContiguous(StackRange),
 }
 
 #[derive(Clone)]

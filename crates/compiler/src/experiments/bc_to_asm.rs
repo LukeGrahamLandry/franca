@@ -150,6 +150,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             let inst = &(self.funcs[f].as_ref().unwrap().insts[i].clone());
             self.asm.mark_next_ip();
             match inst {
+                &Bc::MarkContiguous(slots) => {
+                    self.find_many(slots, true);
+                }
                 &Bc::LastUse(slots) => {
                     self.release_many(slots);
                 }
@@ -283,12 +286,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
                 &Bc::Move { from, to } => {
-                    if !self.slot_is_var(from) && !self.slot_is_var(to) {
-                        self.slots[to.0] = self.slots[from.0].take();
-                    } else {
-                        self.get_slot(x0, from);
-                        self.set_slot(x0, to);
-                    }
+                    // TODO: it might be part of a struct?
+                    // if !self.slot_is_var(from) && !self.slot_is_var(to) {
+                    //     self.slots[to.0] = self.slots[from.0].take();
+                    // } else {
+                    self.get_slot(x0, from);
+                    self.set_slot(x0, to);
+                    // }
                 }
                 &Bc::Clone { from, to } => {
                     self.get_slot(x0, from);
@@ -361,7 +365,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
 
-        let mut slots = self.next_slot.0;
+        let mut slots = self.next_slot.0; //self.funcs[self.f].as_ref().unwrap().stack_slots * 8;
+        assert!(slots < 4096, "not enough bits to refer to all slots");
         if slots % 16 != 0 {
             slots += 16 - (slots % 16); // play by the rules
         }
@@ -386,6 +391,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     fn find_many(&mut self, slot: StackRange, allow_create: bool) -> SpOffset {
+        // SpOffset(slot.first.0 * 8)
         if slot.count == 1 {
             return self.find_one(slot.single(), allow_create);
         }
@@ -393,7 +399,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             return slot;
         }
 
-        // debug_assert!(allow_create);
+        debug_assert!(allow_create);
         // TODO: consecutive when required
         // for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
         //     if size == slot.count * 8 {
@@ -404,19 +410,26 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // }
 
         let made = self.next_slot;
-        self.slots[slot.first.0] = Some(made);
-        self.next_slot.0 += 8;
+        for i in slot {
+            debug_assert!(self.slots[i].is_none());
+            self.slots[i] = Some(self.next_slot);
+            self.next_slot.0 += 8;
+        }
         made
     }
 
     fn release_many(&mut self, slot: StackRange) {
-        if let Some(r) = self.slots[slot.first.0].take() {
-            self.open_slots.push((r, slot.count * 8));
+        for i in slot {
+            self.slots[i].take();
         }
+
+        // self.open_slots.push((r, slot.count * 8));
     }
 
     #[track_caller]
     fn find_one(&mut self, slot: StackOffset, allow_create: bool) -> SpOffset {
+        // SpOffset(slot.0 * 8)
+
         if let Some(slot) = self.slots[slot.0] {
             slot
         // }

@@ -343,6 +343,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
 
                 let inst = &(func.insts[i].clone());
                 match inst {
+                    Bc::MarkContiguous(_) => {} // TODO: use this to force a shared alloca.
                     Bc::NoCompile => unreachable!(),
                     Bc::Unreachable => {
                         LLVMBuildUnreachable(self.llvm.builder);

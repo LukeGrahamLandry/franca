@@ -854,7 +854,7 @@ impl<'p> FnBody<'p> {
             );
             let mut found = 0;
             for ty in types {
-                found += self.reserve_slots(program, *ty)?.count;
+                found += self.reserve_slots_inner(program, *ty)?.count;
             }
             debug_assert_eq!(found, count, "bad tuple size");
             // Note: don't bump self.stack_slots here.
@@ -864,6 +864,22 @@ impl<'p> FnBody<'p> {
 
     #[track_caller]
     fn reserve_slots(&mut self, program: &mut EmitBc<'_, 'p>, ty: TypeId) -> Res<'p, StackRange> {
+        self.mark_contiguous(program, ty);
+        self.reserve_slots_inner(program, ty)
+    }
+
+    fn mark_contiguous(&mut self, program: &mut EmitBc<'_, 'p>, ty: TypeId) {
+        let ty = program.program.raw_type(ty);
+        let count = program.slot_count(ty);
+        if count == 1 {
+            return;
+        }
+        let first = StackOffset(self.stack_slots);
+        self.push(Bc::MarkContiguous(StackRange { first, count }));
+    }
+
+    #[track_caller]
+    fn reserve_slots_inner(&mut self, program: &mut EmitBc<'_, 'p>, ty: TypeId) -> Res<'p, StackRange> {
         let ty = program.program.raw_type(ty);
         let count = program.slot_count(ty);
         match &program.program[ty] {
@@ -889,6 +905,7 @@ impl<'p> FnBody<'p> {
                 Ok((to, ty))
             }
             Values::Many(values) => {
+                self.mark_contiguous(program, ty);
                 let start = self.stack_slots;
                 let count = values.len();
                 let res = (
@@ -903,7 +920,7 @@ impl<'p> FnBody<'p> {
                     if types.len() == values.len() {
                         let types = types.to_vec();
                         for (value, ty) in values.into_iter().zip(types.into_iter()) {
-                            let to = self.reserve_slots(program, ty)?;
+                            let to = self.reserve_slots_inner(program, ty)?;
                             self.push(Bc::LoadConstant { slot: to.single(), value });
                         }
                         return Ok(res);
@@ -911,7 +928,7 @@ impl<'p> FnBody<'p> {
                 }
 
                 for value in values {
-                    let to = self.reserve_slots(program, TypeId::any())?; // TODO: this breaks llvm, now just for enums maybe
+                    let to = self.reserve_slots_inner(program, TypeId::any())?; // TODO: this breaks llvm, now just for enums maybe
                     self.push(Bc::LoadConstant { slot: to.single(), value });
                 }
                 Ok(res)

@@ -155,7 +155,7 @@ macro_rules! jit_test_aarch_only {
             }"#
         );
 
-        /*
+
         simple!(
             varient,
             3,
@@ -168,18 +168,6 @@ macro_rules! jit_test_aarch_only {
                 }"#
         );
 
-        simple!(
-            varient_noop,
-            3,
-            3,
-            r#"
-                @c_call fn main(n: i64) i64 = {
-                    const A = (a: i64, b: i64)!enum;
-                    var a: A = (b: n);
-                    a&.b[]
-                }"#
-        );
-        */
         // simple!(
         //     use_any_reg,
         //     5,

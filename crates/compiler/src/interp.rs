@@ -118,7 +118,7 @@ impl<'p> Interp<'p> {
 
             logln!("I: {:?}", i.log(self.pool));
             match i {
-                Bc::LastUse(_) => {
+                Bc::MarkContiguous(_) | Bc::LastUse(_) => {
                     self.bump_ip();
                 }
                 Bc::NoCompile => err!("Ran empty function",),
