@@ -7,23 +7,27 @@
 @pub const RegO = Unique(u5);
 @pub const Bits = @enum(u1) (W32 = 0b0, X64 = 0b1);
 @pub const Shift = @enum(u2) (LSL = 0b00, LSR = 0b01, ASR = 0b10);
+
+/// These are used by instructions that check the flags after a cmp/fcmp. 
+/// Int: signed vs unsigned
+/// Float: if either is NaN, ordered=false and unordered=true
 @pub const Cond = @enum(u4) (
-    EQ = 0b0000, // equal
-    NE = 0b0001, // not equal
-    HS = 0b0010, // unsigned greater than or equal
-    LO = 0b0011, // unsigned less than
+    EQ = 0b0000, // equal                               | eq,   ordered
+    NE = 0b0001, // not equal                           | ne, unordered
+    HS = 0b0010, // unsigned greater than or equal      | ge, unordered
+    LO = 0b0011, // unsigned less than                  | lt,   ordered
     MI = 0b0100,
     PL = 0b0101,
     VS = 0b0110,
     VC = 0b0111,
-    HI = 0b1000, // unsigned greater than
-    LS = 0b1001, // unsigned less than or equal
-    GE = 0b1010, //  signed greater than or equal
-    LT = 0b1011, // signed less than
-    GT = 0b1100, // signed greater than
-    LE = 0b1101, // signed less than or equal
-    _AL2 = 0b1110, // Always, (yes it has two encodings).
-    _AL1 = 0b1111, // Always
+    HI = 0b1000, // unsigned greater than               | gt, unordered
+    LS = 0b1001, // unsigned less than or equal         | le,   ordered
+    GE = 0b1010, // signed greater than or equal        | ge,   ordered
+    LT = 0b1011, // signed less than                    | lt, unordered
+    GT = 0b1100, // signed greater than                 | gt,   ordered
+    LE = 0b1101, // signed less than or equal           | le, unordered
+   AL2 = 0b1110, // Always, (yes it has two encodings).
+   AL1 = 0b1111, // Always
 );
 
 // TODO: this is wrong becuase you want JumpRel(i19) === JumpRel(i19). 
@@ -150,6 +154,29 @@
 /// X64===D64 and W32===S32
 @pub @rs fn f_str_uo(sf: Bits.T[], src: FRegI, addr: RegI, offset_scaled: u12) u32 = 
     @bits(0b1, sf, 0b11110100, offset_scaled, addr, src);
+
+// Note: int mul doesn't exist (?) so it used madd with the zero register but I guess there's no zero reguister for floats
+// TODO: test that this is the right encoding, might as well provide it just in case
+// @pub @rs fn fmadd(sf: FType.T[], dest: FRegO, x: FRegI, y: FRegI, add: FRegI) u32 =
+//    @bits(0b00011111, size, 0b0, x, 0b0, add, y, dest);
+
+// TODO: all the bin ops have the same encoding with a different magic number. make it a table. 
+
+@pub fn fadd(size: FType.T[], dest: FRegO, a: FRegI, b: FRegI) u32 =
+    @bits(0b00011110, size, 0b1, a, 0b001010, b, dest);
+
+@pub fn fsub(size: FType.T[], dest: FRegO, a: FRegI, b: FRegI) u32 =
+    @bits(0b00011110, size, 0b1, b, 0b001110, a, dest);
+    
+@pub fn fmul(size: FType.T[], dest: FRegO, a: FRegI, b: FRegI) u32 =
+    @bits(0b00011110, size, 0b1, a, 0b000010, b, dest);
+    
+@pub fn fdiv(size: FType.T[], dest: FRegO, dividend: FRegI, divisor: FRegI) u32 =
+    @bits(0b00011110, size, 0b1, divisor, 0b000110, dividend, dest);
+
+// TODO: this has a different encoding for comparing to zero without using an extra register. 
+@pub fn fcmp(size: FType.T[], a: FRegI, b: FRegI) u32 =
+    @bits(0b00011110, size, 0b1, b, 0b001000, a, 0b00000);
 
 @pub const OpPtr = VoidPtr;
 @pub const YieldArg: Type = (OpPtr, u32);

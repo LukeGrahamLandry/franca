@@ -66,6 +66,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
+    ("fn assert_eq(_: f64, __: f64) Unit", assert_eqf64 as *const u8),
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8)];
@@ -147,6 +148,11 @@ pub extern "C-unwind" fn assert_eq(program: &mut Program, a: i64, b: i64) {
 }
 
 pub extern "C-unwind" fn assert_equ32(program: &mut Program, a: u32, b: u32) {
+    hope(|| Ok(assert_eq!(a, b)));
+    program.assertion_count += 1;
+}
+
+pub extern "C-unwind" fn assert_eqf64(program: &mut Program, a: f64, b: f64) {
     hope(|| Ok(assert_eq!(a, b)));
     program.assertion_count += 1;
 }

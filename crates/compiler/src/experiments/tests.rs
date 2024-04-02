@@ -14,6 +14,19 @@ macro_rules! jit_test {
                 }
             };
         }
+        macro_rules! simple_f {
+            ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
+                #[test]
+                fn $name() {
+                    $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
+                    $test_func(stringify!($name), $src, |f| {
+                        let ret: f64 = f($arg);
+                        assert_eq!(ret, $ret);
+                    })
+                    .unwrap();
+                }
+            };
+        }
 
         simple!(trivial, (), 42, "@c_call fn main() i64 = { 42 }");
         simple!(
@@ -122,6 +135,36 @@ macro_rules! jit_test {
             .unwrap();
         }
 
+        simple_f!(
+            float_calling_conv1,
+            (1.0f64, 2.0f64),
+            1.0f64,
+            r#"
+                    @c_call fn main(a: f64, b: f64) f64 = {
+                        a
+                    }"#
+        );
+        simple_f!(
+            float_calling_conv2,
+            (1.0f64, 2.0f64),
+            2.0f64,
+            r#"
+                    @c_call fn main(a: f64, b: f64) f64 = {
+                        b
+                    }"#
+        );
+
+        simple_f!(
+            add_floats,
+            3,
+            3.5f64,
+            r#"
+            @c_call fn main(n: i64) f64 = {
+                let a: f64 = add(1.0, 2.5);
+                a
+            }"#
+        );
+
         // TODO: bootstrap raw_slice
         // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
     };
@@ -135,19 +178,6 @@ macro_rules! jit_test_aarch_only {
                     $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
                     $test_func(stringify!($name), $src, |f| {
                         let ret: i64 = f($arg);
-                        assert_eq!(ret, $ret);
-                    })
-                    .unwrap();
-                }
-            };
-        }
-        macro_rules! simple_f {
-            ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
-                #[test]
-                fn $name() {
-                    $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
-                    $test_func(stringify!($name), $src, |f| {
-                        let ret: f64 = f($arg);
                         assert_eq!(ret, $ret);
                     })
                     .unwrap();
@@ -250,25 +280,6 @@ macro_rules! jit_test_aarch_only {
             @c_call fn main() i64 = thing1();
             "#
         );
-
-        simple_f!(
-            float_calling_conv1,
-            (1.0f64, 2.0f64),
-            1.0f64,
-            r#"
-            @c_call fn main(a: f64, b: f64) f64 = {
-                a
-            }"#
-        );
-        simple_f!(
-            float_calling_conv2,
-            (1.0f64, 2.0f64),
-            2.0f64,
-            r#"
-            @c_call fn main(a: f64, b: f64) f64 = {
-                b
-            }"#
-        );
     };
 }
 
@@ -288,17 +299,6 @@ macro_rules! jit_test_llvm_only {
                 }
             };
         }
-
-        simple!(
-            add_floats,
-            3,
-            3,
-            r#"
-            @c_call fn main(n: i64) i64 = {
-                let a: f64 = add(1.0, 2.5);
-                n
-            }"#
-        );
 
         // simple!(mandelbrot, (), 40, include_str!("../../../examples/mandelbrot.fr"));
     };

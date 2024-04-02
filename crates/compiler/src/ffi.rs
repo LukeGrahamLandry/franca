@@ -125,6 +125,56 @@ impl<'p> InterpSend<'p> for bool {
     }
 }
 
+impl<'p> InterpSend<'p> for char {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn create_type(_program: &mut Program<'p>) -> TypeId {
+        TypeId::i64()
+    }
+
+    fn serialize(self, values: &mut Vec<Value>) {
+        values.push(Value::I64(self as i64))
+    }
+
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        if let Value::I64(i) = values.next()? {
+            char::from_u32(i as u32)
+        } else {
+            None
+        }
+    }
+
+    fn size() -> usize {
+        1
+    }
+}
+
+impl<'p> InterpSend<'p> for f64 {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn create_type(_program: &mut Program<'p>) -> TypeId {
+        TypeId::f64()
+    }
+
+    fn serialize(self, values: &mut Vec<Value>) {
+        values.push(Value::F64(self.to_bits()))
+    }
+
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        if let Value::F64(i) = values.next()? {
+            Some(f64::from_bits(i))
+        } else {
+            None
+        }
+    }
+
+    fn size() -> usize {
+        1
+    }
+}
+
 impl<'p> InterpSend<'p> for TypeId {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -558,10 +608,11 @@ pub mod c {
 
     pub fn to_void_ptr(v: &Value) -> Arg {
         match v {
-            Value::F64(v) => Arg::new(v),
             Value::I64(v) => Arg::new(v),
             Value::Bool(v) => Arg::new(v),
             Value::Symbol(v) | Value::Type(TypeId(v)) => Arg::new(v),
+            // This is weird because I want Value to impl Hash so it can't contain a float, but the u64 is f64::to_bits so it works as a pointer
+            Value::F64(v) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
         }
     }
@@ -598,7 +649,7 @@ pub mod c {
             args.insert(0, Arg::new(&program));
         }
 
-        // TODO: this is getting deranged.
+        // TODO: this is getting deranged. !!
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
@@ -616,6 +667,9 @@ pub mod c {
         } else if f_ty.ret == sym {
             let result: u32 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Symbol(result).into()
+        } else if f_ty.ret == TypeId::f64() {
+            let result: f64 = unsafe { b.into_cif().call(ptr, &args) };
+            Value::F64(result.to_bits()).into()
         } else if f_ty.ret.is_never() {
             let _: () = unsafe { b.into_cif().call(ptr, &args) };
             unreachable!("Called 'fn(_) Never' but it returned.")

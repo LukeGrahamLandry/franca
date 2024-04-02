@@ -1,10 +1,15 @@
 //! Convert a string of source code into a stream of tokens.
 // TODO: ignore shabang line and make sure compiler supports running scripts that way. thats a good side affect of the "all info needed in program" goal.
+// TODO: this could be a good thing to start with for trying self hosting.
 
+use crate::ast::TypeId;
 use crate::ast::VarType;
+use crate::bc::Value;
+use crate::ffi::InterpSend;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
 use codemap::{File, Span};
+use interp_derive::InterpSend;
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::ops::Deref;
@@ -18,8 +23,7 @@ pub struct Token<'p> {
     pub span: Span,
 }
 
-// TODO: true/false
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, InterpSend)]
 pub enum TokenType<'p> {
     Symbol(Ident<'p>),
     Number(i64),
@@ -55,16 +59,14 @@ pub enum TokenType<'p> {
     DoubleColon,
     Pipe,
     // Bit count means leading zeros are observable.
-    BinaryNum { bit_count: u8, value: u128 },
+    BinaryNum { bit_count: u8, value: u64 },
     LeftArrow,
     IncludeStd,
     Directive(Ident<'p>),
     Error(LexErr),
 }
 
-pub type Res<T> = Result<T, LexErr>;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, InterpSend)]
 pub enum LexErr {
     UnterminatedStr,
     Unexpected(char),
@@ -360,11 +362,11 @@ impl<'a, 'p> Lexer<'a, 'p> {
         let mut value = 0;
 
         while let '0' | '1' = self.peek_c() {
-            if bit_count == 128 {
+            if bit_count == 64 {
                 return self.err(LexErr::TooManyBits);
             }
             value <<= 1;
-            value += self.pop() as u128 - '0' as u128;
+            value += self.pop() as u64 - '0' as u64;
             bit_count += 1;
         }
 
@@ -378,25 +380,25 @@ impl<'a, 'p> Lexer<'a, 'p> {
         loop {
             match self.peek_c() {
                 '0'..='9' => {
-                    if bit_count == 128 {
+                    if bit_count == 64 {
                         return self.err(LexErr::TooManyBits);
                     }
                     value *= 16;
-                    value += self.pop() as u128 - '0' as u128;
+                    value += self.pop() as u64 - '0' as u64;
                 }
                 'A'..='F' => {
-                    if bit_count == 128 {
+                    if bit_count == 64 {
                         return self.err(LexErr::TooManyBits);
                     }
                     value *= 16;
-                    value += self.pop() as u128 - 'A' as u128 + 10;
+                    value += self.pop() as u64 - 'A' as u64 + 10;
                 }
                 'a'..='f' => {
-                    if bit_count == 128 {
+                    if bit_count == 64 {
                         return self.err(LexErr::TooManyBits);
                     }
                     value *= 16;
-                    value += self.pop() as u128 - 'a' as u128 + 10;
+                    value += self.pop() as u64 - 'a' as u64 + 10;
                 }
                 _ => break,
             }
