@@ -31,6 +31,7 @@ static LIB: &[(&str, &str)] = &[
     stdlib!("codegen/aarch64/basic"),
     stdlib!("codegen/aarch64/unwind"),
     stdlib!("codegen/wasm/instructions"),
+    stdlib!("codegen/bf/instructions"),
     stdlib!("fmt"),
 ];
 

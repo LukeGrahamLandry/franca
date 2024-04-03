@@ -3,6 +3,16 @@
 //! - It's a harvard architecture (code and data don't share an address space)
 //! - Only structured control flow (bf doesn't even have functions, just while loops)
 
+fn repeat(c: Str, count: i64) Str = {
+    var o: List(i64) = list(count);
+    range(0, count, fn(_: i64) Unit = {
+        o&.push_all(c);
+        o&.push_all(c);
+    });
+    let s: Str = o&.items();
+    s
+}
+
 const Bf = @enum(i64) (
     Right  = 0x3E,  // >
     Left   = 0x3C,  // <
@@ -14,23 +24,126 @@ const Bf = @enum(i64) (
     Close  = 0x5D,  // ]   jump back to matching [ if ptr[].ne(0)
 );
 
-const set_zero = "[-]";
-
 //////////
+// This implements a computed goto which is all you need for interesting control flow. 
 // Each basic block has a header that handles calling the correct block based on an offset in the data array. 
 // When target_offset is 0, it means enter the next block, and you decrement it for each one you pass. 
-// The end of a block must put where to go next in memory. This implements unconditional jumps. 
-// Wrap the whole list of blocks in +[- ___ +] so you wrap around and use high offsets to go backwards. 
+// The end of a block must put where to go next in memory. 
+// Wrap the whole list of blocks in another loop so you wrap around and use high offsets to go backwards. 
+// You could use one of these structures for the whole program (but you might need to emulate larger cells to hold offsets), 
+// OR nest them which would allow faster local backwards jumps, and position independent code (if it only does local jumps). 
 //////////
-//          ; initial layout: ptr=a=0; stored=1; cond=0; next=target_offset
+//          ; initial layout: ptr=A=0; B=1; C=0; next=target_offset
 // >>>      ; ptr=next
-// [ - <  ] ; if (next) decrement next; ptr=cond for exit; 
-// <<       ; next to stored OR cond to a
-// [<       ; if (ptr)  ptr=a 
+// [ - <  ] ; if (next) decrement next; ptr=C for exit; 
+// <<       ; next to B OR C to A
+// [<       ; if (ptr)  ptr=A
 // BODY     ; BODY must set next and not break layout
-// ]        ; and ptr=a=0 to exit the block 
+// ]        ; and ptr=A=0 to exit the block 
 //////////
-const program_start = ">+< +[-";  // then the first block is the entry point. 
-const program_end = "+]";
-const block_start = ">>>[-<]<<[<";
-const block_end = "]";
+
+// These always assume ptr=A at the beginning 
+const program_start = ">+<";  // B=1
+const dispatch_open = ">[<";  // ptr=B so you enter, ptr=A
+const dispatch_close = ">]";  // ptr=B, so loops back to the beginning which does ptr=A
+// Have this as the body of the last block (right before dispatch_close)
+// Then jumping to that block will exit the dispatch loop. (it breaks B which is why it must be at the end) 
+// The outer code must be expecting to restore layout. 
+const dispatch_break = ">-<"; // B=0
+const block_open = ">>>[-<]<<[<";
+const block_close = "]";
+
+// I think the easist way to think about it is with 64 bit cells and there's some replacement you can do to emulate on 8 bit cells. 
+//////////
+// You need random access memory that you can copy stuff around. 
+// Want to be able to move the ptr by a number loaded from memory, without ruining the data in between. 
+// Maybe you move in chunks and have little scratch pads along the stack that you're allowed to stomp and copy the remaining offset along with you. 
+//////////
+// Start with some primatives for working with constant offsets. 
+
+const Rel = i64;  // A relative offset of the pointer. 
+
+// Move the pointer a signed constant offset
+fn walk(offset: Rel) Str = 
+    (offset.gt(0), fn()=">".repeat(offset), fn()="<".repeat(offset.abs()))!if;
+
+/// dest=dest+ptr; ptr=0;
+fn add_acc(dest: Rel) Str = (@join(
+    "[-", walk(dest), "+", walk(dest.neg()), "]"
+));
+
+/// dest=dest-ptr; ptr=0;
+fn sub_acc(dest: Rel) Str = (@join(
+    "[-", walk(dest), "-", walk(dest.neg()), "]"
+));
+
+/// Clone the value at 'ptr' to 'dest', zeroing 't'. 
+fn copy(dest: Rel, t: Rel) Str = (@join(
+    walk(t), "[-]", walk(t.neg()), // zero t
+    "[-", walk(t), "+", walk(dest.sub(t)), "+", walk(dest.neg()), "]", // zero ptr but move it to t and dest
+    walk(t), add_acc(t.neg()), walk(t.neg())  // move t to ptr
+));
+
+
+/*
+
+// Swap the value at the pointer with the one a constant offset away. 
+fn swap(offset: i64, ) Str = {
+    let (r, l, offset) = (offset.gt(0), fn() = (">", "<", offset), fn() = ("<", ">", offset.neg()))!if;  // TODO: impl this pattern match
+    
+    
+    a = a + b
+    b = a - b
+    a = a - b
+    
+    
+}
+
+src_offset, dest_offset
+*/
+
+//////////
+// The real abstraction we want is a callstack where you can push arguments and a return address and have the other guy come back. 
+// Each function body is one of those dispatch loops in the body of the main dispatch loop. 
+// Calling Convention: 
+// Pointer always points at A inside the dispatch loop. 
+// Frame Memory layout: Locals..., A, B, C, Next
+// You can do a call by pushing a new frame (on the right) and return by popping a frame. 
+// So caller puts the offset from callee to continuation in its Next, puts the args after Next, moves right as many slots as callee needs, 
+// then makes a new dispatch header with Next as the offset from caller to callee. 
+// Callee does whatever it wants, puts return value at the front of its stack (where the args were, after old next)
+// then moves pointer back to old A (it knows how much stack space it was given), so control moves to the continuation, 
+// which can read the return value and access the same locals as the original caller. 
+//////////
+
+// TODO: @concat
+// (program_start, ">>>+<<<", dispatch_open, block_open, "+.[-]", block_close, block_open, "++.[-]", block_close, "]")  \2\1
+// (program_start, ">>>++<<<",dispatch_open, block_open, "+.[-]", block_close, block_open, "++.[-]", block_close, "]")             \1\2
+
+
+fn left(const offset: i64) Unit = ""!asm;
+fn set_zero() = "[-]"!asm;
+
+/*
+
+// b=a a=0 
+right(offset) [-] left(offset)     ; zero destination
+[ - right(offset) + left(offset) ] ; while(src != 0) 
+
+
+
+    right(1); set_zero(); left(1);
+    right(offset); set_zero(); left(offset);
+    { 
+        dec(); 
+        right(); inc(); left(); 
+        right(offset); int(); left(offset);
+    }!loop;
+
+// dest=*ptr  next=0
+>[-]<  ; zero next
+right(offset) [-] left(offset)  ; zero destination
+[ - >+< right(offset) + left(offset) ] ; while(src != 0) inc ptr_1; inc dest
+
+// fuck i have to do software floats 
+*/

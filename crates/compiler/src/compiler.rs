@@ -1941,6 +1941,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         arg: &mut FatExpr<'p>,
         requested: Option<TypeId>, // TODO: allow giving return type to infer
     ) -> Res<'p, Structured> {
+        if !arg.ty.is_unknown() {
+            // We've been here before and already replaced closures with calls.
+            return Ok(Structured::RuntimeOnly(TypeId::unit()));
+        }
         let unit = TypeId::unit();
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
         let mut unit_expr = FatExpr::synthetic(Expr::unit(), arg.loc);
@@ -1976,7 +1980,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.type_check_arg(true_arg, unit, sig)?;
                 self.emit_call_on_unit(result, if_true, &mut parts[1], requested)?.ty()
             } else {
-                ice!("if second arg must be func not {:?}", parts[1]);
+                ice!("if second arg must be func not {}", parts[1].log(self.pool));
             };
             if let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? {
                 self.program[if_false].add_tag(Flag::Inline);
@@ -1989,6 +1993,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             self.finish_closure(&mut parts[1]);
             self.finish_closure(&mut parts[2]);
+            arg.ty = TypeId::unit();
             Ok(Structured::RuntimeOnly(true_ty))
         } else {
             ice!("if args must be tuple not {:?}", arg);
