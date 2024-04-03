@@ -271,6 +271,16 @@ impl<'a, 'p> Lexer<'a, 'p> {
     fn lex_ident(&mut self) -> Token<'p> {
         let mut c = self.peek_c();
         let is_directive = c == '#';
+        self.pop();
+        c = self.peek_c();
+        if is_directive && c == '!' {
+            // https://en.wikipedia.org/wiki/Shebang_(Unix)
+            while self.peek_c() != '\n' {
+                self.pop();
+            }
+            // Just something random that's allowed at the start of the file
+            return self.token(Semicolon, self.start, self.current);
+        }
         // TODO: only sometimes allow #
         while c.is_ascii_alphanumeric() || c == '_' || c == '#' {
             self.pop();

@@ -26,6 +26,7 @@ fn main() {
         if name == "log_export_ffi" {
             println!("{}", get_include_std("compiler").unwrap());
             println!("{}", get_include_std("libc").unwrap());
+            println!("{}", get_include_std("compiler_late").unwrap());
             return;
         }
         if name == "lsp" {

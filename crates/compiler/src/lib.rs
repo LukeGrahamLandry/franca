@@ -176,17 +176,17 @@ pub fn run_main<'a: 'p, 'p>(
                                 lines as f64 / seconds
                             );
                             outln!(ShowPrint, "===============");
-                            // let start = timestamp();
+                            let start = timestamp();
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
                                     log_err(&comp, e, save);
                                     return false;
                                 }
                                 Ok(result) => {
-                                    // let end = timestamp();
-                                    // let seconds = end - start;
-                                    // outln!(ShowPrint, "===============");
-                                    // outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
+                                    let end = timestamp();
+                                    let seconds = end - start;
+                                    outln!(ShowPrint, "===============");
+                                    outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
                                     debug_assert_eq!(result, expect.into());
                                     // TODO: change this when i add assert(bool)
                                     let assertion_count = src.split("assert_eq(").count() - 1;
