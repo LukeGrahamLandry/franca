@@ -1215,6 +1215,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
+        let ptr_ty = self.raw_type(ptr_ty);
         let ptr_ty = &self[ptr_ty];
         if let TypeInfo::Ptr(ty) = ptr_ty {
             Some(*ty)

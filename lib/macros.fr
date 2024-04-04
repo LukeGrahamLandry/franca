@@ -19,80 +19,6 @@ fn literal(arg: AstExpr, target: AstExpr) AstExpr = {
     )!quote
 }
 
-// Note: this sucks because it can't use @match because that implementation wants to use this function. 
-@pub fn visit_expr(start: Ptr(FatExpr), f: Fn(Ptr(FatExpr), Unit)) Unit = {
-    const P = Ptr(FatExpr); // TODO
-    var stack: List() = list(1);
-    push(stack!addr, start);
-    
-    (fn() bool = gt(stack&.len[], 0), fn() Unit = {
-        var e: Ptr(FatExpr) = pop_last(stack!addr);
-        f(e);
-        
-        let tag: Symbol = tag_symbol(Expr, e.expr!tag[]);
-        (eq(tag, Call!symbol), fn()={
-            (fn(func: Ptr(FatExpr), arg: Ptr(FatExpr)) Unit = {
-                push(stack!addr, func);
-                push(stack!addr, arg);
-            })(e.expr.Call[]);
-        }, fn()={
-           (eq(tag, Tuple!symbol), fn() Unit ={
-                let parts: Slice(FatExpr) = e.expr.Tuple[];  // TODO: shouldnt need binding
-                foreach(parts, fn(part: Ptr(FatExpr)) Unit = {
-                    push(stack!addr, part);
-                });
-            }, fn() Unit ={
-                (eq(tag, PrefixMacro!symbol), fn() Unit ={
-                    let arg: Ptr(FatExpr) = e.expr.PrefixMacro.arg[];
-                    let target: Ptr(FatExpr) = e.expr.PrefixMacro.target[];
-                    push(stack!addr, arg);
-                    push(stack!addr, target);
-                }, fn() Unit ={
-                    (eq(tag, Closure!symbol), fn() Unit ={
-                        const OptExpr: Type = (i64, FatExpr);
-                        let body: Ptr(OptExpr) = e.expr.Closure[].body;  // TODO: better option ffi
-                        (fn(a: i64, b: FatExpr) Unit = { assert(eq(a, 0), "missing body"); })(body[]);
-                        let body: Ptr(FatExpr) = raw_slice(body, size_of(Tag(Expr)), size_of(OptExpr));
-                        push(stack!addr, body);
-                    }, fn() Unit ={
-                        (eq(tag, SuffixMacro!symbol), fn() Unit ={
-                            (fn(a: Symbol, arg: Ptr(FatExpr)) Unit = { 
-                                push(stack!addr, arg);
-                             })(e.expr.SuffixMacro[]);
-                        }, fn() Unit ={
-                            // @todo
-                        })!if
-                    })!if
-                })!if
-            })!if
-        })!if
-    })!while;
-    drop(stack!addr);
-}
-
-@pub const Subst: Type = (Symbol, FatExpr);
-const ___dasdasddsfe = List(Subst);
-// TODO: instead of this, extend `!quote` to capture ast vars? 
-@pub fn apply_placeholders(template: Ptr(FatExpr), replacements: Slice(Subst)) Unit = {
-    visit_expr(template, fn(expr: Ptr(FatExpr)) Unit = {
-        @if(eq(expr.expr!tag[], tag_value(Expr, GetNamed!symbol))) {
-            let found: Symbol = expr.expr.GetNamed[];
-            foreach(replacements, fn(key: Symbol, value: FatExpr) Unit = 
-                @if(eq(key, found)) {
-                    expr[] = value;
-                }
-            );
-        };
-    });
-}
-
-
-const _todotodo: Type = List(FatStmt);
-@pub const CasePayload: Type = (Symbol, Type);
-const __asda: Type = List(CasePayload);
-
-
-
 // TODO: need to have an actual clone method because just relying on stack copy will share heap ptrs. 
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
@@ -102,16 +28,16 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     let enum_type: TypeInfo = infer_raw_deref_type(arg);
     var enum_type: Type = intern_type(enum_type);
     
-    // Declaring variables is weird because name resolution has already run.
-    var body = (if_false)!quote;
+    let panic_fn = @literal(OverloadSet) panic;
+    var body = panic_fn!unquote("unhandled match case")!quote
     
     foreach(stmts, fn(stmt: Ptr(FatStmt)) Unit = {
         // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
         (eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol)), fn()={
             var handler_body: FatExpr = stmt.stmt.Eval[];
+            // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. 
             var name: Symbol = handler_body&.expr.Closure[].name[];
             
-            // TODO: infer output type instead of just forcing int. 
             var case_access: FatExpr = clone_ast((arg_var&.___)!quote);
             let name_ptr = case_access&.expr.FieldAccess[1];
             name_ptr[] = name;
@@ -119,31 +45,19 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             // TODO: giving in an having unquote syntax is probably worth it. is $(expr) that much better than expr!unquote? this is a bit illegable. 
             // TODO: its too hacky that you only have to call clone_ast when there's no placeholders
             var cond = eq(tag_val, tag_value(
-                literal_ast(Type, enum_type!addr)!unquote, 
-                literal_ast(Symbol, name!addr)!unquote
+                (@literal(Type) enum_type)!unquote, 
+                (@literal(Symbol) name)!unquote
             ))!quote;
-            var new_branch = (cond!unquote,
-                fn() i64 = (handler_body!unquote)(case_access!unquote!deref), 
-                fn() i64 = if_false_temp
+            
+            body = (cond!unquote,
+                fn() = (handler_body!unquote)(case_access!unquote!deref), 
+                fn() = body!unquote
             )!if!quote;
-            
-            var body_rep = (if_false!symbol, new_branch);
-            apply_placeholders(body!addr, body_rep!addr.slice());
-            
-            let body_rep = (
-                (if_false_temp!symbol, clone_ast(if_false!quote)),
-                (asklsaklsalk!symbol, new_branch),
-            )!slice;
-            apply_placeholders(body!addr, body_rep);
             
         }, fn()=())!if;
     });
-    let body_rep = (  // TODO: single element slice
-        (if_false!symbol, panic("unhandled match case")!quote),
-        (lmdksdsalmkdasklm!symbol, panic("unhandled match case")!quote),
-    )!slice;
-    apply_placeholders(body!addr, body_rep);
     
+    // TODO: Declaring variables is weird because name resolution has already run.
     (@with_var(arg_var, arg!unquote) @with_var(tag_val, arg_var&!tag!deref) body!unquote)!quote
 }
 

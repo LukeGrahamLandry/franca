@@ -583,6 +583,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 format!("{}.{}", container.log(pool), pool.get(*name))
             }
             Expr::PrefixMacro { name, arg, target } => format!("[@{}({}) {}]", name.log(pool), arg.log(pool), target.log(pool)),
+            Expr::Index { ptr, index } => format!("{}[{}]", ptr.log(pool), index.log(pool)),
             _ => format!("{:?}", self),
         }
     }
