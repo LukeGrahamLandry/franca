@@ -136,7 +136,7 @@ fn Slice(const T: Type) Type = {
 @impl @pub
 fn List(const T: Type) Type = {
     const Self: Type = (maybe_uninit: Slice(T), len: i64)!struct;
-    @pub fn list(cap: i64) Self = (maybe_uninit: (ptr: alloc(T, cap), len: cap), len: 0);
+    @pub fn list(cap: i64) Self = (maybe_uninit: (ptr: alloc(T, cap), len: cap), len: 0);  // todo: no alloc if len 0 since i dont free
     @pub fn list() Self = list(0);
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
@@ -198,7 +198,18 @@ fn List(const T: Type) Type = {
         self.len[] = add(self.len[], len(new));
     }
     
-    @pub fn drop(self: *Self) Unit = dealloc(T, self.maybe_uninit.ptr[], self.maybe_uninit.len[]);
+    @pub fn push_all(self: *Self, owned: *Self) Unit = {
+        self.push_all(owned.items());
+        owned.drop();
+    }
+    
+    @pub fn drop(self: *Self) Unit = {
+        (self.maybe_uninit.len[].ne(0), fn() = {
+            dealloc(T, self.maybe_uninit.ptr[], self.maybe_uninit.len[]);
+            self.maybe_uninit.len[] = 0;
+            self.len[] = 0;
+        }, fn()=())!if;
+    }
     
     Self
 }
@@ -335,6 +346,10 @@ fn List(const T: Type) Type = {
     let ptr: Ptr(Ptr(i64)) = raw_slice(s&, 0, size_of(i64));
     let len: Ptr(i64) = raw_slice(s&, size_of(i64), mul(2, size_of(i64)));
     slice(ptr[], len[])
+};
+
+@pub fn push_all(self: *List(i64), s: ""!type) Unit = {  // TODO: god damn bro
+    self.push_all(s.str());
 };
 
 @pub

@@ -1137,26 +1137,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("!fn_ptr expected const fn not {fn_val:?}",)
                         }
                     }
-                    "overload_set_ast" => {
-                        if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
-                            if let Some((value, ty)) = result.constants.get(*var) {
-                                if let Values::One(Value::OverloadSet(_)) = value {
-                                    let ast = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
-                                    expr.expr = Expr::Value {
-                                        ty: FatExpr::get_type(self.program),
-                                        value: ast.serialize_one(),
-                                    };
-                                    self.compile_expr(result, expr, requested)?
-                                } else {
-                                    ice!("expected overloadset not {value:?}")
-                                }
-                            } else {
-                                ice!("undeclared constant {:?}", var.log(self.pool))
-                            }
-                        } else {
-                            ice!("Expected var found {arg:?}")
-                        }
-                    }
                     "construct" => {
                         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
                             let out = self.construct_struct(result, requested, pattern)?;

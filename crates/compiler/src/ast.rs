@@ -1617,7 +1617,6 @@ pub enum Flag {
     Tag,
     Reflect_Print,
     Fn_Ptr,
-    Overload_Set_Ast,
     Import,
     TopLevel,
     Module,
