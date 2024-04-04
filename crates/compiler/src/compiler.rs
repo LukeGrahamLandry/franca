@@ -1981,6 +1981,11 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn emit_call_while(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
+        if !arg.ty.is_unknown() {
+            // We've been here before and already replaced closures with calls.
+            return Ok(Structured::RuntimeOnly(TypeId::unit()));
+        }
+
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let _force_inline = self.pool.intern("inline"); // TODO
@@ -2008,6 +2013,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             self.finish_closure(&mut parts[0]);
             self.finish_closure(&mut parts[1]);
+            arg.ty = TypeId::unit();
         } else {
             ice!("if args must be tuple not {:?}", arg);
         }

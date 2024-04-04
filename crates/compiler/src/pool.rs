@@ -43,9 +43,9 @@ impl<'pool> StringPool<'pool> {
         unsafe { &*(v.get(i.0 as usize).expect("Valid Ident").0) }
     }
 
-    pub fn upcast(&self, i: i64) -> Option<Ident<'pool>> {
+    pub fn upcast(&self, i: u32) -> Option<Ident<'pool>> {
         if i > 0 && (i as usize) < self.values.read().unwrap().len() {
-            Some(Ident(i as u32, PhantomData))
+            Some(Ident(i, PhantomData))
         } else {
             None
         }

@@ -469,6 +469,9 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                     }
                     &Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                         let ty = self.llvm.get_function_type(self.program, ty);
+                        if comp_ctx {
+                            todo!("llvm comp ctx")
+                        }
                         todo!()
                     }
                 }

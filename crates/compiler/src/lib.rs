@@ -98,6 +98,8 @@ test_file!(backpassing);
 test_file!(dispatch);
 test_file!(modules);
 test_file!(fmt);
+test_file!(floats);
+// test_file!(bf_interp); // TODO: my vm is slow!
 
 pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncId, usize)> {
     // TODO: this will get less dumb when I have first class modules.
@@ -194,7 +196,8 @@ pub fn run_main<'a: 'p, 'p>(
                                     debug_assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
                                     outln!(
                                         ShowPrint,
-                                        "   - {assertion_count} assertions passed. {} comptime evaluations.",
+                                        "   - {} assertions passed. {} comptime evaluations.",
+                                        comp.program.assertion_count,
                                         comp.anon_fn_counter
                                     );
                                 }

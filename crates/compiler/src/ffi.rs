@@ -656,7 +656,7 @@ pub mod c {
         } else if f_ty.ret == TypeId::ty() {
             let result: u32 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Type(TypeId(result)).into()
-        } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 {
+        } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 || f_ty.ret == TypeId::void_ptr() {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::I64(result).into()

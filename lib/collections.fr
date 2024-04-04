@@ -19,6 +19,20 @@
 @pub fn set() Unit = {unit};
 @pub fn reserve() Unit = {unit};
 @pub fn rest() Unit = {unit};
+@pub fn repeated() Unit = {unit};
+@pub fn clear() Unit = {unit};
+@pub fn fill() Unit = {unit};
+
+
+@pub
+fn range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
+    var i = start;
+    (fn()=lt(i, end), fn()={  // TODO: fix vm poison when no brackets.
+        yield(i);
+        i = add(i, 1);
+    })!while;
+}
+
 
 // TODO: return slice so the result may have more room than you asked for (which is useful for growable collections in allocators that use fixed size blocks). 
 @interp @pub fn alloc(Element: Type, count: i64) VoidPtr; 
@@ -130,6 +144,13 @@ fn Slice(const T: Type) Type = {
         }, fn() bool = false)!if
     }
     
+    /// Set all elements of the slice to 't'. 
+    @pub fn fill(self: *Self, t: T) Unit = {
+        foreach(self, fn(ptr: *T) Unit = {
+            ptr[] = t;
+        });
+    }
+    
     Self
 }
 
@@ -138,6 +159,12 @@ fn List(const T: Type) Type = {
     const Self: Type = (maybe_uninit: Slice(T), len: i64)!struct;
     @pub fn list(cap: i64) Self = (maybe_uninit: (ptr: alloc(T, cap), len: cap), len: 0);  // todo: no alloc if len 0 since i dont free
     @pub fn list() Self = list(0);
+    
+    @pub fn repeated(t: T, count: i64) Self = {
+        var self: Self = list(count);
+        range(0, count, fn(_: i64) Unit = self&.push(t));
+        self
+    }
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
     @pub fn list_clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
@@ -209,6 +236,11 @@ fn List(const T: Type) Type = {
             self.maybe_uninit.len[] = 0;
             self.len[] = 0;
         }, fn()=())!if;
+    }
+    
+    /// Retains capacity
+    @pub fn clear(self: *Self) Unit = {
+        self.len[] = 0;
     }
     
     Self
@@ -351,12 +383,3 @@ fn List(const T: Type) Type = {
 @pub fn push_all(self: *List(i64), s: ""!type) Unit = {  // TODO: god damn bro
     self.push_all(s.str());
 };
-
-@pub
-fn range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
-    var i = start;
-    (fn()=lt(i, end), fn()={  // TODO: fix vm poison when no brackets.
-        yield(i);
-        i = add(i, 1);
-    })!while;
-}

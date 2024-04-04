@@ -257,6 +257,8 @@ macro_rules! jit_test_aarch_only {
         simple!(generics, 5, 5, include_str!("../../../../tests/generics.fr"));
         simple!(basic, 5, 5, include_str!("../../../../tests/basic.fr"));
         simple!(modules, 5, 5, include_str!("../../../../tests/modules.fr"));
+        simple!(libc, 5, 5, include_str!("../../../../tests/libc.fr"));
+        simple!(floats, 5, 5, include_str!("../../../../tests/floats.fr"));
         // simple!(dispatch, 5, 5, include_str!("../../../../tests/dispatch.fr"));
         // simple!(aarch64_jit, 5, 5, include_str!("../../../../tests/aarch64_jit.fr")); // builtin: copy_to_mmap_exec
         // simple!(ffi, 5, 5, include_str!("../../../../tests/ffi.fr")); // builtin: system
@@ -300,6 +302,7 @@ macro_rules! jit_test_llvm_only {
             };
         }
 
+        // simple!(floats, 5, 5, include_str!("../../../tests/floats.fr"));
         // simple!(mandelbrot, (), 40, include_str!("../../../examples/mandelbrot.fr"));
     };
 }

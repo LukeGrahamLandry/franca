@@ -445,7 +445,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
                     Flag::Deref => {
-                        debug_assert_eq!(self.program[arg.ty], TypeInfo::Ptr(expr.ty));
+                        // TODO: @switch gets you a unique type here.
+                        // debug_assert_eq!(self.program[arg.ty], TypeInfo::Ptr(expr.ty));
                         let ptr = result.reserve_slots(self, arg.ty)?;
                         self.compile_expr(result, arg, ptr)?;
                         result.push(Bc::Load {

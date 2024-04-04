@@ -61,6 +61,45 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     (@with_var(arg_var, arg!unquote) @with_var(tag_val, arg_var&!tag!deref) body!unquote)!quote
 }
 
+@annotation @pub
+fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
+    let stmts: Slice(FatStmt) = target&.expr.Block.body[];
+    arg = compile_ast(arg);
+    let arg_type = @literal(Type) arg&.ty[];
+    
+    let panic_fn = @literal(OverloadSet) panic;
+    let eq_fn = @literal(OverloadSet) eq;
+    var body = panic_fn!unquote("unhandled switch case")!quote;
+    
+    foreach(stmts, fn(stmt: Ptr(FatStmt)) Unit = {
+        // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
+        (eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol)), fn()={
+            var handler_body: FatExpr = stmt.stmt.Eval[];
+            
+            let branch: *PrefixMacro = handler_body&.expr.PrefixMacro;
+            let name: Symbol = branch.name[0][];
+            let arg: *FatExpr = branch.arg[];
+            let action: FatExpr = branch.target[][];
+            
+            // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
+            let c: Symbol = case!symbol;
+            (name.int().eq(c.int()), fn() = {
+                // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
+                let cond = (eq_fn!unquote(arg_var, @as(arg_type!unquote) arg[]!unquote))!quote;
+                body = ((cond!unquote, fn() = action!unquote(), fn()=body!unquote)!if)!quote;
+            }, fn()={
+                let n: Str = name.str();
+                puts(n);
+                panic("unhandled prefix in @switch")
+            })!if;
+            
+        }, fn()=())!if;
+    });
+    
+    // TODO: Declaring variables is weird because name resolution has already run.
+    (@with_var(arg_var, arg!unquote) body!unquote)!quote
+}
+
 // TODO: There are implicit range assertions because we get the bit count from the type of the ints. 
 @annotation @pub
 fn bits(arg: AstExpr, target: AstExpr) AstExpr = {

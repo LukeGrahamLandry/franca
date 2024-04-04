@@ -70,7 +70,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: f64, __: f64) Unit", assert_eqf64 as *const u8),
 ];
 
-pub const COMPILER_LATE: &[(&str, *const u8)] = &[("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8)];
+pub const COMPILER_LATE: &[(&str, *const u8)] = &[
+    ("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8),
+    ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
+];
 
 pub fn get_include_std(name: &str) -> Option<String> {
     if let Some((_, src)) = LIB.iter().find(|(check, _)| name == *check) {
@@ -166,13 +169,17 @@ extern "C-unwind" fn array_type(program: &mut Program, ty: TypeId, count: usize)
 }
 
 // TODO: test abi
-extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*const u8, i64) {
+extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: u32) -> (*const u8, i64) {
     hope(|| {
         let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
         let s = program.pool.get(symbol);
         // TODO: fix len stuff
         Ok((s.as_ptr(), (s.len()) as i64 / 2 - 1))
     })
+}
+
+extern "C-unwind" fn symbol_to_int(_: &mut Program, symbol: u32) -> i64 {
+    symbol as i64
 }
 
 #[repr(C)]
