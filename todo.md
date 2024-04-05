@@ -39,6 +39,23 @@
 - free standing versions of functions. so like during comptime you want the compiler to control allocations/printing/panics probably
   but need to be able compile a real binary too. this gets back into the problem of compiling anything used at both multiple times.
   do you try to represent that in the ast so they share work or have fully seperate Func instances for anything that indirectly calls an env function.
+- have addressable bytes (u8, u16, u32, u64) and measure size_of in bytes. seperate logical (pattern matching) size from real size.
+
+## UB
+
+- (CHECKED) accessing the wrong enum field
+- holding a pointer to an enum member while changing its tag
+- read off the end of an array
+- div(0)
+- overflow/underflow. add,sub,mul
+- bitshifting too far
+- constructing a slice with a bad length
+- escaping pointer to stack
+- double free, use after free
+- alias block result location when returning a struct without calling a function
+- void pointer cast
+- hacky rust pointer ffi
+- inline asm
 
 ## Sema
 
@@ -52,7 +69,6 @@
 ## Replacing Interp
 
 - give executors access to the compiler so dont need the hacky message passing with errors
-- asm stack traces
 - convert bytes + type back to Values
 - asm needs to impl Executor. seperate storing bytecode from interp.
 - fix any_reg. asm backend needs access to an executor

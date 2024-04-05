@@ -168,54 +168,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
-                Bc::CallDirect { f, ret, arg } => {
-                    let target = &self.program[*f];
-                    let target_c_call = target.has_tag(Flag::C_Call);
-                    let comp_ctx = target.has_tag(Flag::Ct);
-                    if let Some(template) = target.any_reg_template {
-                        // TODO: this is just a POC
-                        let registers = vec![0, 1, 0];
-                        let ops = self.emit_any_reg(template, registers);
-                        for i in 0..arg.count {
-                            if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
-                                continue;
-                            }
-                            self.get_slot(i as i64, StackOffset(arg.first.0 + i));
-                        }
-                        // TODO: you cant call release many because it assumes they were made in one chunk
-                        for i in *arg {
-                            self.release_one(StackOffset(i));
-                        }
-                        assert_eq!(ret.count, 1);
-                        for op in ops {
-                            // println!("{op:#05x}, ");
-                            self.asm.push(op);
-                        }
-
-                        if !self.slot_type(ret.single()).is_unit() {
-                            self.set_slot(x0, ret.single());
-                        }
-                    } else {
-                        //if target_c_call {
-                        // if let Some(bytes) = self.asm.get_fn(*f) {
-                        //     // TODO: should only do this for comptime functions. for runtime, want to be able to squash everything down.
-                        //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
-                        //     //       since need to allow that for cross compiling anyway.
-                        //     // Would be interesting to always use the indirect because then you could do super powerful things
-                        //     // for mixin patching other code. redirect any call. tho couldn't rely on that cause it might inline.
-                        //     // also feels gross. but i've kinda just invented a super heavy handed context pointer which some languages
-                        //     // do for allocators/logging anyway
-                        //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
-                        // } else {
-                        // TODO: have a mapping. funcs for other arches take up slots.
-                        assert!(f.0 < 4096);
-                        self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
-                        self.dyn_c_call(x16, *arg, *ret, target.unwrap_ty(), comp_ctx);
-                        // }
-                    }
-                    // else {
-                    //     todo!()
-                    // }
+                &Bc::CallSplit { rt, ret, arg, .. } => {
+                    // TODO: update when we support comptime here.
+                    self.call_direct(rt, ret, arg)?;
+                }
+                &Bc::CallDirect { f, ret, arg } => {
+                    self.call_direct(f, ret, arg)?;
                 }
                 Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                 Bc::LoadConstant { slot, value } => match value {
@@ -261,6 +219,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         self.set_slot(x0, *slot);
                     }
                     Value::GetNativeFnPtr(f) => todo!(),
+                    Value::SplitFunc { ct, rt } => todo!(),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
                     self.get_slot(x0, cond);
@@ -610,6 +569,57 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     fn slot_is_var(&self, slot: StackOffset) -> bool {
         self.funcs[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
+
+    fn call_direct(&mut self, f: FuncId, ret: StackRange, arg: StackRange) -> Res<'p, ()> {
+        let target = &self.program[f];
+        let target_c_call = target.has_tag(Flag::C_Call);
+        let comp_ctx = target.has_tag(Flag::Ct);
+        if let Some(template) = target.any_reg_template {
+            // TODO: this is just a POC
+            let registers = vec![0, 1, 0];
+            let ops = self.emit_any_reg(template, registers);
+            for i in 0..arg.count {
+                if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
+                    continue;
+                }
+                self.get_slot(i as i64, StackOffset(arg.first.0 + i));
+            }
+            // TODO: you cant call release many because it assumes they were made in one chunk
+            for i in arg {
+                self.release_one(StackOffset(i));
+            }
+            assert_eq!(ret.count, 1);
+            for op in ops {
+                // println!("{op:#05x}, ");
+                self.asm.push(op);
+            }
+
+            if !self.slot_type(ret.single()).is_unit() {
+                self.set_slot(x0, ret.single());
+            }
+        } else {
+            //if target_c_call {
+            // if let Some(bytes) = self.asm.get_fn(*f) {
+            //     // TODO: should only do this for comptime functions. for runtime, want to be able to squash everything down.
+            //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
+            //     //       since need to allow that for cross compiling anyway.
+            //     // Would be interesting to always use the indirect because then you could do super powerful things
+            //     // for mixin patching other code. redirect any call. tho couldn't rely on that cause it might inline.
+            //     // also feels gross. but i've kinda just invented a super heavy handed context pointer which some languages
+            //     // do for allocators/logging anyway
+            //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
+            // } else {
+            // TODO: have a mapping. funcs for other arches take up slots.
+            assert!(f.0 < 4096);
+            self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
+            self.dyn_c_call(x16, arg, ret, target.unwrap_ty(), comp_ctx);
+            // }
+        }
+        // else {
+        //     todo!()
+        // }
+        Ok(())
+    }
 }
 
 #[allow(unused)]
@@ -740,6 +750,7 @@ impl ConstBytes {
 
     pub fn write_int_copy(&mut self, value: &Value, out: &mut Vec<i64>) {
         match value {
+            Value::SplitFunc { ct, rt } => todo!(),
             Value::F64(_) => todo!(),
             &Value::I64(i) => out.push(i),
             &Value::Bool(i) => out.push(i as i64),

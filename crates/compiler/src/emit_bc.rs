@@ -322,6 +322,22 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(!func.has_tag(Flag::Comptime));
                     return self.emit_runtime_call(result, f_id, arg, output);
                 }
+                if let Expr::Value {
+                    value: Values::One(Value::SplitFunc { ct, rt }),
+                    ..
+                } = f.expr
+                {
+                    let arg_slot = result.reserve_slots(self, arg.ty)?;
+                    self.compile_expr(result, arg, arg_slot)?;
+
+                    result.push(Bc::CallSplit {
+                        ct,
+                        rt,
+                        arg: arg_slot,
+                        ret: output,
+                    });
+                    return Ok(());
+                }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
                     let f_slot = result.reserve_slots(self, f.ty)?;
                     self.compile_expr(result, f, f_slot)?;

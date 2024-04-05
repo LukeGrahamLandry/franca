@@ -152,10 +152,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let _found = self.debug_trace.pop(); //.expect("state stack");
                                              // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
-    pub(crate) fn pop_stat2(&mut self) {
-        // TODO
-        let _found = self.debug_trace.pop(); //.expect("state stack");
-    }
 
     pub fn add_module(&mut self, name: Ident<'p>, parent: Option<ModuleId>) -> Res<'p, ModuleId> {
         let module = ModuleId(self.program.modules.len());
@@ -220,10 +216,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         result
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values, _when: ExecTime) -> Res<'p, Values> {
+    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
-        let result = self.runtime_executor.run_func(self.program, f, arg);
+        let result = self.runtime_executor.run_func(self.program, f, arg, when);
         let result = self.tag_err(result);
         self.pop_state(state2);
         result
@@ -899,7 +895,32 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
-                    return self.compile_call(result, expr, f_id, requested);
+                    match f_id {
+                        FuncRef::Exact(f_id) => return self.compile_call(result, expr, f_id, requested),
+                        FuncRef::Split { ct, rt } => {
+                            assert!(self.is_raw_call(ct));
+                            assert!(self.is_raw_call(rt));
+                            let arg_ty_ct = unwrap!(self.program[ct].finished_arg, "ct fn arg");
+                            let arg_ty = unwrap!(self.program[rt].finished_arg, "rt fn arg");
+                            self.type_check_arg(arg_ty_ct, arg_ty, "ct vs rt")?;
+                            self.compile_expr(result, arg, Some(arg_ty))?;
+                            let ret_ty_ct = unwrap!(self.program[ct].finished_ret, "ct fn ret");
+                            let ret_ty = unwrap!(self.program[rt].finished_ret, "rt fn ret");
+                            self.type_check_arg(ret_ty_ct, ret_ty, "ct vs rt")?;
+                            let f_ty = self.program.func_type(rt);
+
+                            add_unique(&mut result.callees, ct);
+                            add_unique(&mut result.callees, rt);
+                            self.ensure_compiled(ct, ExecTime::Comptime)?;
+                            self.ensure_compiled(rt, ExecTime::Runtime)?;
+                            f.ty = f_ty;
+                            f.expr = Expr::Value {
+                                ty: f_ty,
+                                value: Value::SplitFunc { ct, rt }.into(),
+                            }; // TODO: do this elsewhere
+                            return Ok(Structured::RuntimeOnly(ret_ty));
+                        }
+                    }
                 }
                 ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
             }
@@ -1299,7 +1320,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     value: Values::Many(values),
                 };
                 let mut full_arg = FatExpr::synthetic(full_arg, loc);
-                let f = self.resolve_function(result, *name, &mut full_arg, Some(want))?;
+                let f = self.resolve_function(result, *name, &mut full_arg, Some(want))?.single()?;
                 assert!(self.program[f].has_tag(Flag::Annotation));
                 self.infer_types(f)?;
                 let get_func = FatExpr::synthetic(self.func_expr(f), loc);
@@ -1518,11 +1539,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let Ok(i) = value.as_overload_set() {
                         // println!("type_of overload {i}");
                         if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
-                            if let Ok(Some(f_ty)) = self.infer_types(fid) {
+                            if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
                                 // Need to save this because resolving overloads eats named arguments
                                 f.expr = Expr::Value {
-                                    ty: self.program.func_type(fid),
-                                    value: Value::GetFn(fid).into(),
+                                    ty: self.program.func_type(fid.at_rt()),
+                                    value: fid.as_value().into(),
                                 };
                                 return Ok(Some(f_ty.ret));
                             }
@@ -1537,11 +1558,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
-                        if let Ok(Some(f_ty)) = self.infer_types(fid) {
+                        if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
                             // Need to save this because resolving overloads eats named arguments
                             f.expr = Expr::Value {
-                                ty: self.program.func_type(fid),
-                                value: Value::GetFn(fid).into(),
+                                ty: self.program.func_type(fid.at_rt()),
+                                value: fid.as_value().into(),
                             };
                             return Ok(Some(f_ty.ret));
                         }
@@ -1939,6 +1960,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let cond_index = if cond { 1 } else { 2 };
                 let other_index = if cond { 2 } else { 1 };
                 if let Some(branch_body) = self.maybe_direct_fn(result, &mut parts[cond_index], &mut unit_expr, requested)? {
+                    let branch_body = branch_body.single()?;
                     let branch_arg = self.infer_arg(branch_body)?;
                     self.type_check_arg(branch_arg, unit, sig)?;
                     self.program[branch_body].add_tag(Flag::Inline);
@@ -1955,6 +1977,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
 
             let true_ty = if let Some(if_true) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, requested)? {
+                let if_true = if_true.single()?;
                 self.program[if_true].add_tag(Flag::Inline);
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
@@ -1963,6 +1986,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ice!("if second arg must be func not {}", parts[1].log(self.pool));
             };
             if let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? {
+                let if_false = if_false.single()?;
                 self.program[if_false].add_tag(Flag::Inline);
                 let false_arg = self.infer_arg(if_false)?;
                 self.type_check_arg(false_arg, unit, sig)?;
@@ -2261,6 +2285,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn tuple_access(&self, _result: &mut FnWip<'p>, _container: &FatExpr<'p>, _requested: Option<TypeId>, _index: i32) -> Structured {
         todo!()
+    }
+
+    fn is_raw_call(&self, f: FuncId) -> bool {
+        let func = &self.program[f];
+        !(func.has_tag(Flag::Comptime) || func.any_const_args() || func.has_tag(Flag::Inline) || !func.capture_vars.is_empty())
     }
 
     fn compile_call(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, original_f: FuncId, requested: Option<TypeId>) -> Res<'p, Structured> {
@@ -2784,7 +2813,7 @@ pub trait Executor<'p>: PoolLog<'p> {
     type SavedState;
     fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()>;
 
-    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values>;
+    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values>;
     fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values>;
     fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize;
     fn is_ready(&self, f: FuncId) -> bool;

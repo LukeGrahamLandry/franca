@@ -382,29 +382,17 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                     }
                     Bc::CallDynamic { .. } => todo!(),
                     &Bc::CallDirect { f, ret, arg } => {
-                        let ty = self.program.func_type(f);
-                        let ty = self.program.fn_ty(ty).unwrap();
-                        assert!(
-                            !matches!(self.program[ty.arg], TypeInfo::Struct { .. }),
-                            "TODO: do struct args get flattened like tuples? ffi? enums?"
-                        );
-                        let ty = self.func_type(f);
-
-                        let target = &self.program[f];
-                        let comp_ctx = target.has_tag(Flag::Ct);
-                        // TODO: this has to change for actually emitting
-                        let function = if let Some(addr) = target.comptime_addr {
-                            // TODO: do i need some sort of ptr to function cast?
-                            self.llvm.const_ptr(addr as *const u8)
-                        } else {
-                            self.llvm.get_fn(f).unwrap()
-                        };
-                        self.do_call(function, ty, arg, ret, comp_ctx);
+                        self.call_direct(f, ret, arg)?;
+                    }
+                    &Bc::CallSplit { rt, ret, arg, .. } => {
+                        // TODO: update this when we support comptime here.
+                        self.call_direct(rt, ret, arg)?;
                     }
                     Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                     &Bc::LoadConstant { slot, value } => {
                         let mut ty = self.llvm_type(slot);
                         let value = match value {
+                            Value::SplitFunc { ct, rt } => todo!(),
                             Value::I64(n) => {
                                 // TODO: this fixes calling comptime_addr fns who were in as const ints. ir says null when i told it a function type maybe? need to figure this out
                                 ty = LLVMInt64TypeInContext(self.llvm.context); // HACK
@@ -528,16 +516,14 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn read_slot(&mut self, slot: StackOffset) -> LLVMValueRef {
-        let v = if self.slot_is_var(slot) {
+        if self.slot_is_var(slot) {
             let ptr = self.slots[slot.0].unwrap();
             let ty = self.slot_type(slot);
             let ty = self.llvm.get_type(self.program, ty);
             unsafe { LLVMBuildLoad2(self.llvm.builder, ty, ptr, EMPTY) }
         } else {
             self.slots[slot.0].unwrap()
-        };
-
-        v
+        }
     }
 
     fn write_slot(&mut self, slot: StackOffset, value: LLVMValueRef) {
@@ -587,6 +573,28 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             self.write_slot(ret.single(), value);
         }
     }
+
+    fn call_direct(&mut self, f: FuncId, ret: compiler::bc::StackRange, arg: compiler::bc::StackRange) -> Res<'p, ()> {
+        let ty = self.program.func_type(f);
+        let ty = self.program.fn_ty(ty).unwrap();
+        assert!(
+            !matches!(self.program[ty.arg], TypeInfo::Struct { .. }),
+            "TODO: do struct args get flattened like tuples? ffi? enums?"
+        );
+        let ty = self.func_type(f);
+
+        let target = &self.program[f];
+        let comp_ctx = target.has_tag(Flag::Ct);
+        // TODO: this has to change for actually emitting
+        let function = if let Some(addr) = target.comptime_addr {
+            // TODO: do i need some sort of ptr to function cast?
+            self.llvm.const_ptr(addr as *const u8)
+        } else {
+            self.llvm.get_fn(f).unwrap()
+        };
+        self.do_call(function, ty, arg, ret, comp_ctx);
+        Ok(())
+    }
 }
 
 pub fn null_terminate(bytes: &str) -> CString {
@@ -612,7 +620,7 @@ pub mod tests {
         scope::ResolveScope,
         unwrap,
     };
-    use compiler::{jit_test_llvm_only, load_program};
+    use compiler::{jit_test_llvm_only, load_program, log_err};
     use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
     use llvm_sys::core::{LLVMDisposeBuilder, LLVMDisposeMessage, LLVMPrintModuleToString};
     use llvm_sys::error::{LLVMCreateStringError, LLVMGetErrorMessage};
@@ -632,13 +640,16 @@ pub mod tests {
         let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
         load_program(&mut comp, src)?;
         let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
-        comp.compile(main, ExecTime::Runtime)?;
+
+        if let Err(e) = comp.compile(main, ExecTime::Runtime) {
+            log_err(&comp, e.clone(), None);
+            return Err(e);
+        }
 
         let mut interp = comp.runtime_executor.to_interp().unwrap();
         let mut asm = BcToLlvm::new(&mut interp, &mut program);
 
         asm.compile(main)?;
-
         // TODO: make this a runtime flag?
         if cfg!(feature = "dis_debug") {
             let debug_path = format!("target/latest_log/asm/{test_name}");

@@ -1,5 +1,5 @@
 use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var};
-use crate::bc::{Value, Values};
+use crate::bc::{FuncRef, Value, Values};
 use crate::compiler::{CErr, Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
 use crate::logging::{LogTag, PoolLog};
@@ -14,7 +14,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         f: &mut FatExpr<'p>,
         arg: &mut FatExpr<'p>,
         ret: Option<TypeId>,
-    ) -> Res<'p, Option<FuncId>> {
+    ) -> Res<'p, Option<FuncRef>> {
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
@@ -24,12 +24,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Some(id)
             }
             &mut Expr::Value {
+                value: Values::One(Value::SplitFunc { ct, rt }),
+                ..
+            } => {
+                // TODO: assert no named args
+                assert_ne!(ct, rt);
+                Some(FuncRef::Split { ct, rt })
+            }
+            &mut Expr::Value {
                 value: Values::One(Value::GetFn(id)),
                 ..
             }
             | &mut Expr::WipFunc(id) => {
                 self.named_args_to_tuple(result, arg, id)?;
-                Some(id)
+                Some(id.into())
             }
             &mut Expr::Value {
                 value: Values::One(Value::OverloadSet(i)),
@@ -53,7 +61,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, f)?;
                 self.named_args_to_tuple(result, arg, id)?;
-                Some(id)
+                Some(id.into())
             }
             &mut Expr::GetNamed(i) => {
                 err!("GetNamed func: {}", self.pool.get(i));
@@ -69,7 +77,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         name: Var<'p>,
         arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
-    ) -> Res<'p, FuncId> {
+    ) -> Res<'p, FuncRef> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
@@ -77,7 +85,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             if let Values::One(Value::GetFn(f)) = value {
                 self.named_args_to_tuple(result, arg, f)?;
                 self.pop_state(state);
-                return Ok(f);
+                return Ok(f.into());
+            }
+            if let Values::One(Value::SplitFunc { rt, ct }) = value {
+                assert_ne!(ct, rt);
+                self.pop_state(state);
+                return Ok(FuncRef::Split { ct, rt });
             }
             value
         } else {
@@ -107,25 +120,25 @@ impl<'a, 'p> Compile<'a, 'p> {
         arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
         i: usize,
-    ) -> Res<'p, FuncId> {
+    ) -> Res<'p, FuncRef> {
         let name = self.program.overload_sets[i].name;
         self.compute_new_overloads(i)?;
         let mut overloads = self.program.overload_sets[i].clone(); // Sad
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             self.prune_overloads_by_named_args(&mut overloads, pattern)?;
-        }
 
-        filter_arch(self.program, &mut overloads, result.when);
+            // TODO: my named args test doesn't work without this
+            if overloads.ready.len() == 1 {
+                let id = overloads.ready[0].func;
+                self.named_args_to_tuple(result, arg, id)?;
+                return Ok(id.into());
+            }
+        }
 
         overloads.ready.retain(|f| !self.program[f.func].has_tag(Flag::Forward)); // HACK
 
         if overloads.ready.is_empty() {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
-        }
-        if overloads.ready.len() == 1 {
-            let id = overloads.ready[0].func;
-            self.named_args_to_tuple(result, arg, id)?;
-            return Ok(id);
         }
 
         match self.type_of(result, arg) {
@@ -134,17 +147,29 @@ impl<'a, 'p> Compile<'a, 'p> {
                     arg_ty == f_arg && (requested_ret.is_none() || f_ret.is_none() || (requested_ret.unwrap() == f_ret.unwrap()))
                 };
 
-                let mut found = None;
-                for check in &overloads.ready {
-                    if accept(check.arg, check.ret) {
-                        found = Some(check.func);
-                        break;
-                    }
+                overloads.ready.retain(|check| accept(check.arg, check.ret));
+
+                if overloads.ready.len() == 1 {
+                    let id = overloads.ready[0].func;
+                    self.named_args_to_tuple(result, arg, id)?;
+                    return Ok(id.into());
                 }
 
-                if let Some(found) = found {
-                    self.pop_stat2();
-                    return Ok(found);
+                let mut ct = overloads.clone();
+                filter_arch(self.program, &mut overloads, ExecTime::Runtime);
+                filter_arch(self.program, &mut ct, ExecTime::Comptime);
+
+                if ct.ready.len() == 1 && overloads.ready.len() == 1 {
+                    // TODO: check that types are exactly the same.
+                    let ct = ct.ready[0].func;
+                    let rt = overloads.ready[0].func;
+                    if ct == rt {
+                        // TODO: this should be unreachable
+                        self.named_args_to_tuple(result, arg, rt)?;
+                        return Ok(FuncRef::Exact(rt));
+                    } else {
+                        return Ok(FuncRef::Split { ct, rt });
+                    }
                 }
 
                 let log_goal = |s: &mut Self| {
@@ -156,12 +181,24 @@ impl<'a, 'p> Compile<'a, 'p> {
                     )
                 };
 
+                // TODO: cleanup include ct vs rt split
                 // TODO: put the message in the error so !assert_compile_error doesn't print it.
                 outln!(ShowErr, "not found {}", log_goal(self));
                 for f in overloads.ready {
                     outln!(
                         ShowErr,
-                        "- found {:?} fn({:?}={}) {:?}; {:?}",
+                        "- RT: found {:?} fn({:?}={}) {:?}; {:?}",
+                        f.func,
+                        f.arg,
+                        self.program.log_type(f.arg),
+                        f.ret.map(|ret| self.program.log_type(ret)),
+                        self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
+                    );
+                }
+                for f in ct.ready {
+                    outln!(
+                        ShowErr,
+                        "- CT: found {:?} fn({:?}={}) {:?}; {:?}",
                         f.func,
                         f.arg,
                         self.program.log_type(f.arg),
@@ -263,6 +300,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         });
         Ok(())
     }
+}
+
+pub fn has_arch_split<'p>(program: &Program<'p>, overloads: &OverloadSet<'p>) -> bool {
+    // TODO
+    // if program.comptime_arch == program.runtime_arch {
+    //     // Sure but we don't care
+    //     return false;
+    // }
+
+    for o in &overloads.ready {
+        for a in &program[o.func].annotations {
+            if let Ok(flag) = a.name.try_into() {
+                if matches!(flag, Flag::Llvm | Flag::Interp | Flag::No_Interp | Flag::Aarch64) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 pub fn filter_arch<'p>(program: &Program<'p>, overloads: &mut OverloadSet<'p>, when: ExecTime) {

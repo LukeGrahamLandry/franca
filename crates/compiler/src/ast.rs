@@ -1169,7 +1169,8 @@ impl<'p> Program<'p> {
             Value::Bool(_) => TypeId::bool(),
             Value::Type(_) => TypeId::ty(),
             // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
-            Value::GetNativeFnPtr(f) | Value::GetFn(f) => self.func_type(*f),
+            // TODO: assert SplitFunc branches are the same type.
+            Value::SplitFunc { rt: f, .. } | Value::GetNativeFnPtr(f) | Value::GetFn(f) => self.func_type(*f),
             Value::Unit => TypeId::unit(),
             Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),

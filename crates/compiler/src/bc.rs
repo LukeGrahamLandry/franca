@@ -28,6 +28,12 @@ pub enum Bc<'p> {
         ret: StackRange,
         arg: StackRange,
     },
+    CallSplit {
+        ct: FuncId,
+        rt: FuncId,
+        ret: StackRange,
+        arg: StackRange,
+    },
     CallBuiltin {
         name: Ident<'p>,
         ret: StackRange,
@@ -157,6 +163,52 @@ pub enum Value {
     OverloadSet(usize),
     /// TODO: Different from GetFn because this must be compiled and produces a real native function pointer that can be passed to ffi code.
     GetNativeFnPtr(FuncId),
+    SplitFunc {
+        ct: FuncId,
+        rt: FuncId,
+    },
+}
+
+#[derive(Debug, InterpSend, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum FuncRef {
+    Exact(FuncId),
+    Split { ct: FuncId, rt: FuncId },
+}
+
+impl FuncRef {
+    pub fn as_value(self) -> Value {
+        match self {
+            FuncRef::Exact(f) => Value::GetFn(f),
+            FuncRef::Split { ct, rt } => {
+                if ct == rt {
+                    Value::GetFn(rt)
+                } else {
+                    Value::SplitFunc { ct, rt }
+                }
+            }
+        }
+    }
+
+    pub fn single<'p>(self) -> Res<'p, FuncId> {
+        match self {
+            FuncRef::Exact(f) => Ok(f),
+            FuncRef::Split { ct, rt } => err!("Illigal split func ct={ct:?} rt={rt:?}",),
+        }
+    }
+
+    // Can use this for getting type since they should be the same
+    pub fn at_rt<'p>(self) -> FuncId {
+        match self {
+            FuncRef::Exact(f) => f,
+            FuncRef::Split { rt, .. } => rt,
+        }
+    }
+}
+
+impl From<FuncId> for FuncRef {
+    fn from(value: FuncId) -> Self {
+        FuncRef::Exact(value)
+    }
 }
 
 #[derive(Debug, InterpSend, Clone, Hash, PartialEq, Eq)]

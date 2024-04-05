@@ -237,7 +237,7 @@ fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
     println!("===============================");
 }
 
-fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>) {
+pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>) {
     outln!(ShowPrint, "ERROR");
     if let CErr::Diagnostic(diagnostic) = &e.reason {
         emit_diagnostic(&interp.program.codemap, diagnostic);

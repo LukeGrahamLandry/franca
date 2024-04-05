@@ -684,6 +684,9 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::CallDirect { f: func, ret, arg } => {
                 write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)
             }
+            Bc::CallSplit { ct, rt, ret, arg } => {
+                write!(f, "{ret:?} = call(f({ct:?} | {rt:?}), {arg:?});")
+            }
             Bc::CallBuiltin { name, ret, arg } => {
                 write!(f, "{ret:?} = builtin(S{}, {arg:?});", name.0)
             }

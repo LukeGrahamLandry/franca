@@ -133,6 +133,29 @@ impl<'p> Interp<'p> {
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
+                &Bc::CallSplit { ct, rt, ret, arg } => {
+                    self.bump_ip();
+                    let arg = self.take_slots(arg);
+
+                    let when = self.call_stack.last().unwrap().when;
+                    let f = if when == ExecTime::Runtime { rt } else { ct };
+
+                    // TODO: this is super ugly recreation of all the other calling types. need to factor out calling convention better.
+                    if let Some(addr) = program[f].comptime_addr {
+                        let ty = program[f].unwrap_ty();
+                        let comp_ctx = program[f].has_tag(Flag::Ct);
+                        let ptr = addr as usize;
+                        let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
+                        *self.get_slot_mut(ret.single()) = result.single()?;
+                    } else if program[f].body.is_none() {
+                        let abs = self.range_to_index(ret);
+                        let name = self.pool.get(program[f].name);
+                        let value = self.runtime_builtin(name, arg.clone(), Some(abs), program)?;
+                        self.expand_maybe_tuple(value, abs)?;
+                    } else {
+                        self.push_callframe(f, ret, arg, when, program)?;
+                    }
+                }
                 &Bc::LoadConstant { slot, value } => {
                     *self.get_slot_mut(slot) = value;
                     self.bump_ip();
@@ -865,11 +888,11 @@ impl<'p> Executor<'p> for Interp<'p> {
         result
     }
 
-    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values) -> Res<'p, Values> {
+    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
         let ret = program[f].unwrap_ty().ret;
         assert!(!ret.is_any() && !ret.is_unknown());
         let size = self.size_of(program, ret);
-        self.run(f, arg, ExecTime::Runtime, size, program)
+        self.run(f, arg, when, size, program)
     }
 
     fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values> {
