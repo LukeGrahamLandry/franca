@@ -36,6 +36,9 @@
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
 - command line argument parser
 - getters and setters so enums and flag sets could be done in the language and still have natural syntax.
+- free standing versions of functions. so like during comptime you want the compiler to control allocations/printing/panics probably
+  but need to be able compile a real binary too. this gets back into the problem of compiling anything used at both multiple times.
+  do you try to represent that in the ast so they share work or have fully seperate Func instances for anything that indirectly calls an env function.
 
 ## Sema
 

@@ -150,7 +150,10 @@ impl JittedLlvm {
         let value = self.get_fn(f)?;
         let name = self.functions[f.0].as_ref().unwrap().1.as_ptr();
         let ptr = unsafe { LLVMGetFunctionAddress(self.execution_engine, name) as usize as *const u8 };
-        assert_ne!(ptr as usize, 0);
+        if ptr.is_null() {
+            return None; // TODO: does get_fn ever lie?
+        }
+        assert_ne!(ptr as usize, 0, "Null fn {f:?}");
         Some(ptr)
     }
 
@@ -347,9 +350,11 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
 
             let func = self.interp.ready[f].as_ref().unwrap();
             let mut block_finished = true;
+            let mut dead_code = false; // HACK to deal with my weird 'unreachable'
             for i in 0..func.insts.len() {
                 let func = &self.interp.ready[f].as_ref().unwrap();
                 if func.jump_targets.get(i) {
+                    dead_code = false;
                     let block = *self.blocks.get(&(i)).unwrap();
                     // Fallthrough (false branch of an if)
                     if !block_finished {
@@ -359,7 +364,10 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                     LLVMPositionBuilderAtEnd(self.llvm.builder, block);
                     block_finished = false;
                 }
-                assert!(!block_finished);
+                if dead_code {
+                    continue; // HACK
+                }
+                assert!(!block_finished, "{i}");
 
                 let inst = &(func.insts[i].clone());
                 match inst {
@@ -367,6 +375,10 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                     Bc::NoCompile => unreachable!(),
                     Bc::Unreachable => {
                         LLVMBuildUnreachable(self.llvm.builder);
+                        block_finished = true;
+                        // TODO: I guess my dumb 'comptime if' eliminating the codegen but still putting out the branch,
+                        //       still sometimes puts out the branch over else even tho its unreachable so llvm (rightly) complains about multiple terminators.
+                        dead_code = true;
                     }
                     Bc::CallDynamic { .. } => todo!(),
                     &Bc::CallDirect { f, ret, arg } => {
@@ -627,6 +639,7 @@ pub mod tests {
 
         asm.compile(main)?;
 
+        // TODO: make this a runtime flag?
         if cfg!(feature = "dis_debug") {
             let debug_path = format!("target/latest_log/asm/{test_name}");
             fs::create_dir_all(&debug_path).unwrap();
@@ -637,7 +650,7 @@ pub mod tests {
             }
         }
 
-        verify_module(asm.llvm.module);
+        verify_module(asm.llvm.module)?;
 
         let code = asm.llvm.get_fn_jitted(main).unwrap();
         let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };

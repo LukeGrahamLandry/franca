@@ -86,6 +86,7 @@ macro_rules! test_file {
 }
 
 test_file!(basic);
+test_file!(slices);
 test_file!(structs);
 test_file!(generics);
 test_file!(overloading);
