@@ -35,6 +35,7 @@
 - feature to turn off backtracers dependency
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
 - command line argument parser
+- getters and setters so enums and flag sets could be done in the language and still have natural syntax.
 
 ## Sema
 

@@ -540,6 +540,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
         }
         if comp_ctx {
+            // TODO: this has gotta be UB
             self.load_imm(x0, self.program as *const Program as u64);
         }
         // The symptom of not resetting sp is you get a stack overflow which is odd.
@@ -729,7 +730,8 @@ impl ConstBytes {
         ptr
     }
 
-    fn copy_heap(&mut self, value: *mut InterpBox, first: usize, count: usize) -> *const u8 {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn copy_heap(&mut self, value: *mut InterpBox, first: usize, count: usize) -> *const u8 {
         let value = unsafe { &*value };
         assert!(value.is_constant, "wont be shared by reference so only makes sense for constants?");
         let values = &value.values[first..first + count];

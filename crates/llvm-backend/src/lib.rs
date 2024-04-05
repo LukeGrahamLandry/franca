@@ -31,7 +31,9 @@ use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, StackOffset, Value},
     compiler::Res,
-    err, extend_options,
+    err,
+    experiments::bc_to_asm::ConstBytes,
+    extend_options,
     interp::Interp,
     logging::PoolLog,
     pool::Ident,
@@ -48,6 +50,7 @@ pub struct JittedLlvm {
     functions: Vec<Option<(LLVMValueRef, CString, bool)>>,
     i32_ty: LLVMTypeRef,
     ptr_ty: *mut llvm_sys::LLVMType,
+    constants: ConstBytes,
 }
 
 impl JittedLlvm {
@@ -93,13 +96,14 @@ impl JittedLlvm {
                 functions: vec![],
                 i32_ty: LLVMInt32TypeInContext(context),
                 ptr_ty: LLVMPointerTypeInContext(context, c_uint::from(0u16)),
+                constants: ConstBytes::default(),
             };
 
             for f in program.inline_llvm_ir.clone() {
                 let name = null_terminate(&format!("FN{}", f.0));
                 let ty = program.func_type(f);
                 let ty = program.fn_ty(ty).unwrap();
-                let ty = this.get_function_type(program, ty);
+                let ty = this.get_function_type(program, ty, false);
                 // Note: not LLVMGetNamedFunction on inline_asm_module! we're declaring that we plan on importing into the normal module.
                 let value = unsafe { LLVMAddFunction(this.module, name.as_ptr(), ty) };
                 extend_options(&mut this.functions, f.0);
@@ -116,10 +120,12 @@ impl JittedLlvm {
             return f;
         }
 
+        let target = &program[f];
+        let comp_ctx = target.has_tag(Flag::Ct);
         let name = null_terminate(&format!("FN{}", f.0));
         let ty = program.func_type(f);
         let ty = program.fn_ty(ty).unwrap();
-        let ty = self.get_function_type(program, ty);
+        let ty = self.get_function_type(program, ty, comp_ctx);
         unsafe {
             let func = unsafe { LLVMAddFunction(self.module, name.as_ptr(), ty) };
             assert_ne!(func as usize, 0);
@@ -152,13 +158,13 @@ impl JittedLlvm {
         let func = self.functions[f.0].as_mut().unwrap();
         func.2 = true;
 
-        unsafe {
-            // TODO: where does message go??
-            let failed = LLVMVerifyFunction(func.0, LLVMVerifierFailureAction::LLVMPrintMessageAction);
-            if failed != 0 {
-                panic!("Failed llvm verify! {f:?}.");
-            }
-        }
+        // unsafe {
+        //     // TODO: where does message go?? makes this a bit useless since module verify actually gives me the err
+        //     let failed = LLVMVerifyFunction(func.0, LLVMVerifierFailureAction::LLVMPrintMessageAction);
+        //     if failed != 0 {
+        //         panic!("Failed llvm verify! {f:?}.");
+        //     }
+        // }
     }
 
     /// This is more complicated than it sounds
@@ -167,12 +173,15 @@ impl JittedLlvm {
     ///   TODO: its weird that structs are treated differently but you need to be able to do whatever c does for ffi.
     ///         should have a @repr(C) so you can opt in. but then also some huristic for when to not bother trying to represent big tuples in registers?
     ///         or its fine, just spill them like you would if someone manually wrote that function, just seems like extra regalloc work.
-    fn get_function_type(&mut self, program: &mut Program, ty: FnType) -> LLVMTypeRef {
+    fn get_function_type(&mut self, program: &mut Program, ty: FnType, comp_ctx: bool) -> LLVMTypeRef {
         let mut arg = if let TypeInfo::Tuple(fields) = &program[ty.arg] {
             fields.clone().iter().map(|ty| self.get_type(program, *ty)).collect()
         } else {
             vec![self.get_type(program, ty.arg)]
         };
+        if comp_ctx {
+            arg.insert(0, self.ptr_ty); // TODO: cri
+        }
         let ret = self.get_type(program, ty.ret);
         unsafe { LLVMFunctionType(ret, arg.as_mut_ptr(), arg.len() as c_uint, LLVMBool::from(false)) }
     }
@@ -190,7 +199,7 @@ impl JittedLlvm {
                 // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
                 TypeInfo::OverloadSet | TypeInfo::Fn(_) | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => LLVMInt64TypeInContext(self.context),
                 TypeInfo::Bool => LLVMInt1TypeInContext(self.context),
-                &TypeInfo::FnPtr(ty) => self.get_function_type(program, ty),
+                &TypeInfo::FnPtr(ty) => self.get_function_type(program, ty, false),
                 &TypeInfo::Struct { as_tuple, .. } => self.get_type(program, as_tuple),
                 TypeInfo::Tuple(fields) => {
                     let mut fields: Vec<_> = fields.clone().iter().map(|ty| self.get_type(program, *ty)).collect();
@@ -215,6 +224,14 @@ impl JittedLlvm {
         // LLVMDisposeModule(self.module);
         // LLVMDisposeModule(self.inline_asm_module);
         LLVMContextDispose(self.context);
+    }
+
+    fn const_ptr(&self, ptr: *const u8) -> *mut llvm_sys::LLVMValue {
+        unsafe {
+            debug_assert!(!ptr.is_null());
+            let ptr = LLVMConstInt(LLVMInt64TypeInContext(self.context), ptr as u64, LLVMBool::from(false));
+            LLVMConstIntToPtr(ptr, self.ptr_ty)
+        }
     }
 }
 
@@ -256,8 +273,11 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
         self.wip.push(f);
 
         if let Some(template) = self.program[f].any_reg_template {
-        } else if self.program[f].comptime_addr.is_some() {
-            // TODO
+            todo!()
+        } else if let Some(addr) = self.program[f].comptime_addr {
+            // TODO: shouldn't need this since i change at the callsite anyway
+            let ptr = self.llvm.const_ptr(addr as *const u8);
+            self.llvm.functions[f.0] = Some((ptr, CString::new(String::new()).unwrap(), true));
         } else {
             let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
@@ -357,16 +377,27 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                             "TODO: do struct args get flattened like tuples? ffi? enums?"
                         );
                         let ty = self.func_type(f);
-                        let function = self.llvm.get_fn(f).unwrap();
-                        let mut args = arg.into_iter().map(|i| self.read_slot(StackOffset(i))).collect::<Vec<_>>();
-                        let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, EMPTY);
-                        self.write_slot(ret.single(), value);
+
+                        let target = &self.program[f];
+                        let comp_ctx = target.has_tag(Flag::Ct);
+                        // TODO: this has to change for actually emitting
+                        let function = if let Some(addr) = target.comptime_addr {
+                            // TODO: do i need some sort of ptr to function cast?
+                            self.llvm.const_ptr(addr as *const u8)
+                        } else {
+                            self.llvm.get_fn(f).unwrap()
+                        };
+                        self.do_call(function, ty, arg, ret, comp_ctx);
                     }
                     Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
                     &Bc::LoadConstant { slot, value } => {
                         let mut ty = self.llvm_type(slot);
                         let value = match value {
-                            Value::I64(n) => LLVMConstInt(ty, u64::from_le_bytes(n.to_le_bytes()), LLVMBool::from(false)),
+                            Value::I64(n) => {
+                                // TODO: this fixes calling comptime_addr fns who were in as const ints. ir says null when i told it a function type maybe? need to figure this out
+                                ty = LLVMInt64TypeInContext(self.llvm.context); // HACK
+                                LLVMConstInt(ty, u64::from_le_bytes(n.to_le_bytes()), LLVMBool::from(false))
+                            }
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
                             Value::OverloadSet(n) | Value::GetFn(FuncId(n)) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
                             Value::Type(TypeId(n)) | Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
@@ -385,7 +416,11 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                                 value,
                                 physical_first,
                                 physical_count,
-                            } => todo!(),
+                            } => {
+                                // TODO: this needs to be different when I actually want to emit an executable.
+                                let ptr = self.llvm.constants.copy_heap(value, physical_first, physical_count);
+                                self.llvm.const_ptr(ptr)
+                            }
                         };
                         self.write_slot(slot, value);
                     }
@@ -468,11 +503,10 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                         todo!()
                     }
                     &Bc::CallC { f, arg, ret, ty, comp_ctx } => {
-                        let ty = self.llvm.get_function_type(self.program, ty);
-                        if comp_ctx {
-                            todo!("llvm comp ctx")
-                        }
-                        todo!()
+                        let ty = self.llvm.get_function_type(self.program, ty, comp_ctx);
+                        let f = self.read_slot(f);
+                        let f = LLVMBuildIntToPtr(self.llvm.builder, f, self.llvm.ptr_ty, EMPTY);
+                        self.do_call(f, ty, arg, ret, comp_ctx);
                     }
                 }
             }
@@ -482,14 +516,16 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn read_slot(&mut self, slot: StackOffset) -> LLVMValueRef {
-        if self.slot_is_var(slot) {
+        let v = if self.slot_is_var(slot) {
             let ptr = self.slots[slot.0].unwrap();
             let ty = self.slot_type(slot);
             let ty = self.llvm.get_type(self.program, ty);
             unsafe { LLVMBuildLoad2(self.llvm.builder, ty, ptr, EMPTY) }
         } else {
             self.slots[slot.0].unwrap()
-        }
+        };
+
+        v
     }
 
     fn write_slot(&mut self, slot: StackOffset, value: LLVMValueRef) {
@@ -512,9 +548,32 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn func_type(&mut self, ff: FuncId) -> LLVMTypeRef {
+        let target = &self.program[ff];
+        let comp_ctx = target.has_tag(Flag::Ct);
+
         let ff = self.program.func_type(ff);
         let ff = self.program.fn_ty(ff).unwrap();
-        self.llvm.get_function_type(self.program, ff)
+        self.llvm.get_function_type(self.program, ff, comp_ctx)
+    }
+
+    fn do_call(
+        &mut self,
+        function: *mut llvm_sys::LLVMValue,
+        ty: *mut llvm_sys::LLVMType,
+        arg: compiler::bc::StackRange,
+        ret: compiler::bc::StackRange,
+        comp_ctx: bool,
+    ) {
+        unsafe {
+            debug_assert!(LLVMIsNull(function) == 0);
+            let mut args = arg.into_iter().map(|i| self.read_slot(StackOffset(i))).collect::<Vec<_>>();
+            if comp_ctx {
+                let ptr = self.llvm.const_ptr(self.program as *mut Program as usize as *const u8); // TODO: this has gotta be UB
+                args.insert(0, ptr); // TODO: cri
+            }
+            let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, EMPTY);
+            self.write_slot(ret.single(), value);
+        }
     }
 }
 

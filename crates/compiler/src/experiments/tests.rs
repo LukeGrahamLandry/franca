@@ -165,6 +165,17 @@ macro_rules! jit_test {
             }"#
         );
 
+        simple!(
+            assert_eq_ffi,
+            (),
+            2,
+            r#"
+                    @c_call fn main() i64 = {
+                        assert_eq(1, 1);
+                        2
+                    }"#
+        );
+
         // TODO: bootstrap raw_slice
         // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
     };
@@ -225,17 +236,6 @@ macro_rules! jit_test_aarch_only {
         //         sub2(a, 3)
         //     }"#
         // );
-
-        simple!(
-            assert_eq_ffi,
-            (),
-            2,
-            r#"
-            @c_call fn main() i64 = {
-                assert_eq(1, 1);
-                2
-            }"#
-        );
 
         // Requires being able to write constant heap values.
         simple!(
@@ -302,7 +302,7 @@ macro_rules! jit_test_llvm_only {
             };
         }
 
-        // simple!(floats, 5, 5, include_str!("../../../tests/floats.fr"));
+        simple!(floats, 5, 5, include_str!("../../../tests/floats.fr"));
         // simple!(mandelbrot, (), 40, include_str!("../../../examples/mandelbrot.fr"));
     };
 }
