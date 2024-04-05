@@ -1,3 +1,27 @@
+## VoidPtr & overloads (Apr 5)
+
+It's cringe to make the language more verbose just to make the compiler, but void pointers aren't what I want anyway.
+The only reason they exist in the first place is that my type system is too shitty to express things I want.
+
+- Recursive types
+  - Current use is linked list of stack frames for unwind.
+  - Didn't feel important because I'm used to rust where lifetimes make it painful anyway but obviously need it for ast nodes soon so idk what i was thinking.
+  - Require pointer indirection so you know the size. Need to be able to reference the name while making the type.
+  - Mutually recursive should be allowed too (like stmt/expr).
+- Use const args in return type even when the whole thing isn't comptime
+  - current example is alloc which should return a Slice(T) instead of a VoidPtr
+  - means I need to support const args in split FuncRef too. so just do both specializations I guess. Should notice which never get called at runtime anyway (macros).
+- raw_slice used to impl real Slice is probably fine just being a cast there
+  - There's a hacky test in generics.fr with tuple layout that I want to make unspecifed anyway
+  - MySlice generics.fr is more reasonable but its fine to make that more clunky.
+- literal_ast needs const arg used in later arg type except that it's a builtin function where you don't actually want to generate multiple bodies.
+  - but currently used through a macro as a work around anyway
+
+My overload change also made ""!type vs Str more painful. I really need some auto cast subtyping stuff.
+
+Looks like it was a bad change but really its just revealing latent problems that jsut happened to pass because I have small enough programs that it just worked out.
+It feels extreamly important to actually resolve overloads robustly and not just pick the first.
+
 ## How small can it get?
 
 ```

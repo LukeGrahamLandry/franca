@@ -629,6 +629,7 @@ impl<'p> Interp<'p> {
                 let mut v = val.vec();
                 v.insert(0, ty); // aaaaaa
                 let arg = Values::Many(v);
+
                 // aaaaa
                 self.suspend(
                     Flag::Literal_Ast.ident(),

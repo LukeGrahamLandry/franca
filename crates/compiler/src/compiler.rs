@@ -546,6 +546,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Ok((constants, arg_value))
         });
 
+        // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
+        // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
+        let arg_value = arg_value.normalize();
+
         assert!(!arg_expr.ty.is_unknown());
         arg_expr.expr = Expr::Value {
             ty: arg_expr.ty,
@@ -1379,7 +1383,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 let result = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
-                Ok(result.serialize_one())
+                let ast = result.serialize_one();
+                Ok(ast)
             }
             "intern_type" => {
                 let arg: TypeInfo = unwrap!(arg.deserialize(), "");
@@ -1619,7 +1624,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
-            Expr::GetNamed(_) | Expr::StructLiteralP(_) => return Ok(None),
+            &mut Expr::GetNamed(name) => {
+                let name = self.pool.get(name);
+                if let Some((val, ty)) = self.builtin_constant(name) {
+                    expr.expr = Expr::Value { ty, value: val.into() };
+                    ty
+                } else {
+                    return Ok(None);
+                }
+            }
+            Expr::StructLiteralP(_) => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1676,7 +1690,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
-    // TODO: this kinda sucks.
+    // TODO: this kinda sucks. it should go in a builtin generated file like libc and use the normal name resolution rules
     fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
         use TypeInfo::*;
         let ty = match name {

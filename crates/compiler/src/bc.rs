@@ -404,6 +404,19 @@ impl Values {
             err!("expected OverloadSet not {self:?}",)
         }
     }
+
+    pub fn normalize(self) -> Self {
+        match self {
+            Values::One(_) => self,
+            Values::Many(v) => {
+                if v.len() == 1 {
+                    Values::One(v[0])
+                } else {
+                    Values::Many(v)
+                }
+            }
+        }
+    }
 }
 
 impl Value {

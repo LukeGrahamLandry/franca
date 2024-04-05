@@ -22,6 +22,7 @@
 @pub fn repeated() Unit = {unit};
 @pub fn clear() Unit = {unit};
 @pub fn fill() Unit = {unit};
+@pub fn assume() Unit = {unit};
 
 
 @pub
@@ -39,8 +40,12 @@ fn range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
 /// `ptr` must be exactly a slice returned by `alloc` (not a subslice of it).
 @interp @impure @pub fn dealloc(Element: Type, ptr: VoidPtr, len: i64) Unit;
 
-@impl @pub 
-fn Slice(const T: Type) Type = {
+// TODO: PROBLEM: now that im not just taking the first overload, this not using comptiem cache because its not @comptime so multiple versions of inner functions can get made 
+//       I still want to replace @comptiem with just having const args but need to make @impl use the cache. 
+//       also if you say its @comptime, then you cant have const arg or you get random "overwrite arg" assertions
+
+@impl @pub @comptime
+fn Slice(T: Type) Type = {
     const Self: Type = (ptr: *T, len: i64)!struct;
     const T = T;  // TODO
     
@@ -71,7 +76,8 @@ fn Slice(const T: Type) Type = {
         const slots = size_of(T);
         let raw_first = mul(first, slots);
         let raw_past_last = mul(past_last, slots);
-        let new_ptr = raw_slice(self&.ptr[], raw_first, raw_past_last);
+        let ptr: VoidPtr = self&.ptr[];
+        let new_ptr: VoidPtr = raw_slice(ptr, raw_first, raw_past_last);
         (ptr: new_ptr, len: sub(past_last, first))
     }
     
@@ -154,10 +160,14 @@ fn Slice(const T: Type) Type = {
     Self
 }
 
-@impl @pub
-fn List(const T: Type) Type = {
+@impl @pub @comptime
+fn List(T: Type) Type = {
+    const T = T;
     const Self: Type = (maybe_uninit: Slice(T), len: i64)!struct;
-    @pub fn list(cap: i64) Self = (maybe_uninit: (ptr: alloc(T, cap), len: cap), len: 0);  // todo: no alloc if len 0 since i dont free
+    @pub fn list(cap: i64) Self = { 
+        let ptr: VoidPtr = alloc(T, cap);
+        (maybe_uninit: (ptr: ptr, len: cap), len: 0)  // todo: no alloc if len 0 since i dont free
+    }
     @pub fn list() Self = list(0);
     
     @pub fn repeated(t: T, count: i64) Self = {
@@ -232,7 +242,8 @@ fn List(const T: Type) Type = {
     
     @pub fn drop(self: *Self) Unit = {
         (self.maybe_uninit.len[].ne(0), fn() = {
-            dealloc(T, self.maybe_uninit.ptr[], self.maybe_uninit.len[]);
+            let ptr: VoidPtr = self.maybe_uninit.ptr[];
+            dealloc(T, ptr, self.maybe_uninit.len[]);
             self.maybe_uninit.len[] = 0;
             self.len[] = 0;
         }, fn()=())!if;
@@ -363,7 +374,10 @@ fn List(const T: Type) Type = {
 }
 
 // TODO: this is stupid. i have a whole house of cards going on with unique types. 
-@pub fn str_eq(lhs: (Ptr(i64), i64), rhs: (Ptr(i64), i64)) bool = slice_eq(slice(lhs), slice(rhs));
+@pub fn str_eq(lhs: Str, rhs: Str) bool = slice_eq(lhs, rhs);
+@pub fn str_eq(lhs: ""!type, rhs: ""!type) bool = slice_eq(str(lhs), str(rhs));
+@pub fn startswith(lhs: ""!type, rhs: ""!type) bool = startswith(str(lhs), str(rhs));
+@pub fn endswith(lhs: ""!type, rhs: ""!type) bool = endswith(str(lhs), str(rhs));
 
 // See `puts(Str)` or `e!reflect_print` for something more useful. TODO: make this generic.
 @pub @env fn print(i: i64) Unit = {
@@ -375,8 +389,8 @@ fn List(const T: Type) Type = {
 @pub @interp fn str(s: Symbol) Str;
 
 @pub fn str(s: ""!type) Str = {  // TODO: god damn bro
-    let ptr: Ptr(Ptr(i64)) = raw_slice(s&, 0, size_of(i64));
-    let len: Ptr(i64) = raw_slice(s&, size_of(i64), mul(2, size_of(i64)));
+    let ptr: Ptr(Ptr(i64)) = s&[0];
+    let len: Ptr(i64) = s&[1];
     slice(ptr[], len[])
 };
 

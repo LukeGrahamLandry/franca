@@ -147,6 +147,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     arg_ty == f_arg && (requested_ret.is_none() || f_ret.is_none() || (requested_ret.unwrap() == f_ret.unwrap()))
                 };
 
+                let original = overloads.clone();
+
+                // TODO: PROBLEM: this doiesnt do voidptr check. it worked before because i did filter_arch first and there happened to only be one so it didnt even get here and then th e type check passed latter because it knows the rules.
                 overloads.ready.retain(|check| accept(check.arg, check.ret));
 
                 if overloads.ready.len() == 1 {
@@ -174,9 +177,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let log_goal = |s: &mut Self| {
                     format!(
-                        "for fn {}({arg_ty:?}={}) {:?};",
+                        "for fn {}({arg_ty:?}={}) {}={:?};",
                         s.pool.get(name),
                         s.program.log_type(arg_ty),
+                        requested_ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
                         requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
                     )
                 };
@@ -184,27 +188,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: cleanup include ct vs rt split
                 // TODO: put the message in the error so !assert_compile_error doesn't print it.
                 outln!(ShowErr, "not found {}", log_goal(self));
-                for f in overloads.ready {
+                for f in original.ready {
+                    let yes = accept(f.arg, f.ret);
+                    let msg = if yes { "[YES]" } else { "[ NO]" };
                     outln!(
                         ShowErr,
-                        "- RT: found {:?} fn({:?}={}) {:?}; {:?}",
+                        "- {msg} found {:?} fn({:?}={}) {}={}; {:?}",
                         f.func,
                         f.arg,
                         self.program.log_type(f.arg),
-                        f.ret.map(|ret| self.program.log_type(ret)),
+                        f.ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
+                        f.ret.map(|ret| self.program.log_type(ret)).unwrap_or(String::new()),
                         self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
                     );
-                }
-                for f in ct.ready {
-                    outln!(
-                        ShowErr,
-                        "- CT: found {:?} fn({:?}={}) {:?}; {:?}",
-                        f.func,
-                        f.arg,
-                        self.program.log_type(f.arg),
-                        f.ret.map(|ret| self.program.log_type(ret)),
-                        self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
-                    );
+                    if yes {
+                        // outln!(ShowErr, "   {}", self.program[f.func].log(self.pool));
+                    }
                 }
                 outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
 
@@ -227,6 +226,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.name),);
         for f in &decls {
+            debug_assert!(self.program.overload_sets[i].pending.is_empty());
             match self.infer_types(*f) {
                 Ok(Some(f_ty)) => {
                     outln!(
