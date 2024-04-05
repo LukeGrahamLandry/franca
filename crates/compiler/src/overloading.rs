@@ -143,8 +143,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         match self.type_of(result, arg) {
             Ok(Some(arg_ty)) => {
+                // TODO: Never needs to not be a special case. Have like an auto cast graph thingy.
                 let accept = |f_arg: TypeId, f_ret: Option<TypeId>| {
-                    arg_ty == f_arg && (requested_ret.is_none() || f_ret.is_none() || (requested_ret.unwrap() == f_ret.unwrap()))
+                    arg_ty == f_arg
+                        && (requested_ret.is_none() || f_ret.is_none() || (requested_ret.unwrap() == f_ret.unwrap() || f_ret.unwrap().is_never()))
                 };
 
                 let original = overloads.clone();
@@ -207,9 +209,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
 
+                self.last_loc = Some(arg.loc);
                 err!(CErr::AmbiguousCall)
             }
-            Ok(None) => err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool)),
+            Ok(None) => {
+                self.last_loc = Some(arg.loc);
+                err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool))
+            }
             Err(e) => err!(
                 "AmbiguousCall. Unknown type for argument {}. {}",
                 arg.log(self.pool),

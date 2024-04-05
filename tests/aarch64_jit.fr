@@ -2,15 +2,19 @@ const BoxMmap = VoidPtr;
 const CodePtr = VoidPtr;
 fn copy_to_mmap_exec(insts: Slice(u32)) (BoxMmap, CodePtr);
 
-fn call_jit(input: i64, code: Slice(u32)) i64 = {
+// TODO: fix !slice doesn't return a real Slice(T)
+fn call_jit(input: i64, code: Ty(*u32, i64)) i64 = {
+    let code: Slice(u32) = code;
     var res = copy_to_mmap_exec(code);
     let f: FnPtr(i64, i64) = res&[1][];
     f(input)
 }
 
-fn heap(ops: Slice(u32)) Slice(u32) = {
-    var out: List(u32) = list(ops&.len[]);
-    push_all(out!addr, ops);
+// TODO: can't say a return type here (Ty(*u32, i64) or Slice(u32)) because compiler wants an ffi Vec<u32>
+// TODO: cant say arg is Slice(u32) because !slice doesn't infer the right type because compiler can't refer to it. 
+fn heap(ops: Ty(*u32, i64)) = {
+    var out: List(u32) = list(ops&[1][]);
+    push_all(out!addr, @as(Slice(u32)) ops);
     var out: Slice(u32) = items(out!addr);
     out
 }
@@ -18,11 +22,11 @@ fn heap(ops: Slice(u32)) Slice(u32) = {
 fn main(canary: i64) i64 = {
     { let a: u5 = 0b10101010101010; }!assert_compile_error;
     ((fn(a: u1) u1 = 0x1)(0b11))!assert_compile_error;
-    add_sr(Bits.X64[], x0, x1, x0, Shift.LSL[], 0x0000)!assert_compile_error;  // TODO: why does this one work but not the above? 
+    // add_sr(Bits.X64[], x0, x1, x0, Shift.LSL[], 0b000000)!assert_compile_error;  // TODO: why does this one work but not the above? 
     
     let code = (
         movz(Bits.X64[], x1, 0b0000000000001010, Hw.Left0[]),
-        add_sr(Bits.X64[], x0, x1, x0, Shift.LSL[], 0), 
+        add_sr(Bits.X64[], x0, x1, x0, Shift.LSL[], 0b000000), 
         ret()
     )!slice;
     assert_eq(call_jit(90, code), 100);
@@ -30,15 +34,15 @@ fn main(canary: i64) i64 = {
     // Decimal literals auto cast to any bit size. 
     // TODO: bounds checking for constants. 
     let code = (
-        movz(Bits.X64[], x1, 120, Hw.Left0[]), 
-        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0), 
+        movz(Bits.X64[], x1, @as(u16) 120, Hw.Left0[]), 
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0b000000), 
         ret()
     )!slice;
     assert_eq(call_jit(80, code), 200);
     
     @c_call
     fn add_by_asm(a: i64, b: i64) i64 = heap((
-        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0b000000),
         ret(),
     )!slice)!asm;
     
@@ -47,68 +51,68 @@ fn main(canary: i64) i64 = {
     
     @c_call
     fn add_one(a: i64) i64 = heap((
-        add_im(Bits.X64[], x0, x0, 1, 0),
+        add_im(Bits.X64[], x0, x0, @as(u12) 1, 0b0),
         ret(),
     )!slice)!asm;
     assert_eq(add_one(9), 10);
     
     @c_call
     fn sub_one(a: i64) i64 = heap((
-        sub_im(Bits.X64[], x0, x0, 1, 0),
+        sub_im(Bits.X64[], x0, x0, @as(u12) 1, 0b0),
         ret(),
     )!slice)!asm;
     assert_eq(sub_one(10), 9);
 
     @c_call
     fn use_stack(a: i64) i64 = heap((
-        sub_im(Bits.X64[], sp, sp, 16, 0),
-        str_uo(Bits.X64[], x0, sp, 1),
-        movz(Bits.X64[], x0, 10, Hw.Left0[]), 
-        ldr_uo(Bits.X64[], x1, sp, 1),
-        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
+        str_uo(Bits.X64[], x0, sp, @as(u12) 1),
+        movz(Bits.X64[], x0, @as(u16) 10, Hw.Left0[]), 
+        ldr_uo(Bits.X64[], x1, sp, @as(u12) 1),
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], @as(u6) 0),
         ret(),
     )!slice)!asm;
     assert_eq(use_stack(15), 25);
 
     @c_call
     fn read_pair(a: i64, b: i64) i64 = heap((
-        sub_im(Bits.X64[], sp, sp, 16, 0),
-        str_uo(Bits.X64[], x0, sp, 1),
-        str_uo(Bits.X64[], x1, sp, 2),
-        ldp_so(Bits.X64[], x2, x3, sp, 1),
-        sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], 0),
+        sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
+        str_uo(Bits.X64[], x0, sp, @as(u12) 1),
+        str_uo(Bits.X64[], x1, sp, @as(u12) 2),
+        ldp_so(Bits.X64[], x2, x3, sp, @as(i7) 1),
+        sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], @as(u6) 0),
         ret(),
     )!slice)!asm;
     assert_eq(read_pair(30, 20), 10);
 
     @c_call
     fn write_pair(a: i64, b: i64) i64 = heap((
-        sub_im(Bits.X64[], sp, sp, 16, 0),
-        stp_so(Bits.X64[], x0, x1, sp, 1),
-        ldr_uo(Bits.X64[], x2, sp, 1),
-        ldr_uo(Bits.X64[], x3, sp, 2),
-        sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], 0),
+        sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
+        stp_so(Bits.X64[], x0, x1, sp, @as(i7) 1),
+        ldr_uo(Bits.X64[], x2, sp, @as(u12) 1),
+        ldr_uo(Bits.X64[], x3, sp, @as(u12) 2),
+        sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], @as(u6) 0),
         ret(),
     )!slice)!asm;
     assert_eq(write_pair(30, 20), 10);
 
     @c_call
     fn both_pair(a: i64, b: i64) i64 = heap((
-        sub_im(Bits.X64[], sp, sp, 16, 0),
-        stp_so(Bits.X64[], x0, x1, sp, 1),
-        ldp_so(Bits.X64[], x2, x3, sp, 1),
-        sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], 0),  // sub means order matters, so you can catch if flipped in encoding.
+        sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
+        stp_so(Bits.X64[], x0, x1, sp, @as(i7) 1),
+        ldp_so(Bits.X64[], x2, x3, sp, @as(i7) 1),
+        sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
         ret(),
     )!slice)!asm;
     assert_eq(both_pair(30, 20), 10);
 
     @c_call
     fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = heap((
-        cmp_im(Bits.X64[], x2, 7, 0),
-        b_cond(3, Cond.EQ[]),
-        sub_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        cmp_im(Bits.X64[], x2, @as(u12) 7, 0b0),
+        b_cond(@as(i19) 3, Cond.EQ[]),
+        sub_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], @as(u6) 0),
         ret(),
-        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], @as(u6) 0),
         ret(),
     )!slice)!asm;
     assert_eq(add_or_sub(30, 20, 7), 50);
@@ -116,11 +120,11 @@ fn main(canary: i64) i64 = {
 
     @c_call
     fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = heap((
-        cmp_im(Bits.X64[], x2, 7, 0),
-        b_cond(3, Cond.NE[]),
-        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        cmp_im(Bits.X64[], x2, @as(u12) 7, 0b0),
+        b_cond(@as(i19) 3, Cond.NE[]),
+        add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], @as(u6) 0),
         ret(),
-        sub_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0),
+        sub_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], @as(u6) 0),
         ret(),
     )!slice)!asm;
     assert_eq(add_or_sub2(30, 20, 7), 50);
@@ -135,7 +139,7 @@ fn main(canary: i64) i64 = {
     
     @c_call
     fn is_seven(n: i64) i64 = heap((
-        cmp_im(Bits.X64[], x0, 7, 0),
+        cmp_im(Bits.X64[], x0, @as(u12) 7, 0b0),
         cset(Bits.X64[], x0, Cond.NE[]),
         ret(),
     )!slice)!asm;

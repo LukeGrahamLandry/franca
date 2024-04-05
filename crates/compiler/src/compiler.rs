@@ -73,7 +73,7 @@ pub struct Compile<'a, 'p> {
     pub anon_fn_counter: usize,
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
-    last_loc: Option<Span>,
+    pub last_loc: Option<Span>,
     pub runtime_executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
     pub comptime_executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
     pub program: &'a mut Program<'p>,
@@ -1649,7 +1649,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         _ => err!(CErr::AddrRvalue(*arg.clone())),
                     },
-                    "type" => self.program.intern_type(TypeInfo::Type),
+                    "struct" | "enum" | "type" => self.program.intern_type(TypeInfo::Type),
                     "deref" => {
                         let ptr_ty = self.type_of(result, arg)?;
                         if let Some(ptr_ty) = ptr_ty {
@@ -1667,7 +1667,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(None);
                     }
-                    _ => return Ok(None),
+                    "quote" => FatExpr::get_type(self.program),
+                    _ => match self.compile_expr(result, expr, None) {
+                        Ok(res) => res.ty(),
+                        Err(e) => ice!("TODO: SuffixMacro inference failed. need to make it non-destructive?\n{e:?}",),
+                    },
                 }
             }
             Expr::GetVar(var) => {
