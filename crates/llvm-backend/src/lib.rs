@@ -30,7 +30,7 @@ use llvm_sys::{
 use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, StackOffset, Value},
-    compiler::Res,
+    compiler::{ExecTime, Res},
     err,
     experiments::bc_to_asm::ConstBytes,
     extend_options,
@@ -283,8 +283,11 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             self.llvm.functions[f.0] = Some((ptr, CString::new(String::new()).unwrap(), true));
         } else {
             let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
-            for c in callees {
-                self.compile(c)?;
+            for (c, when) in callees {
+                // TODO: this will change
+                if when != ExecTime::Comptime {
+                    self.compile(c)?;
+                }
             }
 
             let func = &self.program[f];

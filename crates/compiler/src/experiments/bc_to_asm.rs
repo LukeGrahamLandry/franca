@@ -83,7 +83,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         } else {
             let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
-                self.compile(c)?;
+                // TODO: change
+                if c.1 != ExecTime::Comptime {
+                    self.compile(c.0)?;
+                }
             }
 
             let func = &self.program[f];

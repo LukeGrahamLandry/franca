@@ -492,7 +492,7 @@ impl<'p> Interp<'p> {
                 }
                 .into()
             }
-            "alloc" => {
+            "alloc_inner" => {
                 let (ty, count) = arg.to_pair()?;
                 let (ty, count) = (program.to_type(ty.into())?, count.to_int()?);
                 let stride = self.size_of(program, ty);
@@ -514,7 +514,7 @@ impl<'p> Interp<'p> {
                 let msg = program.dump_ffi_types();
                 msg.serialize_one()
             }
-            "dealloc" => {
+            "dealloc_inner" => {
                 let (ty, ptr, count) = arg.to_triple()?;
                 let (ty, count, (ptr, ptr_first, ptr_count)) = (program.to_type(ty.into())?, count.to_int()?, Values::One(ptr).to_heap_ptr()?);
                 assert_eq!(self.size_of(program, ty) * count as usize, ptr_count);

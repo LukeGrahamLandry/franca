@@ -286,10 +286,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 let _ = self.pop_scope();
             }
             Expr::String(_) => {}
-            Expr::Either { runtime, comptime } => {
-                self.resolve_expr(runtime);
-                self.resolve_expr(comptime);
-            }
         }
     }
 

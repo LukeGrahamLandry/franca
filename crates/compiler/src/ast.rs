@@ -119,10 +119,6 @@ pub enum Expr<'p> {
         ptr: Box<FatExpr<'p>>,
         index: Box<FatExpr<'p>>,
     },
-    Either {
-        runtime: Box<FatExpr<'p>>,
-        comptime: Box<FatExpr<'p>>,
-    },
 }
 
 pub static EXPR_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -208,11 +204,6 @@ pub trait WalkAst<'p> {
             }
             Expr::WipFunc(_) => todo!("walkwip"),
             Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
-            Expr::Either { runtime, comptime } => {
-                // TODO
-                self.expr(runtime);
-                self.expr(comptime);
-            }
         }
         self.post_walk_expr(expr);
     }
@@ -605,6 +596,7 @@ pub struct FatStmt<'p> {
     pub loc: Span,
 }
 
+// NOTE: you can't store the FuncId in here because I clone it!
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
@@ -716,10 +708,16 @@ impl<'p> Func<'p> {
 
     #[track_caller]
     pub fn unwrap_ty(&self) -> FnType {
-        FnType {
-            arg: self.finished_arg.expect("fn type"),
-            ret: self.finished_ret.expect("fn type"),
+        self.finished_ty().expect("fn type")
+    }
+
+    pub fn finished_ty(&self) -> Option<FnType> {
+        if let Some(arg) = self.finished_arg {
+            if let Some(ret) = self.finished_ret {
+                return Some(FnType { arg, ret });
+            }
         }
+        None
     }
 
     pub fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {

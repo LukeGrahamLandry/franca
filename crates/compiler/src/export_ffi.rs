@@ -39,8 +39,8 @@ static LIB: &[(&str, &str)] = &[
 pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn write(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
     ("@env fn getchar() i32", libc::getchar as *const u8),
-    ("@env fn putchar(c: i64) i32", libc::putchar as *const u8), // TODO: c: i32
-    ("@env fn exit(status: i32) Never", libc::exit as *const u8),
+    ("@env fn putchar(c: i64) i32", libc::putchar as *const u8),  // TODO: c: i32
+    ("@env fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
     ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
     ("@env fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),

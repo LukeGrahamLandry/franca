@@ -522,11 +522,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::String(_) | Expr::PrefixMacro { .. } => {
                 unreachable!("{}", expr.log(self.program.pool))
             }
-            // TODO: the whole point is to not attach when to the result.
-            Expr::Either { runtime, comptime } => match result.when {
-                ExecTime::Comptime => self.compile_expr(result, comptime, output)?,
-                ExecTime::Runtime => self.compile_expr(result, runtime, output)?,
-            },
         };
         Ok(())
     }

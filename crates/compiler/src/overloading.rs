@@ -210,7 +210,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
 
                 self.last_loc = Some(arg.loc);
-                err!(CErr::AmbiguousCall)
+                err!("AmbiguousCall: {}", log_goal(self))
             }
             Ok(None) => {
                 self.last_loc = Some(arg.loc);
@@ -332,6 +332,7 @@ pub fn filter_arch<'p>(program: &Program<'p>, overloads: &mut OverloadSet<'p>, w
     let target = match when {
         ExecTime::Comptime => program.comptime_arch,
         ExecTime::Runtime => program.runtime_arch,
+        ExecTime::Both => unreachable!(),
     };
 
     // TODO: kinda cringe.

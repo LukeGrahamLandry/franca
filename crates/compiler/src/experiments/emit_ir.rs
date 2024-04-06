@@ -424,7 +424,6 @@ impl<'z, 'p: 'z, 'a> EmitIr<'z, 'p, 'a> {
             Expr::String(_) | Expr::PrefixMacro { .. } => {
                 unreachable!("{}", expr.log(self.program.pool))
             }
-            Expr::Either { runtime, comptime } => todo!(),
         })
     }
 

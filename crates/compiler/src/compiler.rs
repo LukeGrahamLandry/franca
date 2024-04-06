@@ -104,7 +104,7 @@ pub struct FnWip<'p> {
     pub why: String,
     pub last_loc: Span,
     pub constants: Constants<'p>,
-    pub callees: Vec<FuncId>,
+    pub callees: Vec<(FuncId, ExecTime)>,
     pub module: Option<ModuleId>,
 }
 
@@ -201,7 +201,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let func = &self.program[f];
             if let Some(wip) = func.wip.as_ref() {
                 let callees = wip.callees.clone();
-                for id in callees {
+                for (id, when) in callees {
                     self.compile(id, when)?;
                 }
                 result = self.runtime_executor.compile_func(self.program, f);
@@ -384,7 +384,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             let hint = self.program[f].finished_ret;
             let res = self.compile_expr(result, body_expr, hint)?;
             if self.program[f].finished_ret.is_none() {
+                // If you got to the point of emitting the body, the only situation where you don't know the return type yet is if they didn't put a type anotation there.
+                // This isn't true if you have an @generic function that isn't @comptime trying to use its args in its return type.
+                // That case used to work becuase I'd always inline after doing const args so you've never even get to the point of compiling the function body on its own.
+                // However, that still wasn't the same as @comptime because it didn't egarly evaluate unless already in a const context.
+                // I do still want to get rid of @comptime and just use const args but I need to think about the semantics of when you inline more.
+                //  -- Apr 6, 2024
                 assert!(matches!(self.program[f].ret, LazyType::Infer));
+
                 self.program[f].finished_ret = Some(res.ty());
                 self.program[f].ret = LazyType::Finished(res.ty());
             }
@@ -410,7 +417,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(func.capture_vars.is_empty());
         assert!(!force_inline);
         assert!(!func.any_const_args());
-        add_unique(&mut result.callees, f);
+        add_unique(&mut result.callees, (f, ExecTime::Both));
         self.ensure_compiled(f, result.when)?;
         let ret_ty = unwrap!(self.program[f].finished_ret, "fn ret");
         Ok(Structured::RuntimeOnly(ret_ty))
@@ -900,10 +907,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     match f_id {
-                        FuncRef::Exact(f_id) => return self.compile_call(result, expr, f_id, requested),
+                        FuncRef::Exact(f_id) => return Ok(self.compile_call(result, expr, f_id, requested)?.0),
                         FuncRef::Split { ct, rt } => {
-                            assert!(self.is_raw_call(ct));
-                            assert!(self.is_raw_call(rt));
+                            assert!(self.is_raw_call(ct), "{}", self.pool.get(self.program[ct].name));
+                            assert!(self.is_raw_call(rt), "{}", self.pool.get(self.program[rt].name));
                             let arg_ty_ct = unwrap!(self.program[ct].finished_arg, "ct fn arg");
                             let arg_ty = unwrap!(self.program[rt].finished_arg, "rt fn arg");
                             self.type_check_arg(arg_ty_ct, arg_ty, "ct vs rt")?;
@@ -913,8 +920,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.type_check_arg(ret_ty_ct, ret_ty, "ct vs rt")?;
                             let f_ty = self.program.func_type(rt);
 
-                            add_unique(&mut result.callees, ct);
-                            add_unique(&mut result.callees, rt);
+                            add_unique(&mut result.callees, (ct, ExecTime::Comptime));
+                            add_unique(&mut result.callees, (rt, ExecTime::Runtime));
                             self.ensure_compiled(ct, ExecTime::Comptime)?;
                             self.ensure_compiled(rt, ExecTime::Runtime)?;
                             f.ty = f_ty;
@@ -966,12 +973,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
-            Expr::Either { runtime, comptime } => {
-                // TODO
-                let rt = self.compile_expr(result, runtime, requested)?;
-                let ct = self.compile_expr(result, comptime, requested)?;
-                todo!()
-            }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1152,7 +1153,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let fn_val = self.compile_expr(result, arg, None)?.get()?;
                         if let Values::One(Value::GetFn(id)) = fn_val {
                             assert!(!self.program[id].any_const_args());
-                            add_unique(&mut result.callees, id);
+                            add_unique(&mut result.callees, (id, ExecTime::Both));
                             self.ensure_compiled(id, result.when)?;
                             // The backend still needs to do something with this, so just leave it
                             let ty = self.program.func_type(id);
@@ -1586,6 +1587,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let types = types?;
                 let before = types.len();
                 let types: Vec<_> = types.into_iter().flatten().collect();
+                self.last_loc = Some(expr.loc);
                 assert_eq!(before, types.len(), "some of tuple not infered");
                 self.program.tuple_of(types)
             }
@@ -1605,8 +1607,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Closure(_) => {
                 if let Ok(id) = self.promote_closure(result, expr) {
-                    // TODO: this unwraps.
-                    self.program.func_type(id)
+                    if self.program[id].finished_ty().is_some() {
+                        return Ok(Some(self.program.func_type(id)));
+                    }
+                    return Ok(None);
                 } else {
                     ice!("TODO: closure inference failed. need to make promote_closure non-destructive")
                 }
@@ -1668,6 +1672,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(None);
                     }
                     "quote" => FatExpr::get_type(self.program),
+                    "while" => TypeId::unit(),
+                    // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
+                    "if" => return Ok(None),
                     _ => match self.compile_expr(result, expr, None) {
                         Ok(res) => res.ty(),
                         Err(e) => ice!("TODO: SuffixMacro inference failed. need to make it non-destructive?\n{e:?}",),
@@ -1685,12 +1692,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::String(_) => String::get_type(self.program),
-            Expr::Either { runtime, comptime } => {
-                return match result.when {
-                    ExecTime::Comptime => self.type_of(result, comptime),
-                    ExecTime::Runtime => self.type_of(result, runtime),
-                }
-            }
         }))
     }
 
@@ -2310,19 +2311,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         !(func.has_tag(Flag::Comptime) || func.any_const_args() || func.has_tag(Flag::Inline) || !func.capture_vars.is_empty())
     }
 
-    fn compile_call(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, original_f: FuncId, requested: Option<TypeId>) -> Res<'p, Structured> {
+    // the bool return is did_inline which will be banned if its a Split FuncRef.
+    fn compile_call(
+        &mut self,
+        result: &mut FnWip<'p>,
+        expr: &mut FatExpr<'p>,
+        mut fid: FuncId,
+        requested: Option<TypeId>,
+    ) -> Res<'p, (Structured, bool)> {
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
-        let func = &self.program[original_f];
+        let func = &self.program[fid];
         let is_comptime = func.has_tag(Flag::Comptime);
         if is_comptime {
-            let (ret_val, ret_ty) = self.emit_comptime_call(result, original_f, arg_expr)?;
+            let (ret_val, ret_ty) = self.emit_comptime_call(result, fid, arg_expr)?;
             let ty = requested.unwrap_or(ret_ty); // TODO: make sure someone else already did the typecheck.
             assert!(!ty.is_unknown());
             expr.expr = Expr::Value { ty, value: ret_val.clone() };
-            return Ok(Structured::Const(ty, ret_val));
+            return Ok((Structured::Const(ty, ret_val), true));
         }
 
-        let arg_ty = self.infer_arg(original_f)?;
+        let arg_ty = self.infer_arg(fid)?;
         let mut arg_val = self.compile_expr(result, arg_expr, Some(arg_ty))?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
         if arg_val.is_empty() {
@@ -2331,31 +2339,63 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(arg_val.ty(), arg_ty, "fn arg")?;
 
         // TODO: you really want to compile as much of the body as possible before you start baking things.
-        let any_const_args = self.program[original_f].any_const_args();
+        let any_const_args = self.program[fid].any_const_args();
 
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
-        // TODO: seperate function for this
         if any_const_args {
-            let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
-            self.push_state(&state);
-            // Some part of the argument must be known at comptime.
-            // You better compile_expr noticed and didn't put it in a stack slot.
-            let func = &self.program[original_f];
-            let pattern = func.arg.flatten();
+            fid = self.curry_const_args(fid, f_expr, arg_expr, arg_val)?;
+        }
 
-            if pattern.len() == 1 {
-                let (name, _, kind) = pattern.into_iter().next().unwrap();
-                debug_assert_eq!(kind, VarType::Const);
-                let name = unwrap!(name, "arg needs name (unreachable?)");
-                let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
-                arg_expr.expr = Expr::unit();
-                arg_expr.ty = TypeId::unit();
-                let res = self.emit_capturing_call(result, current_fn, expr)?;
-                self.pop_state(state);
-                return Ok(res);
-            }
+        let func = &self.program[fid];
+        // TODO: some heuristic based on how many times called and how big the body is.
+        let force_inline = func.has_tag(Flag::Inline);
+        let deny_inline = func.has_tag(Flag::NoInline);
+        assert!(!(force_inline && deny_inline), "{fid:?} is both @inline and @noinline");
+        let will_inline = force_inline || !func.capture_vars.is_empty();
+        assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
+        let func = &self.program[fid];
+        if will_inline && func.body.is_some() {
+            // TODO: check that you're calling from the same place as the definition.
+            Ok((self.emit_capturing_call(result, fid, expr)?, true))
+        } else {
+            let res = self.emit_runtime_call(result, fid, arg_expr)?;
+            // Since we've called it, we must know the type by now.
+            // TODO: cope with emit_runtime_call baking const args, needs to change the arg expr
+            let ty = self.program.func_type(fid);
+            f_expr.expr = Expr::Value {
+                ty,
+                value: Value::GetFn(fid).into(),
+            };
+            f_expr.ty = ty;
+            Ok((res, false))
+        }
+    }
+
+    fn curry_const_args(
+        &mut self,
+        original_f: FuncId,
+        f_expr: &mut FatExpr<'p>,
+        arg_expr: &mut FatExpr<'p>,
+        mut arg_val: Structured,
+    ) -> Res<'p, FuncId> {
+        let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
+        self.push_state(&state);
+        // Some part of the argument must be known at comptime.
+        // You better hope compile_expr noticed and didn't put it in a stack slot.
+        let func = &self.program[original_f];
+        let pattern = func.arg.flatten();
+
+        if pattern.len() == 1 {
+            let (name, _, kind) = pattern.into_iter().next().unwrap();
+            debug_assert_eq!(kind, VarType::Const);
+            let name = unwrap!(name, "arg needs name (unreachable?)");
+            let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
+            arg_expr.expr = Expr::unit();
+            arg_expr.ty = TypeId::unit();
+            Ok(current_fn)
+        } else {
             if let Structured::Const(ty, values) = arg_val {
                 assert_eq!(
                     pattern.len(),
@@ -2389,11 +2429,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         arg_values,
                         func.synth_name(self.pool)
                     );
-                    let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
-                        v
-                    } else {
-                        todo!()
-                    };
+                    let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() { v } else { todo!() };
                     assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
                     let mut current_fn = original_f;
                     let mut skipped_args = vec![];
@@ -2416,7 +2452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     debug_assert_ne!(current_fn, original_f);
                     if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
                         if v.len() == 1 {
-                            *arg_expr.deref_mut() = mem::take(v.iter_mut().next().unwrap());
+                            *arg_expr = mem::take(v.iter_mut().next().unwrap());
                         }
                     }
                     let ty = self.program.func_type(current_fn);
@@ -2427,38 +2463,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     f_expr.ty = ty;
                     let f_ty = self.program.fn_ty(ty).unwrap();
                     self.type_check_arg(arg_ty, f_ty.arg, "sanity: post bake arg")?;
-                    // TODO: only emit_capturing_call if we based a closure
-                    let res = self.emit_capturing_call(result, current_fn, expr)?;
                     self.pop_state(state);
-                    return Ok(res);
+                    // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
+                    Ok(current_fn)
                 }
             }
-        }
-
-        let func = &self.program[original_f];
-        // TODO: some heuristic based on how many times called and how big the body is.
-        // TODO: pre-intern all these constants so its not a hash lookup everytime
-        let force_inline = func.has_tag(Flag::Inline);
-        let deny_inline = func.has_tag(Flag::NoInline);
-        assert!(!(force_inline && deny_inline), "{original_f:?} is both @inline and @noinline");
-
-        let will_inline = force_inline;
-        let func = &self.program[original_f];
-        if (!func.capture_vars.is_empty() || will_inline) && func.body.is_some() {
-            // TODO: check that you're calling from the same place as the definition.
-            assert!(!deny_inline, "capturing calls are always inlined.");
-            self.emit_capturing_call(result, original_f, expr)
-        } else {
-            let res = self.emit_runtime_call(result, original_f, arg_expr)?;
-            // Since we've called it, we must know the type by now.
-            // TODO: cope with emit_runtime_call baking const args, needs to change the arg expr
-            let ty = self.program.func_type(original_f);
-            f_expr.expr = Expr::Value {
-                ty,
-                value: Value::GetFn(original_f).into(),
-            };
-            f_expr.ty = ty;
-            Ok(res)
         }
     }
 
@@ -2800,6 +2809,7 @@ pub fn insert_multi<K: Hash + Eq, V: Eq>(set: &mut HashMap<K, Vec<V>>, key: K, v
 pub enum ExecTime {
     Comptime,
     Runtime,
+    Both,
 }
 
 fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {

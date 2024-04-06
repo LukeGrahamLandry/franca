@@ -123,7 +123,9 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
         self.comp.compile(f, ExecTime::Runtime)?;
         let callees = self.comp.program[f].wip.as_ref().unwrap().callees.clone();
         for c in callees {
-            self.compile(c)?;
+            if c.1 != ExecTime::Comptime {
+                self.compile(c.0)?;
+            }
         }
 
         self.func = Some(f);
@@ -303,7 +305,6 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             Expr::PrefixMacro { .. } | Expr::Closure(_) | Expr::GetNamed(_) | Expr::String(_) => {
                 unreachable!()
             }
-            Expr::Either { runtime, .. } => self.compile_expr(runtime)?,
         })
     }
 
