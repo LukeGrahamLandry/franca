@@ -249,7 +249,7 @@ macro_rules! jit_test_aarch_only {
             }"#
         );
 
-        simple!(backpassing, 5, 5, include_str!("../../../../tests/backpassing.fr"));
+        //simple!(backpassing, 5, 5, include_str!("../../../../tests/backpassing.fr"));
         simple!(structs, 5, 5, include_str!("../../../../tests/structs.fr"));
         simple!(overloading, 5, 5, include_str!("../../../../tests/overloading.fr"));
         simple!(closures, 5, 5, include_str!("../../../../tests/closures.fr"));

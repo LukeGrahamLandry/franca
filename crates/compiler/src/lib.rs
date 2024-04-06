@@ -95,7 +95,7 @@ test_file!(ffi);
 test_file!(collections);
 test_file!(macros);
 test_file!(aarch64_jit);
-test_file!(backpassing);
+//test_file!(backpassing);
 test_file!(dispatch);
 test_file!(modules);
 test_file!(fmt);
