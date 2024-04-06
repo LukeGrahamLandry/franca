@@ -9,6 +9,7 @@ use crate::logging::unwrap;
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::io::stdout;
+use std::process::exit;
 use std::ptr::null;
 use std::{io, slice};
 
@@ -60,7 +61,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_equ32 as *const u8), // TODO: subtyping
     (
-        "fn resolve_backtrace_symbol(addr: VoidPtr, out: *RsResolvedSymbol) bool",
+        "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,
     ),
     ("fn print_int(v: i64) Unit", print_int as *const u8),
@@ -71,7 +72,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
-    ("@no_interp fn str(s: Symbol) Str", symbol_to_str as *const u8),
+    ("@no_interp fn sym_to_str(s: Symbol) Str", symbol_to_str as *const u8),
     ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
 ];
 
@@ -169,7 +170,8 @@ extern "C-unwind" fn array_type(program: &mut Program, ty: TypeId, count: usize)
 }
 
 // TODO: test abi
-extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: u32) -> (*const u8, i64) {
+extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*const u8, i64) {
+    let symbol = symbol as u32;
     hope(|| {
         let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
         let s = program.pool.get(symbol);

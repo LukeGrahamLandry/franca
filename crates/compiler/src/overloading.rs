@@ -143,6 +143,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         match self.type_of(result, arg) {
             Ok(Some(arg_ty)) => {
+                // TODO: need to factor this part out so that 'const F: <> = some_overload_set' works properly.
+
                 // TODO: Never needs to not be a special case. Have like an auto cast graph thingy.
                 let accept = |f_arg: TypeId, f_ret: Option<TypeId>| {
                     arg_ty == f_arg

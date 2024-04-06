@@ -908,29 +908,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     match f_id {
                         FuncRef::Exact(f_id) => return Ok(self.compile_call(result, expr, f_id, requested)?.0),
-                        FuncRef::Split { ct, rt } => {
-                            assert!(self.is_raw_call(ct), "{}", self.pool.get(self.program[ct].name));
-                            assert!(self.is_raw_call(rt), "{}", self.pool.get(self.program[rt].name));
-                            let arg_ty_ct = unwrap!(self.program[ct].finished_arg, "ct fn arg");
-                            let arg_ty = unwrap!(self.program[rt].finished_arg, "rt fn arg");
-                            self.type_check_arg(arg_ty_ct, arg_ty, "ct vs rt")?;
-                            self.compile_expr(result, arg, Some(arg_ty))?;
-                            let ret_ty_ct = unwrap!(self.program[ct].finished_ret, "ct fn ret");
-                            let ret_ty = unwrap!(self.program[rt].finished_ret, "rt fn ret");
-                            self.type_check_arg(ret_ty_ct, ret_ty, "ct vs rt")?;
-                            let f_ty = self.program.func_type(rt);
-
-                            add_unique(&mut result.callees, (ct, ExecTime::Comptime));
-                            add_unique(&mut result.callees, (rt, ExecTime::Runtime));
-                            self.ensure_compiled(ct, ExecTime::Comptime)?;
-                            self.ensure_compiled(rt, ExecTime::Runtime)?;
-                            f.ty = f_ty;
-                            f.expr = Expr::Value {
-                                ty: f_ty,
-                                value: Value::SplitFunc { ct, rt }.into(),
-                            }; // TODO: do this elsewhere
-                            return Ok(Structured::RuntimeOnly(ret_ty));
-                        }
+                        FuncRef::Split { ct, rt } => return self.compile_split_call(result, expr, ct, rt, requested),
                     }
                 }
                 ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
@@ -2394,6 +2372,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
             arg_expr.expr = Expr::unit();
             arg_expr.ty = TypeId::unit();
+
+            let ty = self.program.func_type(current_fn);
+            f_expr.expr = Expr::Value {
+                ty,
+                value: Value::GetFn(current_fn).into(),
+            };
+            f_expr.ty = ty;
+
             Ok(current_fn)
         } else {
             if let Structured::Const(ty, values) = arg_val {
@@ -2713,7 +2699,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             overloads
                                 .ready
                                 .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
-                            filter_arch(self.program, &mut overloads, result.when);
+                            // TODO: You can't just filter here anymore because what if its a Split FuncRef.
+                            // filter_arch(self.program, &mut overloads, result.when);
                             let found = match overloads.ready.len() {
                                 0 => err!("Missing overload",),
                                 1 => overloads.ready[0].func,
@@ -2792,6 +2779,67 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         Ok(())
+    }
+
+    fn compile_split_call(
+        &mut self,
+        result: &mut FnWip<'p>,
+        expr: &mut FatExpr<'p>,
+        mut ct: FuncId,
+        mut rt: FuncId,
+        requested: Option<TypeId>,
+    ) -> Result<Structured, CompileError<'p>> {
+        debug_assert_ne!(ct, rt);
+        let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
+
+        let arg_ty_ct = unwrap!(self.program[ct].finished_arg, "ct fn arg");
+        let arg_ty = unwrap!(self.program[rt].finished_arg, "rt fn arg");
+        self.type_check_arg(arg_ty_ct, arg_ty, "ct vs rt")?;
+        let arg_val = self.compile_expr(result, arg_expr, Some(arg_ty))?;
+        let ret_ty_ct = unwrap!(self.program[ct].finished_ret, "ct fn ret");
+        let ret_ty = unwrap!(self.program[rt].finished_ret, "rt fn ret");
+        self.type_check_arg(ret_ty_ct, ret_ty, "ct vs rt")?;
+        let mut f_ty = self.program.func_type(rt);
+        // At this point we know they have matching arg and ret types.
+
+        assert!(
+            !self.program[ct].has_tag(Flag::Comptime) && !self.program[rt].has_tag(Flag::Comptime),
+            "@comptime fn must support all architectures"
+        );
+        assert!(!self.program[ct].has_tag(Flag::Inline) && !self.program[rt].has_tag(Flag::Inline));
+
+        let ct_consts: Vec<_> = self.program[ct].arg.bindings.iter().map(|b| b.kind == VarType::Const).collect();
+        let rt_consts: Vec<_> = self.program[rt].arg.bindings.iter().map(|b| b.kind == VarType::Const).collect();
+        assert_eq!(
+            ct_consts,
+            rt_consts,
+            "Split FuncRef arg bindings must have same const-ness. {}",
+            self.pool.get(self.program[rt].name)
+        );
+
+        if rt_consts.iter().any(|&b| b) {
+            let mut arg_expr2 = arg_expr.clone();
+            // Pretend we're just going to do one and bake the args so no more const.
+            rt = self.curry_const_args(rt, f_expr, arg_expr, arg_val.clone())?;
+            // Now do the same for the other, so now we have two functions that each go through a chain of calls baking the same const args.
+            ct = self.curry_const_args(ct, f_expr, &mut arg_expr2, arg_val)?;
+            // TODO: assert no captures and that arg_expr===arg_expr2
+
+            // This will have changed from baking the args.
+            f_ty = self.program.func_type(rt);
+        }
+
+        add_unique(&mut result.callees, (ct, ExecTime::Comptime));
+        add_unique(&mut result.callees, (rt, ExecTime::Runtime));
+        self.ensure_compiled(ct, ExecTime::Comptime)?;
+        self.ensure_compiled(rt, ExecTime::Runtime)?;
+        // Since we just baked args, the ids might have changed so we have to update them.
+        f_expr.ty = f_ty;
+        f_expr.expr = Expr::Value {
+            ty: f_ty,
+            value: Value::SplitFunc { ct, rt }.into(),
+        };
+        Ok(Structured::RuntimeOnly(ret_ty))
     }
 }
 
