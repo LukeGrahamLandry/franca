@@ -1,0 +1,163 @@
+let test_asm = `
+.section	__TEXT,__text,regular,pure_instructions
+	.build_version macos, 13, 0
+	.globl	_c_add                          ; -- Begin function c_add
+	.p2align	2
+_c_add:                                 ; @c_add
+	.cfi_startproc
+; %bb.0:
+	add	x0, x1, x0
+	ret
+	.cfi_endproc
+                                        ; -- End function
+`;
+
+@pub fn insert() Unit = unit;
+@pub fn get() Unit = unit;
+@pub fn get_ptr() Unit = unit;
+@pub fn is_none() Unit = unit;
+@pub fn is_some() Unit = unit;
+@pub fn unwrap() Unit = unit;
+@pub fn if_opt() Unit = unit;
+
+@comptime
+fn Option(T: Type) Type = {
+    const Self: Type = (Some: T, None: Unit)!enum;
+    
+    @pub fn if(self: Self, const then: Fn(T, Unit)) Unit = {
+        (@match(self) {
+            (fn Some(t: T) Unit = then(t));
+            (fn None(t: Unit) Unit = ());
+        })
+    }
+    
+    const _: Unit = if_opt(T, bool);
+    
+    @pub fn is_some(self: Self) bool = self.if(fn(_: i64) bool = true, fn() bool = false);
+    @pub fn is_none(self: Self) bool = self.if(fn(_: i64) bool = false, fn() bool = true);
+
+    @pub fn eq(self: Self, other: Self) bool = 
+        self.if(fn(a: T) bool = {
+            other.if(fn(b: T) bool = {
+                a.eq(b)
+            }, fn() bool = false)
+        }, fn() bool = other.is_none());
+    
+    Self
+}
+
+// TODO: it should close over T without the extra argument when put in the @comptime fn Option
+@comptime @impl
+@pub fn if_opt(I: Type, O: Type) Unit = {
+    @pub fn if(self: Option(I), const then: Fn(I, O), const else: Fn(Unit, O)) O = {
+        (@match(self) {
+            (fn Some(t: I) O = then(t));
+            (fn None(t: Unit) O = else());
+        })
+    }
+}
+
+fn test_option() Unit = {
+    let s: Option(i64) = (Some: 123);
+    var a = 0;
+    s.if(fn(i: i64) Unit = {
+        a = i;
+    });
+    assert_eq(a, 123);
+}
+
+
+@comptime 
+fn DumbMap(K: Type, V: Type) Type = {
+    const K = K;
+    const V = V;
+    const Self = (arr: List(Ty(K, V)))!struct;
+    
+    @pub fn init() Self = (arr: list());
+    
+    const _: Type = Option(V);
+    const _: Type = Option(*V);
+    const _: Unit = if_opt(*V, Option(V));
+    
+    @pub fn insert(self: *Self, key: K, value: V) Option(V) = {
+        self.get_ptr(key).if(fn(v: *V) Option(V) = {
+            let old = v[];
+            v[] = value;
+            (Some: old)
+        }, fn() Option(V) = {
+            let entry = (key, value);
+            self.arr.push(entry);
+            (None: unit)
+        })
+    }
+
+    @pub fn get(self: *Self, key: K) Option(V) = {
+        let found: Option(*V) = self.get_ptr(key);
+        (@match(found) {
+            (fn Some(t: *V) Option(V) = (Some: t[]));
+            (fn None(t: Unit) Option(V) = (None: ()));
+        })
+    }
+    
+    @pub fn get_ptr(self: *Self, key: K) Option(*V) = {
+        var i = 0;
+        var arr = self.arr.items();
+        let count = arr&.len[];
+        var done = false;
+        var out: Option(*V) = (None: ());
+        (fn() = done.not().and(i.lt(count)), fn() = {
+            let p: *Ty(K, V) = arr.index(i);
+            let k: K = p[0][];
+            let c: bool = k.eq(key);
+            c.if(fn() Unit = {
+                let v = p[1];
+                out = (Some: v);
+                done = true;
+            });
+            i = i.add(1);
+        })!while;
+    
+        out
+    }
+    
+    Self
+}
+
+
+fn test_map() Unit = {
+    var m: DumbMap(i64, i64) = init();
+    assert_eq(true, m&.insert(123, 456).is_none());
+    let expect: Option(i64) = (Some: 456);
+    let prev = m&.insert(123, 5);
+    let same = expect.eq(prev); // TODO: when you inline this it fails but thinks right is 654. disagree about bool calling conventions maybe? 
+    assert_eq(true, same);
+    
+    let expect: Option(i64) = (Some: 5);
+    let prev = m&.get(123);
+    let same = expect.eq(prev);
+    assert_eq(true, same);
+}
+
+// TODO: you can't put a Symbol as a key becuase it doesnt have an eq yet (should just be by number). 
+/*
+const AsmFile = (
+    src: Str,
+    blocks: DumbMap(Symbol, i64),
+)!struct;
+*/
+
+@test(aarch64)
+fn main(c: i64) i64 = {
+    test_option();
+    test_map();
+    
+    /*
+    var asm: AsmFile = (
+        src: "".str(),
+        blocks: init(),
+    );
+    asm&.blocks.insert(t!symbol, 123);
+    */
+    
+    c
+}

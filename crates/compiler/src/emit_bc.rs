@@ -208,6 +208,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(!func.has_tag(Flag::Inline));
 
         if let Some(ptr) = func.comptime_addr {
+            debug_assert_eq!(ptr % 4, 0);
             if func.has_tag(Flag::C_Call) {
                 // We could emit its body as just a Bc::CallC but might as well skip the indirection.
                 let ty = func.unwrap_ty();

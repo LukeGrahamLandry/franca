@@ -17,7 +17,7 @@ use std::str::Chars;
 use std::sync::Arc;
 
 // TODO: why tf is Range not copy
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, InterpSend)]
 pub struct Token<'p> {
     pub kind: TokenType<'p>,
     pub span: Span,
@@ -128,6 +128,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '\0' => self.one(TokenType::Eof),
             '#' => self.lex_ident(),
             '"' | '“' | '”' | '\'' => self.lex_quoted(),
+            '`' => self.lex_quoted_multiline(),
             '0' => {
                 self.pop();
                 match self.peek_c() {
@@ -218,6 +219,21 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
                 // I could let you have multi-line, but I don't like it because you end up with garbage indentation.
                 '\n' | '\0' => return self.err(LexErr::UnterminatedStr),
+                _ => {}
+            }
+        }
+    }
+
+    fn lex_quoted_multiline(&mut self) -> Token<'p> {
+        self.pop();
+        loop {
+            match self.pop() {
+                '`' => {
+                    // Payload doesn't include quotes.
+                    let text = &self.src.source()[self.start + 1..self.current - 1];
+                    return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
+                }
+                '\0' => return self.err(LexErr::UnterminatedStr),
                 _ => {}
             }
         }

@@ -142,6 +142,7 @@ impl<'p> Interp<'p> {
 
                     // TODO: this is super ugly recreation of all the other calling types. need to factor out calling convention better.
                     if let Some(addr) = program[f].comptime_addr {
+                        debug_assert_eq!(addr % 4, 0);
                         let ty = program[f].unwrap_ty();
                         let comp_ctx = program[f].has_tag(Flag::Ct);
                         let ptr = addr as usize;
@@ -311,6 +312,7 @@ impl<'p> Interp<'p> {
 
                     self.bump_ip();
                     let ptr = f.to_int()?.to_bytes() as usize;
+                    debug_assert_eq!(ptr % 4, 0);
                     let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
                     *self.get_slot_mut(ret.single()) = result.single()?;
                 }

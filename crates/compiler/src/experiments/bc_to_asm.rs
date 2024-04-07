@@ -882,6 +882,7 @@ pub mod jit {
                 self.dispatch[f.0] = self.current_start;
                 self.ranges[f.0] = range as *const [u8];
                 self.ip_to_inst.clear();
+                debug_assert_eq!(self.current_start as usize % 4, 0);
                 self.current_start = self.next;
             }
         }

@@ -1,4 +1,6 @@
 #![feature(slice_ptr_get)]
+#![feature(pattern)]
+
 use compiler::{
     ast::{Flag, Program, TargetArch, TypeId},
     bc::Value,
@@ -15,7 +17,7 @@ use compiler::{
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
-use std::{arch::asm, env, fs, io::Write, mem::transmute, ops::DerefMut, path::PathBuf, process::exit};
+use std::{arch::asm, env, fs, io::Write, mem::transmute, ops::DerefMut, path::PathBuf, process::exit, str::pattern::Pattern};
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
 //       Make sure theres some prefix that lets you run/compile the next arg as a file path for shabang line.
@@ -113,7 +115,11 @@ fn run_tests() {
         if jobs.len() < max_jobs && !files.is_empty() {
             let case = files.pop().unwrap().unwrap();
             let name = case.file_name();
-            let name = name.to_str().unwrap().strip_suffix(".fr").unwrap();
+            let name = name.to_str().unwrap();
+            if !".fr".is_suffix_of(name) {
+                continue;
+            }
+            let name = name.strip_suffix(".fr").unwrap();
             let src = fs::read_to_string(case.path()).unwrap();
             add_test_cases(name.to_string(), src, &mut jobs);
         } else {

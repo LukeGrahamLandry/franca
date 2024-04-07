@@ -590,6 +590,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
         let comp_ctx = target.has_tag(Flag::Ct);
         // TODO: this has to change for actually emitting
         let function = if let Some(addr) = target.comptime_addr {
+            debug_assert_eq!(addr % 4, 0);
             // TODO: do i need some sort of ptr to function cast?
             self.llvm.const_ptr(addr as *const u8)
         } else {
@@ -679,6 +680,7 @@ pub mod tests {
     jit_test_llvm_only!(jit_main);
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn verify_module<'p>(module: LLVMModuleRef) -> Res<'p, ()> {
     unsafe { checked_llvm(|msg| LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg))? }
     Ok(())

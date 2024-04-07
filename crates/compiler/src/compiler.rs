@@ -2191,8 +2191,21 @@ impl<'a, 'p> Compile<'a, 'p> {
         let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
         let mut raw_container_ty = self.program.raw_type(container_ty);
 
-        if let TypeInfo::Struct { as_tuple, .. } = self.program[raw_container_ty] {
-            raw_container_ty = as_tuple;
+        if let TypeInfo::Struct { as_tuple, fields, .. } = &self.program[raw_container_ty] {
+            // A struct with one field will have its as_tuple be another struct.
+            if let TypeInfo::Struct { .. } = self.program[*as_tuple] {
+                // There should only be one field
+                assert_eq!(fields.len(), 1);
+                assert_eq!(index, 0);
+                // TODO: this is just a noop type cast, should update the ast.
+                let ty = self.program.ptr_type(fields[0].ty);
+                return Ok(match container_ptr {
+                    Structured::Const(_, v) => Structured::Const(ty, v),
+                    Structured::RuntimeOnly(_) => Structured::RuntimeOnly(ty),
+                    _ => unreachable!(),
+                });
+            }
+            raw_container_ty = *as_tuple;
         }
 
         if let TypeInfo::Enum { cases } = &self.program[raw_container_ty] {
@@ -2232,7 +2245,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             err!("unknown index {index} on {:?}", self.program.log_type(container_ty));
         } else {
-            err!("Only tuples support index expr",)
+            err!("Only tuples support index expr, not {:?}", self.program[raw_container_ty])
         }
     }
 
@@ -2554,7 +2567,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let all = names.into_iter().zip(values).zip(fields);
                     let mut values = vec![];
                     for ((name, value), field) in all {
-                        assert_eq!(name, field.name);
+                        assert_eq!(name, field.name, "{} vs {}", self.pool.get(name), self.pool.get(field.name));
                         let value = self.compile_expr(result, value, Some(field.ty))?;
                         self.type_check_arg(value.ty(), field.ty, "struct field")?;
                         values.push(value.unchecked_cast(field.ty));
