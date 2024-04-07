@@ -5,6 +5,7 @@ macro_rules! jit_test {
             ($name:ident, $arg:expr, $ret:expr, $src:expr) => {
                 #[test]
                 fn $name() {
+                    $crate::find_std_lib();
                     $crate::logging::init_logs(&[$crate::logging::LogTag::ShowErr]);
                     $test_func(stringify!($name), $src, |f| {
                         let ret: i64 = f($arg);

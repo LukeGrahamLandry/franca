@@ -7,11 +7,14 @@ use crate::ast::{FuncId, Program, TypeId, TypeInfo};
 use crate::compiler::Res;
 use crate::logging::unwrap;
 use crate::pool::Ident;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::io::stdout;
+use std::path::PathBuf;
 use std::process::exit;
 use std::ptr::null;
-use std::{io, slice};
+use std::sync::{Arc, Mutex, RwLock};
+use std::{env, fs, io, slice};
 
 macro_rules! stdlib {
     ($name:expr) => {
@@ -19,22 +22,22 @@ macro_rules! stdlib {
     };
 }
 
-static LIB: &[(&str, &str)] = &[
-    stdlib!("prelude"),
-    stdlib!("core"),
-    stdlib!("codegen/aarch64/basic.gen"),
-    stdlib!("codegen/llvm/basic"),
-    stdlib!("collections"),
-    stdlib!("system"),
-    stdlib!("ast"),
-    stdlib!("macros"),
-    stdlib!("codegen/aarch64/instructions"),
-    stdlib!("codegen/aarch64/basic"),
-    stdlib!("codegen/aarch64/unwind"),
-    stdlib!("codegen/wasm/instructions"),
-    stdlib!("codegen/bf/instructions"),
-    stdlib!("fmt"),
-];
+// static LIB: &[(&str, &str)] = &[
+//     stdlib!("prelude"),
+//     stdlib!("core"),
+//     stdlib!("codegen/aarch64/basic.gen"),
+//     stdlib!("codegen/llvm/basic"),
+//     stdlib!("collections"),
+//     stdlib!("system"),
+//     stdlib!("ast"),
+//     stdlib!("macros"),
+//     stdlib!("codegen/aarch64/instructions"),
+//     stdlib!("codegen/aarch64/basic"),
+//     stdlib!("codegen/aarch64/unwind"),
+//     stdlib!("codegen/wasm/instructions"),
+//     stdlib!("codegen/bf/instructions"),
+//     stdlib!("fmt"),
+// ];
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
@@ -76,15 +79,14 @@ pub const COMPILER_LATE: &[(&str, *const u8)] = &[
     ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
 ];
 
-pub fn get_include_std(name: &str) -> Option<String> {
-    if let Some((_, src)) = LIB.iter().find(|(check, _)| name == *check) {
-        return Some(src.to_string());
-    }
+pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-    let mut out = String::new();
-    writeln!(out, "//! IMPORTANT: don't try to save @comptime_addr('ASLR junk'), it won't go well. \n").unwrap();
+pub fn get_include_std(name: &str) -> Option<String> {
+    let msg = "//! IMPORTANT: don't try to save @comptime_addr('ASLR junk'), it won't go well. \n";
     match name {
         "libc" => {
+            let mut out = String::new();
+            writeln!(out, "{}", msg).unwrap();
             writeln!(
                 out,
                 "@pub const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
@@ -96,21 +98,42 @@ pub fn get_include_std(name: &str) -> Option<String> {
             for (sig, ptr) in LIBC {
                 writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
             }
+            Some(out)
         }
         "compiler" => {
+            let mut out = String::new();
+            writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER {
                 writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
+            Some(out)
         }
         "compiler_late" => {
+            let mut out = String::new();
+            writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER_LATE {
                 writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
+            Some(out)
         }
-        _ => return None,
+        _ => {
+            // if let Some((_, src)) = LIB.iter().find(|(check, _)| name == *check) {
+            //     return Some(src.to_string());
+            // }
+            let path = STDLIB_PATH.lock();
+            let path = path.as_ref().unwrap().as_ref();
+            if let Some(path) = path {
+                let path = path.join(name);
+                if let Ok(src) = fs::read_to_string(&path) {
+                    return Some(src);
+                }
+                println!("Missing path {path:?}");
+            } else {
+                println!("STDLIB_PATH not set.");
+            }
+            None
+        }
     }
-
-    Some(out)
 }
 
 // macro_rules! _result_ffi {

@@ -12,7 +12,9 @@
 #![feature(backtrace_frames)]
 extern crate core;
 
+use std::env;
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::{fs, sync::atomic::Ordering};
 
 use ast::FuncId;
@@ -20,6 +22,7 @@ use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::{BoxedExec, CErr, Res};
+use export_ffi::STDLIB_PATH;
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -60,10 +63,62 @@ use crate::{
     scope::ResolveScope,
 };
 
+// I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
+// (maybe include_bytes in a seperate crate would make it better)
+// I also like that users can put the lib somewhere an edit it for thier program. I dont want the compiler to just force its blessed version.
+// But I also don't want it to be like c where you just get whatever the system happens to have.
+pub fn find_std_lib() -> bool {
+    fn check(mut p: PathBuf) -> bool {
+        p.push("lib");
+        p.push("franca_stdlib_1.fr");
+        if p.exists() {
+            p.pop();
+            let mut path = STDLIB_PATH.lock().unwrap();
+            *path = Some(p);
+            return true;
+        }
+        false
+    }
+
+    // if a project wants to supply its own version, that should take priority.
+    if let Ok(mut p) = env::current_dir() {
+        if check(p.clone()) {
+            return true;
+        }
+        p.push("franca");
+        if check(p.clone()) {
+            return true;
+        }
+        p.pop();
+        p.push("vendor/franca");
+        if check(p.clone()) {
+            return true;
+        }
+    }
+
+    if let Ok(mut p) = env::current_exe() {
+        p.pop();
+        p.push("franca");
+        if check(p.clone()) {
+            return true;
+        }
+        // exe might be in franca/target/release/franca or franca/target/debug/deps/compiler-21be1aa281dbe5d6, so go up
+        for _ in 0..5 {
+            p.pop();
+            if check(p.clone()) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 macro_rules! test_file {
     ($case:ident) => {
         #[test]
         fn $case() {
+            $crate::find_std_lib();
             crate::logging::init_logs(&[ShowErr]);
 
             let pool = Box::leak(Box::<StringPool>::default());

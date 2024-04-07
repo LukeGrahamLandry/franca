@@ -4,7 +4,8 @@ use compiler::{
     bc::Value,
     compiler::{Compile, ExecTime},
     experiments::{bc_to_asm::BcToAsm, emit_rust::bootstrap},
-    export_ffi::get_include_std,
+    export_ffi::{get_include_std, STDLIB_PATH},
+    find_std_lib,
     interp::Interp,
     load_program, log_dbg, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
@@ -14,7 +15,7 @@ use compiler::{
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
-use std::{arch::asm, env, fs, io::Write, mem::transmute, path::PathBuf, process::exit};
+use std::{arch::asm, env, fs, io::Write, mem::transmute, ops::DerefMut, path::PathBuf, process::exit};
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
 //       Make sure theres some prefix that lets you run/compile the next arg as a file path for shabang line.
@@ -23,6 +24,16 @@ use std::{arch::asm, env, fs, io::Write, mem::transmute, path::PathBuf, process:
 //       Because it seems nicer if things are composable and the compiler functions don't assume they can just read the args except the top level one which you can define in userland.
 // TODO: repl(). works nicely with ^ so you could experiment but then always be able to run things as a command when working with other tools
 fn main() {
+    // TODO: option to hardcode path
+    // TODO: its a problem that someone could add one at a higher prio place maybe?
+    if find_std_lib() {
+        // TODO: option to silence
+        eprintln!("Found installed lib at {:?}", STDLIB_PATH.lock().unwrap().as_ref().unwrap());
+    } else {
+        // TODO: show search locations
+        eprintln!("Standard library not found.");
+        exit(1);
+    }
     if let Some(name) = env::args().nth(1) {
         if name == "bootstrap" {
             let (rs, fr) = bootstrap();
@@ -75,53 +86,73 @@ fn main() {
             );
         }
     } else {
-        let max_jobs = 7; // not really max cause one file can add multiple.
-        let mut passed = 0;
-        let mut failed = 0;
-        let mut jobs = vec![];
-        let mut files: Vec<_> = fs::read_dir("tests").unwrap().collect();
-
-        while !files.is_empty() || !jobs.is_empty() {
-            if jobs.len() < max_jobs && !files.is_empty() {
-                let case = files.pop().unwrap().unwrap();
-                let name = case.file_name();
-                let name = name.to_str().unwrap().strip_suffix(".fr").unwrap();
-                let src = fs::read_to_string(case.path()).unwrap();
-                run_one_test(name.to_string(), src, &mut jobs);
-            } else {
-                assert!(!jobs.is_empty());
-                let mut status = 0i32;
-                let pid = unsafe { libc::wait(&mut status) };
-
-                let the_job = jobs.iter().position(|j| j.2 == pid).expect("wait returned unexpected pid");
-                let (name, arch, _) = jobs.remove(the_job);
-
-                if status == 0 {
-                    // TODO: have it return 'assertion_count' somehow so the tested program calling exit(0) doesn't get seen as a pass.
-
-                    std::io::stdout().write_all(&[27]).unwrap();
-                    print!("[38;2;{};{};{}m", 0, 255, 0);
-                    println!("[PASSED: {} {:?}]", name, arch);
-                    std::io::stdout().write_all(&[27]).unwrap();
-                    print!("[0m");
-                    passed += 1;
-                } else {
-                    std::io::stdout().write_all(&[27]).unwrap();
-                    print!("[38;2;{};{};{}m", 255, 0, 0);
-                    println!("[FAILED: {} {:?}]^^^", name, arch);
-                    std::io::stdout().write_all(&[27]).unwrap();
-                    print!("[0m");
-                    failed += 1;
-                }
-            }
-        }
-
-        println!("Passed {}/{} Tests", passed, passed + failed);
-        assert_eq!(failed, 0);
+        run_tests();
     }
 }
 
-fn run_one_test(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32)>) {
+/// The normal cargo test harness combines the tests of a package into one exe and catches panics to continue after one fails.
+/// It doesn't expect you do be causing segfault/illegal instruction signals, (which is generally a reasonable assumption but less so for my compiler sadly).
+/// So when a test does that it kills the whole thing instead of being recorded as a failing test and continuing.
+/// Instead, I start each test in its own process so no matter what happens, it can't interfear with the other tests
+/// (unless they're like trying to use the write files or something, which like... don't do that then I guess).
+/// My way has higher overhead per test but it feels worth it.
+fn run_tests() {
+    if !PathBuf::from("tests").exists() {
+        eprint!("Directory 'tests' does not exist in cwd");
+        eprint!("run 'franca <path>' to run a specific file instead.");
+        exit(1);
+    }
+    let start = timestamp();
+    let max_jobs = 7; // not really max cause one file can add multiple.
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut jobs = vec![];
+    let mut files: Vec<_> = fs::read_dir("tests").unwrap().collect();
+
+    while !files.is_empty() || !jobs.is_empty() {
+        if jobs.len() < max_jobs && !files.is_empty() {
+            let case = files.pop().unwrap().unwrap();
+            let name = case.file_name();
+            let name = name.to_str().unwrap().strip_suffix(".fr").unwrap();
+            let src = fs::read_to_string(case.path()).unwrap();
+            add_test_cases(name.to_string(), src, &mut jobs);
+        } else {
+            assert!(!jobs.is_empty());
+            let mut status = 0i32;
+            let pid = unsafe { libc::wait(&mut status) };
+
+            let the_job = jobs.iter().position(|j| j.2 == pid).expect("wait returned unexpected pid");
+            let (name, arch, _) = jobs.remove(the_job);
+
+            if status == 0 {
+                // TODO: have it return 'assertion_count' somehow so the tested program calling exit(0) doesn't get seen as a pass.
+
+                // TODO: should have this colour stuff as a library in my language.
+                //       https://en.wikipedia.org/wiki/ANSI_escape_code#24-bit
+                std::io::stdout().write_all(&[27]).unwrap();
+                print!("[38;2;{};{};{}m", 0, 255, 0);
+                println!("[PASSED: {} {:?}]", name, arch);
+                std::io::stdout().write_all(&[27]).unwrap();
+                print!("[0m");
+                passed += 1;
+            } else {
+                std::io::stdout().write_all(&[27]).unwrap();
+                print!("[38;2;{};{};{}m", 255, 0, 0);
+                println!("[FAILED: {} {:?}]^^^", name, arch);
+                std::io::stdout().write_all(&[27]).unwrap();
+                print!("[0m");
+                failed += 1;
+            }
+        }
+    }
+
+    let end = timestamp();
+    let seconds = end - start;
+    println!("Passed {}/{} Tests in {} ms.", passed, passed + failed, (seconds * 1000.0) as i64);
+    assert_eq!(failed, 0);
+}
+
+fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32)>) {
     let start = src.find("@test(").expect("@test in test file") + 6;
     let s = &src[start..];
     let end = s.find(')').unwrap();
@@ -132,13 +163,10 @@ fn run_one_test(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i
         let arch = match backend {
             "interp" => TargetArch::Interp,
             "aarch64" => TargetArch::Aarch64,
-            "llvm" => {
-                #[cfg(not(feature = "llvm"))]
-                {
-                    continue;
-                }
-                TargetArch::Llvm
-            }
+            #[cfg(not(feature = "llvm"))]
+            "llvm" => continue,
+            #[cfg(feature = "llvm")]
+            "llvm" => TargetArch::Llvm,
             "skip" => break,
             other => panic!("Unknown backend {other}"),
         };
@@ -153,6 +181,7 @@ fn run_one_test(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i
     }
 }
 
+/// This is the thing we exec.
 fn actually_run_it(name: String, src: String, assertion_count: usize, arch: TargetArch) -> ! {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
     let pool = Box::leak(Box::<StringPool>::default());

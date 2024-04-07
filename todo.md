@@ -56,6 +56,7 @@
   - need to be careful about what happens if you hold on to internal pointers, then it can't move.
   - could just say you have to put it at the outer stack frame and not let it escape.
   - would be nice to change between current inlining and closures without changing source so you could opt for size or speed.
+- https://github.com/arun11299/How-not-to-async-rs/tree/main
 
 ## UB
 
