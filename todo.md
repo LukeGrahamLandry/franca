@@ -10,7 +10,7 @@
 - fix impl generics now that public vars work
 - give macros access to type info for auto debug printing
 - const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
-  safety(Bounds, fn() = lt(i, len(self));
+  safety(Bounds, fn= lt(i, len(self));
 - deref for constants,
 - inferred container type for constants. so fn a(b: @enum(A, B)); can be called like a(.A);
 - enum bitset

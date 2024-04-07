@@ -111,13 +111,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                     None
                 };
                 // Args are optional so you can do `if(a, fn=b, fn=c)`
-                let arg = if self.maybe(LeftParen) {
+                let mut arg = if self.maybe(LeftParen) {
                     let a = self.parse_args()?;
                     self.eat(RightParen)?;
                     a
                 } else {
                     Pattern::empty(loc)
                 };
+                arg.if_empty_add_unit();
 
                 let ret = if Equals != self.peek() {
                     LazyType::PendingEval(self.parse_expr()?)
@@ -226,6 +227,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let arg = self.parse_tuple()?;
                     self.expr_call(prefix, arg)
                 }
+                LeftSquiggle => {
+                    self.start_subexpr();
+
+                    todo!("Trailing lambda syntax");
+                }
+
                 Bang => {
                     self.start_subexpr();
                     self.eat(Bang)?;
@@ -309,7 +316,9 @@ impl<'a, 'p> Parser<'a, 'p> {
                         Pattern::empty(*self.spans.last().unwrap())
                     } else {
                         // Otherwise, switch to parsing a pattern.
-                        self.parse_args()?
+                        let mut a = self.parse_args()?;
+                        a.if_empty_add_unit(); // TODO: kinda HACK that i can't call it in the other branch but everywhere else I do.
+                        a
                     };
                     // Add in the that first argument
                     named.bindings.insert(0, first);
@@ -349,7 +358,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let name = self.ident()?;
 
                 self.eat(LeftParen)?;
-                let arg = self.parse_args()?;
+                let mut arg = self.parse_args()?;
+                arg.if_empty_add_unit();
                 self.eat(RightParen)?;
 
                 let ret = if Equals != self.peek() && Semicolon != self.peek() {
@@ -515,15 +525,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                     }
                 }
             }
-        }
-
-        if args.bindings.is_empty() {
-            args.bindings.push(Binding {
-                name: Name::None,
-                ty: LazyType::Finished(TypeId::unit()),
-                default: None,
-                kind: VarType::Let,
-            });
         }
 
         Ok(args)

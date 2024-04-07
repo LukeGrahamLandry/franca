@@ -36,8 +36,8 @@ macro_rules! jit_test {
             42,
             "@c_call fn get_42() i64 = { 42 } @c_call fn main() i64 = { get_42() }"
         );
-        simple!(test_ifa, true, 123, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
-        simple!(test_ifb, false, 456, "@c_call fn main(a: bool) i64 = { (a, fn()=123, fn=456)!if }");
+        simple!(test_ifa, true, 123, "@c_call fn main(a: bool) i64 = { (a, fn=123, fn=456)!if }");
+        simple!(test_ifb, false, 456, "@c_call fn main(a: bool) i64 = { (a, fn=123, fn=456)!if }");
         simple!(math, 5, 20, "@c_call fn main(a: i64) i64 = { add(a, 15) }");
         simple!(
             test_while,
@@ -46,7 +46,7 @@ macro_rules! jit_test {
             r#"
             @c_call fn main(n: i64) i64 = {
                 var a = 0;
-                (fn()=ne(n, 0), fn()={
+                (fn=ne(n, 0), fn={
                     a = add(a, n);
                     n = sub(n, 1);
                 })!while;

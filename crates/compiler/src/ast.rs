@@ -499,6 +499,20 @@ impl<'p> Pattern<'p> {
             .collect();
         program.tuple_of(types)
     }
+
+    // TODO: probably shouldn't do this because ideally someone would take it out later anyway.
+    //       but for now it fixes a Poison debug check on inferp and kinda makes it more consistant
+    //       so all functions have an argument (but I could just know empty means Unit).
+    pub fn if_empty_add_unit(&mut self) {
+        if self.bindings.is_empty() {
+            self.bindings.push(Binding {
+                name: Name::None,
+                ty: LazyType::Finished(TypeId::unit()),
+                default: None,
+                kind: VarType::Let,
+            });
+        }
+    }
 }
 
 // TODO: use this as a canary when I start doing asm stuff.
