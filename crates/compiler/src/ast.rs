@@ -1627,6 +1627,8 @@ pub enum Flag {
     This,
     Super,
     Unreachable,
+    Rt,
+    Test,
     _Reserved_Count_,
 }
 

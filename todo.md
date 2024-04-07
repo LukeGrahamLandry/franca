@@ -26,20 +26,36 @@
 - function that take a slice of args called like variadic functions.
 - field auto ref/deref for primitive types?
 - my expression output thingy broke some struct stuff (aliasing + asm consecutive slots)
-- be able to address a byte so you can use libc for stuff
 - let macros code generate a string and compile that
 - panics show stack trace
 - super cold calling convention for panics with constant args where you use return address to lookup arg values (i feel like i can do better than rustc which is really strange)
 - asm panic on invalid enum field instead of faulting
 - explicit runtime data struct.
-- feature to turn off backtracers dependency
+- feature to turn off backtrace-rs dependency
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
 - command line argument parser
 - getters and setters so enums and flag sets could be done in the language and still have natural syntax.
 - free standing versions of functions. so like during comptime you want the compiler to control allocations/printing/panics probably
   but need to be able compile a real binary too. this gets back into the problem of compiling anything used at both multiple times.
   do you try to represent that in the ast so they share work or have fully seperate Func instances for anything that indirectly calls an env function.
-- have addressable bytes (u8, u16, u32, u64) and measure size_of in bytes. seperate logical (pattern matching) size from real size.
+- have addressable bytes (u8, u16, u32, u64) and measure size_of in bytes.
+  - then you could reliably do c ffi
+  - seperate logical (pattern matching) size from real size.
+- c struct padding logic for ffi
+- expose c variadic functions on llvm (because why not)
+- add @rt for freestanding which denies calling @ct fns and can resolve overloads.
+  - tho I suppose you should be able to still call @rt at compile time if no overload conflict? or does that make it pointless?
+  - one of the usecases would be having panic be exit(1) when freestanding but otherwise just hook into the compiler's error mechanism
+    so you don't just want the arch to be what decides.
+- should really have a more extensible way of describing an environment.
+  - ie. what arch? do you have the compiler context? what os? do you have libc?
+  - the end goal for this would be to expose what imports each module needs and let the comptime resolve differently if you really wanted.
+- real closures
+  - I don't want to implicitly heap allocate escaping ones but should be able to expose the list of captures and fill in a struct of pointers.
+  - my goal would be writing rust like iterators but without making you explicitly put your locals in a struct
+  - need to be careful about what happens if you hold on to internal pointers, then it can't move.
+  - could just say you have to put it at the outer stack frame and not let it escape.
+  - would be nice to change between current inlining and closures without changing source so you could opt for size or speed.
 
 ## UB
 
@@ -56,6 +72,24 @@
 - void pointer cast
 - hacky rust pointer ffi
 - inline asm
+
+## Testing
+
+- clean up the way I do tests.
+- be able to write a thing in my language that says which backend combinations to test on each snippet
+- so need to expose apis for compiling source to my language. does that mean I should allow runtime @ct and have you opt into bundling the compiler?
+- output assert_eq counts to stdout and check them from another language so it can't cheat?
+- replace shell scripts with my language?
+- should really make the canary thing optional.
+
+## QBE
+
+- https://c9x.me/compile/
+- need to expose a function that I can call on a string of ir instead of using them as an executable that reads a file
+- make sure the reason they don't expose a lib isn't because they never free anything
+- they emit assembly not code so I have to write an assembler
+  - which would be nice to have anyway because then I could have clang output asm for other libs and link them into my stuff that way
+- setup benchmarking system so I can make sure its dramatically faster than my own shitty asm
 
 ## Sema
 
@@ -76,6 +110,7 @@
 ## Backend
 
 - get llvm backend to parity with aarch64
+  - convert struct arg/ret to pointers
 - llvm output an executable
 - using mir for compiling c dependencies would be cool
 - figure out if llvm-sys statically links itself and if it can cross compile

@@ -42,7 +42,7 @@ use compiler::{
 
 pub struct JittedLlvm {
     context: LLVMContextRef,
-    module: LLVMModuleRef,
+    pub module: LLVMModuleRef,
     inline_asm_module: LLVMModuleRef,
     execution_engine: LLVMExecutionEngineRef,
     builder: LLVMBuilderRef,
@@ -246,9 +246,9 @@ fn null_terminated(s: String) -> CString {
 }
 
 pub struct BcToLlvm<'z, 'p> {
-    program: &'z mut Program<'p>,
+    pub program: &'z mut Program<'p>,
     interp: &'z mut Interp<'p>,
-    llvm: JittedLlvm,
+    pub llvm: JittedLlvm,
     f: FuncId,
     wip: Vec<FuncId>, // makes recursion work
     slots: Vec<Option<LLVMValueRef>>,
@@ -316,7 +316,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
             let func = self.interp.ready[f].as_ref().unwrap();
-            println!("{}", func.log(self.program.pool));
+            // println!("{}", func.log(self.program.pool));
             self.slots.clear();
             self.slots.extend(vec![None; func.stack_slots]);
             self.blocks.clear();
@@ -679,7 +679,7 @@ pub mod tests {
     jit_test_llvm_only!(jit_main);
 }
 
-fn verify_module<'p>(module: LLVMModuleRef) -> Res<'p, ()> {
+pub fn verify_module<'p>(module: LLVMModuleRef) -> Res<'p, ()> {
     unsafe { checked_llvm(|msg| LLVMVerifyModule(module, LLVMVerifierFailureAction::LLVMPrintMessageAction, msg))? }
     Ok(())
 }

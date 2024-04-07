@@ -175,9 +175,6 @@ macro_rules! jit_test {
                         2
                     }"#
         );
-
-        // TODO: bootstrap raw_slice
-        // simple!(basic, 3145, 3145, include_str!("../../tests/basic.txt"));
     };
 }
 macro_rules! jit_test_aarch_only {
@@ -264,7 +261,7 @@ macro_rules! jit_test_aarch_only {
         // simple!(aarch64_jit, 5, 5, include_str!("../../../../tests/aarch64_jit.fr")); // builtin: copy_to_mmap_exec
         // simple!(ffi, 5, 5, include_str!("../../../../tests/ffi.fr")); // builtin: system
         // simple!(collections, 5, 5, include_str!("../../../../tests/collections.fr"));
-        // simple!(fmt, 5, 5, include_str!("../../../../tests/fmt.fr")); // buildin: raw_slice?? the thing about differetn funcs per executor probably.
+        // simple!(fmt, 5, 5, include_str!("../../../../tests/fmt.fr"));
 
         simple!(
             backtrace,
@@ -304,8 +301,11 @@ macro_rules! jit_test_llvm_only {
         }
 
         simple!(floats, 5, 5, include_str!("../../../tests/floats.fr"));
-        simple!(basic, 5, 5, include_str!("../../../tests/basic.fr")); //raw_slice
-                                                                       // simple!(mandelbrot, (), 40, include_str!("../../../examples/mandelbrot.fr"));
+        simple!(basic, 5, 5, include_str!("../../../tests/basic.fr"));
+        simple!(modules, 5, 5, include_str!("../../../tests/modules.fr"));
+        simple!(closures, 5, 5, include_str!("../../../tests/closures.fr"));
+        // simple!(overloading, 5, 5, include_str!("../../../tests/overloading.fr"));  // multi-ret
+        // simple!(mandelbrot, (), 40, include_str!("../../../examples/mandelbrot.fr"));
     };
 }
 

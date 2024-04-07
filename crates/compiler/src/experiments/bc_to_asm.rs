@@ -114,7 +114,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     // TODO: now with my result ptrs i messed ip the order of things? need to handle grouped stack slots. before it worked out because i would always copy into a new chunk.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let func = self.funcs[f].as_ref().unwrap();
-        println!("{}", func.log(self.program.pool));
+        // println!("{}", func.log(self.program.pool));
         let ff = &self.program[func.func];
         self.f = f;
         self.next_slot = SpOffset(0);

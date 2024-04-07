@@ -654,6 +654,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let any_reg_template = func.has_tag(Flag::Any_Reg);
                 let is_struct = func.has_tag(Flag::Struct);
                 let is_enum = func.has_tag(Flag::Enum);
+                if func.has_tag(Flag::Annotation) {
+                    assert!(!func.has_tag(Flag::Rt));
+                    func.add_tag(Flag::Ct);
+                }
                 assert!(!(is_struct && is_enum));
                 if is_struct {
                     let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
@@ -1075,7 +1079,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Unit)
                     }
                     "comptime_print" => {
-                        println!("TODO: fix comptime_print");
+                        // println!("TODO: fix comptime_print");
                         // TODO: wtf bounds check
                         // outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
                         let _value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());

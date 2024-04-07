@@ -106,7 +106,8 @@ pub enum LogTag {
     Generics = 8,
     Jitted = 9,
     RtRust = 10,
-    _Last = 11,
+    Perf = 11,
+    _Last = 12,
 }
 
 pub struct LogSettings {

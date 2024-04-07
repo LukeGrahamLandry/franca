@@ -137,8 +137,8 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 pub fn run_main<'a: 'p, 'p>(
     pool: &'a StringPool<'p>,
     src: String,
-    arg: Value,
-    expect: Value,
+    mut arg: Value,
+    mut expect: Value,
     save: Option<&str>,
     runtime_executor: BoxedExec<'a>,
     leak: bool,
@@ -173,13 +173,17 @@ pub fn run_main<'a: 'p, 'p>(
                         Ok(_) => {
                             let end = timestamp();
                             let seconds = end - start;
-                            outln!(ShowPrint, "===============");
-                            outln!(ShowPrint,
+                            outln!(Perf, "===============");
+                            outln!(Perf,
                                 "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
                                 lines as f64 / seconds
                             );
-                            outln!(ShowPrint, "===============");
+                            outln!(Perf, "===============");
                             let start = timestamp();
+                            if comp.program[f].finished_ret == Some(TypeId::unit()) && comp.program[f].finished_arg == Some(TypeId::unit()) {
+                                arg = Value::Unit;
+                                expect = Value::Unit;
+                            }
                             match comp.run(f, arg.into(), ExecTime::Runtime) {
                                 Err(e) => {
                                     log_err(&comp, e, save);
@@ -188,15 +192,15 @@ pub fn run_main<'a: 'p, 'p>(
                                 Ok(result) => {
                                     let end = timestamp();
                                     let seconds = end - start;
-                                    outln!(ShowPrint, "===============");
-                                    outln!(ShowPrint, "Interpreter finished running main() in {seconds:.5} seconds.");
+                                    outln!(Perf, "===============");
+                                    outln!(Perf, "Interpreter finished running main() in {seconds:.5} seconds.");
                                     debug_assert_eq!(result, expect.into());
                                     // TODO: change this when i add assert(bool)
                                     let assertion_count = src.split("assert_eq(").count() - 1;
                                     // debug so dont crash in web if not using my system of one run per occurance.
                                     debug_assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
                                     outln!(
-                                        ShowPrint,
+                                        Perf,
                                         "   - {} assertions passed. {} comptime evaluations.",
                                         comp.program.assertion_count,
                                         comp.anon_fn_counter
@@ -210,9 +214,9 @@ pub fn run_main<'a: 'p, 'p>(
         }
     } // TODO: this is dereanged. put it in a function so you can just use ? to call log_err
 
-    outln!(ShowPrint, "===============");
+    outln!(Perf, "===============");
     log_dbg(&comp, save);
-    println!("Created {} AST nodes.", EXPR_COUNT.load(Ordering::Acquire));
+    outln!(Perf, "Created {} AST nodes.", EXPR_COUNT.load(Ordering::Acquire));
     if leak {
         let _ = ManuallyDrop::new(comp);
         let _ = ManuallyDrop::new(program);
@@ -220,21 +224,25 @@ pub fn run_main<'a: 'p, 'p>(
     true
 }
 
-fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
+pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
     outln!(Bytecode, "{}", comp.runtime_executor.log(comp.pool));
     if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
         outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
     }
 
     println!("{}", get_logs(ShowPrint));
-    println!("{}", get_logs(ShowErr));
+    let err = get_logs(ShowErr);
+    if !err.is_empty() {
+        println!("{err}");
+    }
+
     if let Some(path) = save {
         let folder = &format!("target/latest_log/{path}");
         fs::create_dir_all(folder).unwrap();
         save_logs(folder);
-        println!("Wrote log to {folder:?}");
+        outln!(Perf, "Wrote log to {folder:?}");
     }
-    println!("===============================");
+    outln!(Perf, "===============================");
 }
 
 pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>) {
