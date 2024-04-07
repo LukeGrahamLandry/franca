@@ -1,3 +1,28 @@
+## new test runner (Apr 6)
+
+at first i wrote a dumb serial one which was fine but 3x slower than cargo test.
+
+- what the heck is happening.
+- its doing something for a really long time before calling main but after it claims to have run the exe when
+  calling through cargo run but if i just do it directly its fine. 0.5 vs 1.3 seconds
+- but cargo build and then run it doesn't help. its just slow the first time you run regardless.
+- it would make sense if it were like getting the files from disk thats later cached but its not even running main
+  (i printed something at the beginning and flushed stdout)
+- same behaviour in release mode
+- oh damn turning off the llvm feature flag makes it fast again.
+- so the reason i didnt notice before is most of my tests were in the compiler crate, not the llvm-backend crate so that didnt include it.
+  and the i did see that my llvm tests took longer but i thought that was just running llvm is slow not... the existance of llvm is slow.
+- so like maybe its because llvm is doing initilization shit but then why only the first time? so not that
+- then must be because the binary is giant (9MB vs 69MB)? so it has to load the whole thing into memory? or macos is dumb as fuck and like sending a hash somewhere to check for viruses??
+- speaking of which how the fuck is it 9MB even without llvm?? ok release is 2.2 which is better.
+- looking in Instruments, its spending the time in dyld4::prepare so i guess it is the linker thing.
+  so like am i dynamiclly linking? theres no way, my exe is so much bigger. loader doing offsets?
+  and like maybe it can cache that for latter if i run the thing again immediatly?
+- oh it probably doesn't even get a new address space. ok science time.
+  nah. 'println!("main addr: {}", main as usize);' is different every time so not that simple to understand sadly.
+  i also tried on a function from llvm c api but its also different every time.
+- but like also, even without llvm its 0.195 vs 0.077 the second time you run it (release mode).
+
 ## VoidPtr & overloads (Apr 5)
 
 It's cringe to make the language more verbose just to make the compiler, but void pointers aren't what I want anyway.
