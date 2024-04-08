@@ -620,6 +620,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             ice!("if args must be tuple not {:?}", arg);
         };
 
+        // This fixes interp poison debug err when loop only runs once.
+        result.push(Bc::LoadConstant {
+            slot: output.single(),
+            value: Value::Unit,
+        });
+
         let cond_ret = result.reserve_slots(self, TypeId::bool())?;
         let cond_ip = result.insts.len();
         self.compile_expr(result, cond_fn, cond_ret)?;

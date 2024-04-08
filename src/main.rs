@@ -135,18 +135,14 @@ fn run_tests() {
 
                 // TODO: should have this colour stuff as a library in my language.
                 //       https://en.wikipedia.org/wiki/ANSI_escape_code#24-bit
-                std::io::stdout().write_all(&[27]).unwrap();
-                print!("[38;2;{};{};{}m", 0, 255, 0);
+                set_colour(0, 255, 0);
                 println!("[PASSED: {} {:?}]", name, arch);
-                std::io::stdout().write_all(&[27]).unwrap();
-                print!("[0m");
+                unset_colour();
                 passed += 1;
             } else {
-                std::io::stdout().write_all(&[27]).unwrap();
-                print!("[38;2;{};{};{}m", 255, 0, 0);
+                set_colour(255, 0, 0);
                 println!("[FAILED: {} {:?}]^^^", name, arch);
-                std::io::stdout().write_all(&[27]).unwrap();
-                print!("[0m");
+                unset_colour();
                 failed += 1;
             }
         }
@@ -154,8 +150,21 @@ fn run_tests() {
 
     let end = timestamp();
     let seconds = end - start;
+    println!("============================");
+    set_colour((failed != 0) as u8 * 255, (failed == 0) as u8 * 255, 0);
     println!("Passed {}/{} Tests in {} ms.", passed, passed + failed, (seconds * 1000.0) as i64);
+    unset_colour();
     assert_eq!(failed, 0);
+}
+
+fn set_colour(r: u8, g: u8, b: u8) {
+    std::io::stdout().write_all(&[27]).unwrap();
+    print!("[38;2;{r};{g};{b}m");
+}
+
+fn unset_colour() {
+    std::io::stdout().write_all(&[27]).unwrap();
+    print!("[0m");
 }
 
 fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32)>) {

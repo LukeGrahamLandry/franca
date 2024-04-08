@@ -89,6 +89,15 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let inner = self.parse_expr()?;
                 Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
             }
+            Question => {
+                self.eat(Question)?;
+                self.start_subexpr();
+                self.start_subexpr();
+                let ptr = self.pool.intern("Option"); // AAAA Flag:: auto lowercases it.
+                let ptr = self.expr(Expr::GetNamed(ptr));
+                let inner = self.parse_expr()?;
+                Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
+            }
             _ => {
                 let prefix = self.parse_expr_inner()?;
                 self.maybe_parse_suffix(prefix)

@@ -19,22 +19,38 @@ _c_add:                                 ; @c_add
 @pub fn is_some() Unit = unit;
 @pub fn unwrap() Unit = unit;
 @pub fn if_opt() Unit = unit;
+@pub fn as_ref() Unit = unit;
+@pub fn none() Unit = unit;
+@pub fn some() Unit = unit;
 
 @comptime
 fn Option(T: Type) Type = {
     const Self: Type = (Some: T, None: Unit)!enum;
     
-    @pub fn if(self: Self, const then: Fn(T, Unit)) Unit = {
+    @pub fn none() Self = (None: ());
+    @pub fn some(t: T) Self = (Some: t);
+    
+    
+    @pub fn if(self: Self, const then: Fn(T, Unit)) Unit = 
         (@match(self) {
             (fn Some(t: T) Unit = then(t));
             (fn None(t: Unit) Unit = ());
-        })
-    }
+        });
     
     const _: Unit = if_opt(T, bool);
+    const _: Unit = if_opt(T, T);
     
-    @pub fn is_some(self: Self) bool = self.if(fn(_: i64) bool = true, fn() bool = false);
-    @pub fn is_none(self: Self) bool = self.if(fn(_: i64) bool = false, fn() bool = true);
+    @pub fn or(self: Self, const else: Fn(Unit, T)) T =
+        self.if(fn(t: T) T = t, fn = else());
+    
+    @pub fn unwrap(self: Self) T =
+        self.if(fn(t: T) T = t, fn = @as(T) panic("Unwrapped missing value."));
+        
+    @pub fn is_some(self: Self) bool = 
+        self.if(fn(_: T) = true, fn = false);
+    
+    // TODO: when i wrote this manually instead of calling not(): !! arg needs to be T not i64 but then stuff fails????
+    @pub fn is_none(self: Self) bool = self.is_some().not();
 
     @pub fn eq(self: Self, other: Self) bool = 
         self.if(fn(a: T) bool = {
@@ -43,13 +59,23 @@ fn Option(T: Type) Type = {
             }, fn() bool = false)
         }, fn() bool = other.is_none());
     
+    @pub fn while(const next: Fn(Unit, Self), const body: Fn(T, Unit)) Unit = {
+        // Note: this is formated a bit awkwardly because you don't want to expand next and body in multiple places. 
+        // TODO: should add an optional warning if you care about binary size for expanding the same const closure multiple times. 
+        dowhile {() bool |
+            var v = next();
+            v.if(body);
+            v.is_some()
+        };
+    }
+    
     Self
 }
 
 // TODO: it should close over T without the extra argument when put in the @comptime fn Option
 @comptime @impl
 @pub fn if_opt(I: Type, O: Type) Unit = {
-    @pub fn if(self: Option(I), const then: Fn(I, O), const else: Fn(Unit, O)) O = {
+    @pub fn if(self: ?I, const then: Fn(I, O), const else: Fn(Unit, O)) O = {
         (@match(self) {
             (fn Some(t: I) O = then(t));
             (fn None(t: Unit) O = else());
@@ -57,15 +83,46 @@ fn Option(T: Type) Type = {
     }
 }
 
+const _ = if(?*i64);
+// TODO: this sucks cause you can't @match through a pointer 
+//       and like now do i have to write pointer versions of all of them so you dont have to manually call as_ref every time? 
+@pub fn as_ref(self: *?i64) ?*i64 = {
+    let cond = self!tag[].eq(tag_value(?i64, Some!symbol));
+    if(cond, fn() ?*i64 = {
+        some(self.Some)
+    },  fn() ?*i64 = none())
+}
+
 fn test_option() Unit = {
-    let s: Option(i64) = (Some: 123);
+    var s: ?i64 = some(123);
     var a = 0;
     s.if(fn(i: i64) Unit = {
         a = i;
     });
     assert_eq(a, 123);
+    
+    var i = 0;
+    while(fn = s) { (v: i64) |
+        s = none();
+        i = i.add(1);
+    };
+    assert_eq(i, 1);
+    
+    let n: ?i64 = none();
+    let z = n.or(fn = 555);
+    assert_eq(z, 555);
+    
+    var y: ?i64 = some(10);
+    let z = y.or(fn = 555);
+    assert_eq(z, 10);
+    
+    let a = y.is_some(); // TODO: get garbage if i try to inline this !!!!
+    assert_eq(true, a);
+    y.unwrap();
+    
+    let y_ptr = y&.as_ref();
+    
 }
-
 
 @comptime 
 fn DumbMap(K: Type, V: Type) Type = {
@@ -75,47 +132,43 @@ fn DumbMap(K: Type, V: Type) Type = {
     
     @pub fn init() Self = (arr: list());
     
-    const _: Type = Option(V);
-    const _: Type = Option(*V);
-    const _: Unit = if_opt(*V, Option(V));
+    const _: Type = ?*V;
+    const _: Unit = if_opt(*V, ?V);
     
-    @pub fn insert(self: *Self, key: K, value: V) Option(V) = {
-        self.get_ptr(key).if(fn(v: *V) Option(V) = {
+    @pub fn insert(self: *Self, key: K, value: V) ?V = {
+        self.get_ptr(key).if(fn(v: *V) ?V = {
             let old = v[];
             v[] = value;
-            (Some: old)
-        }, fn() Option(V) = {
+            some(old)
+        }, fn() ?V = {
             let entry = (key, value);
             self.arr.push(entry);
-            (None: unit)
+            none()
         })
     }
 
-    @pub fn get(self: *Self, key: K) Option(V) = {
-        let found: Option(*V) = self.get_ptr(key);
+    @pub fn get(self: *Self, key: K) ?V = {
+        let found: ?*V = self.get_ptr(key);
         (@match(found) {
-            (fn Some(t: *V) Option(V) = (Some: t[]));
-            (fn None(t: Unit) Option(V) = (None: ()));
+            (fn Some(t: *V) ?V = some(t[]));
+            (fn None(t: Unit) ?V = none());
         })
     }
     
-    @pub fn get_ptr(self: *Self, key: K) Option(*V) = {
+    @pub fn get_ptr(self: *Self, key: K) ?*V = {
         var i = 0;
-        var arr = self.arr.items();
-        let count = arr&.len[];
-        var done = false;
-        var out: Option(*V) = (None: ());
-        while(fn= done.not().and(i.lt(count))) {|
-            let p: *Ty(K, V) = arr.index(i);
+        let count = self.arr.len[];
+        var out: ?*V = none();
+        dowhile {() bool |
+            let p: *Ty(K, V) = self.arr.index(i);
             let k: K = p[0][];
-            let c: bool = k.eq(key);
-            c.if {|
+            k.eq(key).if {|
                 let v = p[1];
-                out = (Some: v);
-                done = true;
+                out = some(v);
             };
             
             i = i.add(1);
+            i.lt(count).and(out.is_none())
         };
     
         out
@@ -128,12 +181,12 @@ fn DumbMap(K: Type, V: Type) Type = {
 fn test_map() Unit = {
     var m: DumbMap(i64, i64) = init();
     assert_eq(true, m&.insert(123, 456).is_none());
-    let expect: Option(i64) = (Some: 456);
+    let expect: ?i64 = some(456);
     let prev = m&.insert(123, 5);
     let same = expect.eq(prev); // TODO: when you inline this it fails but thinks right is 654. disagree about bool calling conventions maybe? 
     assert_eq(true, same);
     
-    let expect: Option(i64) = (Some: 5);
+    let expect: ?i64 = some(5);
     let prev = m&.get(123);
     let same = expect.eq(prev);
     assert_eq(true, same);

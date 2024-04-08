@@ -34,7 +34,6 @@ fn range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
     };
 }
 
-
 // TODO: return slice so the result may have more room than you asked for (which is useful for growable collections in allocators that use fixed size blocks). 
 @interp fn alloc_inner(Element: Type, count: i64) VoidPtr; 
 /// `ptr` must be exactly a slice returned by `alloc` (not a subslice of it).
@@ -59,7 +58,7 @@ fn Slice(T: Type) Type = {
     @pub fn assume(ptr: *T, len: i64) Self = (ptr: ptr, len: len);
     
     @pub fn get(self: Self, i: i64) T = {
-        // assert(lt(i, len(self)), "OOB"); // TODO: asm
+        assert(lt(i, len(self)), "OOB"); // TODO: asm
         let v: *T = index(self, i);  // TODO: fix so dont need useless binding 
         v[]
     }
@@ -135,16 +134,11 @@ fn Slice(T: Type) Type = {
     // TODO: have eq be generic and do something sane but currently its just in the vm and does addr_eq which should be a seperate thing. 
     @pub fn slice_eq(lhs: Self, rhs: Self) bool = {
         (eq(len(lhs), len(rhs)), fn() bool = {
-            (len(lhs).eq(0), fn = true, fn= {
-                var i = 0;
-                var prev = true;  // TODO: this is weird because 'and' doesn't short circuit  
-                while(fn=and(lt(i, len(lhs)), prev)) {| 
-                    prev = eq(get(lhs, i), get(rhs, i)); 
-                    i = add(i, 1); 
-                };
-                and(prev, eq(i, len(lhs)))
-            })!if
-            
+            var i = 0;
+            while(fn=i.lt(len(lhs)).and(fn = lhs.get(i).eq(rhs.get(i)))) {| 
+                i = add(i, 1); 
+            };
+            eq(i, len(lhs))
         }, fn() bool = false)!if
     }
     
@@ -189,6 +183,11 @@ fn List(T: Type) Type = {
         index(self.maybe_uninit[], i)
     }
     
+    @pub fn get(self: *Self, i: i64) T = {
+        let v: *T = self.index(i);
+        v[]
+    }
+    
     @pub fn get(self: Self, i: i64) T = {
         let ptr: *T = index(self&, i);
         ptr[]
@@ -196,16 +195,15 @@ fn List(T: Type) Type = {
     
     @pub fn reserve(self: *Self, extra: i64) Unit = {
         let total = add(self.len[], extra);
-        let old_cap: i64 = len(self.maybe_uninit[]);
-        // TODO: why can't I use @if here? 
+        let old_cap = self.maybe_uninit.len[];
         if(lt(old_cap, total)) {|
             let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
             var new: Self = list(cap);
-            (gt(self.len[], 0), fn() Unit = {  // TODO: it doesnt let you create a zero length slice in items()
+            if(self.len[].gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
                 let dest: Slice(T) = subslice(new&.maybe_uninit[], 0, self.len[]);
                 memcpy(dest, items(self));
                 new&.len[] = self.len[];
-            }, fn() Unit = ())!if;
+            };
             drop(self);
             self[] = new;
         };
@@ -280,8 +278,8 @@ fn List(T: Type) Type = {
                 push(lines&, found);
                 i = add(i, len(needle));
                 start = i;
-            }, fn() Unit = { i = add(i, 1); });
-        }, fn() Unit = { i = add(i, 1); });
+            }) {| i = add(i, 1); };
+        }) {| i = add(i, 1); };
     };
     let found: Str = subslice(haystack, start, max(0, sub(len(haystack), start)));
     push(lines&, found);
@@ -349,14 +347,11 @@ fn List(T: Type) Type = {
     var first = 0;
     
     // This prevents overflow for tracking scale for lots of leading zeros. 
-    // TODO: add a test that requires this. 
-    while(fn = eq(get(s, first), 48)) {|
-        first = add(first, 1)
-    };
-    
-    while(fn = eq(get(s, first), 48)){|
+    // TODO: add a test that requires this. lol its an insane number tho so could just not bother 
+    while(fn = first.lt(s.len()).and(fn = eq(get(s, first), 48))) {|
         first = add(first, 1) 
     };
+    
     while(fn = ge(i, first)) {|
         total = add(total, mul(scale, hex_digit(get(s, i))));
         scale = mul(scale, 16);
