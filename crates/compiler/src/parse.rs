@@ -96,6 +96,38 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
+    fn fn_def_signeture(&mut self, loc: Span) -> Res<(Option<Ident<'p>>, Pattern<'p>, LazyType<'p>)> {
+        let name = if let Symbol(i) = self.peek() {
+            self.pop();
+            // return Err(self.error_next("Fn expr must not have name".into()));
+            Some(i)
+        } else {
+            None
+        };
+        // Args are optional so you can do `if(a, fn=b, fn=c)`
+        let mut no_paren = false;
+        let mut arg = if self.maybe(LeftParen) {
+            let a = self.parse_args()?;
+            self.eat(RightParen)?;
+            a
+        } else {
+            no_paren = true;
+            Pattern::empty(loc)
+        };
+        arg.if_empty_add_unit();
+
+        let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() {
+            assert!(
+                name.is_some() || !no_paren,
+                "'fn <Expr> =' can't treat Expr as ret type. pls specify name or args."
+            );
+            LazyType::PendingEval(self.parse_expr()?)
+        } else {
+            LazyType::Infer
+        };
+        Ok((name, arg, ret))
+    }
+
     fn parse_expr_inner(&mut self) -> Res<FatExpr<'p>> {
         match self.peek() {
             // TODO: use no body as type expr?
@@ -103,28 +135,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             Fn => {
                 self.start_subexpr();
                 let loc = self.eat(Fn)?;
-                let name = if let Symbol(i) = self.peek() {
-                    self.pop();
-                    // return Err(self.error_next("Fn expr must not have name".into()));
-                    Some(i)
-                } else {
-                    None
-                };
-                // Args are optional so you can do `if(a, fn=b, fn=c)`
-                let mut arg = if self.maybe(LeftParen) {
-                    let a = self.parse_args()?;
-                    self.eat(RightParen)?;
-                    a
-                } else {
-                    Pattern::empty(loc)
-                };
-                arg.if_empty_add_unit();
-
-                let ret = if Equals != self.peek() {
-                    LazyType::PendingEval(self.parse_expr()?)
-                } else {
-                    LazyType::Infer
-                };
+                let (name, arg, ret) = self.fn_def_signeture(loc)?;
                 self.eat(Equals)?;
                 let body = self.parse_expr()?;
 
@@ -229,8 +240,25 @@ impl<'a, 'p> Parser<'a, 'p> {
                 }
                 LeftSquiggle => {
                     self.start_subexpr();
+                    self.pop(); // {
+                    let loc = self.next_span();
+                    let (name, arg, ret) = self.fn_def_signeture(loc)?;
+                    self.eat(Pipe)?;
 
-                    todo!("Trailing lambda syntax");
+                    self.start_subexpr();
+                    let callback = self.parse_block_until_squiggle()?;
+                    self.eat(RightSquiggle)?;
+
+                    let name = name.unwrap_or_else(|| {
+                        let mut name = callback.expr.log(self.pool);
+                        name.truncate(25);
+                        self.pool.intern(&name)
+                    });
+                    let callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false);
+                    let callback = self.expr(Expr::Closure(Box::new(callback)));
+
+                    self.push_arg(&mut prefix, callback)?;
+                    prefix
                 }
 
                 Bang => {
@@ -355,18 +383,12 @@ impl<'a, 'p> Parser<'a, 'p> {
             Fn => {
                 let loc = self.next_span();
                 self.eat(Fn)?;
-                let name = self.ident()?;
 
-                self.eat(LeftParen)?;
-                let mut arg = self.parse_args()?;
-                arg.if_empty_add_unit();
-                self.eat(RightParen)?;
-
-                let ret = if Equals != self.peek() && Semicolon != self.peek() {
-                    LazyType::PendingEval(self.parse_expr()?)
-                } else {
-                    LazyType::Infer
-                };
+                let (name, arg, ret) = self.fn_def_signeture(loc)?;
+                if name.is_none() {
+                    // TODO: msg in wrong place
+                    return Err(self.expected("fn expr to have name"));
+                }
 
                 let body = match self.peek() {
                     Semicolon => {
@@ -380,7 +402,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
                 };
 
-                let func = Func::new(name, arg, ret, body, loc, true);
+                let func = Func::new(name.unwrap(), arg, ret, body, loc, true);
                 Stmt::DeclFunc(func)
             }
             Qualifier(kind) => {
@@ -423,17 +445,12 @@ impl<'a, 'p> Parser<'a, 'p> {
 
                         self.start_subexpr();
                         let callback = self.parse_block_until_squiggle()?;
+                        // Note: we leave the closing squiggle because the outer code is expecting to be inside a block.
                         let name = Flag::Backpass.ident();
                         let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 
-                        if let Expr::Call(_, old_arg) = &mut call.expr {
-                            if let Expr::Tuple(parts) = &mut old_arg.expr {
-                                parts.push(callback);
-                            } else {
-                                old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
-                            }
-                        }
+                        self.push_arg(&mut call, callback)?;
                         Stmt::Eval(call)
                     }
                     _ => return Err(self.expected("';' or '<-' or '=' after declaration.")),
@@ -713,6 +730,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         self.error_next(s)
     }
 
+    /// does NOT consume the closing squiggle
     fn parse_block_until_squiggle(&mut self) -> Res<FatExpr<'p>> {
         let mut body = vec![];
         while self.peek() != RightSquiggle {
@@ -744,6 +762,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn expr_call(&mut self, prefix: FatExpr<'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
         // Dot call syntax sugar.
         if let Expr::FieldAccess(first, name) = prefix.expr {
+            // TODO: I want this to just call push_arg
             self.start_subexpr();
             let f = self.expr(Expr::GetNamed(name));
             match arg.expr {
@@ -768,5 +787,34 @@ impl<'a, 'p> Parser<'a, 'p> {
         } else {
             self.expr(Expr::Call(Box::new(prefix), Box::new(arg)))
         }
+    }
+
+    fn push_arg(&mut self, call: &mut FatExpr<'p>, callback: FatExpr<'p>) -> Res<()> {
+        if let Expr::Call(_, old_arg) = &mut call.expr {
+            match &mut old_arg.expr {
+                Expr::Tuple(parts) => parts.push(callback),
+                // Parser flattened empty tuples.
+                Expr::Value {
+                    value: Values::One(Value::Unit),
+                    ..
+                } => old_arg.expr = callback.expr,
+                _ => {
+                    old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
+                }
+            }
+        } else if let Expr::FieldAccess(first, name) = &mut call.expr {
+            // This is simpler than the version in expr_call because we already know the arg we're pushing is just a closure (not a tuple)
+            debug_assert!(matches!(callback.expr, Expr::Closure(_)));
+            self.start_subexpr();
+            self.start_subexpr();
+            self.start_subexpr();
+            let f = self.expr(Expr::GetNamed(*name));
+            let arg = self.expr(Expr::Tuple(vec![mem::take(first), callback]));
+            *call = self.expr(Expr::Call(Box::new(f), Box::new(arg)));
+        } else {
+            // TODO: message is at wrong place (end of <callback> instead of <call>)
+            return Err(self.error_next(String::from("expected call expr for backpassing/trailing lambda")));
+        }
+        Ok(())
     }
 }
