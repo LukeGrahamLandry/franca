@@ -383,7 +383,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::Tuple(values) => {
-                debug_assert!(values.len() > 1, "no trivial tuples");
+                debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
                 let mut offset = 0;
                 for value in values {
                     let slot = output.range(offset, self.slot_count(value.ty));

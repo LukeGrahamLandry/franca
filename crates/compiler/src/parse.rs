@@ -812,8 +812,10 @@ impl<'a, 'p> Parser<'a, 'p> {
             let arg = self.expr(Expr::Tuple(vec![mem::take(first), callback]));
             *call = self.expr(Expr::Call(Box::new(f), Box::new(arg)));
         } else {
-            // TODO: message is at wrong place (end of <callback> instead of <call>)
-            return Err(self.error_next(String::from("expected call expr for backpassing/trailing lambda")));
+            self.start_subexpr();
+            // It might just be a function access. like 'while {| _ } {| _ }' should be valid.
+            let f = mem::take(call);
+            *call = self.expr(Expr::Call(Box::new(f), Box::new(callback)))
         }
         Ok(())
     }

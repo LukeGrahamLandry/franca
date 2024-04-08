@@ -799,7 +799,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(());
                     } else {
-                        assert!(value.as_mut().unwrap().expr.is_raw_unit(), "var no name not unit");
+                        let e = value.as_mut().unwrap();
+                        assert!(e.expr.is_raw_unit(), "var no name not unit: {}", e.log(self.pool));
                         return Ok(());
                     }
                 }
@@ -834,6 +835,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 // Fix trivial tuples
+                binding.if_empty_add_unit();
                 if exprs.is_empty() {
                     value.expr = Expr::unit();
                 } else if exprs.len() == 1 {
@@ -2012,10 +2014,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
+        let mut unit_expr = FatExpr::synthetic(Expr::unit(), arg.loc);
         if let Expr::Tuple(parts) = arg.deref_mut() {
             let _force_inline = self.pool.intern("inline"); // TODO
-            if let Expr::Closure(_) = parts[0].deref_mut() {
-                let cond_fn = self.promote_closure(result, &mut parts[0])?;
+            if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
+                let cond_fn = cond_fn.single()?;
                 self.program[cond_fn].add_tag(Flag::Inline);
                 let cond_arg = self.infer_arg(cond_fn)?;
                 self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
@@ -2025,8 +2028,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 unwrap!(parts[0].as_fn(), "while first arg must be func not {:?}", parts[0]);
                 todo!("shouldnt get here twice")
             }
-            if let Expr::Closure(_) = parts[1].deref_mut() {
-                let body_fn = self.promote_closure(result, &mut parts[1])?;
+            if let Some(body_fn) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, Some(TypeId::unit()))? {
+                let body_fn = body_fn.single()?;
                 self.program[body_fn].add_tag(Flag::Inline);
                 let body_arg = self.infer_arg(body_fn)?;
                 self.type_check_arg(body_arg, TypeId::unit(), sig)?;
@@ -2396,7 +2399,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 value: Value::GetFn(current_fn).into(),
             };
             f_expr.ty = ty;
-
             Ok(current_fn)
         } else {
             if let Structured::Const(ty, values) = arg_val {
@@ -2454,7 +2456,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let arg_ty = self.program.tuple_of(skipped_types);
                     debug_assert_ne!(current_fn, original_f);
                     if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
-                        if v.len() == 1 {
+                        if v.is_empty() {
+                            // Note: this started being required when I added fn while.
+                            arg_expr.expr = Expr::unit();
+                        } else if v.len() == 1 {
                             *arg_expr = mem::take(v.iter_mut().next().unwrap());
                         }
                     }
