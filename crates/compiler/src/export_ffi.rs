@@ -52,6 +52,10 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn close(fd: Fd) i32", libc::close as *const u8),
     ("@env fn rand() i32", libc::rand as *const u8),
     ("@env fn get_errno() i32", get_errno as *const u8),
+    ("@env fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
+    ("@env fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
+    ("@env fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
+    ("@env fn c_puts(s: CStr) i64", libc::puts as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[
@@ -95,6 +99,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::O_RDWR
             )
             .unwrap();
+            writeln!(out, "@pub const DlHandle = VoidPtr; @pub const CStr = Ptr(i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
             }

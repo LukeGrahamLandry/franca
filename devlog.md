@@ -1,3 +1,15 @@
+## Planning a Linker
+
+- calls
+- jump tables for switch stmts
+- function pointers
+- const vtables
+- imports
+- global vars
+- extern globals
+
+> Note: qbe doesn't give thread-safe vibes. There's a lot of static vars. Probably part of why they don't distribute as a lib.
+
 ## new test runner (Apr 6)
 
 at first i wrote a dumb serial one which was fine but 3x slower than cargo test.

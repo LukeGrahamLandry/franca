@@ -1124,6 +1124,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             Value::Symbol(i.0)
                         } else if let Expr::GetVar(v) = arg.deref_mut().deref_mut() {
                             Value::Symbol(v.0 .0)
+                        } else if let Expr::String(i) = arg.deref_mut().deref_mut() {
+                            Value::Symbol(i.0)
                         } else {
                             ice!("Expected identifier found {arg:?}")
                         };

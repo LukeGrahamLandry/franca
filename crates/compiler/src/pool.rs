@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, mem, sync::RwLock};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, marker::PhantomData, mem, slice, sync::RwLock};
 
 use crate::{ast::Flag, bc::Value, ffi::InterpSend};
 
@@ -62,9 +62,12 @@ impl<'pool> StringPool<'pool> {
             return *i;
         }
 
-        let alloc = s.to_owned();
-        let alloc: Box<str> = Box::from(alloc);
-        let alloc = Ptr(Box::into_raw(alloc));
+        let mut alloc = s.to_owned().into_bytes();
+        alloc.push(0); // might as well make it a c string since have to reallocate anyway
+
+        let alloc: Box<[u8]> = alloc.into_boxed_slice();
+        let alloc = Box::into_raw(alloc);
+        let alloc = Ptr( unsafe {&mut(*alloc)[..alloc.len()-1]} as *mut [u8] as *mut str);
 
         // Delay taking this lock as long as possible to not block calls to get().
         let mut values = self.values.write().unwrap();
@@ -82,7 +85,10 @@ impl Drop for StringPool<'_> {
             // # Safety
             // Drop can only be called once.
             unsafe {
-                drop(Box::from_raw(s.0));
+                let s = s.0 as *mut [u8];
+                let s = slice::from_raw_parts_mut(s.as_mut_ptr(), s.len() + 1) as *mut [u8]; // it was a c string
+
+                drop(Box::from_raw(s));
             }
         }
     }
