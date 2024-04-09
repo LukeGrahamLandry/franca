@@ -58,23 +58,23 @@ fn Slice(T: Type) Type = {
     @pub fn assume(ptr: *T, len: i64) Self = (ptr: ptr, len: len);
     
     @pub fn get(self: Self, i: i64) T = {
-        assert(lt(i, len(self)), "OOB"); // TODO: asm
         let v: *T = index(self, i);  // TODO: fix so dont need useless binding 
         v[]
     }
     
     @pub fn index(self: Self, i: i64) *T = {
-        // assert(lt(i, len(self)), "OOB"); // TODO: asm
-        var s: Self = subslice(self, i, 1);
+        var s = subslice(self, i, 1);
         s&.ptr[]
     }
     
     @pub fn set(self: Self, i: i64, v: T) Unit = {
-        assert(lt(i, len(self)), "OOB");
         index(self, i)[] = v
     }
     
     @pub fn slice(self: Self, first: i64, past_last: i64) Self = {
+        // TODO: first should be lt
+        // TODO: its sad that im doing double bounds check in common case where its just index()
+        assert(first.le(self.len()).and(past_last.le(self.len())), "OOB"); 
         const slots = size_of(T);
         let raw_first = mul(first, slots);
         let raw_past_last = mul(past_last, slots);
@@ -86,7 +86,6 @@ fn Slice(T: Type) Type = {
     @pub fn subslice(ptr: Self, first: i64, count: i64) Self = {
         slice(ptr, first, add(first, count))
     }
-    
     
     @pub fn rest(self: Self, first: i64) Self = {
         slice(self, first, self.len())
@@ -116,19 +115,16 @@ fn Slice(T: Type) Type = {
         var i = 0;
         let l: i64 = len(arr);
         while(fn() bool = lt(i, l)) {|
-            let e: *T = index(arr, i);
-            f(e);
+            f(arr.index(i));
             i = add(i, 1);
         };
     }
     
     @pub fn memcpy(dest: Self, src: Self) Unit = {
         assert(eq(len(dest), len(src)), "OOB");  // Note: not using `asser t_eq` because the vm tracks those for my tests
-        // TODO: vm doesnt like empty slices? it should work without the zero check
-        if(len(src).ne(0)) {|
-            const f = fn(i: i64, e: *T) Unit = set(dest, i, e[]);
-            enumerate(src, f);
-        };
+        // TODO: sad that this does the bounds check every iteration but a real optimiser would fix it for me anyway so meh. 
+        const f = fn(i: i64, e: *T) Unit = set(dest, i, e[]);
+        enumerate(src, f);
     }
     
     // TODO: have eq be generic and do something sane but currently its just in the vm and does addr_eq which should be a seperate thing. 
@@ -155,7 +151,7 @@ fn Slice(T: Type) Type = {
 @impl @pub @comptime
 fn List(T: Type) Type = {
     const T = T;
-    const Self: Type = (maybe_uninit: Slice(T), len: i64)!struct;
+    const Self: Type = (maybe_uninit: Slice$T, len: i64)!struct;
     @pub fn list(cap: i64) Self = { 
         let ptr: VoidPtr = alloc(T, cap);
         (maybe_uninit: (ptr: ptr, len: cap), len: 0)  // todo: no alloc if len 0 since i dont free
@@ -169,13 +165,13 @@ fn List(T: Type) Type = {
     }
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
-    @pub fn list_clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
+    @pub fn list_clone(from: Slice$T) Self = {  // TODO: better error message if you put the = on the wrong side of the type
         var self: Self = list(len(from));
         push_all(self&, from);
         self
     }
     
-    @pub fn items(self: *Self) Slice(T) = {
+    @pub fn items(self: *Self) Slice$T = {
         slice(self.maybe_uninit[], 0, self.len[])
     }
     
@@ -197,10 +193,10 @@ fn List(T: Type) Type = {
         let total = add(self.len[], extra);
         let old_cap = self.maybe_uninit.len[];
         if(lt(old_cap, total)) {|
-            let cap = max(max(add(old_cap, extra), mul(old_cap, 2)), 4);
+            let cap = 4.max$ old_cap.add(extra).max$ old_cap.mul(2);
             var new: Self = list(cap);
             if(self.len[].gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
-                let dest: Slice(T) = subslice(new&.maybe_uninit[], 0, self.len[]);
+                let dest: Slice$T = subslice(new&.maybe_uninit[], 0, self.len[]);
                 memcpy(dest, items(self));
                 new&.len[] = self.len[];
             };
@@ -211,7 +207,7 @@ fn List(T: Type) Type = {
     
     @pub fn push(self: *Self, v: T) Unit = {
         reserve(self, 1);
-        let last: *T = index(self.maybe_uninit[], self.len[]); 
+        let last = self.maybe_uninit[].index(self.len[]); 
         last[] = v;
         self.len[] = add(self.len[], 1);
     }
@@ -219,14 +215,13 @@ fn List(T: Type) Type = {
     @pub fn pop_last(self: *Self) T = {
         assert(gt(self.len[], 0), "OOB");
         let i = sub(self.len[], 1);
-        let e: *T = index(self.maybe_uninit[], i);
         self.len[] = i;
-        e[]
+        self.maybe_uninit[].get(i)
     }
     
-    @pub fn push_all(self: *Self, new: Slice(T)) Unit = {
+    @pub fn push_all(self: *Self, new: Slice$T) Unit = {
         reserve(self, len(new));
-        let dest: Slice(T) = subslice(self.maybe_uninit[], self.len[], len(new));
+        let dest = subslice(self.maybe_uninit[], self.len[], len(new));
         memcpy(dest, new);
         self.len[] = add(self.len[], len(new));
     }
@@ -258,31 +253,32 @@ fn List(T: Type) Type = {
 
 // TODO: this is really inefficient if you already own 'a'
 @pub fn concat(a: Str, b: Str) Str = {
-    var c: List(i64) = list(add(len(a), len(b)));
+    var c: List(i64) = list$ a.len().add(b.len());
     c&.push_all(a);
     c&.push_all(b);
     c&.items()
 }
 
 @pub fn split(haystack: Str, needle: Str) List(Str) = {
-    assert(gt(len(needle), 0), "OOB");
-    var lines: List(Str) = list(1);
+    assert(needle.len().gt(0), "OOB");
+    var lines: List$Str = list$1;
     var i = 0;
     let last = sub(len(haystack), len(needle));
     var start = 0;
+    // TODO: !! should be lt maybe?
     while(fn = le(i, last)) {|
         if(eq(get(haystack, i), get(needle, 0)), fn() Unit = {
-            let check: Str = subslice(haystack, i, len(needle));
+            let check = subslice(haystack, i, len(needle));
             if(slice_eq(check, needle), fn() Unit = {
-                let found: Str = subslice(haystack, start, sub(i, start));
+                let found = subslice(haystack, start, i.sub(start));
                 push(lines&, found);
                 i = add(i, len(needle));
                 start = i;
             }) {| i = add(i, 1); };
         }) {| i = add(i, 1); };
     };
-    let found: Str = subslice(haystack, start, max(0, sub(len(haystack), start)));
-    push(lines&, found);
+    let found = subslice(haystack, start, max(0, sub(len(haystack), start)));
+    lines&.push(found);
     lines
 }
 
@@ -305,8 +301,7 @@ fn List(T: Type) Type = {
 
 // TODO: these should just be on Slice(T)
 @pub fn startswith(haystack: Str, needle: Str) bool = {
-    if(lt(len(haystack), len(needle)),
-        fn() bool = false,
+    if(lt(len(haystack), len(needle)), fn = false,
         fn() bool = {
             let start: Str = subslice(haystack, 0, len(needle));  // TODO: infer type
             slice_eq(start, needle)
@@ -343,7 +338,7 @@ fn List(T: Type) Type = {
 @pub fn hex(s: Str) i64 = {
     var total = 0;
     var scale = 1;
-    var i = sub(len(s), 1);
+    var i = s.len().sub(1);
     var first = 0;
     
     // This prevents overflow for tracking scale for lots of leading zeros. 
@@ -360,9 +355,8 @@ fn List(T: Type) Type = {
     total
 }
 
-@pub fn multi_puts(s: Slice(Str)) Unit = {
-    const one = fn(s: Ptr(Str)) Unit = puts(s[]);
-    foreach(s, one);
+@pub fn multi_puts(s: Slice$Str) Unit = {
+    foreach(s) {(s: *Str)| puts(s[]); };
 }
 
 // TODO: this is stupid. i have a whole house of cards going on with unique types. 
@@ -373,7 +367,7 @@ fn List(T: Type) Type = {
 
 // See `puts(Str)` or `e!reflect_print` for something more useful. TODO: make this generic.
 @pub @env fn print(i: i64) Unit = {
-    var s: Str = str(i);  // TODO: dont treat missing type annotation as Any. actually infer it
+    var s = str(i);
     puts(s&.ptr[], s&.len[]);
 }
 
@@ -381,14 +375,14 @@ fn List(T: Type) Type = {
 @pub @interp fn str(s: Symbol) Str;
 
 @pub fn str(s: ""!type) Str = {  // TODO: god damn bro
-    let ptr: Ptr(Ptr(i64)) = s&[0];
-    let len: Ptr(i64) = s&[1];
+    let ptr: **i64 = s&[0];
+    let len = s&[1];
     slice(ptr[], len[])
 };
 
 @pub fn str(s: Str) ""!type = {  // TODO: god damn bro
-    let ptr: Ptr(Ptr(i64)) = s&[0];
-    let len: Ptr(i64) = s&[1];
+    let ptr: **i64 = s&[0];
+    let len = s&[1];
     (ptr[], len[])
 };
 

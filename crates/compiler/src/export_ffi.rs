@@ -63,10 +63,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: Type, __: Type) Unit", assert_equ32 as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_equ32 as *const u8), // TODO: subtyping
-    (
-        "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
-        resolve_backtrace_symbol as *const u8,
-    ),
     ("fn print_int(v: i64) Unit", print_int as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
@@ -77,6 +73,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
     ("@no_interp fn sym_to_str(s: Symbol) Str", symbol_to_str as *const u8),
     ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
+    (
+        "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
+        resolve_backtrace_symbol as *const u8,
+    ),
 ];
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);

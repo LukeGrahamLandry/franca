@@ -621,6 +621,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
 
         // This fixes interp poison debug err when loop only runs once.
+        result.slot_is_var.set(output.single().0); // TODO: just don't even do any of this shit with Unit. this is for ssa
         result.push(Bc::LoadConstant {
             slot: output.single(),
             value: Value::Unit,

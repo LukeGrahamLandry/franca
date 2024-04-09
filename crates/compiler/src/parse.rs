@@ -80,29 +80,24 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
         match self.peek() {
-            Star => {
-                self.eat(Star)?;
-                self.start_subexpr();
-                self.start_subexpr();
-                let ptr = self.pool.intern("Ptr"); // AAAA Flag:: auto lowercases it.
-                let ptr = self.expr(Expr::GetNamed(ptr));
-                let inner = self.parse_expr()?;
-                Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
-            }
-            Question => {
-                self.eat(Question)?;
-                self.start_subexpr();
-                self.start_subexpr();
-                let ptr = self.pool.intern("Option"); // AAAA Flag:: auto lowercases it.
-                let ptr = self.expr(Expr::GetNamed(ptr));
-                let inner = self.parse_expr()?;
-                Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
-            }
+            Star => self.prefix_operator(Star, Flag::Operator_Star_Prefix),
+            Question => self.prefix_operator(Question, Flag::Operator_Question_Prefix),
+            // UpArrow => self.prefix_operator(UpArrow, Flag::Operator_Up_Arrow_Prefix),
+            // Amp => self.prefix_operator(Amp, Flag::Operator_Ampersand_Prefix),
             _ => {
                 let prefix = self.parse_expr_inner()?;
                 self.maybe_parse_suffix(prefix)
             }
         }
+    }
+
+    fn prefix_operator(&mut self, tok: TokenType, op: Flag) -> Res<FatExpr<'p>> {
+        self.eat(tok)?;
+        self.start_subexpr();
+        self.start_subexpr();
+        let ptr = self.expr(Expr::GetNamed(op.ident()));
+        let inner = self.parse_expr()?;
+        Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
     }
 
     fn fn_def_signeture(&mut self, loc: Span) -> Res<(Option<Ident<'p>>, Pattern<'p>, LazyType<'p>)> {
@@ -245,6 +240,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                 LeftParen => {
                     self.start_subexpr();
                     let arg = self.parse_tuple()?;
+                    self.expr_call(prefix, arg)
+                }
+                Dollar => {
+                    self.start_subexpr();
+                    self.eat(Dollar)?;
+                    let arg = self.parse_expr()?;
                     self.expr_call(prefix, arg)
                 }
                 LeftSquiggle => {

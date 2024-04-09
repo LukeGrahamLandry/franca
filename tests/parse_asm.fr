@@ -23,13 +23,13 @@ _c_add:                                 ; @c_add
 @pub fn none() Unit = unit;
 @pub fn some() Unit = unit;
 
+
 @comptime
 fn Option(T: Type) Type = {
     const Self: Type = (Some: T, None: Unit)!enum;
     
     @pub fn none() Self = (None: ());
     @pub fn some(t: T) Self = (Some: t);
-    
     
     @pub fn if(self: Self, const then: Fn(T, Unit)) Unit = 
         (@match(self) {
@@ -46,8 +46,7 @@ fn Option(T: Type) Type = {
     @pub fn unwrap(self: Self) T =
         self.if(fn(t: T) T = t, fn = @as(T) panic("Unwrapped missing value."));
         
-    @pub fn is_some(self: Self) bool = 
-        self.if(fn(_: T) = true, fn = false);
+    @pub fn is_some(self: Self) bool = self&!tag[].eq(tag_value(Self, Some!symbol));
     
     // TODO: when i wrote this manually instead of calling not(): !! arg needs to be T not i64 but then stuff fails????
     @pub fn is_none(self: Self) bool = self.is_some().not();
@@ -56,8 +55,8 @@ fn Option(T: Type) Type = {
         self.if(fn(a: T) bool = {
             other.if(fn(b: T) bool = {
                 a.eq(b)
-            }, fn() bool = false)
-        }, fn() bool = other.is_none());
+            }, fn = false)
+        }, fn = other.is_none());
     
     @pub fn while(const next: Fn(Unit, Self), const body: Fn(T, Unit)) Unit = {
         // Note: this is formated a bit awkwardly because you don't want to expand next and body in multiple places. 
@@ -72,13 +71,16 @@ fn Option(T: Type) Type = {
     Self
 }
 
+@comptime
+@pub fn operator_question_prefix(T: Type) Type = Option(T);
+
 // TODO: it should close over T without the extra argument when put in the @comptime fn Option
 @comptime @impl
 @pub fn if_opt(I: Type, O: Type) Unit = {
     @pub fn if(self: ?I, const then: Fn(I, O), const else: Fn(Unit, O)) O = {
         (@match(self) {
-            (fn Some(t: I) O = then(t));
-            (fn None(t: Unit) O = else());
+            (fn Some(t: I) O = then$t);
+            (fn None(t: Unit) O = else()); // TODO: allow no arg name in match macro. 
         })
     }
 }
@@ -89,7 +91,7 @@ const _ = if(?*i64);
 @pub fn as_ref(self: *?i64) ?*i64 = {
     let cond = self!tag[].eq(tag_value(?i64, Some!symbol));
     if(cond, fn() ?*i64 = {
-        some(self.Some)
+        some$self.Some
     },  fn() ?*i64 = none())
 }
 
@@ -142,15 +144,15 @@ fn DumbMap(K: Type, V: Type) Type = {
             some(old)
         }, fn() ?V = {
             let entry = (key, value);
-            self.arr.push(entry);
+            self.arr.push$entry;
             none()
         })
     }
 
     @pub fn get(self: *Self, key: K) ?V = {
-        let found: ?*V = self.get_ptr(key);
+        let found: ?*V = self.get_ptr$key;
         (@match(found) {
-            (fn Some(t: *V) ?V = some(t[]));
+            (fn Some(t: *V) ?V = some$t[]);
             (fn None(t: Unit) ?V = none());
         })
     }
@@ -159,16 +161,18 @@ fn DumbMap(K: Type, V: Type) Type = {
         var i = 0;
         let count = self.arr.len[];
         var out: ?*V = none();
-        dowhile {() bool |
-            let p: *Ty(K, V) = self.arr.index(i);
-            let k: K = p[0][];
-            k.eq(key).if {|
-                let v = p[1];
-                out = some(v);
+        count.ne(0).if {|
+            dowhile {() bool |
+                let p: *Ty(K, V) = self.arr.index$i;
+                let k: K = p[0][];
+                k.eq(key).if {|
+                    let v = p[1];
+                    out = some$v;
+                };
+                
+                i = i.add(1);
+                i.lt(count).and(out.is_none())
             };
-            
-            i = i.add(1);
-            i.lt(count).and(out.is_none())
         };
     
         out
@@ -186,7 +190,7 @@ fn test_map() Unit = {
     let same = expect.eq(prev); // TODO: when you inline this it fails but thinks right is 654. disagree about bool calling conventions maybe? 
     assert_eq(true, same);
     
-    let expect: ?i64 = some(5);
+    let expect: ?i64 = some$5;
     let prev = m&.get(123);
     let same = expect.eq(prev);
     assert_eq(true, same);
@@ -207,7 +211,7 @@ fn main(c: i64) i64 = {
     
     /*
     var asm: AsmFile = (
-        src: "".str(),
+        src: str$"",
         blocks: init(),
     );
     asm&.blocks.insert(t!symbol, 123);

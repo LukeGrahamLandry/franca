@@ -298,7 +298,7 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
     assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");
     // std::io::stdout().write_all(&[27]).unwrap();
     // print!("[38;2;{};{};{}m", 0, 255, 0);
-    // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
+    println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
     // std::io::stdout().write_all(&[27]).unwrap();
     // print!("[0m");
     exit(0);

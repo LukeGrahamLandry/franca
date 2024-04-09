@@ -1643,6 +1643,10 @@ pub enum Flag {
     Unreachable,
     Rt,
     Test,
+    Operator_Star_Prefix,
+    Operator_Question_Prefix,
+    Operator_Up_Arrow_Prefix,
+    Operator_Ampersand_Prefix,
     _Reserved_Count_,
 }
 
