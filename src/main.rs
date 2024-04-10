@@ -195,7 +195,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
 }
 
 /// This is the thing we exec.
-fn actually_run_it(name: String, src: String, assertion_count: usize, arch: TargetArch) -> ! {
+fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) -> ! {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
@@ -233,7 +233,7 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
             let mut interp: Interp = comp.runtime_executor.to_interp().unwrap();
             let mut asm = BcToAsm::new(&mut interp.ready, &mut program);
             asm.asm.reserve(asm.program.funcs.len());
-            if let Err(e) = asm.compile(f) {
+            if let Err(_e) = asm.compile(f) {
                 // log_err(&comp, e, None);
                 exit(1);
             }
@@ -264,13 +264,13 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
             let mut interp = comp.runtime_executor.to_interp().unwrap();
             let mut asm = BcToLlvm::new(&mut interp, &mut program);
 
-            if let Err(e) = asm.compile(f) {
+            if let Err(_e) = asm.compile(f) {
                 // TODO: make logerr just take program so i can actually call it
                 // log_err(&comp, e, None);
                 exit(1);
             }
 
-            if let Err(e) = verify_module(asm.llvm.module) {
+            if let Err(_e) = verify_module(asm.llvm.module) {
                 // log_err(&comp, e, None);
                 exit(1);
             }
@@ -284,20 +284,16 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
             (Ok(Value::I64(res).into()), &mut program)
         }
     };
-    if let Err(e) = result {
+    if let Err(_e) = result {
         // log_err(&comp, e, None);
         exit(1);
     }
     let result = result.unwrap();
     let end = timestamp();
-    let seconds = end - start;
+    let _seconds = end - start;
     debug_assert_eq!(result, arg.into());
 
     assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");
-    // std::io::stdout().write_all(&[27]).unwrap();
-    // print!("[38;2;{};{};{}m", 0, 255, 0);
-    println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
-    // std::io::stdout().write_all(&[27]).unwrap();
-    // print!("[0m");
+    // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
     exit(0);
 }

@@ -319,15 +319,15 @@ impl<'p> Program<'p> {
             }
         }
 
-        out += "=======================================\n\n\n\n";
-        out += "=======================================\n\n\n\n";
-        for i in 0..self.funcs.len() {
-            out += "=======================================\n\n\n\n";
-            let func = &self.funcs[i];
-            if func.body.is_some() {
-                log_one(&mut out, FuncId(i), func);
-            }
-        }
+        // out += "=======================================\n\n\n\n";
+        // out += "=======================================\n\n\n\n";
+        // for i in 0..self.funcs.len() {
+        //     out += "=======================================\n\n\n\n";
+        //     let func = &self.funcs[i];
+        //     if func.body.is_some() {
+        //         log_one(&mut out, FuncId(i), func);
+        //     }
+        // }
 
         out
     }

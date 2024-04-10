@@ -16,7 +16,7 @@ use crate::logging::{unwrap, PoolLog};
 use crate::outln;
 use crate::{assert, assert_eq, err, logln};
 use crate::{
-    ast::{FnType, FuncId, Program, TypeId, TypeInfo},
+    ast::{FuncId, Program, TypeId, TypeInfo},
     export_ffi,
     pool::{Ident, StringPool},
 };
@@ -446,15 +446,6 @@ impl<'p> Interp<'p> {
                 let result = range.iter().all(|v| v == &Value::Poison);
                 Value::Bool(result).into()
             }
-            "size_of" => {
-                let ty = program.to_type(arg)?;
-                let stride = self.size_of(program, ty);
-                Value::I64(stride as i64).into()
-            }
-            "is_oob_stack" => {
-                let addr = arg.to_stack_addr()?;
-                Value::Bool(addr.first.0 >= self.value_stack.len()).into()
-            }
             "raw_slice" => {
                 // last is not included
                 let (addr, new_first, new_last) = arg.to_triple()?;
@@ -528,40 +519,16 @@ impl<'p> Interp<'p> {
                 let _ = unsafe { Box::from_raw(ptr) };
                 Value::Unit.into()
             }
-            "print" => {
-                outln!(ShowPrint, "{:?}", arg);
-                Value::Unit.into()
-            }
             "reflect_print" => {
                 outln!(ShowPrint, "=== start print ===");
                 self.reflect_print(arg, 0)?;
                 outln!(ShowPrint, "=== end print ===");
                 Value::Unit.into()
             }
-            "Fn" => {
-                // println!("Fn: {:?}", arg);
-                let (arg, ret) = arg.to_pair()?;
-                let (arg, ret) = (program.to_type(arg.into())?, program.to_type(ret.into())?);
-                let ty = program.intern_type(TypeInfo::Fn(FnType { arg, ret }));
-                // println!("=> {}", self.program.log_type(ty));
-                Value::Type(ty).into()
-            }
-            "FnPtr" => {
-                // println!("Fn: {:?}", arg);
-                let (arg, ret) = arg.to_pair()?;
-                let (arg, ret) = (program.to_type(arg.into())?, program.to_type(ret.into())?);
-                let ty = program.intern_type(TypeInfo::FnPtr(FnType { arg, ret }));
-                // println!("=> {}", self.program.log_type(ty));
-                Value::Type(ty).into()
-            }
-            // TODO: remove. make sure tuple syntax always works first tho.
-            "Ty" => {
-                if let Values::One(Value::Type(ty)) = arg {
-                    assert!(false, "Ty arg should be tuple of types not type {:?}", program.log_type(ty));
-                }
-                // print!("Ty: {:?}", arg);
-                let ty = program.to_type(arg)?;
-                // println!(" => {:?}", self.program.log_type(ty));
+            "IntType" => {
+                let (bit_count, signed) = arg.to_pair()?;
+                let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
+                let ty = program.intern_type(TypeInfo::Int(crate::ast::IntTypeInfo { bit_count, signed }));
                 Value::Type(ty).into()
             }
             "system" => {
@@ -598,12 +565,6 @@ impl<'p> Interp<'p> {
                 let args: Vec<_> = args.collect();
                 args.serialize_one()
             }
-            "IntType" => {
-                let (bit_count, signed) = arg.to_pair()?;
-                let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
-                let ty = program.intern_type(TypeInfo::Int(crate::ast::IntType { bit_count, signed }));
-                Value::Type(ty).into()
-            }
             "clone_const" => {
                 let (ptr, first, count) = arg.to_heap_ptr()?;
                 let ptr = unsafe { &mut *ptr };
@@ -626,6 +587,7 @@ impl<'p> Interp<'p> {
                 Values::Many(vec![Value::I64(map as i64), Value::I64(code as i64)])
             }
             "literal_ast" => {
+                // TODO: I think i caved and made Exec::deref_ptr_pls after I made this, so use that instead?
                 let (ty, ptr) = arg.to_pair()?;
                 let val = self.deref_ptr(ptr)?;
                 let mut v = val.vec();
@@ -991,15 +953,6 @@ impl<'p> Values {
         let values = self.to_seq()?;
         assert_eq!(values.len(), 2, "arity {:?}", values);
         Ok((values[0], values[1]))
-    }
-
-    #[track_caller]
-    fn to_stack_addr(self) -> Res<'p, StackAbsoluteRange> {
-        if let Values::One(Value::InterpAbsStackAddr(r)) = self {
-            Ok(r)
-        } else {
-            err!(CErr::TypeError("StackAddr", self))
-        }
     }
 
     fn to_heap_ptr(self) -> Res<'p, (*mut InterpBox, usize, usize)> {

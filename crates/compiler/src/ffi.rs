@@ -573,7 +573,7 @@ pub mod c {
     use libc::c_void;
     use libffi::middle::{Arg, Type};
 
-    use crate::ast::IntType;
+    use crate::ast::IntTypeInfo;
     use crate::err;
     use crate::ffi::InterpSend;
     use crate::pool::Ident;
@@ -641,7 +641,7 @@ pub mod c {
         if f_ty.ret != TypeId::unit() {
             b = b.res(program.as_c_type(f_ty.ret)?)
         }
-        let int32 = program.find_interned(TypeInfo::Int(IntType { bit_count: 32, signed: true }));
+        let int32 = program.find_interned(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true }));
         let sym = *program.ffi_types.get(&Ident::get_type_key()).unwrap();
 
         if comp_ctx {

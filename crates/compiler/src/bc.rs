@@ -353,7 +353,7 @@ impl<'p> Constants<'p> {
     pub fn add_all(&mut self, other: &Self) {
         debug_assert!(self.is_valid && other.is_valid);
         for (k, v) in other.local.iter() {
-            let prev = self.local.insert(*k, v.clone());
+            let _prev = self.local.insert(*k, v.clone());
             // TODO: this seems like a problem
             // assert!(prev.is_none() || prev.as_ref().unwrap() == v, "{:?} = {:?} -> {:?}", k, prev.unwrap(), v);
         }

@@ -95,10 +95,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
 
         self.push_scope(true);
-        self.resolve_func(stmts);
+        self.resolve_func(stmts)?;
         let (_globals, _captured_imports) = self.pop_scope();
         let (_imports, outer_captures) = self.pop_scope();
-        assert!(outer_captures.unwrap().is_empty(), "unreachable?");
+        let outer_captures = outer_captures.expect("well formed blocks (ICE)");
+        assert!(outer_captures.is_empty(), "unreachable? {:?}", outer_captures);
         assert!(self.compiler.program[current].exports.is_empty());
         for var in &self.exports {
             self.compiler.program[current].exports.insert(var.0, *var);
@@ -106,16 +107,16 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         Ok(())
     }
 
-    fn resolve_func(&mut self, func: &mut Func<'p>) {
+    fn resolve_func(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
         self.local_constants.push(Default::default());
         self.push_scope(true);
         for b in &mut func.arg.bindings {
-            self.resolve_binding(b, true, func.loc);
+            self.resolve_binding(b, true, func.loc)?;
         }
         self.walk_ty(&mut func.ret);
         self.push_scope(false);
         if let Some(body) = &mut func.body {
-            self.resolve_expr(body)
+            self.resolve_expr(body)?;
         }
         let (outer_locals, _) = self.pop_scope();
         assert!(outer_locals.is_empty(), "function needs block");
@@ -139,16 +140,17 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         func.local_constants.extend(self.local_constants.pop().unwrap());
 
         outln!(Scope, "{}", func.log_captures(self.pool));
+        Ok(())
     }
 
-    fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) {
+    fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         debug_assert_eq!(self.next_var, self.compiler.program.vars.len());
         let loc = stmt.loc;
         self.last_loc = loc;
         let mut public = false;
         for a in &mut stmt.annotations {
             if let Some(args) = &mut a.args {
-                self.resolve_expr(args)
+                self.resolve_expr(args)?
             }
             if a.name == Flag::Pub.ident() {
                 public = true;
@@ -161,7 +163,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::DeclNamed { name, ty, value, kind } => {
                 self.walk_ty(ty);
                 if let Some(value) = value {
-                    self.resolve_expr(value);
+                    self.resolve_expr(value)?;
                 }
                 let new = self.decl_var(name);
                 self.compiler.program.vars.push(VarInfo { kind: *kind, loc });
@@ -172,6 +174,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     kind: *kind,
                 };
                 if *kind == VarType::Const {
+                    if self.scopes.last().unwrap().iter().filter(|v| v.0 == *name).count() != 1 {
+                        // TODO: show other declaration site.
+                        // TODO: different rules for const _ = e;? or better to express that idea as @comptime(e);
+                        err!(
+                            "Constants (will be) order independent, so cannot shadow in the same scope: {}",
+                            self.pool.get(*name)
+                        )
+                    }
                     self.local_constants
                         .last_mut()
                         .unwrap()
@@ -185,11 +195,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 }
             }
             Stmt::Set { place, value } => {
-                self.resolve_expr(place);
-                self.resolve_expr(value);
+                self.resolve_expr(place)?;
+                self.resolve_expr(value)?;
             }
             Stmt::Noop => {}
-            Stmt::Eval(e) => self.resolve_expr(e),
+            Stmt::Eval(e) => self.resolve_expr(e)?,
             Stmt::DeclFunc(func) => {
                 if func.referencable_name {
                     // Functions don't shadow, they just add to an overload group.
@@ -205,6 +215,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                             kind: VarType::Const,
                             loc: func.loc,
                         });
+
+                        if self.scopes.last().unwrap().iter().filter(|v| v.0 == func.name).count() != 1 {
+                            // TODO: show other declaration site.
+                            err!(
+                                "Constants (will be) order independent, so cannot shadow in the same scope: {}",
+                                self.pool.get(func.name)
+                            )
+                        }
                         v
                     };
                     if public {
@@ -212,7 +230,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     }
                 }
                 func.annotations = aaa;
-                self.resolve_func(func);
+                self.resolve_func(func)?;
                 self.local_constants
                     .last_mut()
                     .unwrap()
@@ -224,49 +242,50 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::DeclVarPattern { binding, value } => {
                 // TODO: this isnt actually tested because only the backend makes these
                 if let Some(value) = value {
-                    self.resolve_expr(value);
+                    self.resolve_expr(value)?;
                 }
                 for b in &mut binding.bindings {
-                    self.resolve_binding(b, true, loc);
+                    self.resolve_binding(b, true, loc)?;
                 }
             }
         }
+        Ok(())
     }
 
     // TODO: this could use walk_whatever()
-    fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn resolve_expr(&mut self, expr: &mut FatExpr<'p>) -> Res<'p, ()> {
         let loc = expr.loc;
         self.last_loc = loc;
         match expr.deref_mut() {
             Expr::WipFunc(_) => unreachable!(),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
-                self.resolve_expr(fst);
-                self.resolve_expr(snd);
+                self.resolve_expr(fst)?;
+                self.resolve_expr(snd)?;
             }
             Expr::PrefixMacro { name, arg, target } => {
                 if let Some(var) = self.find_var(&name.0) {
                     *name = var;
                 }
-                self.resolve_expr(arg);
-                self.resolve_expr(target);
+                self.resolve_expr(arg)?;
+                self.resolve_expr(target)?;
             }
             Expr::Block { body, result, locals } => {
                 assert!(locals.is_none());
                 self.push_scope(false);
                 for stmt in body {
-                    self.resolve_stmt(stmt);
+                    self.resolve_stmt(stmt)?;
                 }
-                self.resolve_expr(result);
+                self.resolve_expr(result)?;
                 let (vars, _) = self.pop_scope();
                 *locals = Some(vars);
             }
             Expr::Tuple(values) => {
                 for value in values {
-                    self.resolve_expr(value);
+                    self.resolve_expr(value)?;
                 }
             }
-            Expr::SuffixMacro(_, e) => self.resolve_expr(e),
-            Expr::Closure(func) => self.resolve_func(func),
+            Expr::SuffixMacro(_, e) => self.resolve_expr(e)?,
+            Expr::Closure(func) => self.resolve_func(func)?,
             Expr::Value { .. } => {}
             Expr::GetNamed(name) => {
                 if let Some(var) = self.find_var(name) {
@@ -275,16 +294,17 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 // else it might be a global, like a function with overloading, or undeclared. We'll find out later.
             }
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
-            Expr::FieldAccess(e, _) => self.resolve_expr(e),
+            Expr::FieldAccess(e, _) => self.resolve_expr(e)?,
             Expr::StructLiteralP(p) => {
                 self.push_scope(false);
                 for b in &mut p.bindings {
-                    self.resolve_binding(b, true, loc)
+                    self.resolve_binding(b, true, loc)?;
                 }
                 let _ = self.pop_scope();
             }
             Expr::String(_) => {}
         }
+        Ok(())
     }
 
     fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
@@ -333,7 +353,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         (vars, captures)
     }
 
-    fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) {
+    fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) -> Res<'p, ()> {
         match binding.name {
             Name::Ident(name) => {
                 self.walk_ty(&mut binding.ty);
@@ -352,8 +372,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Name::None => self.walk_ty(&mut binding.ty),
         }
         if let Some(expr) = &mut binding.default {
-            self.resolve_expr(expr);
+            self.resolve_expr(expr)?;
         }
+        Ok(())
     }
 }
 
@@ -367,7 +388,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for ResolveScope<'z, 'a, 'p> {
         match ty {
             LazyType::EvilUnit => panic!(),
             LazyType::Infer => {}
-            LazyType::PendingEval(e) => self.resolve_expr(e),
+            LazyType::PendingEval(e) => self.resolve_expr(e).unwrap(), // TODO: have WalkAst return errs.
             LazyType::Finished(_) => {}
             LazyType::Different(parts) => parts.iter_mut().for_each(|t| self.walk_ty(t)),
         }

@@ -15,8 +15,8 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntType, Module, ModuleBody, ModuleId, Name, OverloadSet, Pattern, Var, VarInfo, VarType,
-    WalkAst,
+    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Module, ModuleBody, ModuleId, Name, OverloadSet, Pattern, Var, VarInfo,
+    VarType, WalkAst,
 };
 
 use crate::bc::*;
@@ -1057,7 +1057,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Type(ty))
                     }
                     "size_of" => {
-                        // TODO: warning if it has side effects.
                         let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
                         let ty = self.to_type(ty)?;
                         let size = self.runtime_executor.size_of(self.program, ty);
@@ -1069,7 +1068,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let (saved_res, state) = (result.clone(), self.runtime_executor.mark_state());
                         let res = self.compile_expr(result, arg, None);
                         assert!(res.is_err());
-                        mem::forget(res); // TODO: dont do this. but for now i like having my drop impl that prints it incase i forget  ot unwrap
                         self.runtime_executor.restore_state(state);
                         *result = saved_res;
 
@@ -1077,11 +1075,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Unit)
                     }
                     "comptime_print" => {
-                        // println!("TODO: fix comptime_print");
-                        // TODO: wtf bounds check
-                        // outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
-                        let _value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());
-                        // outln!(ShowPrint, "VALUE: {:?}", value);
+                        outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
+                        let value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());
+                        outln!(ShowPrint, "VALUE: {:?}", value);
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
                     }
@@ -1423,16 +1419,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 err!("expected binary literal not {arg:?}",);
             }
-            "new_pair_ast" => {
-                let (a, b): (FatExpr, FatExpr) = unwrap!(arg.deserialize(), "");
-                let loc = a.loc;
-                Ok(FatExpr::synthetic(Expr::Tuple(vec![a, b]), loc).serialize_one())
-            }
-            "new_call_ast" => {
-                let (a, b): (FatExpr, FatExpr) = unwrap!(arg.deserialize(), "");
-                let loc = a.loc;
-                Ok(FatExpr::synthetic(Expr::Call(Box::new(a), Box::new(b)), loc).serialize_one())
-            }
             "compile_ast" => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
                 self.compile_expr(result, &mut expr, None)?;
@@ -1680,7 +1666,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
         use TypeInfo::*;
         let ty = match name {
-            "i64" => Some(TypeInfo::Int(IntType { bit_count: 64, signed: true })),
+            "i64" => Some(TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true })),
             "f64" => Some(F64),
             "Type" => Some(Type),
             "bool" => Some(Bool),
@@ -2878,7 +2864,7 @@ fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     false
 }
 
-fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntType, i64)> {
+fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTypeInfo, i64)> {
     if let Expr::SuffixMacro(name, arg) = &expr.expr {
         if *name == Flag::From_Bit_Literal.ident() {
             if let Expr::Tuple(parts) = arg.deref().deref() {
@@ -2886,7 +2872,7 @@ fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTy
                     let bit_count = value.clone().single()?.to_int()?;
                     if let Expr::Value { value, .. } = parts[1].deref() {
                         let val = value.clone().single()?.to_int()?;
-                        return Ok((IntType { bit_count, signed: false }, val));
+                        return Ok((IntTypeInfo { bit_count, signed: false }, val));
                     }
                 }
             }

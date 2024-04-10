@@ -3,7 +3,7 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{FuncId, Program, TypeId};
+use crate::ast::{FnType, FuncId, Program, TypeId, TypeInfo};
 use crate::compiler::Res;
 use crate::logging::unwrap;
 use crate::pool::Ident;
@@ -46,6 +46,23 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
     ("fn assert_eq(_: f64, __: f64) Unit", assert_eqf64 as *const u8),
+    // TODO: all these type ones could use ffi TypeInfo if i gave it `@ct fn intern_type`
+    //       but to do that here instead of current macro message, I'd need to do ffi of enums in a less insane way.
+    //       (these functions don't use InterpSend, they just rely on C ABI).
+    // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
+    ("fn Ty(fst: Type, snd: Type) Type;", pair_type as *const u8),
+    // The type of '@pub fn(Arg) Ret'. This is a comptime only value.
+    // All calls are inlined, as are calls that pass one of these as an argument.
+    // Captures of runtime variables are allowed since you just inline everything anyway.
+    // Const captures behave as you'd expect from first class closures.
+    ("fn Fn(Arg: Type, Ret: Type) Type;", fn_type as *const u8),
+    // TODO: include calling convention.
+    // Like @pub fn(Arg, Ret) but as a runtime value. Same as a function pointer in c but with less insane syntax :).
+    // Use '!addr' on a normal @pub fn value to get create a value of this type.
+    // - The function cannot have any runtime variable captures,
+    //   but they could be implemented on top of this by taking an environment data pointer as an argument.
+    // - The function cannot have any const arguments, they must be baked before creating the pointer.
+    ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
@@ -131,7 +148,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
 // }
 
 // TODO: can do some nicer reporting here? maybe this goes away once i can actually do error handling in my language.
-fn hope<'p, T>(res: impl Fn() -> Res<'p, T>) -> T {
+fn hope<'p, T>(res: impl FnOnce() -> Res<'p, T>) -> T {
     res().unwrap_or_else(|e| panic!("{e:?}"))
 }
 
@@ -146,6 +163,30 @@ extern "C-unwind" fn tag_symbol<'p>(program: &Program<'p>, enum_ty: TypeId, tag_
     let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
     let case = hope(|| Ok(unwrap!(cases.get(tag_val as usize), "enum tag too high")));
     case.0
+}
+
+extern "C-unwind" fn pair_type(program: &mut Program, a: TypeId, b: TypeId) -> TypeId {
+    hope(|| {
+        assert!(a.0 < program.types.len() as u32, "TypeId OOB {}", a.0);
+        assert!(b.0 < program.types.len() as u32, "TypeId OOB {}", b.0);
+        Ok(program.intern_type(TypeInfo::Tuple(vec![a, b])))
+    })
+}
+
+extern "C-unwind" fn fn_type(program: &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
+    hope(|| {
+        assert!(arg.0 < program.types.len() as u32, "TypeId OOB {}", arg.0);
+        assert!(ret.0 < program.types.len() as u32, "TypeId OOB {}", ret.0);
+        Ok(program.intern_type(TypeInfo::Fn(FnType { arg, ret })))
+    })
+}
+
+extern "C-unwind" fn fn_ptr_type(program: &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
+    hope(|| {
+        assert!(arg.0 < program.types.len() as u32, "TypeId OOB {}", arg.0);
+        assert!(ret.0 < program.types.len() as u32, "TypeId OOB {}", ret.0);
+        Ok(program.intern_type(TypeInfo::FnPtr(FnType { arg, ret })))
+    })
 }
 
 // Supports bool, i64, and Type which all have the same repr.

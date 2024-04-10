@@ -9,16 +9,12 @@
 //       can't decide if this macro is good enough or want ^ as more general solution. 
 @annotation @pub
 fn literal(arg: AstExpr, target: AstExpr) AstExpr = {
-    // TODO: Something fucked up happens if you shadow here. symptom: the ptr passsed to literal_ast points at poison. 
-    //       It was revealed when I made overloads more strict so needed to add an extra binding but I assume the problem existed before. 
-    //       make a test that reproduces!!
-    //       probly  emit_bc: if let Some(dropping) = dropping
-    var lit_fn____: OverloadSet = literal_ast; 
-    let lit_fn: VoidPtr = lit_fn____&;
+    var lit_fn: OverloadSet = literal_ast; 
+    let lit_fn: VoidPtr = lit_fn&;
     let lit_fn = literal_ast(OverloadSet, lit_fn);
-    var v = VoidPtr;
-    let vv: VoidPtr = v&;
-    let void_ast = literal_ast(Type, vv);
+    var void_ast = VoidPtr;
+    let void_ast: VoidPtr = void_ast&;
+    let void_ast = literal_ast(Type, void_ast);
     
     (@with_var(value, target!unquote) 
         lit_fn!unquote(arg!unquote, @as(void_ast!unquote) value&)
@@ -69,7 +65,6 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
     (@with_var(arg_var, arg!unquote) @with_var(tag_val, arg_var&!tag!deref) body!unquote)!quote
 }
 
-
 /// Similar to @match but operates on values instead of enum payloads. 
 /// @switch(value) { @<specifier> fn= <body> }
 /// - @case(v): calls <body> if value.eq(v)
@@ -100,12 +95,11 @@ fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
             
             // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
             if(name.int().eq(case!symbol.int()), fn = {
-                println("case");
                 // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                 let cond = (eq_fn!unquote(arg_var, @as(arg_type!unquote) arg[]!unquote))!quote;
                 body = ((cond!unquote, fn= action!unquote(), fn=body!unquote)!if)!quote;
             }, fn=if(name.int().eq(default!symbol.int()), fn = {
-                first.if {|
+                if(first) {|
                     body = (action!unquote(arg_var))!quote;
                 }{|
                     panic("@default must be the last handler in @switch");
@@ -139,7 +133,7 @@ fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
     var expr = @literal(i64) 0;
     var shift = 32;
     foreach(parts, fn(part: *AstExpr) Unit = {
-        var int: IntType = get_type_int(part[]);
+        var int: IntTypeInfo = get_type_int(part[]);
         // TODO: fix inference + overloading. 
         //       you only need this annotation if you include instructions.fr so there's another definition of `fn sub`
         //       So it doesn't infer through the field lookup but even without that it should notice that
@@ -154,7 +148,6 @@ fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
         )!if;
         let next = new_call_ast(fn_shift, new_pair_ast(next, @literal(i64) shift));
         expr = new_call_ast(fn_or, new_pair_ast(expr, next));
-        
     });
     assert(eq(shift, 0), concat(str(shift), " != 0; expected 32 bits. TODO: other sizes.".str()).str());
     (@as(i64_ast!unquote) expr!unquote)!quote

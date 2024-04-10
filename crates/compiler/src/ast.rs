@@ -47,7 +47,7 @@ pub enum TypeInfo<'p> {
     Any,
     Never,
     F64,
-    Int(IntType),
+    Int(IntTypeInfo),
     Bool,
     Fn(FnType),
     FnPtr(FnType),
@@ -888,7 +888,7 @@ pub(crate) use safe_rec;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
-pub struct IntType {
+pub struct IntTypeInfo {
     pub bit_count: i64,
     pub signed: bool,
 }
@@ -903,7 +903,7 @@ impl<'p> Program<'p> {
                 TypeInfo::Any,
                 TypeInfo::Unit,
                 TypeInfo::Type,
-                TypeInfo::Int(IntType { bit_count: 64, signed: true }),
+                TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
@@ -931,7 +931,7 @@ impl<'p> Program<'p> {
         }
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
-        init_interp_send!(&mut program, Bc, IntType); // TODO: aaaa
+        init_interp_send!(&mut program, Bc, IntTypeInfo); // TODO: aaaa
         program.get_rs_type(SuperSimple::get_ty());
         program.get_rs_type(RsResolvedSymbol::get_ty());
 
@@ -959,7 +959,7 @@ impl<'p> Program<'p> {
         use crate::experiments::reflect::*;
         // TODO: think more about this but need same int type
         if let RsData::Opaque = type_info.data {
-            return self.intern_type(TypeInfo::Int(IntType {
+            return self.intern_type(TypeInfo::Int(IntTypeInfo {
                 bit_count: (type_info.stride * 8) as i64,
                 signed: true, // TODO
             }));
