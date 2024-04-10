@@ -292,8 +292,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
         let boundery = *self.track_captures_before_scope.last().unwrap();
         for (i, scope) in self.scopes.iter().enumerate().rev() {
-            if let Some(found) = scope.iter().position(|v| v.0 == *name) {
-                let v = scope[found];
+            // Reverse so you get the shadowing first.
+            if let Some(found) = scope.iter().rev().position(|v| v.0 == *name) {
+                let v = scope[scope.len() - found - 1];
                 if i < boundery && !self.captures.contains(&v) {
                     // We got it from our parent function.
                     self.captures.push(v);
@@ -309,14 +310,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let var = Var(*name, self.next_var);
         self.next_var += 1;
         let current = self.scopes.last_mut().unwrap();
+        // TODO: cleanup callers
         // Only checking current scope for something to drop.
-        let old = if let Some(found) = current.iter().position(|v| v.0 == *name) {
-            Some(mem::replace(&mut current[found], var))
-        } else {
-            current.push(var);
-            None
-        };
-        (old, var)
+        // let old = if let Some(found) = current.iter().position(|v| v.0 == *name) {
+        //     Some(mem::replace(&mut current[found], var))
+        // } else {
+        //     None
+        // };
+        current.push(var);
+        (None, var)
     }
 
     fn push_scope(&mut self, track_captures: bool) {

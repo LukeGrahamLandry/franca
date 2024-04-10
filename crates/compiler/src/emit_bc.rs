@@ -30,6 +30,7 @@ pub struct EmitBc<'z, 'p: 'z> {
     sizes: &'z mut SizeCache,
     last_loc: Option<Span>,
     locals: Vec<Vec<StackRange>>,
+    locals_drop: Vec<Vec<StackRange>>,
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
@@ -50,6 +51,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             program,
             sizes,
             locals: vec![],
+            locals_drop: vec![],
         }
     }
 
@@ -81,6 +83,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
         self.locals.clear();
         self.locals.push(vec![]);
+        self.locals_drop.clear();
+        self.locals_drop.push(vec![]); // TODO: use this for args_to_drop
         let func = &self.program[f];
         let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
@@ -187,6 +191,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             result.push(Bc::Drop(range));
         }
+        // TODO: copy-paste
         for slot in self.locals.pop().unwrap() {
             result.push(Bc::LastUse(slot));
             for i in slot {
@@ -194,6 +199,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
         }
         assert!(self.locals.is_empty());
+        let slots = self.locals_drop.pop().unwrap();
+        for slot in slots {
+            result.push(Bc::Drop(slot));
+            result.push(Bc::LastUse(slot));
+            for i in slot {
+                assert!(result.slot_is_var.get(i));
+            }
+        }
+        assert!(self.locals_drop.is_empty());
 
         Ok(())
     }
@@ -262,18 +276,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let prev = result.vars.insert(*name, (ret, ty));
                 self.locals.last_mut().unwrap().push(ret);
                 assert!(prev.is_none(), "shadow is still new var");
-
-                // TODO:BUG: I bet this is why shadowing in @literal breaks stuff. it drops the var you're trying to point at.
-                //       so this is hard to think about because shadow might not be last use if you alias'd it.
-                // TODO: what if shadow is const? that would be more consistant if did it like rust.
-                if let Some(dropping) = dropping {
-                    // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
-                    // It would be consistant and it mean you can reference its data if you do a chain of transforming something with the same name.
-                    // But need to change my debugging check that everything was dropped.
-                    // Actually if i did that just put them in the block's list instead of carefully taking them out which i did because i thought i wanted to egarly drop.
-                    let (slot, _) = unwrap!(result.vars.remove(dropping), "missing shadow {}", name.log(self.program.pool));
-                    result.push(Bc::Drop(slot));
-                }
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclVarPattern { binding, value } => {
@@ -360,6 +362,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Block { body, result: value, locals } => {
                 self.locals.push(vec![]);
+                self.locals_drop.push(vec![]);
                 for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
@@ -378,6 +381,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: redundant with ^ but i dont trust
                 let slots = self.locals.pop().unwrap();
                 for slot in slots {
+                    result.push(Bc::LastUse(slot));
+                    for i in slot {
+                        assert!(result.slot_is_var.get(i));
+                    }
+                }
+                let slots = self.locals_drop.pop().unwrap();
+                for slot in slots {
+                    result.push(Bc::Drop(slot));
                     result.push(Bc::LastUse(slot));
                     for i in slot {
                         assert!(result.slot_is_var.get(i));
@@ -461,7 +472,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             slot: output.offset(1),
                             value: Value::I64(count as i64),
                         });
-                        result.to_drop.push((container, container_ty));
+                        self.locals_drop.last_mut().unwrap().push(container);
                     }
                     Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
                     Flag::Deref => {
