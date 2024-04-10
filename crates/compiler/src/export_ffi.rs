@@ -55,7 +55,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
     ("@env fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
     ("@env fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
-    ("@env fn c_puts(s: CStr) i64", libc::puts as *const u8),
+    ("@env fn puts(s: CStr) i64", libc::puts as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[
@@ -76,6 +76,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
     ("@no_interp fn sym_to_str(s: Symbol) Str", symbol_to_str as *const u8),
+    ("@no_interp fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
     ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
     (
         "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
@@ -99,7 +100,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::O_RDWR
             )
             .unwrap();
-            writeln!(out, "@pub const DlHandle = VoidPtr; @pub const CStr = Ptr(i64);").unwrap();
+            writeln!(out, "@pub const DlHandle = VoidPtr; @pub const CStr = Unique$Ptr(i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
             }
@@ -208,6 +209,16 @@ extern "C-unwind" fn symbol_to_str(program: &mut Program, symbol: i64) -> (*cons
     })
 }
 
+// Note: currently StringPool guarentees that they're all null terminated but I don't want to promise that to the language so wrap in this function.
+extern "C-unwind" fn symbol_to_cstr(program: &mut Program, symbol: i64) -> *const u8 {
+    let symbol = symbol as u32;
+    hope(|| {
+        let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
+        let s = program.pool.get(symbol);
+        Ok(s.as_ptr())
+    })
+}
+
 extern "C-unwind" fn symbol_to_int(_: &mut Program, symbol: u32) -> i64 {
     symbol as i64
 }
@@ -216,7 +227,6 @@ extern "C-unwind" fn symbol_to_int(_: &mut Program, symbol: u32) -> i64 {
 #[derive(Reflect)]
 pub struct RsResolvedSymbol {
     line: i64,
-    col: i64,
     owned_name: *const u8,
     name_len: i64,
 }
@@ -225,7 +235,7 @@ extern "C-unwind" fn resolve_backtrace_symbol(_: &mut Program, addr: *mut c_void
     let mut success = 0;
     backtrace::resolve(addr, |symbol| {
         out.line = symbol.lineno().map(|v| v as i64).unwrap_or(-1);
-        out.col = symbol.colno().map(|v| v as i64).unwrap_or(-1);
+        // out.col = symbol.colno().map(|v| v as i64).unwrap_or(-1);
         if let Some(name) = symbol.name() {
             let mut bytes = name.to_string().into_bytes();
             if bytes.is_empty() {

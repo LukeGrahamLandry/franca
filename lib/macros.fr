@@ -12,6 +12,7 @@ fn literal(arg: AstExpr, target: AstExpr) AstExpr = {
     // TODO: Something fucked up happens if you shadow here. symptom: the ptr passsed to literal_ast points at poison. 
     //       It was revealed when I made overloads more strict so needed to add an extra binding but I assume the problem existed before. 
     //       make a test that reproduces!!
+    //       probly  emit_bc: if let Some(dropping) = dropping
     var lit_fn____: OverloadSet = literal_ast; 
     let lit_fn: VoidPtr = lit_fn____&;
     let lit_fn = literal_ast(OverloadSet, lit_fn);
@@ -81,9 +82,13 @@ fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
     let panic_fn = @literal(OverloadSet) panic;
     let eq_fn = @literal(OverloadSet) eq;
     var body = panic_fn!unquote("unhandled switch case")!quote;
+    var first = true;
     
     // TODO: reverse order because i build out from the inside
-    foreach(stmts, fn(stmt: Ptr(FatStmt)) Unit = {
+    var i = stmts.len().sub(1);
+    
+    while(fn = i.ge(0)) {|
+        let stmt: *FatStmt = stmts.index(i); 
         // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
         if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
             var handler_body = stmt.stmt.Eval[];
@@ -94,20 +99,30 @@ fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
             let action = branch.target[][];
             
             // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
-            let c = case!symbol;
-            (name.int().eq(c.int()), fn = {
+            var out: FatExpr;
+            if(name.int().eq(case!symbol.int()), fn = {
+                println("case");
                 // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                 let cond = (eq_fn!unquote(arg_var, @as(arg_type!unquote) arg[]!unquote))!quote;
                 body = ((cond!unquote, fn= action!unquote(), fn=body!unquote)!if)!quote;
+            }, fn=if(name.int().eq(default!symbol.int()), fn = {
+                println("default");
+                first.if {|
+                    body = (action!unquote(arg_var))!quote;
+                }{|
+                    panic("@default must be the last handler in @switch");
+                };
             }, fn={
                 // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
                 let n: Str = name.str();
-                puts(n);
-                panic("unhandled prefix in @switch")
-            })!if;
+                println(n);
+                panic("unhandled prefix in @switch");
+            }));
             
+            first = false;
         };
-    });
+        i = i.sub(1);
+    };
     
     // TODO: Declaring variables is weird because name resolution has already run.
     (@with_var(arg_var, arg!unquote) body!unquote)!quote

@@ -161,7 +161,7 @@ pub fn save_logs(folder: &str) {
 #[macro_export]
 macro_rules! outln {
     ($tag:expr, $($arg:tt)*) => {{
-        if cfg!(feature = "println_now") && $tag == $crate::logging::LogTag::ShowPrint {
+        if $tag == $crate::logging::LogTag::ShowPrint {
             println!($($arg)*);
         } else if cfg!(feature = "some_log") {
             let tag: $crate::logging::LogTag = $tag;
@@ -281,6 +281,25 @@ impl<'p> Program<'p> {
         let mut out = String::new();
         let mut const_reads = HashSet::new();
 
+        let log_one = |out: &mut String, id: FuncId, func: &Func<'p>| {
+            *out += &format!(
+                "{id:?}: [fn {:?}=Name={:?} Arg={:?} -> Ret={:?}] = \nBODY: \n{}\nEND\n{}\nCONSTS:\n",
+                if func.referencable_name { func.synth_name(self.pool) } else { "@anon@" },
+                func.get_name(self.pool),
+                func.finished_arg.map(|arg| self.log_type(arg)),
+                func.finished_ret.map(|ret| self.log_type(ret)),
+                func.body.as_ref().map(|e| e.log(self.pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
+                if func.capture_vars.is_empty() {
+                    String::from("Raw function, no captures.")
+                } else {
+                    format!(
+                        "Closure capturing: {:?}.",
+                        func.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
+                    )
+                },
+            );
+        };
+
         while let Some(next) = pending.pop() {
             if !done.insert(next) {
                 continue;
@@ -289,22 +308,7 @@ impl<'p> Program<'p> {
             let func = &self.funcs[next.0];
             if let Some(body) = &func.body {
                 collect_func_references(body, &mut pending, &mut const_reads);
-                out += &format!(
-                    "{next:?}: [fn {:?}=Name={:?} Arg={} -> Ret={}] = \nBODY: \n{}\nEND\n{}\nCONSTS:\n",
-                    if func.referencable_name { func.synth_name(self.pool) } else { "@anon@" },
-                    func.get_name(self.pool),
-                    self.log_type(func.unwrap_ty().arg),
-                    self.log_type(func.unwrap_ty().ret),
-                    func.body.as_ref().map(|e| e.log(self.pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
-                    if func.capture_vars.is_empty() {
-                        String::from("Raw function, no captures.")
-                    } else {
-                        format!(
-                            "Closure capturing: {:?}.",
-                            func.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
-                        )
-                    },
-                );
+                log_one(&mut out, next, func);
                 for c in const_reads.drain() {
                     if let Some((val, ty)) = func.closed_constants.get(c) {
                         out += &format!("const {:?}: {} = {:?};\n", c.log(self.pool), self.log_type(ty), val);
@@ -312,6 +316,16 @@ impl<'p> Program<'p> {
                     }
                 }
                 out += "=======================================\n\n\n\n";
+            }
+        }
+
+        out += "=======================================\n\n\n\n";
+        out += "=======================================\n\n\n\n";
+        for i in 0..self.funcs.len() {
+            out += "=======================================\n\n\n\n";
+            let func = &self.funcs[i];
+            if let Some(_) = &func.body {
+                log_one(&mut out, FuncId(i), func);
             }
         }
 
@@ -487,36 +501,7 @@ impl<'p> Program<'p> {
 
 impl<'p> PoolLog<'p> for Stmt<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        match self {
-            Stmt::DeclNamed { name, ty, value, kind } => format!(
-                "{kind:?} {}: {} = {};",
-                pool.get(*name),
-                ty.log(pool),
-                value.as_ref().map(|v| v.log(pool)).unwrap_or_else(|| String::from("uninit()"))
-            ),
-            Stmt::DeclVar { name, ty, value, .. } => format!(
-                "let {}: {} = {};",
-                name.log(pool),
-                ty.log(pool),
-                value.as_ref().map(|v| v.log(pool)).unwrap_or_else(|| String::from("uninit()"))
-            ),
-            Stmt::Eval(e) => e.log(pool),
-            Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
-            Stmt::Noop => "".to_owned(),
-            Stmt::Set { place, value } => {
-                format!("{} = {};", place.log(pool), value.log(pool))
-            }
-            Stmt::DeclVarPattern { binding, value } => {
-                let body: String = binding
-                    .bindings
-                    .iter()
-                    .map(|b| format!("{}: ({}), ", b.var().map_or("_".to_string(), |n| n.log(pool)), b.lazy().log(pool)))
-                    .collect();
-
-                format!("({body}) = {:?};", value.as_ref().map(|v| v.log(pool)))
-            }
-            _ => format!("{:?}", self),
-        }
+        self.logd(pool, 0)
     }
 }
 
@@ -534,26 +519,36 @@ impl<'p> PoolLog<'p> for LazyType<'p> {
 
 impl<'p> PoolLog<'p> for Expr<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
+        self.logd(pool, 0)
+    }
+}
+
+impl<'p> Expr<'p> {
+    fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
         match self {
             Expr::Call(func, arg) => {
-                format!("{}({})", func.log(pool), arg.log(pool))
+                format!("{}({})", func.logd(pool, depth), arg.logd(pool, depth))
             }
             &Expr::GetNamed(i) => pool.get(i).to_string(),
             Expr::Block { body, result, .. } => {
                 let es: Vec<_> = body
                     .iter()
-                    .map(|e| e.log(pool))
-                    .filter(|s| !s.is_empty())
-                    .enumerate()
-                    .map(|(i, s)| format!("{i}. {s}"))
+                    .filter(|s| !matches!(s.stmt, Stmt::Noop))
+                    .map(|e| e.logd(pool, depth + 1))
                     .collect();
                 let es = es.join(";\n");
-                format!("{{ {}; {} }}", es, result.log(pool))
+                format!(
+                    "{{\n{}\n{}{}\n{}}}",
+                    es,
+                    "    ".repeat(depth + 1),
+                    result.logd(pool, depth + 1),
+                    "    ".repeat(depth)
+                )
             }
             Expr::Tuple(args) => {
-                let args: Vec<_> = args.iter().map(|e| e.log(pool)).collect();
+                let args: Vec<_> = args.iter().map(|e| e.logd(pool, depth)).collect();
                 let args: String = args.join(", ");
-                format!("T[{}]", args)
+                format!("[{}]", args)
             }
             Expr::Value {
                 value: Values::One(Value::Unit),
@@ -563,10 +558,14 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 value: Values::One(Value::GetFn(f)),
                 ..
             } => format!("Fn{}", f.0),
-            Expr::Value { value, .. } => format!("{:?}", value),
+            Expr::Value { value, .. } => match value {
+                Values::One(Value::I64(i)) => format!("{i}"),
+                Values::One(Value::Type(i)) => format!("{i:?}"),
+                v => format!("{v:?}"),
+            },
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
-            Expr::SuffixMacro(i, e) => format!("{}!{}", e.log(pool), pool.get(*i)),
+            Expr::SuffixMacro(i, e) => format!("{}!{}", e.logd(pool, depth), pool.get(*i)),
             Expr::StructLiteralP(pattern) => {
                 let body: String = pattern
                     .bindings
@@ -577,12 +576,50 @@ impl<'p> PoolLog<'p> for Expr<'p> {
                 format!(".{{ {body} }}")
             }
             Expr::FieldAccess(container, name) => {
-                format!("{}.{}", container.log(pool), pool.get(*name))
+                format!("{}.{}", container.logd(pool, depth), pool.get(*name))
             }
-            Expr::PrefixMacro { name, arg, target } => format!("[@{}({}) {}]", name.log(pool), arg.log(pool), target.log(pool)),
-            Expr::Index { ptr, index } => format!("{}[{}]", ptr.log(pool), index.log(pool)),
+            Expr::PrefixMacro { name, arg, target } => format!("[@{}({}) {}]", name.log(pool), arg.logd(pool, depth), target.logd(pool, depth)),
+            Expr::Index { ptr, index } => format!("{}[{}]", ptr.logd(pool, depth), index.logd(pool, depth)),
             _ => format!("{:?}", self),
         }
+    }
+}
+
+impl<'p> Stmt<'p> {
+    pub(crate) fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
+        let s = match self {
+            Stmt::DeclNamed { name, ty, value, kind } => format!(
+                "{kind:?} {}: {} = {};",
+                pool.get(*name),
+                ty.log(pool),
+                value.as_ref().map(|v| v.logd(pool, depth)).unwrap_or_else(|| String::from("uninit()"))
+            ),
+            Stmt::DeclVar { name, ty, value, kind, .. } => format!(
+                "{:?} {}: {} = {};",
+                kind,
+                name.log(pool),
+                ty.log(pool),
+                value.as_ref().map(|v| v.logd(pool, depth)).unwrap_or_else(|| String::from("uninit()"))
+            ),
+            Stmt::Eval(e) => e.logd(pool, depth),
+            Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
+            Stmt::Noop => "".to_owned(),
+            Stmt::Set { place, value } => {
+                format!("{} = {};", place.logd(pool, depth), value.logd(pool, depth))
+            }
+            Stmt::DeclVarPattern { binding, value } => {
+                let body: String = binding
+                    .bindings
+                    .iter()
+                    .map(|b| format!("{}: ({}), ", b.var().map_or("_".to_string(), |n| n.log(pool)), b.lazy().log(pool)))
+                    .collect();
+
+                format!("({body}) = {};", value.as_ref().map_or("_".to_string(), |v| v.logd(pool, depth)))
+            }
+            _ => format!("{:?}", self),
+        };
+
+        format!("{}{s}", "    ".repeat(depth))
     }
 }
 
@@ -897,4 +934,37 @@ pub fn log_tag_info() {
         Bytecode,
         "Your program broken down into simple instructions. This is the format understood by the comptime interpreter. It's also the only backend that exists so far.",
     );
+}
+
+impl Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            &Value::F64(v) => write!(f, "{}", f64::from_bits(v)),
+            &Value::I64(v) => write!(f, "{}", v),
+            &Value::Bool(v) => write!(f, "{}", v),
+            &Value::Type(v) => write!(f, "{:?}", v),
+            &Value::GetFn(v) => write!(f, "{:?}", v),
+            &Value::Unit => write!(f, "unit"),
+            &Value::Poison => write!(f, "POISON"),
+            &Value::InterpAbsStackAddr(a) => write!(f, "{a:?}"),
+            Value::Heap {
+                value,
+                physical_first,
+                physical_count,
+            } => write!(f, "{value:p}[{physical_first}..{}]", physical_first + physical_count),
+            &Value::Symbol(v) => write!(f, "sym{v}"),
+            &Value::OverloadSet(v) => write!(f, "os{v}"),
+            &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),
+            &Value::SplitFunc { ct, rt } => write!(f, "cr={ct:?}|rt={rt:?}"),
+        }
+    }
+}
+
+impl Debug for Values {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Values::One(v) => write!(f, "{v:?}"),
+            Values::Many(v) => write!(f, "{v:?}"),
+        }
+    }
 }

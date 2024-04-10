@@ -79,6 +79,7 @@ pub struct Compile<'a, 'p> {
     pub program: &'a mut Program<'p>,
     pub jitted: Vec<*const u8>,
     pub save_bootstrap: Vec<FuncId>,
+    pub tests: Vec<FuncId>,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +125,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             comptime_executor,
             jitted: vec![],
             save_bootstrap: vec![],
+            tests: vec![],
         }
     }
 
@@ -445,7 +447,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let pattern = func.arg.clone();
         let locals = func.arg.collect_vars();
 
-        // TODO: is locals supposed to be just the new ones introduced or recursivly bubbled up?
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
         // TODO: dont bother if its just unit args (which most are because of !if and !while).
         // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
@@ -460,7 +461,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 loc,
             }],
             result: Box::new(func.body.as_ref().unwrap().clone()),
-            locals: Some(locals),
+            locals: Some(locals), // Note: just the declarations in this block, not recursivly bubbled up.
         };
         expr_out.renumber_vars(&mut self.program.vars);
 
@@ -775,6 +776,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                 }
+
+                if func.has_tag(Flag::Test) {
+                    // TODO: actually use this.
+                    // TODO: probably want referencable_name=false?
+                    self.tests.push(id);
+                }
             }
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
             Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations)?,
@@ -987,8 +994,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if placeholders.is_empty() {
                             Structured::Const(ty, value)
                         } else {
-                            placeholders.push(mem::take(expr));
-                            let arg = Box::new(FatExpr::synthetic(Expr::Tuple(placeholders), loc));
+                            placeholders.push(Some(mem::take(expr)));
+                            let arg = Box::new(FatExpr::synthetic(
+                                Expr::Tuple(placeholders.into_iter().map(|p| p.unwrap()).collect()),
+                                loc,
+                            ));
                             let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), arg), loc);
                             let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
                             let _ = self.infer_types(f)?.unwrap();
@@ -1401,7 +1411,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // println!("before {:?}", template.log(self.pool));
                 let mut walk = Unquote {
                     compiler: self,
-                    placeholders: arg,
+                    placeholders: arg.into_iter().map(Some).collect(),
                     result,
                 };
                 walk.expr(&mut template); // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
@@ -2940,7 +2950,7 @@ impl ToBytes for i64 {
 
 pub struct Unquote<'z, 'a, 'p> {
     pub compiler: &'z mut Compile<'a, 'p>,
-    pub placeholders: Vec<FatExpr<'p>>,
+    pub placeholders: Vec<Option<FatExpr<'p>>>,
     pub result: &'z mut FnWip<'p>,
 }
 
@@ -2962,12 +2972,12 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
                 let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(Flag::Placeholder.ident(), Box::new(placeholder)), loc);
                 placeholder.ty = expr_ty;
                 // Note: take <arg> but replace the whole <expr>
-                self.placeholders.push(mem::take(arg.deref_mut()));
+                self.placeholders.push(Some(mem::take(arg.deref_mut())));
                 *expr = placeholder;
             } else if *name == Flag::Placeholder.ident() {
                 let index = arg.as_int().expect("!placeholder expected int") as usize;
-                let value = mem::take(&mut self.placeholders[index]); // TODO: make it more obvious that its only one use and the slot is empty.
-                *expr = value;
+                let value = self.placeholders[index].take(); // TODO: make it more obvious that its only one use and the slot is empty.
+                *expr = value.unwrap();
             }
         }
     }

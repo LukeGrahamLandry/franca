@@ -586,7 +586,7 @@ impl<'p> Interp<'p> {
                     Err(e) => err!("Error running {cmd:?}: {e:?}",),
                 }
             }
-            "puts" => {
+            "println" => {
                 let arg = unwrap!(String::deserialize_one(arg.clone()), "expect str not {arg:?}");
                 outln!(ShowPrint, "{arg}");
                 Value::Unit.into()
@@ -711,7 +711,14 @@ impl<'p> Interp<'p> {
     #[track_caller]
     fn take_slot(&mut self, slot: StackOffset) -> Value {
         let value = replace(self.get_slot_mut(slot), Value::Poison);
-        debug_assert_ne!(value, Value::Poison, "{}", self.log_callstack());
+        // let f = self.call_stack.last().as_ref().unwrap().current_func;
+        debug_assert_ne!(
+            value,
+            Value::Poison,
+            "{slot:?} {}", //  {}
+            self.log_callstack(),
+            // self.ready[f].as_ref().unwrap().log(self.pool)
+        );
         value
     }
 

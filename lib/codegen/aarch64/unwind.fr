@@ -76,43 +76,41 @@ fn get_func_id(ip: InstPtr) (f: FuncId, rel_ip: i64)!struct = {
     (f: best_index, rel_ip: best_distance)
 }
 
+@pub const FrResolvedSymbol = (name: Symbol, fid: FuncId)!struct;
+@pub const ResolvedFn = (Rust: RsResolvedSymbol, Franca: FrResolvedSymbol, Unknown: InstPtr)!enum;
+
+// TODO: take const callback instead of allocating list? since list wants to panic which wasnts to call this,
+// TODO: check for panic while panicking. 
+/// TODO: you want to do this on panics should shouldn't be allocating but this is nice for test. 
 /// Note: This relies on the stack frame layout used by bc_to_asm and rustc matching. 
 @no_interp @aarch64 @pub
-fn collect_backtrace() Unit = {
+fn collect_backtrace() List$ResolvedFn = {
+    var found: List$ResolvedFn = list(10);
     var addr: *Frame = get_fp();
     var i = 0;
     var info: RsResolvedSymbol;
     // TODO: nullable pointer should be spelled ?*T
     while(fn= addr.fp[].ptr_to_int().ne(0)) {|
         (resolve_backtrace_symbol(addr.lr[], info&), fn= {
-            let len = info&.name_len[];
-            (len.ne(0), fn= {
-                // TODO: HACK. be able to address bytes so puts doesnt .mul(8). rn this gets truncated to a multiple of 8 chars. 
-                let s: Str = (info&.owned_name[], len.div(8));
-                puts(s);
-            }, fn= {
-                puts("Rust found but len=0.".str());
-            })!if;
+            let r: ResolvedFn = (Rust: info); // TODO: should be able to do this inline
+            found&.push(r);
         }, fn= {
             // TODO: check that its not some other ffi thing that rust couldn't find a name for. 
             var func = addr.lr[].get_func_id();
             let fid = func&.f[];
             (number_of_functions().gt(@as(i64) fid), fn= {
                 let name = fid.name();
-                // TODO: after overload rework (which should have make it stricter but clearly not)...  
-                //       invalid memory reference before I renamed this to sym_to_str. when it was str() i guess it picked the wrong overload which is really scary. 
-                //       broken unique types so it tried to do the str(int) maybe but of so, that should have worked and just printed the number. 
-                //          -- Apr 6, 2024
-                let name: Str = name.sym_to_str();
-                puts(name);
+                let r: ResolvedFn = (Franca: (name: name, fid: fid));
+                found&.push(r);
             }, fn= {
-                puts("Rust not found but I also not found.".str());
+                let r: ResolvedFn = (Unknown: addr.lr[]);
+                found&.push(r);
             })!if;
         })!if;
-        putchar(10);
         
         let fp: *Frame = addr.fp[];
         addr = fp;
         i = i.add(1);
     };
+    found
 }

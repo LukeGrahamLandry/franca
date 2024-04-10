@@ -1,14 +1,34 @@
 ## Planning a Linker
 
 - calls
-- jump tables for switch stmts
+- jump tables for switch stmts. (a-b)>>2
 - function pointers
 - const vtables
 - imports
-- global vars
-- extern globals
+- global vars @PAGEOFF
+- extern globals @PAGEOFFGOT
+- `___stack_chk_guard`
 
 > Note: qbe doesn't give thread-safe vibes. There's a lot of static vars. Probably part of why they don't distribute as a lib.
+
+## Casts (Apr 9)
+
+Currently @as sets the result location, and stops inference from going deeper, so you can use it for resolving an overload.
+
+- But it doesn't actually change the type returned by compile_expr so its not as powerful as specifying a variable/return type.
+- And it doesn't do a type check (because that's the point), which means `let a: i64 = @as(Str) 1;` is legal (and a no-op) which is kinda dumb.
+
+Doing casts as annotations works for helping overload system but its weird to not be a function cause they really are.
+
+- `as(Str)(e)` feels like too many brackets but `as(Str)$e` is the same as the `@` one.
+- Then `as` could be a comptime function returning the cast function.
+  - `fn as(const t: T) Fn(__any__, T);` but there's no type I can put for the input.
+- Really `e.as(Str)` would be better but means a different thing.
+  - That sounds like evaluate `e` as whatever type it is, and then convert to `Str` instead of giving that as the result type.
+  - Maybe you want `fn as(e: T, const T: Type) T = e;` which would match the current `@as`.
+    - But I can't do that with my current generics yet.
+
+(want different types of cast, just using `as` for example).
 
 ## new test runner (Apr 6)
 

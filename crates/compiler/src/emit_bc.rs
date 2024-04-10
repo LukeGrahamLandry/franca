@@ -263,6 +263,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.locals.last_mut().unwrap().push(ret);
                 assert!(prev.is_none(), "shadow is still new var");
 
+                // TODO:BUG: I bet this is why shadowing in @literal breaks stuff. it drops the var you're trying to point at.
+                //       so this is hard to think about because shadow might not be last use if you alias'd it.
                 // TODO: what if shadow is const? that would be more consistant if did it like rust.
                 if let Some(dropping) = dropping {
                     // Maybe should be like rust and dont call drop on the shadowed thing until the end of scope.
@@ -426,6 +428,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let name = if let Ok(f) = Flag::try_from(*macro_name) {
                     f
                 } else {
+                    // TODO: this will change when you're able to define !bang macros in the language.
                     err!(CErr::UndeclaredIdent(*macro_name))
                 };
                 match name {

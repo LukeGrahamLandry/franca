@@ -139,7 +139,7 @@ pub struct SizeCache {
     pub known: Vec<Option<usize>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Value {
     F64(u64), // TODO: hash
     I64(i64),
@@ -211,7 +211,7 @@ impl From<FuncId> for FuncRef {
     }
 }
 
-#[derive(Debug, InterpSend, Clone, Hash, PartialEq, Eq)]
+#[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
 pub enum Values {
     One(Value),
     Many(Vec<Value>),

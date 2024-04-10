@@ -58,6 +58,8 @@
   - would be nice to change between current inlining and closures without changing source so you could opt for size or speed.
 - https://github.com/arun11299/How-not-to-async-rs/tree/main
 - something that tried randomly deleting statements in your files to warn you if tests still passed would be cool.
+- let macros access requested type (of thier call site, not just infered of thier args) or provide an infered a type before processing.
+- split up different types of casts. @as is weird. Don't do the implicit voidptr cast based on result location.
 
 ## UB
 

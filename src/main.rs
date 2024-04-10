@@ -171,8 +171,6 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
     let start = src.find("@test(").expect("@test in test file") + 6;
     let s = &src[start..];
     let end = s.find(')').unwrap();
-    let mut passed = 0;
-    let mut failed = 0;
     let assertion_count = src.split("assert_eq(").count() - 1;
     for backend in s[..end].split(", ") {
         let arch = match backend {
@@ -186,6 +184,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
             other => panic!("Unknown backend {other}"),
         };
 
+        // TODO: use dup2/pipe to capture stdout/err and print in a mutex so the colours don't get fucked up.
         match unsafe { libc::fork() } {
             -1 => panic!("Fork Failed"),
             0 => actually_run_it(name, src, assertion_count, arch),
