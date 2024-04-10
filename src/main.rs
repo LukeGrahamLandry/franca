@@ -11,13 +11,12 @@ use compiler::{
     interp::Interp,
     load_program, log_dbg, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
-    outln,
     pool::StringPool,
     run_main, timestamp,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
-use std::{arch::asm, env, fs, io::Write, mem::transmute, ops::DerefMut, path::PathBuf, process::exit, str::pattern::Pattern};
+use std::{arch::asm, env, fs, io::Write, mem::transmute, path::PathBuf, process::exit, str::pattern::Pattern};
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
 //       Make sure theres some prefix that lets you run/compile the next arg as a file path for shabang line.
@@ -207,7 +206,7 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
         log_err(&comp, e, None);
         exit(1);
     }
-    let (_, lines) = result.unwrap();
+    result.unwrap();
     let f = comp.program.find_unique_func(Flag::Main.ident());
     if f.is_none() {
         println!("'fn main' NOT FOUND");

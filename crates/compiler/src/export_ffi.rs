@@ -3,41 +3,15 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{FuncId, Program, TypeId, TypeInfo};
+use crate::ast::{FuncId, Program, TypeId};
 use crate::compiler::Res;
 use crate::logging::unwrap;
 use crate::pool::Ident;
-use std::collections::HashMap;
 use std::fmt::Write;
-use std::io::stdout;
 use std::path::PathBuf;
-use std::process::exit;
 use std::ptr::null;
-use std::sync::{Arc, Mutex, RwLock};
-use std::{env, fs, io, slice};
-
-macro_rules! stdlib {
-    ($name:expr) => {
-        (concat!($name, ".fr"), include_str!(concat!("../../../lib/", $name, ".fr")))
-    };
-}
-
-// static LIB: &[(&str, &str)] = &[
-//     stdlib!("prelude"),
-//     stdlib!("core"),
-//     stdlib!("codegen/aarch64/basic.gen"),
-//     stdlib!("codegen/llvm/basic"),
-//     stdlib!("collections"),
-//     stdlib!("system"),
-//     stdlib!("ast"),
-//     stdlib!("macros"),
-//     stdlib!("codegen/aarch64/instructions"),
-//     stdlib!("codegen/aarch64/basic"),
-//     stdlib!("codegen/aarch64/unwind"),
-//     stdlib!("codegen/wasm/instructions"),
-//     stdlib!("codegen/bf/instructions"),
-//     stdlib!("fmt"),
-// ];
+use std::sync::Mutex;
+use std::{fs, io, slice};
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
@@ -189,13 +163,6 @@ extern "C-unwind" fn assert_equ32(program: &mut Program, a: u32, b: u32) {
 extern "C-unwind" fn assert_eqf64(program: &mut Program, a: f64, b: f64) {
     hope(|| Ok(assert_eq!(a, b)));
     program.assertion_count += 1;
-}
-
-// TODO: test. need to allow indexing tuple elements for this to be usable.
-// TODO: more efficient storage. TypeInfo::Array(Type, usize) but then need to cleanup everywhere that specifically handles a tuple.
-extern "C-unwind" fn array_type(program: &mut Program, ty: TypeId, count: usize) -> TypeId {
-    let types = vec![ty; count];
-    program.intern_type(TypeInfo::Tuple(types))
 }
 
 // TODO: test abi

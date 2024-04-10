@@ -324,7 +324,7 @@ impl<'p> Program<'p> {
         for i in 0..self.funcs.len() {
             out += "=======================================\n\n\n\n";
             let func = &self.funcs[i];
-            if let Some(_) = &func.body {
+            if func.body.is_some() {
                 log_one(&mut out, FuncId(i), func);
             }
         }

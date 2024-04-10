@@ -76,7 +76,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                                 ty: LazyType::Infer,
                                 value: None,
                                 kind: VarType::Const,
-                                dropping: None,
                             },
                             annotations: vec![import],
                             loc: self.last_loc,
@@ -164,13 +163,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 if let Some(value) = value {
                     self.resolve_expr(value);
                 }
-                let (old, new) = self.decl_var(name);
+                let new = self.decl_var(name);
                 self.compiler.program.vars.push(VarInfo { kind: *kind, loc });
                 let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
                     value: mem::replace(value, Some(FatExpr::null(loc))),
-                    dropping: old,
                     kind: *kind,
                 };
                 if *kind == VarType::Const {
@@ -201,7 +199,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                         func.var_name = Some(v);
                         v
                     } else {
-                        let (_, v) = self.decl_var(&func.name);
+                        let v = self.decl_var(&func.name);
                         func.var_name = Some(v);
                         self.compiler.program.vars.push(VarInfo {
                             kind: VarType::Const,
@@ -306,19 +304,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     #[must_use]
-    fn decl_var(&mut self, name: &Ident<'p>) -> (Option<Var<'p>>, Var<'p>) {
+    fn decl_var(&mut self, name: &Ident<'p>) -> Var<'p> {
         let var = Var(*name, self.next_var);
         self.next_var += 1;
         let current = self.scopes.last_mut().unwrap();
-        // TODO: cleanup callers
-        // Only checking current scope for something to drop.
-        // let old = if let Some(found) = current.iter().position(|v| v.0 == *name) {
-        //     Some(mem::replace(&mut current[found], var))
-        // } else {
-        //     None
-        // };
         current.push(var);
-        (None, var)
+        var
     }
 
     fn push_scope(&mut self, track_captures: bool) {
@@ -347,7 +338,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Name::Ident(name) => {
                 self.walk_ty(&mut binding.ty);
                 if declaring {
-                    let (_old, var) = self.decl_var(&name);
+                    let var = self.decl_var(&name);
                     self.compiler.program.vars.push(VarInfo { kind: VarType::Var, loc });
                     *binding = Binding {
                         name: Name::Var(var),

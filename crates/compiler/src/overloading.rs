@@ -1,6 +1,6 @@
 use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var};
 use crate::bc::{FuncRef, Value, Values};
-use crate::compiler::{CErr, Compile, DebugState, ExecTime, FnWip, Res};
+use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::LogTag::ShowErr;
 use crate::logging::{LogTag, PoolLog};
 use crate::{assert_eq, err, outln, unwrap};
@@ -184,7 +184,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         "for fn {}({arg_ty:?}={}) {}={:?};",
                         s.pool.get(name),
                         s.program.log_type(arg_ty),
-                        requested_ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
+                        requested_ret.map(|ret| format!("{ret:?}")).unwrap_or_default(),
                         requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
                     )
                 };

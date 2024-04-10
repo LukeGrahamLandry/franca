@@ -264,13 +264,8 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     }
 
     fn pre_walk_stmt(&mut self, stmt: &mut FatStmt<'p>) {
-        if let Stmt::DeclVar { name, dropping, .. } = &mut stmt.stmt {
+        if let Stmt::DeclVar { name, .. } = &mut stmt.stmt {
             self.decl(name);
-            if let Some(dropping) = dropping {
-                if let Some(new_d) = self.mapping.get(dropping) {
-                    *dropping = *new_d;
-                }
-            }
         }
     }
 
@@ -570,10 +565,6 @@ pub enum Stmt<'p> {
         name: Var<'p>,
         ty: LazyType<'p>,
         value: Option<FatExpr<'p>>,
-        // TODO: if this is a redeclaration, immediatly call the drop handler on the old one?
-        //       thats not what rust does. but lexical destructors seem like they'd block tail recursion a lot.
-        //       but also i like the thing where you refine your
-        dropping: Option<Var<'p>>,
         kind: VarType,
     },
     // I have to write the logic for this anyway to deal with function args and I need it for inlining because I don't want the backend to have to deal with it.
@@ -585,7 +576,6 @@ pub enum Stmt<'p> {
     DeclVarPattern {
         binding: Pattern<'p>,
         value: Option<FatExpr<'p>>,
-        // dropping: Option<Var<'p>>,
         // kind: VarType,  // TODO: put this in pattern so function args really are the same as variables. I hate how many minor variations of shit I have.
     },
 

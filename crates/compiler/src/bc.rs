@@ -197,7 +197,7 @@ impl FuncRef {
     }
 
     // Can use this for getting type since they should be the same
-    pub fn at_rt<'p>(self) -> FuncId {
+    pub fn at_rt(self) -> FuncId {
         match self {
             FuncRef::Exact(f) => f,
             FuncRef::Split { rt, .. } => rt,

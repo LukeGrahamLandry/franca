@@ -22,7 +22,6 @@ use crate::ast::{
 use crate::bc::*;
 use crate::ffi::InterpSend;
 use crate::interp::Interp;
-use crate::overloading::filter_arch;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -875,18 +874,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
         let res = self.compile_expr_inner(result, expr, requested)?;
         expr.ty = res.ty();
-        // TODO: it seems like this should always work but it doesn't
-        if let Structured::Const(ty, value) = &res {
-            // expr.expr = Expr::Value {
-            //     ty: *ty,
-            //     value: value.clone(),
-            // };
-            // assert!(
-            //     matches!(expr.expr, Expr::Value { .. }),
-            //     "If reduced to constant, that should be saved in the ast.\n{}",
-            //     expr.log(self.pool)
-            // )
-        }
+        // TODO: should be able to .expr=Value:: if Structured::Const
         Ok(res)
     }
 
@@ -1056,8 +1044,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                             Structured::RuntimeOnly(ty)
                         }
                     }
-                    "first" => self.tuple_access(result, arg, requested, 0),
-                    "second" => self.tuple_access(result, arg, requested, 1),
                     "reflect_print" => {
                         self.compile_expr(result, arg, None)?;
                         // TODO: replace expr with fn call
@@ -1232,7 +1218,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                                         name,
                                         ty: LazyType::Infer,
                                         value: Some(value),
-                                        dropping: None,
                                         kind: VarType::Var,
                                     },
                                     annotations: vec![],
@@ -2312,15 +2297,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(Structured::RuntimeOnly(tuple_ty))
     }
 
-    fn tuple_access(&self, _result: &mut FnWip<'p>, _container: &FatExpr<'p>, _requested: Option<TypeId>, _index: i32) -> Structured {
-        todo!()
-    }
-
-    fn is_raw_call(&self, f: FuncId) -> bool {
-        let func = &self.program[f];
-        !(func.has_tag(Flag::Comptime) || func.any_const_args() || func.has_tag(Flag::Inline) || !func.capture_vars.is_empty())
-    }
-
     // the bool return is did_inline which will be banned if its a Split FuncRef.
     fn compile_call(
         &mut self,
@@ -2821,7 +2797,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         expr: &mut FatExpr<'p>,
         mut ct: FuncId,
         mut rt: FuncId,
-        requested: Option<TypeId>,
+        _requested: Option<TypeId>,
     ) -> Result<Structured, CompileError<'p>> {
         debug_assert_ne!(ct, rt);
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
