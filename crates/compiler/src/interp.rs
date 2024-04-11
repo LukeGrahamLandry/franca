@@ -8,8 +8,7 @@ use codemap::Span;
 use interp_derive::InterpSend;
 
 use crate::ast::Flag;
-use crate::compiler::{CErr, CompileError, ExecTime, Executor, Res, ToBytes};
-use crate::emit_bc::EmitBc;
+use crate::compiler::{CErr, Compile, ExecTime, FnWip, Res, ToBytes};
 use crate::ffi::InterpSend;
 use crate::logging::LogTag::ShowPrint;
 use crate::logging::{unwrap, PoolLog};
@@ -38,10 +37,36 @@ pub struct Interp<'p> {
     pub pool: &'p StringPool<'p>,
     pub value_stack: Vec<Value>,
     pub call_stack: Vec<CallFrame<'p>>,
-    pub ready: BcReady<'p>,
     pub last_loc: Option<Span>,
     pub messages: Vec<StackAbsoluteRange>,
     pub ffi_stack: Vec<Values>,
+}
+
+pub fn interp_run<'p: 'a, 'a>(
+    compile: &mut Compile<'a, 'p>,
+    mut result: Option<&mut FnWip<'p>>,
+    f: FuncId,
+    arg: Values,
+    when: ExecTime,
+) -> Res<'p, Values> {
+    let ret = compile.program[f].unwrap_ty().ret;
+    assert!(!ret.is_any() && !ret.is_unknown());
+    let return_slot_count = compile.ready.sizes.slot_count(compile.program, ret);
+
+    let mut interp: Interp = Interp::new(compile.pool);
+    let mut response = interp.run(f, arg, when, return_slot_count, compile.program, &mut compile.ready);
+    while let Err(msg) = response {
+        match msg.reason {
+            CErr::InterpMsgToCompiler(name, arg, _) => {
+                let name = compile.pool.get(name);
+                let res = compile.handle_macro_msg(result.as_mut().unwrap(), name, arg)?;
+                let ret = unwrap!(interp.messages.pop(), "nothing to resume");
+                response = interp.resume(res, ret, compile.program, &mut compile.ready);
+            }
+            _ => return Err(msg),
+        }
+    }
+    response
 }
 
 impl<'p> Interp<'p> {
@@ -50,14 +75,21 @@ impl<'p> Interp<'p> {
             pool,
             value_stack: vec![],
             call_stack: vec![],
-            ready: BcReady::default(),
             last_loc: None,
             messages: vec![],
             ffi_stack: vec![],
         }
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime, return_slot_count: usize, program: &mut Program<'p>) -> Res<'p, Values> {
+    pub fn run(
+        &mut self,
+        f: FuncId,
+        arg: Values,
+        when: ExecTime,
+        return_slot_count: usize,
+        program: &mut Program<'p>,
+        ready: &mut BcReady<'p>,
+    ) -> Res<'p, Values> {
         let _init_heights = (self.call_stack.len(), self.value_stack.len());
 
         // A fake callframe representing the calling rust program.
@@ -84,12 +116,12 @@ impl<'p> Interp<'p> {
         };
 
         // Call the function
-        self.push_callframe(f, ret, arg, when, program)?;
-        self.run_continuation(program)
+        self.push_callframe(f, ret, arg, when, program, ready)?;
+        self.run_continuation(program, ready)
     }
 
-    fn run_continuation(&mut self, program: &mut Program<'p>) -> Res<'p, Values> {
-        self.run_inst_loop(program)?;
+    fn run_continuation(&mut self, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, Values> {
+        self.run_inst_loop(program, ready)?;
 
         // Give the return value to the caller.
         let frame = unwrap!(self.call_stack.last(), "");
@@ -110,10 +142,10 @@ impl<'p> Interp<'p> {
         Ok(result)
     }
 
-    fn run_inst_loop(&mut self, program: &mut Program<'p>) -> Res<'p, ()> {
+    fn run_inst_loop(&mut self, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, ()> {
         loop {
-            self.update_debug();
-            let i = self.next_inst();
+            self.update_debug(ready);
+            let i = self.next_inst(ready);
             self.log_stack();
 
             logln!("I: {:?}", i.log(self.pool));
@@ -129,7 +161,7 @@ impl<'p> Interp<'p> {
                     self.bump_ip();
                     let arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
-                    self.push_callframe(f, ret, arg, when, program)?;
+                    self.push_callframe(f, ret, arg, when, program, ready)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -151,10 +183,10 @@ impl<'p> Interp<'p> {
                     } else if program[f].body.is_none() {
                         let abs = self.range_to_index(ret);
                         let name = self.pool.get(program[f].name);
-                        let value = self.runtime_builtin(name, arg.clone(), Some(abs), program)?;
+                        let value = self.runtime_builtin(name, arg.clone(), Some(abs), program, ready)?;
                         self.expand_maybe_tuple(value, abs)?;
                     } else {
-                        self.push_callframe(f, ret, arg, when, program)?;
+                        self.push_callframe(f, ret, arg, when, program, ready)?;
                     }
                 }
                 &Bc::LoadConstant { slot, value } => {
@@ -179,7 +211,7 @@ impl<'p> Interp<'p> {
                     let abs = self.range_to_index(ret);
                     self.bump_ip();
                     // Note: at this point you have to be re-enterant because you might suspend to ask the compiler to do something.
-                    let value = self.runtime_builtin(name, arg.clone(), Some(abs), program)?;
+                    let value = self.runtime_builtin(name, arg.clone(), Some(abs), program, ready)?;
                     self.expand_maybe_tuple(value, abs)?;
                 }
                 &Bc::Ret(slot) => {
@@ -225,7 +257,7 @@ impl<'p> Interp<'p> {
                     let f = self.take_slot(f);
                     let arg = self.take_slots(arg);
                     let f = Values::One(f).to_func()?;
-                    self.push_callframe(f, ret, arg, when, program)?;
+                    self.push_callframe(f, ret, arg, when, program, ready)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -305,7 +337,7 @@ impl<'p> Interp<'p> {
                     if let Some(f) = f.to_func() {
                         self.bump_ip(); // pre-bump
                         let when = self.call_stack.last().unwrap().when;
-                        self.push_callframe(f, ret, arg, when, program)?;
+                        self.push_callframe(f, ret, arg, when, program, ready)?;
                         // don't bump ip here, we're in a new call frame.
                         continue;
                     }
@@ -406,6 +438,7 @@ impl<'p> Interp<'p> {
         arg: Values,
         ret_slot_for_suspend: Option<StackAbsoluteRange>,
         program: &mut Program<'p>,
+        ready: &mut BcReady<'p>,
     ) -> Res<'p, Values> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
@@ -488,7 +521,7 @@ impl<'p> Interp<'p> {
             "alloc_inner" => {
                 let (ty, count) = arg.to_pair()?;
                 let (ty, count) = (program.to_type(ty.into())?, count.to_int()?);
-                let stride = self.size_of(program, ty);
+                let stride = ready.sizes.slot_count(program, ty);
                 assert!(count >= 0);
                 let values = vec![Value::Poison; count as usize * stride];
                 let value = Box::into_raw(Box::new(InterpBox {
@@ -510,7 +543,7 @@ impl<'p> Interp<'p> {
             "dealloc_inner" => {
                 let (ty, ptr, count) = arg.to_triple()?;
                 let (ty, count, (ptr, ptr_first, ptr_count)) = (program.to_type(ty.into())?, count.to_int()?, Values::One(ptr).to_heap_ptr()?);
-                assert_eq!(self.size_of(program, ty) * count as usize, ptr_count);
+                assert_eq!(ready.sizes.slot_count(program, ty) * count as usize, ptr_count);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
@@ -587,7 +620,6 @@ impl<'p> Interp<'p> {
                 Values::Many(vec![Value::I64(map as i64), Value::I64(code as i64)])
             }
             "literal_ast" => {
-                // TODO: I think i caved and made Exec::deref_ptr_pls after I made this, so use that instead?
                 let (ty, ptr) = arg.to_pair()?;
                 let val = self.deref_ptr(ptr)?;
                 let mut v = val.vec();
@@ -601,6 +633,21 @@ impl<'p> Interp<'p> {
                     unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
                 )?
             }
+            "unquote_macro_apply_placeholders" => {
+                let (ptr, count) = arg.to_pair()?;
+                let val = self.deref_ptr(ptr)?;
+                let mut v = val.vec();
+                v.push(count);
+                let arg = Values::Many(v);
+
+                // aaaaa
+                self.suspend(
+                    Flag::Unquote_Macro_Apply_Placeholders.ident(),
+                    arg,
+                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
+                )?
+            }
+
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
                 let name = self.pool.intern(name);
@@ -617,13 +664,13 @@ impl<'p> Interp<'p> {
         err!(CErr::InterpMsgToCompiler(name, arg, ret))
     }
 
-    pub fn resume(&mut self, result: Values, ret: StackAbsoluteRange, program: &mut Program<'p>) -> Res<'p, Values> {
+    pub fn resume(&mut self, result: Values, ret: StackAbsoluteRange, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, Values> {
         self.expand_maybe_tuple(result, ret)?;
-        self.run_continuation(program)
+        self.run_continuation(program, ready)
     }
 
-    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, program: &Program<'p>) -> Res<'p, ()> {
-        let func = self.ready[f].as_ref();
+    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, program: &Program<'p>, ready: &BcReady<'p>) -> Res<'p, ()> {
+        let func = ready[f].as_ref();
         assert!(func.is_some(), "ICE: tried to call {f:?} but not compiled.");
         // Calling Convention: arguments passed to a function are moved out of your stack.
         let return_slot = self.range_to_index(ret);
@@ -639,7 +686,7 @@ impl<'p> Interp<'p> {
             debug_name,
             when,
         });
-        let empty = self.current_fn_body().stack_slots; // TODO: does this count tuple args right?
+        let empty = self.current_fn_body(ready).stack_slots; // TODO: does this count tuple args right?
         for _ in 0..empty {
             self.value_stack.push(Value::Poison);
         }
@@ -727,24 +774,24 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn next_inst(&self) -> &Bc<'p> {
+    fn next_inst<'b>(&self, ready: &'b BcReady<'p>) -> &'b Bc<'p> {
         let frame = self.call_stack.last().unwrap();
-        let body = self.ready[frame.current_func].as_ref().unwrap();
+        let body = ready[frame.current_func].as_ref().unwrap();
         body.insts.get(frame.current_ip).unwrap()
     }
 
-    fn update_debug(&mut self) {
+    fn update_debug(&mut self, ready: &BcReady<'p>) {
         let frame = self.call_stack.last().unwrap();
-        let body = self.ready[frame.current_func].as_ref().unwrap();
+        let body = ready[frame.current_func].as_ref().unwrap();
         // TOOD: @track_caller so you don't just get an error report on the forward declare of assert_eq all the time. HACK:
         if !matches!(body.insts[frame.current_ip], Bc::CallBuiltin { .. }) {
             self.last_loc = body.debug.get(frame.current_ip).map(|i| i.src_loc);
         }
     }
 
-    fn current_fn_body(&self) -> &FnBody {
+    fn current_fn_body<'b>(&self, ready: &'b BcReady<'p>) -> &'b FnBody<'p> {
         let frame = self.call_stack.last().unwrap();
-        self.ready[frame.current_func].as_ref().expect("jit current function")
+        ready[frame.current_func].as_ref().expect("jit current function")
     }
 
     fn set_ptr(&mut self, addr: Value, value: Values) -> Res<'p, Value> {
@@ -845,70 +892,6 @@ pub struct CmdResult {
     status: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-}
-
-impl<'p> Executor<'p> for Interp<'p> {
-    type SavedState = (usize, usize);
-
-    fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()> {
-        let init_heights = (self.call_stack.len(), self.value_stack.len());
-        let result = EmitBc::compile(program, &mut self.ready, f);
-        if result.is_ok() {
-            let end_heights = (self.call_stack.len(), self.value_stack.len());
-            assert_eq!(init_heights, end_heights, "bad stack size");
-        }
-        result
-    }
-
-    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
-        let ret = program[f].unwrap_ty().ret;
-        assert!(!ret.is_any() && !ret.is_unknown());
-        let size = self.size_of(program, ret);
-        self.run(f, arg, when, size, program)
-    }
-
-    fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values> {
-        let ret = unwrap!(self.messages.pop(), "nothing to resume");
-        self.resume(response, ret, program)
-    }
-
-    fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize {
-        self.ready.sizes.slot_count(program, ty)
-    }
-
-    fn is_ready(&self, f: FuncId) -> bool {
-        self.ready.ready.len() > f.0 && self.ready[f].is_some()
-    }
-
-    fn dump_repr(&self, _program: &Program<'p>, f: FuncId) -> String {
-        self.ready[f]
-            .as_ref()
-            .map(|func| func.log(self.pool))
-            .unwrap_or_else(|| String::from("NOT READY"))
-    }
-
-    fn tag_error(&self, err: &mut CompileError<'p>) {
-        err.value_stack = self.value_stack.clone();
-        err.call_stack = self.log_callstack();
-        err.loc = self.last_loc.or(err.loc);
-    }
-
-    fn mark_state(&self) -> Self::SavedState {
-        (self.call_stack.len(), self.value_stack.len())
-    }
-
-    fn restore_state(&mut self, (cs, vs): Self::SavedState) {
-        drops(&mut self.call_stack, cs);
-        drops(&mut self.value_stack, vs);
-    }
-
-    fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values> {
-        self.deref_ptr(slot)
-    }
-
-    fn to_interp(self: Box<Self>) -> Option<Interp<'p>> {
-        Some(*self)
-    }
 }
 
 fn drops<T>(vec: &mut Vec<T>, new_len: usize) {

@@ -6,7 +6,6 @@ use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, Tar
 use crate::ast::{FatStmt, Var};
 use crate::bc_to_asm::BcToAsm;
 use crate::compiler::{Compile, ExecTime, Res};
-use crate::interp::Interp;
 use crate::logging::PoolLog;
 use crate::pool::StringPool;
 use crate::{bc::*, load_program};
@@ -15,7 +14,7 @@ use crate::{err, unwrap};
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
-    let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
+    let mut comp = Compile::new(pool, &mut program);
     load_program(&mut comp, "").unwrap();
 
     let (rs, mut comp) = EmitRs::emit_rs(comp).unwrap();
@@ -24,8 +23,7 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
     }
-    let mut interp = comp.runtime_executor.to_interp().unwrap();
-    let mut asm = BcToAsm::new(&mut interp.ready, &mut program);
+    let mut asm = BcToAsm::new(&mut comp.ready, comp.program);
     asm.asm.reserve(asm.program.funcs.len());
     for f in &bs {
         asm.compile(*f).unwrap();

@@ -6,9 +6,7 @@ use compiler::{
     bc::Value,
     compiler::{Compile, ExecTime},
     export_ffi::{get_include_std, STDLIB_PATH},
-    find_std_lib,
-    interp::Interp,
-    load_program, log_dbg, log_err,
+    find_std_lib, load_program, log_dbg, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
     run_main, timestamp,
@@ -74,22 +72,11 @@ fn main() {
                 Value::I64(0),
                 Value::I64(0),
                 Some(&name),
-                Box::new(Interp::new(pool)),
                 true,
-                Box::new(Interp::new(pool)),
             );
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
-            run_main(
-                pool,
-                fs::read_to_string(&name).unwrap(),
-                Value::I64(0),
-                Value::I64(0),
-                Some(&name),
-                Box::new(Interp::new(pool)),
-                true,
-                Box::new(Interp::new(pool)),
-            );
+            run_main(pool, fs::read_to_string(&name).unwrap(), Value::I64(0), Value::I64(0), Some(&name), true);
         }
     } else {
         run_tests();
@@ -250,7 +237,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, arch);
-    let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
+    let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
     if let Err(e) = result {
         log_err(&comp, e, None);
@@ -280,8 +267,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
             (res, comp.program)
         }
         TargetArch::Aarch64 => {
-            let mut interp: Interp = comp.runtime_executor.to_interp().unwrap();
-            let mut asm = BcToAsm::new(&mut interp.ready, &mut program);
+            let mut asm = BcToAsm::new(&mut comp.ready, comp.program);
             asm.asm.reserve(asm.program.funcs.len());
             if let Err(_e) = asm.compile(f) {
                 // log_err(&comp, e, None);

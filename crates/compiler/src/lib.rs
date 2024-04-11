@@ -21,7 +21,7 @@ use ast::FuncId;
 use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use compiler::{BoxedExec, CErr, Res};
+use compiler::{CErr, Res};
 use export_ffi::STDLIB_PATH;
 use pool::StringPool;
 
@@ -152,20 +152,11 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
-pub fn run_main<'a: 'p, 'p>(
-    pool: &'a StringPool<'p>,
-    src: String,
-    mut arg: Value,
-    mut expect: Value,
-    save: Option<&str>,
-    runtime_executor: BoxedExec<'a>,
-    leak: bool,
-    comptime_executor: BoxedExec<'a>,
-) -> bool {
+pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, mut arg: Value, mut expect: Value, save: Option<&str>, leak: bool) -> bool {
     log_tag_info();
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
-    let mut comp = Compile::new(pool, &mut program, runtime_executor, comptime_executor);
+    let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
 
     // damn turns out defer would maybe be a good idea
@@ -243,7 +234,7 @@ pub fn run_main<'a: 'p, 'p>(
 }
 
 pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
-    outln!(Bytecode, "{}", comp.runtime_executor.log(comp.pool));
+    // outln!(Bytecode, "{}", comp.runtime_executor.log(comp.pool));
     if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
         outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
     }

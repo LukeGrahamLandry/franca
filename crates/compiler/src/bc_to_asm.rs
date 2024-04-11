@@ -7,7 +7,7 @@
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, BcReady, InterpBox, StackOffset, StackRange, Value, Values};
 use crate::bootstrap_gen::*;
-use crate::compiler::{ExecTime, Executor, Res};
+use crate::compiler::{Compile, ExecTime, Executor, Res};
 use crate::interp::Interp;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
@@ -50,6 +50,10 @@ const lr: i64 = 30;
 const sp: i64 = 31;
 // const W32: i64 = 0b0;
 const X64: i64 = 0b1;
+
+pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
+    BcToAsm::new(&mut compile.ready, compile.program).bc_to_asm(f)
+}
 
 impl<'z, 'p> BcToAsm<'z, 'p> {
     pub fn new(interp: &'z mut BcReady<'p>, program: &'z mut Program<'p>) -> Self {
@@ -677,7 +681,7 @@ impl ConstBytes {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+//#[cfg(target_arch = "aarch64")]
 pub mod jit {
     use crate::ast::FuncId;
     use crate::bc_to_asm::ConstBytes;

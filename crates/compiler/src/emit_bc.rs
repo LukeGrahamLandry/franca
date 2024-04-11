@@ -11,7 +11,7 @@ use std::usize;
 use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
-use crate::compiler::{CErr, FnWip, Res};
+use crate::compiler::{CErr, Compile, FnWip, Res};
 use crate::extend_options;
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
@@ -31,6 +31,10 @@ pub struct EmitBc<'z, 'p: 'z> {
     last_loc: Option<Span>,
     locals: Vec<Vec<StackRange>>,
     locals_drop: Vec<Vec<StackRange>>,
+}
+
+pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
+    EmitBc::compile(compile.program, &mut compile.ready, f)
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {

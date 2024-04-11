@@ -29,7 +29,7 @@ use llvm_sys::{
 
 use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
-    bc::{Bc, StackOffset, Value},
+    bc::{Bc, BcReady, StackOffset, Value},
     bc_to_asm::ConstBytes,
     compiler::{ExecTime, Res},
     err, extend_options,
@@ -246,7 +246,7 @@ fn null_terminated(s: String) -> CString {
 
 pub struct BcToLlvm<'z, 'p> {
     pub program: &'z mut Program<'p>,
-    interp: &'z mut Interp<'p>,
+    ready: &'z mut BcReady<'p>,
     pub llvm: JittedLlvm,
     f: FuncId,
     wip: Vec<FuncId>, // makes recursion work
@@ -255,11 +255,11 @@ pub struct BcToLlvm<'z, 'p> {
 }
 
 impl<'z, 'p> BcToLlvm<'z, 'p> {
-    pub fn new(interp: &'z mut Interp<'p>, program: &'z mut Program<'p>) -> Self {
+    pub fn new(ready: &'z mut BcReady<'p>, program: &'z mut Program<'p>) -> Self {
         Self {
             llvm: JittedLlvm::new("franca", program).unwrap(),
             program,
-            interp,
+            ready,
             f: FuncId(0), // TODO: bad
             wip: vec![],
             slots: vec![],
@@ -304,7 +304,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
 
     #[track_caller]
     fn slot_type(&self, slot: StackOffset) -> TypeId {
-        self.interp.ready[self.f].as_ref().unwrap().slot_types[slot.0]
+        self.ready[self.f].as_ref().unwrap().slot_types[slot.0]
     }
 
     // TODO: change name? make this whole thing a trait so i dont have to keep writing the shitty glue.
@@ -314,7 +314,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             let ff = &self.program[f];
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
             let llvm_f = self.llvm.decl_function(self.program, f);
-            let func = self.interp.ready[f].as_ref().unwrap();
+            let func = self.ready[f].as_ref().unwrap();
             // println!("{}", func.log(self.program.pool));
             self.slots.clear();
             self.slots.extend(vec![None; func.stack_slots]);
@@ -350,11 +350,11 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                 self.write_slot(StackOffset(i), value);
             }
 
-            let func = self.interp.ready[f].as_ref().unwrap();
+            let func = self.ready[f].as_ref().unwrap();
             let mut block_finished = true;
             let mut dead_code = false; // HACK to deal with my weird 'unreachable'
             for i in 0..func.insts.len() {
-                let func = &self.interp.ready[f].as_ref().unwrap();
+                let func = &self.ready[f].as_ref().unwrap();
                 if func.jump_targets.get(i) {
                     dead_code = false;
                     let block = *self.blocks.get(&(i)).unwrap();
@@ -539,7 +539,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.interp.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
 
     fn llvm_type(&mut self, slot: StackOffset) -> LLVMTypeRef {

@@ -20,8 +20,10 @@ use crate::ast::{
 };
 
 use crate::bc::*;
+use crate::bc_to_asm::Jitted;
+use crate::emit_bc::emit_bc;
 use crate::ffi::InterpSend;
-use crate::interp::Interp;
+use crate::interp::{interp_run, Interp};
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -65,7 +67,7 @@ pub enum CErr<'p> {
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
-pub struct Compile<'a, 'p> {
+pub struct Compile<'a, 'p: 'a> {
     pub pool: &'p StringPool<'p>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
@@ -73,12 +75,11 @@ pub struct Compile<'a, 'p> {
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     pub last_loc: Option<Span>,
-    pub runtime_executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
-    pub comptime_executor: Box<dyn Executor<'p, SavedState = (usize, usize)>>,
     pub program: &'a mut Program<'p>,
-    pub jitted: Vec<*const u8>,
     pub save_bootstrap: Vec<FuncId>,
     pub tests: Vec<FuncId>,
+    pub aarch64: Jitted,
+    pub ready: BcReady<'p>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +112,7 @@ pub struct FnWip<'p> {
 pub type BoxedExec<'p> = Box<dyn Executor<'p, SavedState = (usize, usize)>>;
 
 impl<'a, 'p> Compile<'a, 'p> {
-    pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>, runtime_executor: BoxedExec<'p>, comptime_executor: BoxedExec<'p>) -> Self {
+    pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         Self {
             pool,
             debug_trace: vec![],
@@ -120,9 +121,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: None,
             currently_compiling: vec![],
             program,
-            runtime_executor,
-            comptime_executor,
-            jitted: vec![],
+            aarch64: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            ready: BcReady::default(),
             save_bootstrap: vec![],
             tests: vec![],
         }
@@ -205,7 +205,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for (id, when) in callees {
                     self.compile(id, when)?;
                 }
-                result = self.runtime_executor.compile_func(self.program, f);
+                result = emit_bc(self, f);
             } else {
                 self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime)?;
             }
@@ -220,7 +220,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
-        let result = self.runtime_executor.run_func(self.program, f, arg, when);
+        let result = interp_run(self, None, f, arg, when);
         let result = self.tag_err(result);
         self.pop_state(state2);
         result
@@ -236,7 +236,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Err(err) = &mut res {
             err.trace = self.log_trace();
             err.loc = self.last_loc;
-            self.runtime_executor.tag_error(err);
         }
         res
     }
@@ -586,7 +585,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let args = func.arg.flatten().into_iter();
         let mut arg_values = arg_value.vec().into_iter();
         for (name, ty, _) in args {
-            let size = self.runtime_executor.size_of(self.program, ty); // TODO: better pattern matching
+            let size = self.ready.sizes.slot_count(self.program, ty); // TODO: better pattern matching
             let mut values = vec![];
             for _ in 0..size {
                 values.push(unwrap!(arg_values.next(), "ICE: missing arguments"));
@@ -1059,16 +1058,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "size_of" => {
                         let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
                         let ty = self.to_type(ty)?;
-                        let size = self.runtime_executor.size_of(self.program, ty);
+                        let size = self.ready.sizes.slot_count(self.program, ty);
                         expr.expr = Expr::int(size as i64);
                         self.program.load_value(Value::I64(size as i64))
                     }
                     "assert_compile_error" => {
-                        // TODO: this can still have side-effects on the vm state tho :(
-                        let (saved_res, state) = (result.clone(), self.runtime_executor.mark_state());
+                        // TODO: this can still have side-effects on the compiler state tho :(
+                        let saved_res = result.clone();
                         let res = self.compile_expr(result, arg, None);
                         assert!(res.is_err());
-                        self.runtime_executor.restore_state(state);
                         *result = saved_res;
 
                         expr.expr = Expr::unit();
@@ -1299,41 +1297,29 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let want = FatExpr::get_type(self.program);
                 let full_arg = Expr::Value {
                     ty: self.program.tuple_of(vec![expr_ty, expr_ty]),
-                    value: Values::Many(values),
+                    value: Values::Many(values.clone()), // TODO: sad
                 };
                 let mut full_arg = FatExpr::synthetic(full_arg, loc);
                 let f = self.resolve_function(result, *name, &mut full_arg, Some(want))?.single()?;
                 assert!(self.program[f].has_tag(Flag::Annotation));
                 self.infer_types(f)?;
-                let get_func = FatExpr::synthetic(self.func_expr(f), loc);
-                let full_call = FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
+                // let get_func = FatExpr::synthetic(self.func_expr(f), loc);
+                // let full_call = FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
 
-                let mut response = self.immediate_eval_expr(&result.constants, full_call, want);
-                loop {
-                    match response {
-                        Ok(new_expr) => {
-                            // TODO: deserialize should return a meaningful error message
-                            *expr = unwrap!(FatExpr::deserialize_one(new_expr.clone()), "macro failed. returned {new_expr:?}");
-                            outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
-                            outln!(LogTag::Macros, "================\n");
-                            // Now evaluate whatever the macro gave us.
-                            break self.compile_expr(result, expr, requested)?;
-                        }
-                        Err(msg) => match msg.reason {
-                            CErr::InterpMsgToCompiler(name, arg, _) => {
-                                let name = self.pool.get(name);
-                                let res = self.handle_macro_msg(result, name, arg)?;
-                                response = self.runtime_executor.run_continuation(self.program, res);
-                            }
-                            _ => return Err(msg),
-                        },
-                    }
-                }
+                // let new_expr = self.immediate_eval_expr(&result.constants, full_call, want)?;
+                self.compile(f, ExecTime::Comptime)?;
+                let new_expr = interp_run(self, Some(result), f, Values::Many(values), ExecTime::Comptime)?;
+                // TODO: deserialize should return a meaningful error message
+                *expr = unwrap!(FatExpr::deserialize_one(new_expr.clone()), "macro failed. returned {new_expr:?}");
+                outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
+                outln!(LogTag::Macros, "================\n");
+                // Now evaluate whatever the macro gave us.
+                self.compile_expr(result, expr, requested)?
             }
         })
     }
 
-    fn handle_macro_msg(&mut self, result: &mut FnWip<'p>, name: &str, arg: Values) -> Res<'p, Values> {
+    pub fn handle_macro_msg(&mut self, result: &mut FnWip<'p>, name: &str, arg: Values) -> Res<'p, Values> {
         match name {
             "infer_raw_deref_type" => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
@@ -1381,10 +1367,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Ok(arg.serialize_one())
             }
             "unquote_macro_apply_placeholders" => {
-                let (slot, count) = arg.to_pair()?;
-                let mut values = self.runtime_executor.deref_ptr_pls(slot)?.vec().into_iter();
+                let mut values = arg.vec();
+                let count = unwrap!(values.pop(), "").to_int()?;
+                let mut values = values.into_iter();
                 let mut arg: Vec<FatExpr<'p>> = vec![];
-                for _ in 0..count.to_int()? {
+                for _ in 0..count {
                     arg.push(unwrap!(FatExpr::deserialize(&mut values), ""));
                 }
                 assert!(values.next().is_none());
@@ -2215,7 +2202,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }),
                     ) = &container_ptr
                     {
-                        let size = self.runtime_executor.size_of(self.program, *f_ty);
+                        let size = self.ready.sizes.slot_count(self.program, *f_ty);
                         assert!(physical_count >= size);
                         let value = Values::One(Value::Heap {
                             value,
@@ -2227,7 +2214,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     return Ok(Structured::RuntimeOnly(ty));
                 }
-                count += self.runtime_executor.size_of(self.program, *f_ty);
+                count += self.ready.sizes.slot_count(self.program, *f_ty);
             }
             err!("unknown index {index} on {:?}", self.program.log_type(container_ty));
         } else {

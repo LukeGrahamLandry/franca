@@ -165,8 +165,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
                 }
-                let new = self.decl_var(name);
-                self.compiler.program.vars.push(VarInfo { kind: *kind, loc });
+                let new = self.decl_var(name, *kind, loc);
                 let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
@@ -210,12 +209,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                         func.var_name = Some(v);
                         v
                     } else {
-                        let v = self.decl_var(&func.name);
+                        let v = self.decl_var(&func.name, VarType::Const, func.loc);
                         func.var_name = Some(v);
-                        self.compiler.program.vars.push(VarInfo {
-                            kind: VarType::Const,
-                            loc: func.loc,
-                        });
 
                         if self.scopes.last().unwrap().iter().filter(|v| v.0 == func.name).count() != 1 {
                             // TODO: show other declaration site.
@@ -324,21 +319,24 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         None
     }
 
+    // TODO: move the const shadow check here.
     #[must_use]
-    fn decl_var(&mut self, name: &Ident<'p>) -> Var<'p> {
+    fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Var<'p> {
         let var = Var(*name, self.next_var);
         self.next_var += 1;
         let current = self.scopes.last_mut().unwrap();
         current.push(var);
+        self.compiler.program.vars.push(VarInfo { kind, loc });
         var
     }
 
     fn push_scope(&mut self, track_captures: bool) {
-        self.track_captures_before_scope.push(if track_captures {
+        let function_scope = if track_captures {
             self.scopes.len()
         } else {
             *self.track_captures_before_scope.last().unwrap()
-        });
+        };
+        self.track_captures_before_scope.push(function_scope);
         self.scopes.push(Default::default());
     }
 
@@ -359,8 +357,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Name::Ident(name) => {
                 self.walk_ty(&mut binding.ty);
                 if declaring {
-                    let var = self.decl_var(&name);
-                    self.compiler.program.vars.push(VarInfo { kind: VarType::Var, loc });
+                    // TODO: allow different qualifiers? structs could have const fields, what would that mean exactly?
+                    let var = self.decl_var(&name, VarType::Var, loc);
                     *binding = Binding {
                         name: Name::Var(var),
                         ty: mem::replace(&mut binding.ty, LazyType::Infer),

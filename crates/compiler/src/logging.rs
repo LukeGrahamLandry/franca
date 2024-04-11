@@ -470,24 +470,6 @@ impl<'p> PoolLog<'p> for Program<'p> {
     }
 }
 
-impl<'p> PoolLog<'p> for Interp<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
-        let mut s = String::new();
-        // s += &self.program.log_cached_types();
-        writeln!(s, "=== {} FUNCTIONS ===", self.ready.ready.len());
-        for (i, f) in self.ready.ready.iter().enumerate() {
-            write!(s, "FuncId({i}): ");
-            // s += &self.program.funcs[i].log(pool);
-            // s += "\n";
-            if let Some(bc) = f {
-                writeln!(s, "{}", bc.log(pool));
-            }
-            writeln!(s, "===");
-        }
-        s
-    }
-}
-
 impl<'p> Program<'p> {
     pub fn log_consts(&self, c: &Constants<'p>) -> String {
         let mut s = String::new();
