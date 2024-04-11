@@ -1637,6 +1637,14 @@ pub enum Flag {
     Operator_Question_Prefix,
     Operator_Up_Arrow_Prefix,
     Operator_Ampersand_Prefix,
+    Infer_Raw_Deref_Type,
+    Promote_Closure,
+    Intern_Type,
+    Print_Ast,
+    Clone_Ast,
+    Get_Type_Int,
+    Compile_Ast,
+    Const_Eval_String,
     _Reserved_Count_,
 }
 

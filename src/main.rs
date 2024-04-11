@@ -262,14 +262,11 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     assert_eq!(comp.program[f].finished_arg, Some(TypeId::i64()));
     let arg = Value::I64(982164);
 
-    let (result, program) = match arch {
-        TargetArch::Interp => {
-            let res = comp.run(f, arg.into(), ExecTime::Runtime);
-            (res, comp.program)
-        }
+    let result = match arch {
+        TargetArch::Interp => comp.run(f, arg.into(), ExecTime::Runtime),
         TargetArch::Aarch64 => {
-            if let Err(_e) = emit_aarch64(&mut comp, f) {
-                // log_err(&comp, e, None);
+            if let Err(e) = emit_aarch64(&mut comp, f) {
+                log_err(&comp, e, None);
                 exit(1);
             }
             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
@@ -290,24 +287,22 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
                 out("x21") _
                 );
             }
-            (Ok(Value::I64(code(a)).into()), &mut program)
+            Ok(Value::I64(code(a)).into())
         }
         #[cfg(not(feature = "llvm"))]
         TargetArch::Llvm => unreachable!(),
         #[cfg(feature = "llvm")]
         TargetArch::Llvm => {
-            let mut interp = comp.runtime_executor.to_interp().unwrap();
-            let mut asm = BcToLlvm::new(&mut interp, &mut program);
+            let mut asm = BcToLlvm::new(&mut comp);
 
-            if let Err(_e) = asm.compile(f) {
-                // TODO: make logerr just take program so i can actually call it
-                // log_err(&comp, e, None);
-                exit(1);
+            if let Err(e) = asm.compile(f) {
+                log_err(&comp, e, None);
+                return;
             }
 
-            if let Err(_e) = verify_module(asm.llvm.module) {
-                // log_err(&comp, e, None);
-                exit(1);
+            if let Err(e) = verify_module(asm.llvm.module) {
+                log_err(&comp, e, None);
+                return;
             }
 
             let code = asm.llvm.get_fn_jitted(f).unwrap();
@@ -316,12 +311,12 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
             unsafe {
                 asm.llvm.release();
             }
-            (Ok(Value::I64(res).into()), &mut program)
+            Ok(Value::I64(res).into())
         }
     };
-    if let Err(_e) = result {
-        // log_err(&comp, e, None);
-        exit(1);
+    if let Err(e) = result {
+        log_err(&comp, e, None);
+        return;
     }
     let result = result.unwrap();
     let end = timestamp();

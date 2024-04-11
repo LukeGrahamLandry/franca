@@ -31,7 +31,7 @@ use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, BcReady, StackOffset, Value},
     bc_to_asm::ConstBytes,
-    compiler::{ExecTime, Res},
+    compiler::{Compile, ExecTime, Res},
     err, extend_options,
     logging::PoolLog,
     pool::Ident,
@@ -243,9 +243,8 @@ fn null_terminated(s: String) -> CString {
     CString::from_vec_with_nul(s).unwrap()
 }
 
-pub struct BcToLlvm<'z, 'p> {
-    pub program: &'z mut Program<'p>,
-    ready: &'z mut BcReady<'p>,
+pub struct BcToLlvm<'z, 'p, 'a> {
+    pub compile: &'z mut Compile<'a, 'p>,
     pub llvm: JittedLlvm,
     f: FuncId,
     wip: Vec<FuncId>, // makes recursion work
@@ -253,12 +252,11 @@ pub struct BcToLlvm<'z, 'p> {
     blocks: HashMap<usize, LLVMBasicBlockRef>,
 }
 
-impl<'z, 'p> BcToLlvm<'z, 'p> {
-    pub fn new(ready: &'z mut BcReady<'p>, program: &'z mut Program<'p>) -> Self {
+impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
+    pub fn new(compile: &'z mut Compile<'a, 'p>) -> Self {
         Self {
-            llvm: JittedLlvm::new("franca", program).unwrap(),
-            program,
-            ready,
+            llvm: JittedLlvm::new("franca", compile.program).unwrap(),
+            compile,
             f: FuncId(0), // TODO: bad
             wip: vec![],
             slots: vec![],
@@ -273,14 +271,14 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
         }
         self.wip.push(f);
 
-        if let Some(template) = self.program[f].any_reg_template {
+        if let Some(template) = self.compile.program[f].any_reg_template {
             todo!()
-        } else if let Some(addr) = self.program[f].comptime_addr {
+        } else if let Some(addr) = self.compile.program[f].comptime_addr {
             // TODO: shouldn't need this since i change at the callsite anyway
             let ptr = self.llvm.const_ptr(addr as *const u8);
             self.llvm.functions[f.0] = Some((ptr, CString::new(String::new()).unwrap(), true));
         } else {
-            let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
+            let callees = self.compile.program[f].wip.as_ref().unwrap().callees.clone();
             for (c, when) in callees {
                 // TODO: this will change
                 if when != ExecTime::Comptime {
@@ -288,7 +286,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                 }
             }
 
-            let func = &self.program[f];
+            let func = &self.compile.program[f];
             if let Some(insts) = func.jitted_code.as_ref() {
                 todo!()
             } else {
@@ -303,18 +301,18 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
 
     #[track_caller]
     fn slot_type(&self, slot: StackOffset) -> TypeId {
-        self.ready[self.f].as_ref().unwrap().slot_types[slot.0]
+        self.compile.ready[self.f].as_ref().unwrap().slot_types[slot.0]
     }
 
     // TODO: change name? make this whole thing a trait so i dont have to keep writing the shitty glue.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         unsafe {
             self.f = f;
-            let ff = &self.program[f];
+            let ff = &self.compile.program[f];
             let is_c_call = ff.has_tag(Flag::C_Call); // TODO
-            let llvm_f = self.llvm.decl_function(self.program, f);
-            let func = self.ready[f].as_ref().unwrap();
-            // println!("{}", func.log(self.program.pool));
+            let llvm_f = self.llvm.decl_function(self.compile.program, f);
+            let func = self.compile.ready[f].as_ref().unwrap();
+            // println!("{}", func.log(self.compile.program.pool));
             self.slots.clear();
             self.slots.extend(vec![None; func.stack_slots]);
             self.blocks.clear();
@@ -332,7 +330,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             for i in 0..func.stack_slots {
                 if func.slot_is_var.get(i) {
                     let name = null_terminate(&format!(".VAR{}", i));
-                    let ty = self.llvm.get_type(self.program, func.slot_types[i]);
+                    let ty = self.llvm.get_type(self.compile.program, func.slot_types[i]);
                     let ptr = LLVMBuildAlloca(self.llvm.builder, ty, name.as_ptr()); // TODO: sometimes tuples need consecutive addresses.
                     self.slots[i] = Some(ptr);
                 }
@@ -349,11 +347,11 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                 self.write_slot(StackOffset(i), value);
             }
 
-            let func = self.ready[f].as_ref().unwrap();
+            let func = self.compile.ready[f].as_ref().unwrap();
             let mut block_finished = true;
             let mut dead_code = false; // HACK to deal with my weird 'unreachable'
             for i in 0..func.insts.len() {
-                let func = &self.ready[f].as_ref().unwrap();
+                let func = &self.compile.ready[f].as_ref().unwrap();
                 if func.jump_targets.get(i) {
                     dead_code = false;
                     let block = *self.blocks.get(&(i)).unwrap();
@@ -389,7 +387,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                         // TODO: update this when we support comptime here.
                         self.call_direct(rt, ret, arg)?;
                     }
-                    Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
+                    Bc::CallBuiltin { name, .. } => todo!("{}", self.compile.program.pool.get(*name)),
                     &Bc::LoadConstant { slot, value } => {
                         let mut ty = self.llvm_type(slot);
                         let value = match value {
@@ -474,9 +472,9 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                     }
                     &Bc::SlicePtr { base, offset, ret, .. } => {
                         let ty = self.slot_type(base);
-                        let ty = unwrap!(self.program.unptr_ty(ty), "not ptr");
-                        assert!(matches!(self.program[ty], TypeInfo::Struct { .. }));
-                        let ty = self.llvm.get_type(self.program, ty);
+                        let ty = unwrap!(self.compile.program.unptr_ty(ty), "not ptr");
+                        assert!(matches!(self.compile.program[ty], TypeInfo::Struct { .. }));
+                        let ty = self.llvm.get_type(self.compile.program, ty);
                         let ptr = self.read_slot(base);
                         // The first one is because you're going through the pointer.
                         let mut index_values = vec![
@@ -504,7 +502,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
                         todo!()
                     }
                     &Bc::CallC { f, arg, ret, ty, comp_ctx } => {
-                        let ty = self.llvm.get_function_type(self.program, ty, comp_ctx);
+                        let ty = self.llvm.get_function_type(self.compile.program, ty, comp_ctx);
                         let f = self.read_slot(f);
                         let f = LLVMBuildIntToPtr(self.llvm.builder, f, self.llvm.ptr_ty, EMPTY);
                         self.do_call(f, ty, arg, ret, comp_ctx);
@@ -520,7 +518,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
         if self.slot_is_var(slot) {
             let ptr = self.slots[slot.0].unwrap();
             let ty = self.slot_type(slot);
-            let ty = self.llvm.get_type(self.program, ty);
+            let ty = self.llvm.get_type(self.compile.program, ty);
             unsafe { LLVMBuildLoad2(self.llvm.builder, ty, ptr, EMPTY) }
         } else {
             self.slots[slot.0].unwrap()
@@ -538,21 +536,21 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.compile.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
 
     fn llvm_type(&mut self, slot: StackOffset) -> LLVMTypeRef {
         let ty = self.slot_type(slot);
-        self.llvm.get_type(self.program, ty)
+        self.llvm.get_type(self.compile.program, ty)
     }
 
     fn func_type(&mut self, ff: FuncId) -> LLVMTypeRef {
-        let target = &self.program[ff];
+        let target = &self.compile.program[ff];
         let comp_ctx = target.has_tag(Flag::Ct);
 
-        let ff = self.program.func_type(ff);
-        let ff = self.program.fn_ty(ff).unwrap();
-        self.llvm.get_function_type(self.program, ff, comp_ctx)
+        let ff = self.compile.program.func_type(ff);
+        let ff = self.compile.program.fn_ty(ff).unwrap();
+        self.llvm.get_function_type(self.compile.program, ff, comp_ctx)
     }
 
     fn do_call(
@@ -567,7 +565,7 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
             debug_assert!(LLVMIsNull(function) == 0);
             let mut args = arg.into_iter().map(|i| self.read_slot(StackOffset(i))).collect::<Vec<_>>();
             if comp_ctx {
-                let ptr = self.llvm.const_ptr(self.program as *mut Program as usize as *const u8); // TODO: this has gotta be UB
+                let ptr = self.llvm.const_ptr(self.compile.program as *mut Program as usize as *const u8); // TODO: this has gotta be UB
                 args.insert(0, ptr); // TODO: cri
             }
             let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, EMPTY);
@@ -576,15 +574,15 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
     }
 
     fn call_direct(&mut self, f: FuncId, ret: compiler::bc::StackRange, arg: compiler::bc::StackRange) -> Res<'p, ()> {
-        let ty = self.program.func_type(f);
-        let ty = self.program.fn_ty(ty).unwrap();
+        let ty = self.compile.program.func_type(f);
+        let ty = self.compile.program.fn_ty(ty).unwrap();
         assert!(
-            !matches!(self.program[ty.arg], TypeInfo::Struct { .. }),
+            !matches!(self.compile.program[ty.arg], TypeInfo::Struct { .. }),
             "TODO: do struct args get flattened like tuples? ffi? enums?"
         );
         let ty = self.func_type(f);
 
-        let target = &self.program[f];
+        let target = &self.compile.program[f];
         let comp_ctx = target.has_tag(Flag::Ct);
         // TODO: this has to change for actually emitting
         let function = if let Some(addr) = target.comptime_addr {

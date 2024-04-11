@@ -61,7 +61,6 @@ pub enum CErr<'p> {
     Msg(String),
     AmbiguousCall,
     VarNotFound(Var<'p>),
-    InterpMsgToCompiler(Ident<'p>, Values, StackAbsoluteRange),
     Diagnostic(Vec<Diagnostic>),
 }
 
@@ -1317,9 +1316,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    pub fn handle_macro_msg(&mut self, result: &mut FnWip<'p>, name: &str, arg: Values) -> Res<'p, Values> {
+    // TODO: next step is to make these normal functions with serilization seperate so asm can call them directly.
+    //       tho maybe start with still going through array of ints so don't have to deal with rust repr yet.
+    pub fn handle_macro_msg(&mut self, result: &mut FnWip<'p>, name: Flag, arg: Values) -> Res<'p, Values> {
         match name {
-            "infer_raw_deref_type" => {
+            Flag::Infer_Raw_Deref_Type => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
                 // TODO: make it less painful to return an option
                 let ty = unwrap!(self.type_of(result, &mut expr)?, "could not infer type");
@@ -1328,12 +1329,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ty = self.program[ty].clone();
                 Ok(ty.serialize_one())
             }
-            "promote_closure" => {
+            Flag::Promote_Closure => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
                 let id = self.promote_closure(result, &mut expr)?;
                 Ok(id.serialize_one())
             }
-            "literal_ast" => {
+            Flag::Literal_Ast => {
                 let mut args = arg.vec().into_iter();
                 let ty = self.to_type(unwrap!(args.next(), "").into())?;
                 let mut value = Values::Many(args.collect());
@@ -1348,11 +1349,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ast = result.serialize_one();
                 Ok(ast)
             }
-            "intern_type" => {
+            Flag::Intern_Type => {
                 let arg: TypeInfo = unwrap!(arg.deserialize(), "");
                 Ok(self.program.intern_type(arg).serialize_one())
             }
-            "print_ast" => {
+            Flag::Print_Ast => {
                 outln!(ShowPrint, "print_ast1: {arg:?}");
                 let arg: FatExpr = unwrap!(arg.deserialize(), "");
                 outln!(ShowPrint, "show...");
@@ -1360,11 +1361,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 outln!(ShowPrint, "print_ast3: {}", arg.log(self.pool));
                 Ok(Values::One(Value::Unit))
             }
-            "clone_ast" => {
+            Flag::Clone_Ast => {
                 let arg: FatExpr = unwrap!(arg.deserialize(), "");
                 Ok(arg.serialize_one())
             }
-            "unquote_macro_apply_placeholders" => {
+            Flag::Unquote_Macro_Apply_Placeholders => {
                 let mut values = arg.vec();
                 let count = unwrap!(values.pop(), "").to_int()?;
                 let mut values = values.into_iter();
@@ -1384,7 +1385,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                           // println!("after {:?}", template.log(self.pool));
                 Ok(template.serialize_one())
             }
-            "get_type_int" => {
+            Flag::Get_Type_Int => {
                 let mut arg: FatExpr = unwrap!(arg.deserialize(), "");
                 match arg.deref() {
                     Expr::Call(_, _) => {
@@ -1404,19 +1405,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 err!("expected binary literal not {arg:?}",);
             }
-            "compile_ast" => {
+            Flag::Compile_Ast => {
                 let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
                 self.compile_expr(result, &mut expr, None)?;
                 Ok(expr.serialize_one())
             }
             // TODO: need to be able to have generics like  fn const_eval_ast(T) Fn(AstExpr, T);
-            "const_eval_string" => {
+            Flag::Const_Eval_String => {
                 let mut expr: FatExpr = unwrap!(arg.deserialize(), "");
                 let ty = String::get_type(self.program);
                 let result = self.compile_expr(result, &mut expr, Some(ty))?;
+                // TODO: actually typecheck because requested doesn't force it.
                 result.get()
             }
-            _ => err!("Macro send unknown message: {name} with {arg:?}",),
+            _ => err!("Macro send unknown message: {name:?} with {arg:?}",),
         }
     }
 

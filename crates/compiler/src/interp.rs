@@ -14,7 +14,7 @@ use crate::logging::LogTag::ShowPrint;
 use crate::logging::{unwrap, PoolLog};
 use crate::{assert, assert_eq, err, logln};
 use crate::{
-    ast::{FuncId, Program, TypeInfo},
+    ast::{FuncId, TypeInfo},
     export_ffi,
     pool::{Ident, StringPool},
 };
@@ -38,7 +38,6 @@ struct Interp<'p> {
     value_stack: Vec<Value>,
     call_stack: Vec<CallFrame<'p>>,
     last_loc: Option<Span>,
-    messages: Vec<StackAbsoluteRange>,
 }
 
 pub fn interp_run<'p: 'a, 'a>(
@@ -52,30 +51,17 @@ pub fn interp_run<'p: 'a, 'a>(
     assert!(!ret.is_any() && !ret.is_unknown());
     let return_slot_count = compile.ready.sizes.slot_count(compile.program, ret);
 
-    let mut interp: Interp = Interp::new(compile.pool);
-    let mut response = interp.run(f, arg, when, return_slot_count, compile.program, &mut compile.ready);
-    while let Err(msg) = response {
-        match msg.reason {
-            CErr::InterpMsgToCompiler(name, arg, _) => {
-                let name = compile.pool.get(name);
-                let res = compile.handle_macro_msg(result.as_mut().unwrap(), name, arg)?;
-                let ret = unwrap!(interp.messages.pop(), "nothing to resume");
-                response = interp.resume(res, ret, compile.program, &mut compile.ready);
-            }
-            _ => return Err(msg),
-        }
-    }
-    response
+    let mut interp = Interp::new(compile.pool);
+    interp.run(f, arg, when, return_slot_count, compile, &mut result)
 }
 
-impl<'p> Interp<'p> {
+impl<'a, 'p: 'a> Interp<'p> {
     fn new(pool: &'p StringPool<'p>) -> Self {
         Self {
             pool,
             value_stack: vec![],
             call_stack: vec![],
             last_loc: None,
-            messages: vec![],
         }
     }
 
@@ -85,12 +71,10 @@ impl<'p> Interp<'p> {
         arg: Values,
         when: ExecTime,
         return_slot_count: usize,
-        program: &mut Program<'p>,
-        ready: &mut BcReady<'p>,
+        compile: &mut Compile<'a, 'p>,
+        result: &mut Option<&mut FnWip<'p>>,
     ) -> Res<'p, Values> {
-        let _init_heights = (self.call_stack.len(), self.value_stack.len());
-
-        // A fake callframe representing the calling rust program.
+        // A fake callframe representing the calling rust compile.program.
         let marker_callframe = CallFrame {
             stack_base: StackAbsolute(self.value_stack.len()),
             current_func: FuncId(0), // TODO: actually reserve 0 cause i do this a lot
@@ -110,16 +94,12 @@ impl<'p> Interp<'p> {
         }
         let ret = StackRange {
             first: StackOffset(0),
-            count: return_slot_count, // TODO
+            count: return_slot_count,
         };
 
         // Call the function
-        self.push_callframe(f, ret, arg, when, program, ready)?;
-        self.run_continuation(program, ready)
-    }
-
-    fn run_continuation(&mut self, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, Values> {
-        self.run_inst_loop(program, ready)?;
+        self.push_callframe(f, ret, arg, when, compile)?;
+        self.run_inst_loop(compile, result)?;
 
         // Give the return value to the caller.
         let frame = unwrap!(self.call_stack.last(), "");
@@ -127,23 +107,18 @@ impl<'p> Interp<'p> {
         let ret = self.index_to_range(frame.return_slot);
         let result = self.take_slots(ret);
 
-        // Sanity checks that we didn't mess anything up for the next guy.
         assert!(!result.is_poison());
         for _ in 0..ret.count {
             assert_eq!(self.value_stack.pop(), Some(Value::Poison));
         }
-        let _final_callframe = self.call_stack.pop().unwrap();
-        // assert!(self, final_callframe == marker_callframe, "bad frame");
-        // let end_heights = (self.call_stack.len(), self.value_stack.len());
-        // assert!(init_heights == end_heights, "bad stack size");
         self.last_loc = None;
         Ok(result)
     }
 
-    fn run_inst_loop(&mut self, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, ()> {
+    fn run_inst_loop(&mut self, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, ()> {
         loop {
-            self.update_debug(ready);
-            let i = self.next_inst(ready);
+            self.update_debug(&compile.ready);
+            let i = self.next_inst(&compile.ready);
             self.log_stack();
 
             logln!("I: {:?}", i.log(self.pool));
@@ -159,7 +134,7 @@ impl<'p> Interp<'p> {
                     self.bump_ip();
                     let arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
-                    self.push_callframe(f, ret, arg, when, program, ready)?;
+                    self.push_callframe(f, ret, arg, when, compile)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -171,20 +146,20 @@ impl<'p> Interp<'p> {
                     let f = if when == ExecTime::Runtime { rt } else { ct };
 
                     // TODO: this is super ugly recreation of all the other calling types. need to factor out calling convention better.
-                    if let Some(addr) = program[f].comptime_addr {
+                    if let Some(addr) = compile.program[f].comptime_addr {
                         debug_assert_eq!(addr % 4, 0);
-                        let ty = program[f].unwrap_ty();
-                        let comp_ctx = program[f].has_tag(Flag::Ct);
+                        let ty = compile.program[f].unwrap_ty();
+                        let comp_ctx = compile.program[f].has_tag(Flag::Ct);
                         let ptr = addr as usize;
-                        let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
+                        let result = ffi::c::call(compile.program, ptr, ty, arg, comp_ctx)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
-                    } else if program[f].body.is_none() {
+                    } else if compile.program[f].body.is_none() {
                         let abs = self.range_to_index(ret);
-                        let name = self.pool.get(program[f].name);
-                        let value = self.runtime_builtin(name, arg.clone(), Some(abs), program, ready)?;
+                        let name = self.pool.get(compile.program[f].name);
+                        let value = self.runtime_builtin(name, arg.clone(), compile, &mut None)?;
                         self.expand_maybe_tuple(value, abs)?;
                     } else {
-                        self.push_callframe(f, ret, arg, when, program, ready)?;
+                        self.push_callframe(f, ret, arg, when, compile)?;
                     }
                 }
                 &Bc::LoadConstant { slot, value } => {
@@ -208,8 +183,7 @@ impl<'p> Interp<'p> {
                     let arg = self.take_slots(arg);
                     let abs = self.range_to_index(ret);
                     self.bump_ip();
-                    // Note: at this point you have to be re-enterant because you might suspend to ask the compiler to do something.
-                    let value = self.runtime_builtin(name, arg.clone(), Some(abs), program, ready)?;
+                    let value = self.runtime_builtin(name, arg.clone(), compile, result)?;
                     self.expand_maybe_tuple(value, abs)?;
                 }
                 &Bc::Ret(slot) => {
@@ -255,7 +229,7 @@ impl<'p> Interp<'p> {
                     let f = self.take_slot(f);
                     let arg = self.take_slots(arg);
                     let f = Values::One(f).to_func()?;
-                    self.push_callframe(f, ret, arg, when, program, ready)?;
+                    self.push_callframe(f, ret, arg, when, compile)?;
                     logln!("{}", self.log_callstack());
                     // don't bump ip here, we're in a new call frame.
                 }
@@ -335,7 +309,7 @@ impl<'p> Interp<'p> {
                     if let Some(f) = f.to_func() {
                         self.bump_ip(); // pre-bump
                         let when = self.call_stack.last().unwrap().when;
-                        self.push_callframe(f, ret, arg, when, program, ready)?;
+                        self.push_callframe(f, ret, arg, when, compile)?;
                         // don't bump ip here, we're in a new call frame.
                         continue;
                     }
@@ -343,7 +317,7 @@ impl<'p> Interp<'p> {
                     self.bump_ip();
                     let ptr = f.to_int()?.to_bytes() as usize;
                     debug_assert_eq!(ptr % 4, 0);
-                    let result = ffi::c::call(program, ptr, ty, arg, comp_ctx)?;
+                    let result = ffi::c::call(compile.program, ptr, ty, arg, comp_ctx)?;
                     *self.get_slot_mut(ret.single()) = result.single()?;
                 }
             }
@@ -430,14 +404,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn runtime_builtin(
-        &mut self,
-        name: &str,
-        arg: Values,
-        ret_slot_for_suspend: Option<StackAbsoluteRange>,
-        program: &mut Program<'p>,
-        ready: &mut BcReady<'p>,
-    ) -> Res<'p, Values> {
+    fn runtime_builtin(&mut self, name: &str, arg: Values, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, Values> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
@@ -446,12 +413,12 @@ impl<'p> Interp<'p> {
                 } else {
                     format!("{arg:?}")
                 };
-                err!("Program panicked: \n{msg}\nAt {}", self.log_callstack())
+                err!("compile.program panicked: \n{msg}\nAt {}", self.log_callstack())
             }
             "assert_eq" => {
                 let (a, b) = arg.to_pair()?;
                 assert_eq!(a, b, "runtime_builtin:assert_eq");
-                program.assertion_count += 1; // sanity check for making sure tests actually ran
+                compile.program.assertion_count += 1; // sanity check for making sure tests actually ran
                 Value::Unit.into()
             }
             "is_comptime" => {
@@ -518,8 +485,8 @@ impl<'p> Interp<'p> {
             }
             "alloc_inner" => {
                 let (ty, count) = arg.to_pair()?;
-                let (ty, count) = (program.to_type(ty.into())?, count.to_int()?);
-                let stride = ready.sizes.slot_count(program, ty);
+                let (ty, count) = (compile.program.to_type(ty.into())?, count.to_int()?);
+                let stride = compile.ready.sizes.slot_count(compile.program, ty);
                 assert!(count >= 0);
                 let values = vec![Value::Poison; count as usize * stride];
                 let value = Box::into_raw(Box::new(InterpBox {
@@ -535,17 +502,18 @@ impl<'p> Interp<'p> {
                 .into()
             }
             "dump_ffi_types" => {
-                let msg = program.dump_ffi_types();
+                let msg = compile.program.dump_ffi_types();
                 msg.serialize_one()
             }
             "dealloc_inner" => {
                 let (ty, ptr, count) = arg.to_triple()?;
-                let (ty, count, (ptr, ptr_first, ptr_count)) = (program.to_type(ty.into())?, count.to_int()?, Values::One(ptr).to_heap_ptr()?);
-                assert_eq!(ready.sizes.slot_count(program, ty) * count as usize, ptr_count);
+                let (ty, count, (ptr, ptr_first, ptr_count)) =
+                    (compile.program.to_type(ty.into())?, count.to_int()?, Values::One(ptr).to_heap_ptr()?);
+                assert_eq!(compile.ready.sizes.slot_count(compile.program, ty) * count as usize, ptr_count);
                 assert_eq!(ptr_first, 0);
                 let ptr_val = unsafe { &*ptr };
                 assert_eq!(ptr_val.references, 1);
-                // let slots = ptr_count * self.program.slot_count(ty);  // TODO: arrays of tuples should be flattened and then this makes sense for the check below.
+                // let slots = ptr_count * self.compile.program.slot_count(ty);  // TODO: arrays of tuples should be flattened and then this makes sense for the check below.
                 assert_eq!(ptr_val.values.len(), ptr_count);
                 let _ = unsafe { Box::from_raw(ptr) };
                 Value::Unit.into()
@@ -559,7 +527,7 @@ impl<'p> Interp<'p> {
             "IntType" => {
                 let (bit_count, signed) = arg.to_pair()?;
                 let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
-                let ty = program.intern_type(TypeInfo::Int(crate::ast::IntTypeInfo { bit_count, signed }));
+                let ty = compile.program.intern_type(TypeInfo::Int(crate::ast::IntTypeInfo { bit_count, signed }));
                 Value::Type(ty).into()
             }
             "system" => {
@@ -625,11 +593,7 @@ impl<'p> Interp<'p> {
                 let arg = Values::Many(v);
 
                 // aaaaa
-                self.suspend(
-                    Flag::Literal_Ast.ident(),
-                    arg,
-                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
-                )?
+                self.call_compiler(Flag::Literal_Ast.ident(), arg, compile, result)?
             }
             "unquote_macro_apply_placeholders" => {
                 let (ptr, count) = arg.to_pair()?;
@@ -639,42 +603,30 @@ impl<'p> Interp<'p> {
                 let arg = Values::Many(v);
 
                 // aaaaa
-                self.suspend(
-                    Flag::Unquote_Macro_Apply_Placeholders.ident(),
-                    arg,
-                    unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"),
-                )?
+                self.call_compiler(Flag::Unquote_Macro_Apply_Placeholders.ident(), arg, compile, result)?
             }
 
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
                 let name = self.pool.intern(name);
-                self.suspend(name, arg, unwrap!(ret_slot_for_suspend, "interp suspend but no ret slot"))?
+                self.call_compiler(name, arg, compile, result)?
             }
         };
         Ok(value)
     }
 
-    // This does not spark joy...
-    // I think I'll be spending a while reading about algebreic effects.
-    fn suspend(&mut self, name: Ident<'p>, arg: Values, ret: StackAbsoluteRange) -> Res<'p, Values> {
-        self.messages.push(ret);
-        err!(CErr::InterpMsgToCompiler(name, arg, ret))
+    fn call_compiler(&mut self, name: Ident<'p>, arg: Values, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, Values> {
+        compile.handle_macro_msg(result.as_mut().unwrap(), Flag::try_from(name)?, arg)
     }
 
-    fn resume(&mut self, result: Values, ret: StackAbsoluteRange, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, Values> {
-        self.expand_maybe_tuple(result, ret)?;
-        self.run_continuation(program, ready)
-    }
-
-    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, program: &Program<'p>, ready: &BcReady<'p>) -> Res<'p, ()> {
-        let func = ready[f].as_ref();
+    fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, compile: &Compile<'a, 'p>) -> Res<'p, ()> {
+        let func = compile.ready[f].as_ref();
         assert!(func.is_some(), "ICE: tried to call {f:?} but not compiled.");
         // Calling Convention: arguments passed to a function are moved out of your stack.
         let return_slot = self.range_to_index(ret);
         let stack_base = self.value_stack.len(); // Our stack includes the argument but not the return slot.
         self.push_expanded(arg);
-        let debug_name = program[f].get_name(self.pool);
+        let debug_name = compile.program[f].get_name(self.pool);
         self.call_stack.push(CallFrame {
             stack_base: StackAbsolute(stack_base),
             current_func: f,
@@ -684,7 +636,7 @@ impl<'p> Interp<'p> {
             debug_name,
             when,
         });
-        let empty = self.current_fn_body(ready).stack_slots; // TODO: does this count tuple args right?
+        let empty = self.current_fn_body(&compile.ready).stack_slots; // TODO: does this count tuple args right?
         for _ in 0..empty {
             self.value_stack.push(Value::Poison);
         }
