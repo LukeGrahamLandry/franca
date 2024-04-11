@@ -336,7 +336,7 @@ pub fn is_thin_boxed<T>() -> bool {
 mod test {
     #![allow(unused)]
     use super::{vec_is_ptr_cap_len, Reflect, RsField};
-    use crate::experiments::reflect::{ptr_before_len, VReflect};
+    use crate::reflect::{ptr_before_len, VReflect};
     use core::slice;
     use std::{
         fmt::Debug,

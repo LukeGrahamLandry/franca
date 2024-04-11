@@ -1,8 +1,8 @@
 //! Low level instructions that the interpreter can execute.
+use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
-use crate::experiments::crc::CRc;
-use crate::experiments::reflect::BitSet;
 use crate::impl_index;
+use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
     compiler::{ExecTime, Res},

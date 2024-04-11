@@ -3,7 +3,7 @@
 use core::fmt;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::fmt::{Debug, Write};
+use std::fmt::{Debug, Formatter, Write};
 use std::ops::Deref;
 use std::{fs, mem};
 
@@ -966,5 +966,11 @@ impl Debug for Values {
             Values::One(v) => write!(f, "{v:?}"),
             Values::Many(v) => write!(f, "{v:?}"),
         }
+    }
+}
+
+impl Debug for FuncId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fn{}", self.0)
     }
 }

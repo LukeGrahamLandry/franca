@@ -1,3 +1,8 @@
+## burn it with fire (Apr 10)
+
+Code is evil. I want less of it.
+Go back to commit "remove unused experiments" when ready to try again.
+
 ## Planning a Linker
 
 - calls
@@ -11,7 +16,7 @@
 
 > Note: qbe doesn't give thread-safe vibes. There's a lot of static vars. Probably part of why they don't distribute as a lib.
 
-## Casts (Apr 9)
+## Planning Casts (Apr 9)
 
 Currently @as sets the result location, and stops inference from going deeper, so you can use it for resolving an overload.
 

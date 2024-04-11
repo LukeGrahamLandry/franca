@@ -6,8 +6,8 @@
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, BcReady, InterpBox, StackOffset, StackRange, Value, Values};
+use crate::bootstrap_gen::*;
 use crate::compiler::{ExecTime, Executor, Res};
-use crate::experiments::bootstrap_gen::*;
 use crate::interp::Interp;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
@@ -625,103 +625,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 }
 
-#[allow(unused)]
-#[cfg(target_arch = "aarch64")]
-pub mod tests {
-    use super::{BcToAsm, Jitted};
-    use crate::ast::{Flag, FuncId, SuperSimple, TargetArch};
-    use crate::experiments::arena::Arena;
-    use crate::experiments::emit_ir::EmitIr;
-    use crate::experiments::tests::{jit_test, jit_test_aarch_only};
-    use crate::load_program;
-    use crate::{
-        ast::{garbage_loc, Program},
-        compiler::{Compile, ExecTime, Res},
-        interp::Interp,
-        make_toplevel,
-        parse::Parser,
-        pool::StringPool,
-        scope::ResolveScope,
-        {err, ice, unwrap},
-    };
-    use codemap::CodeMap;
-    use std::process::Command;
-    use std::ptr::addr_of;
-    use std::{arch::asm, fs, mem::transmute};
-
-    pub fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C-unwind" fn(Arg) -> Ret)) -> Res<'static, ()> {
-        let pool = Box::leak(Box::<StringPool>::default());
-        let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
-        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
-        load_program(&mut comp, src)?;
-        let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
-        if let Err(e) = comp.compile(main, ExecTime::Runtime) {
-            println!("{}", e.reason.log(comp.program, pool));
-            return Err(e);
-        }
-
-        let debug_path = format!("target/latest_log/asm/{test_name}");
-        fs::create_dir_all(&debug_path).unwrap();
-
-        // let mut arena = Arena::default();
-        // {
-        //     if let Ok(mut ir) = EmitIr::compile(&comp.program, &mut comp.executor, main, &arena) {
-        //         ir.fixup(comp.program);
-        //         let dot_filepath = format!("{debug_path}/flow.dot");
-        //         let svg_filepath = format!("{debug_path}/flow.svg");
-        //         fs::write(&dot_filepath, ir.log(comp.program)).unwrap();
-        //         let out = Command::new("dot").arg(dot_filepath).arg("-Tsvg").arg("-o").arg(svg_filepath).output().unwrap();
-        //         if !out.status.success() {
-        //             panic!("graphviz failed {}", String::from_utf8(out.stderr).unwrap());
-        //         }
-        //     }
-        // }
-
-        let mut interp: Interp = comp.runtime_executor.to_interp().unwrap();
-        let mut asm = BcToAsm::new(&mut interp.ready, &mut program);
-        asm.asm.reserve(asm.program.funcs.len());
-        asm.compile(main)?;
-
-        if cfg!(feature = "dis_debug") {
-            let hex: String = asm
-                .asm
-                .bytes()
-                .iter()
-                .copied()
-                .array_chunks::<4>()
-                .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
-                .collect();
-            let path = format!("{debug_path}/all.asm");
-            fs::write(&path, hex).unwrap();
-            let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
-            fs::write(&path, dis).unwrap();
-        }
-
-        asm.asm.reserve(asm.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
-        asm.asm.make_exec();
-        let code = asm.asm.get_fn(main).unwrap().as_ptr();
-
-        let code: extern "C-unwind" fn(Arg) -> Ret = unsafe { transmute(code) };
-        let indirect_fns = asm.asm.get_dispatch();
-        unsafe {
-            asm!(
-            "mov x21, {fns}",
-            fns = in(reg) indirect_fns,
-            // I'm hoping this is how I declare that I intend to clobber the register.
-            // https://doc.rust-lang.org/reference/inline-assembly.html
-            // "[...] the contents of the register to be discarded at the end of the asm code"
-            // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
-            out("x21") _
-            );
-        }
-        f(code);
-        Ok(())
-    }
-
-    jit_test!(jit_main);
-    jit_test_aarch_only!(jit_main);
-}
-
 use crate::ffi::InterpSend;
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
@@ -777,8 +680,8 @@ impl ConstBytes {
 #[cfg(target_arch = "aarch64")]
 pub mod jit {
     use crate::ast::FuncId;
-    use crate::experiments::bc_to_asm::ConstBytes;
-    use crate::experiments::bootstrap_gen::brk;
+    use crate::bc_to_asm::ConstBytes;
+    use crate::bootstrap_gen::brk;
     use std::cell::UnsafeCell;
     use std::ptr::null;
     use std::slice;

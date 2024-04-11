@@ -3,11 +3,11 @@ use crate::{
     bc::{Bc, Constants, Structured, Value, Values},
     compiler::{CErr, CompileError, FnWip, Res},
     err,
-    experiments::reflect::{Reflect, RsType},
     export_ffi::RsResolvedSymbol,
     ffi::{init_interp_send, InterpSend},
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
+    reflect::{Reflect, RsType},
 };
 use codemap::{CodeMap, Span};
 use interp_derive::{InterpSend, Reflect};
@@ -956,7 +956,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
-        use crate::experiments::reflect::*;
+        use crate::reflect::*;
         // TODO: think more about this but need same int type
         if let RsData::Opaque = type_info.data {
             return self.intern_type(TypeInfo::Int(IntTypeInfo {

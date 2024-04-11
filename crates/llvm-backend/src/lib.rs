@@ -30,10 +30,9 @@ use llvm_sys::{
 use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, StackOffset, Value},
+    bc_to_asm::ConstBytes,
     compiler::{ExecTime, Res},
-    err,
-    experiments::bc_to_asm::ConstBytes,
-    extend_options,
+    err, extend_options,
     interp::Interp,
     logging::PoolLog,
     pool::Ident,
@@ -604,80 +603,6 @@ impl<'z, 'p> BcToLlvm<'z, 'p> {
 pub fn null_terminate(bytes: &str) -> CString {
     let bytes: Vec<_> = Vec::from(bytes).into_iter().map(|b| NonZeroU8::new(b).unwrap()).collect();
     CString::from(bytes)
-}
-
-#[allow(unused)]
-pub mod tests {
-    use codemap::CodeMap;
-    use compiler::ast::{Flag, FuncId, SuperSimple, TargetArch};
-    use compiler::experiments::arena::Arena;
-    use compiler::experiments::emit_ir::EmitIr;
-    use compiler::experiments::tests::jit_test;
-    use compiler::{
-        ast::{garbage_loc, Program},
-        compiler::{Compile, ExecTime, Res},
-        err, ice,
-        interp::Interp,
-        make_toplevel,
-        parse::Parser,
-        pool::StringPool,
-        scope::ResolveScope,
-        unwrap,
-    };
-    use compiler::{jit_test_llvm_only, load_program, log_err};
-    use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
-    use llvm_sys::core::{LLVMDisposeBuilder, LLVMDisposeMessage, LLVMPrintModuleToString};
-    use llvm_sys::error::{LLVMCreateStringError, LLVMGetErrorMessage};
-    use llvm_sys::execution_engine::{LLVMGetFunctionAddress, LLVMGetGlobalValueAddress, LLVMRunFunction};
-    use std::ffi::CStr;
-    use std::mem::MaybeUninit;
-    use std::process::Command;
-    use std::ptr::{addr_of, null};
-    use std::{arch::asm, fs, mem::transmute};
-
-    use super::{print_module, verify_module, BcToLlvm};
-
-    // TODO: this is an ugly copy paste
-    pub fn jit_main<Arg, Ret>(test_name: &str, src: &str, f: impl FnOnce(extern "C" fn(Arg) -> Ret)) -> Res<'static, ()> {
-        let pool = Box::leak(Box::<StringPool>::default());
-        let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Llvm);
-        let mut comp = Compile::new(pool, &mut program, Box::new(Interp::new(pool)), Box::new(Interp::new(pool)));
-        load_program(&mut comp, src)?;
-        let main = unwrap!(comp.program.find_unique_func(Flag::Main.ident()), "");
-
-        if let Err(e) = comp.compile(main, ExecTime::Runtime) {
-            log_err(&comp, e.clone(), None);
-            return Err(e);
-        }
-
-        let mut interp = comp.runtime_executor.to_interp().unwrap();
-        let mut asm = BcToLlvm::new(&mut interp, &mut program);
-
-        asm.compile(main)?;
-        // TODO: make this a runtime flag?
-        if cfg!(feature = "dis_debug") {
-            let debug_path = format!("target/latest_log/asm/{test_name}");
-            fs::create_dir_all(&debug_path).unwrap();
-            unsafe {
-                print_module(asm.llvm.module, |dis| {
-                    fs::write(format!("{debug_path}/program_llvm_ir.txt"), dis).unwrap()
-                });
-            }
-        }
-
-        verify_module(asm.llvm.module)?;
-
-        let code = asm.llvm.get_fn_jitted(main).unwrap();
-        let code: extern "C" fn(Arg) -> Ret = unsafe { transmute(code) };
-        f(code);
-        unsafe {
-            asm.llvm.release();
-        }
-        Ok(())
-    }
-
-    jit_test!(jit_main);
-    jit_test_llvm_only!(jit_main);
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]

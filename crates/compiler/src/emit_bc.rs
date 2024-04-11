@@ -12,9 +12,9 @@ use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc::*;
 use crate::compiler::{CErr, FnWip, Res};
-use crate::experiments::reflect::BitSet;
 use crate::extend_options;
 use crate::logging::PoolLog;
+use crate::reflect::BitSet;
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 

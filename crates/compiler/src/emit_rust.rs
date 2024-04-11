@@ -4,8 +4,8 @@ use std::ops::Deref;
 
 use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo, VarType};
 use crate::ast::{FatStmt, Var};
+use crate::bc_to_asm::BcToAsm;
 use crate::compiler::{Compile, ExecTime, Res};
-use crate::experiments::bc_to_asm::BcToAsm;
 use crate::interp::Interp;
 use crate::logging::PoolLog;
 use crate::pool::StringPool;

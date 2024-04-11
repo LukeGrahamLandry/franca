@@ -37,19 +37,25 @@ macro_rules! mut_replace {
 
 pub mod ast;
 pub mod bc;
+pub mod bc_to_asm;
+pub mod bootstrap_gen;
 pub mod compiler;
+pub mod crc;
 pub mod emit_bc;
-pub mod experiments;
+pub mod emit_rust;
 pub mod export_ffi;
 pub mod ffi;
 pub mod interp;
 pub mod lex;
+#[cfg(feature = "llvm")]
+pub mod llvm;
 pub mod logging;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 pub mod overloading;
 pub mod parse;
 pub mod pool;
+pub mod reflect;
 pub mod scope;
 
 use crate::{
@@ -113,49 +119,6 @@ pub fn find_std_lib() -> bool {
 
     false
 }
-
-macro_rules! test_file {
-    ($case:ident) => {
-        #[test]
-        fn $case() {
-            $crate::find_std_lib();
-            crate::logging::init_logs(&[ShowErr]);
-
-            let pool = Box::leak(Box::<StringPool>::default());
-
-            let res = run_main(
-                pool,
-                fs::read_to_string(format!("../../tests/{}.fr", stringify!($case))).unwrap(),
-                Value::I64(3145192),
-                Value::I64(3145192),
-                Some(&stringify!($case)),
-                Box::new(crate::interp::Interp::new(pool)),
-                true,
-                Box::new(crate::interp::Interp::new(pool)),
-            );
-            if !res {
-                panic!("Test Failed")
-            }
-        }
-    };
-}
-
-test_file!(basic);
-test_file!(slices);
-test_file!(structs);
-test_file!(generics);
-test_file!(overloading);
-test_file!(closures);
-test_file!(ffi);
-test_file!(collections);
-test_file!(macros);
-test_file!(aarch64_jit);
-//test_file!(backpassing);
-test_file!(dispatch);
-test_file!(modules);
-test_file!(fmt);
-test_file!(floats);
-// test_file!(bf_interp); // TODO: my vm is slow!
 
 pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncId, usize)> {
     // TODO: this will get less dumb when I have first class modules.
@@ -363,96 +326,9 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     Func::new(name, g_arg, g_ret, body, user_span, true)
 }
 
-// TODO: its unfortunate that ifdefing this out means i don't get ide here.
-/// C ABI callable from js when targeting wasm.
-#[cfg(target_arch = "wasm32")]
-pub mod web {
-    #![allow(clippy::missing_safety_doc)]
-    use crate::logging::{init_logs_flag, save_logs};
-
-    use crate::bc::Value;
-    use crate::interp::Interp;
-    use crate::logging::{outln, LogTag::*};
-    use crate::pool::StringPool;
-    use crate::run_main;
-    use std::alloc::{alloc, Layout};
-    use std::ffi::{c_char, CStr, CString};
-    use std::ptr::slice_from_raw_parts;
-
-    static mut POOL: Option<StringPool> = None;
-
-    /// len does NOT include null terminator.
-    #[no_mangle]
-    pub unsafe extern "C" fn run(log_flag: u64, input_query: *const u8, len: usize) {
-        let s = format!("Running with log={log_flag:?}");
-        unsafe { crate::web::console_log(s.as_ptr(), s.len()) };
-
-        init_logs_flag(log_flag);
-        if POOL.is_none() {
-            POOL = Some(StringPool::default());
-        }
-        let pool = POOL.as_ref().unwrap();
-
-        let src = &*slice_from_raw_parts(input_query, len);
-        let src = match String::from_utf8(src.to_vec()) {
-            Ok(src) => src,
-            Err(e) => {
-                outln!(ShowErr, "{:?}", e);
-                return;
-            }
-        };
-        run_main(pool, src, Value::Unit, Value::Unit, None, Interp::new(pool));
-        save_logs("");
-    }
-
-    /// len DOES include null terminator
-    #[no_mangle]
-    pub unsafe extern "C" fn alloc_str(len: usize) -> *mut u8 {
-        alloc(Layout::array::<u8>(len).unwrap())
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn drop_c_str(ptr: *mut c_char) {
-        let _ = CString::from_raw(ptr);
-    }
-
-    /// result does NOT include null terminator.
-    #[no_mangle]
-    pub unsafe extern "C" fn c_str_len(ptr: *mut c_char) -> usize {
-        CStr::from_ptr(ptr).to_bytes().len()
-    }
-
-    extern "C" {
-        pub fn console_log(ptr: *const u8, len: usize);
-        pub fn timestamp() -> f64;
-        pub fn show_log(tag: usize, ptr: *const u8, len: usize);
-    }
-}
-
 pub fn timestamp() -> f64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let t = unsafe { web::timestamp() };
-        t / 1000.0
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        use std::time::SystemTime;
-        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64()
-    }
-}
-
-#[cfg(feature = "mir")]
-#[test]
-fn test_mir() {
-    use mir_sys::*;
-    unsafe {
-        let ctx = _MIR_init();
-        c2mir_init(ctx);
-        // c2mir_compile(ctx, ops, getc_func, getc_data, source_name, output_file);
-        c2mir_finish(ctx);
-    }
+    use std::time::SystemTime;
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64()
 }
 
 macro_rules! impl_index_imm {
