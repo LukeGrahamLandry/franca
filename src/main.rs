@@ -59,6 +59,11 @@ fn main() {
             return;
         }
 
+        if name == "--no-fork" {
+            run_tests_serial_for_profile();
+            return;
+        }
+
         let pool = Box::leak(Box::<StringPool>::default());
         let path = PathBuf::from(format!("tests/{name}.fr"));
         if path.exists() {
@@ -156,6 +161,48 @@ fn run_tests() {
     assert_eq!(failed, 0);
 }
 
+fn run_tests_serial_for_profile() {
+    if !PathBuf::from("tests").exists() {
+        eprint!("Directory 'tests' does not exist in cwd");
+        exit(1);
+    }
+    let start = timestamp();
+    let files: Vec<_> = fs::read_dir("tests").unwrap().collect();
+
+    for case in files {
+        let case = case.unwrap();
+        let name = case.file_name();
+        let name = name.to_str().unwrap();
+        if !".fr".is_suffix_of(name) {
+            continue;
+        }
+        let name = name.strip_suffix(".fr").unwrap();
+        let src = fs::read_to_string(case.path()).unwrap();
+        let start = src.find("@test(").expect("@test in test file") + 6;
+        let s = &src[start..];
+        let end = s.find(')').unwrap();
+        let assertion_count = src.split("assert_eq(").count() - 1;
+        for backend in s[..end].split(", ") {
+            let arch = match backend {
+                "interp" => TargetArch::Interp,
+                "aarch64" => TargetArch::Aarch64,
+                #[cfg(not(feature = "llvm"))]
+                "llvm" => continue,
+                #[cfg(feature = "llvm")]
+                "llvm" => TargetArch::Llvm,
+                "skip" => break,
+                other => panic!("Unknown backend {other}"),
+            };
+
+            actually_run_it(name.to_string(), src.clone(), assertion_count, arch);
+        }
+    }
+
+    let end = timestamp();
+    let seconds = end - start;
+    println!("Done in {} ms.", (seconds * 1000.0) as i64);
+}
+
 fn set_colour(r: u8, g: u8, b: u8) {
     std::io::stdout().write_all(&[27]).unwrap();
     print!("[38;2;{r};{g};{b}m");
@@ -186,7 +233,10 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
         // TODO: use dup2/pipe to capture stdout/err and print in a mutex so the colours don't get fucked up.
         match unsafe { libc::fork() } {
             -1 => panic!("Fork Failed"),
-            0 => actually_run_it(name, src, assertion_count, arch),
+            0 => {
+                actually_run_it(name, src, assertion_count, arch);
+                exit(0);
+            }
             pid => {
                 jobs.push((name.clone(), arch, pid));
             }
@@ -195,7 +245,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
 }
 
 /// This is the thing we exec.
-fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) -> ! {
+fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
@@ -295,5 +345,4 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
 
     assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");
     // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
-    exit(0);
 }

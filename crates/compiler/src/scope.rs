@@ -174,6 +174,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     kind: *kind,
                 };
                 if *kind == VarType::Const {
+                    // TODO: probably want the reverse too where you can't shadow a const with a let, etc.
                     if self.scopes.last().unwrap().iter().filter(|v| v.0 == *name).count() != 1 {
                         // TODO: show other declaration site.
                         // TODO: different rules for const _ = e;? or better to express that idea as @comptime(e);

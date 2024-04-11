@@ -66,7 +66,12 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
+    // TODO: this return a packed string, with the length divided by 8
+    //       so its truncated to amultiple of 8 chars but with an unknown amount of memory hanging off the end that you can't free.
+    //       WORTHLESS  --Apr, 10
     ("@no_interp fn sym_to_str(s: Symbol) Str", symbol_to_str as *const u8),
+    // This a null terminated packed string, useful for ffi with old c functions.
+    // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("@no_interp fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
     ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
     (
