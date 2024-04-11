@@ -1,9 +1,10 @@
 #![allow(improper_ctypes_definitions)]
 
-use interp_derive::Reflect;
+use interp_derive::{InterpSend, Reflect};
 use libc::c_void;
 
 use crate::ast::{FnType, FuncId, Program, TypeId, TypeInfo};
+use crate::bc::Value;
 use crate::compiler::Res;
 use crate::logging::unwrap;
 use crate::pool::Ident;
@@ -295,4 +296,11 @@ pub fn copy_to_mmap_exec(code: Vec<u32>) -> (Box<memmap2::Mmap>, *const u8) {
     let map = map.make_exec().unwrap();
     let ptr = map.as_ptr();
     (Box::new(map), ptr)
+}
+
+#[derive(Debug, Clone, InterpSend)]
+pub struct CmdResult {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }

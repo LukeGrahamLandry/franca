@@ -1,4 +1,5 @@
 //! Low level instructions that the interpreter can execute.
+use crate::compiler::CErr;
 use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
 use crate::impl_index;
@@ -534,5 +535,19 @@ impl IntoIterator for StackRange {
 
     fn into_iter(self) -> Self::IntoIter {
         self.first.0..self.first.0 + self.count
+    }
+}
+
+impl<'p> Value {
+    #[track_caller]
+    pub fn to_int(self) -> Res<'p, i64> {
+        if let Value::I64(r) = self {
+            Ok(r)
+        } else if let Value::Symbol(r) = self {
+            // TODO: have a special unwrap method for this
+            Ok(r as i64)
+        } else {
+            err!(CErr::TypeError("i64", self.into()))
+        }
     }
 }

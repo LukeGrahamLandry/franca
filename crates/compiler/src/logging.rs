@@ -205,7 +205,6 @@ use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
-    interp::Interp,
     pool::StringPool,
 };
 
@@ -757,38 +756,6 @@ impl Stmt<'_> {
             Stmt::Set { place, .. } => Some(place.loc),
             _ => None,
         }
-    }
-}
-
-impl<'p> Interp<'p> {
-    pub fn log_stack(&self) {
-        if cfg!(not(feature = "spam_log")) {
-            return;
-        }
-        log!("STACK ");
-        let frame = self.call_stack.last().unwrap();
-        for i in 0..frame.stack_base.0 {
-            if self.value_stack[i] != Value::Poison {
-                log!("({i}|{:?}), ", self.value_stack[i]);
-            }
-        }
-        for i in frame.stack_base.0..self.value_stack.len() {
-            if self.value_stack[i] != Value::Poison {
-                let slot = i - frame.stack_base.0;
-                log!("[{i}|${slot}|{:?}], ", self.value_stack[i]);
-            }
-        }
-        logln!("END");
-    }
-
-    pub fn log_callstack(&self) -> String {
-        let mut s = String::new();
-        write!(s, "CALLS ");
-        for frame in &self.call_stack {
-            write!(s, "[{}], ", self.pool.get(frame.debug_name));
-        }
-        write!(s, "END");
-        s
     }
 }
 

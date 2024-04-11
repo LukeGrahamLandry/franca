@@ -23,7 +23,7 @@ use crate::bc::*;
 use crate::bc_to_asm::Jitted;
 use crate::emit_bc::emit_bc;
 use crate::ffi::InterpSend;
-use crate::interp::{interp_run, Interp};
+use crate::interp::interp_run;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -108,8 +108,6 @@ pub struct FnWip<'p> {
     pub callees: Vec<(FuncId, ExecTime)>,
     pub module: Option<ModuleId>,
 }
-
-pub type BoxedExec<'p> = Box<dyn Executor<'p, SavedState = (usize, usize)>>;
 
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
@@ -1679,7 +1677,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "true" => (Value::Bool(true), TypeId::bool()),
             "false" => (Value::Bool(false), TypeId::bool()),
             "Symbol" => ffi_type!(Ident),
-            "CmdResult" => ffi_type!(crate::interp::CmdResult),
+            "CmdResult" => ffi_type!(crate::export_ffi::CmdResult),
             "FatExpr" => ffi_type!(FatExpr),
             _ => {
                 let name = self.pool.intern(name);
@@ -2866,22 +2864,6 @@ fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTy
         }
     }
     err!("not int",)
-}
-
-pub trait Executor<'p>: PoolLog<'p> {
-    type SavedState;
-    fn compile_func(&mut self, program: &Program<'p>, f: FuncId) -> Res<'p, ()>;
-
-    fn run_func(&mut self, program: &mut Program<'p>, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values>;
-    fn run_continuation(&mut self, program: &mut Program<'p>, response: Values) -> Res<'p, Values>;
-    fn size_of(&mut self, program: &Program<'p>, ty: TypeId) -> usize;
-    fn is_ready(&self, f: FuncId) -> bool;
-    fn dump_repr(&self, program: &Program<'p>, f: FuncId) -> String;
-    fn tag_error(&self, err: &mut CompileError<'p>);
-    fn mark_state(&self) -> Self::SavedState;
-    fn restore_state(&mut self, state: Self::SavedState);
-    fn deref_ptr_pls(&mut self, slot: Value) -> Res<'p, Values>; //  HACK
-    fn to_interp(self: Box<Self>) -> Option<Interp<'p>>;
 }
 
 // i like when my code is rocks not rice

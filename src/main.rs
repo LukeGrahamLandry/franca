@@ -4,13 +4,14 @@
 use compiler::{
     ast::{Flag, Program, TargetArch, TypeId},
     bc::Value,
+    bc_to_asm::emit_aarch64,
     compiler::{Compile, ExecTime},
+    emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib, load_program, log_dbg, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
     run_main, timestamp,
-    {bc_to_asm::BcToAsm, emit_rust::bootstrap},
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
@@ -267,18 +268,16 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
             (res, comp.program)
         }
         TargetArch::Aarch64 => {
-            let mut asm = BcToAsm::new(&mut comp.ready, comp.program);
-            asm.asm.reserve(asm.program.funcs.len());
-            if let Err(_e) = asm.compile(f) {
+            if let Err(_e) = emit_aarch64(&mut comp, f) {
                 // log_err(&comp, e, None);
                 exit(1);
             }
-            asm.asm.reserve(asm.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
-            asm.asm.make_exec();
-            let code = asm.asm.get_fn(f).unwrap().as_ptr();
+            comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
+            comp.aarch64.make_exec();
+            let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
 
             let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
-            let indirect_fns = asm.asm.get_dispatch();
+            let indirect_fns = comp.aarch64.get_dispatch();
             let a = arg.to_int().unwrap();
             unsafe {
                 asm!(

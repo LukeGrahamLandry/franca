@@ -5,41 +5,40 @@ use std::mem::replace;
 use std::process::Command;
 
 use codemap::Span;
-use interp_derive::InterpSend;
 
 use crate::ast::Flag;
 use crate::compiler::{CErr, Compile, ExecTime, FnWip, Res, ToBytes};
+use crate::export_ffi::CmdResult;
 use crate::ffi::InterpSend;
 use crate::logging::LogTag::ShowPrint;
 use crate::logging::{unwrap, PoolLog};
-use crate::outln;
 use crate::{assert, assert_eq, err, logln};
 use crate::{
-    ast::{FuncId, Program, TypeId, TypeInfo},
+    ast::{FuncId, Program, TypeInfo},
     export_ffi,
     pool::{Ident, StringPool},
 };
 use crate::{bc::*, ffi};
+use crate::{log, outln};
 
 #[derive(Debug, Clone)]
-pub struct CallFrame<'p> {
-    pub stack_base: StackAbsolute,
+struct CallFrame<'p> {
+    stack_base: StackAbsolute,
     current_func: FuncId,
     current_ip: usize,
     return_slot: StackAbsoluteRange,
     is_rust_marker: bool,
-    pub debug_name: Ident<'p>,
+    debug_name: Ident<'p>,
     when: ExecTime,
 }
 
 #[derive(Clone)]
-pub struct Interp<'p> {
-    pub pool: &'p StringPool<'p>,
-    pub value_stack: Vec<Value>,
-    pub call_stack: Vec<CallFrame<'p>>,
-    pub last_loc: Option<Span>,
-    pub messages: Vec<StackAbsoluteRange>,
-    pub ffi_stack: Vec<Values>,
+struct Interp<'p> {
+    pool: &'p StringPool<'p>,
+    value_stack: Vec<Value>,
+    call_stack: Vec<CallFrame<'p>>,
+    last_loc: Option<Span>,
+    messages: Vec<StackAbsoluteRange>,
 }
 
 pub fn interp_run<'p: 'a, 'a>(
@@ -70,18 +69,17 @@ pub fn interp_run<'p: 'a, 'a>(
 }
 
 impl<'p> Interp<'p> {
-    pub fn new(pool: &'p StringPool<'p>) -> Self {
+    fn new(pool: &'p StringPool<'p>) -> Self {
         Self {
             pool,
             value_stack: vec![],
             call_stack: vec![],
             last_loc: None,
             messages: vec![],
-            ffi_stack: vec![],
         }
     }
 
-    pub fn run(
+    fn run(
         &mut self,
         f: FuncId,
         arg: Values,
@@ -406,7 +404,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    pub fn deref_ptr(&mut self, arg: Value) -> Res<'p, Values> {
+    fn deref_ptr(&mut self, arg: Value) -> Res<'p, Values> {
         match arg {
             Value::InterpAbsStackAddr(addr) => {
                 let values = &self.value_stack[addr.first.0..addr.first.0 + addr.count];
@@ -432,7 +430,7 @@ impl<'p> Interp<'p> {
         }
     }
 
-    pub fn runtime_builtin(
+    fn runtime_builtin(
         &mut self,
         name: &str,
         arg: Values,
@@ -664,7 +662,7 @@ impl<'p> Interp<'p> {
         err!(CErr::InterpMsgToCompiler(name, arg, ret))
     }
 
-    pub fn resume(&mut self, result: Values, ret: StackAbsoluteRange, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, Values> {
+    fn resume(&mut self, result: Values, ret: StackAbsoluteRange, program: &mut Program<'p>, ready: &mut BcReady<'p>) -> Res<'p, Values> {
         self.expand_maybe_tuple(result, ret)?;
         self.run_continuation(program, ready)
     }
@@ -733,7 +731,7 @@ impl<'p> Interp<'p> {
 
     /// If slot ranges over multiple, return them as a tuple.
     #[track_caller]
-    pub fn take_slots(&mut self, slot: StackRange) -> Values {
+    fn take_slots(&mut self, slot: StackRange) -> Values {
         if slot.count == 0 {
             Value::Unit.into()
         } else if slot.count == 1 {
@@ -887,18 +885,7 @@ impl<'p> Interp<'p> {
     }
 }
 
-#[derive(Debug, Clone, InterpSend)]
-pub struct CmdResult {
-    status: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-fn drops<T>(vec: &mut Vec<T>, new_len: usize) {
-    for _ in 0..(vec.len() - new_len) {
-        vec.pop();
-    }
-}
+use std::fmt::{Debug, Write};
 
 impl<'p> Values {
     #[track_caller]
@@ -932,7 +919,7 @@ impl<'p> Values {
     }
 
     #[track_caller]
-    pub fn to_pair(self) -> Res<'p, (Value, Value)> {
+    fn to_pair(self) -> Res<'p, (Value, Value)> {
         let values = self.to_seq()?;
         assert_eq!(values.len(), 2, "arity {:?}", values);
         Ok((values[0], values[1]))
@@ -952,16 +939,34 @@ impl<'p> Values {
     }
 }
 
-impl<'p> Value {
-    #[track_caller]
-    pub fn to_int(self) -> Res<'p, i64> {
-        if let Value::I64(r) = self {
-            Ok(r)
-        } else if let Value::Symbol(r) = self {
-            // TODO: have a special unwrap method for this
-            Ok(r as i64)
-        } else {
-            err!(CErr::TypeError("i64", self.into()))
+impl<'p> Interp<'p> {
+    fn log_stack(&self) {
+        if cfg!(not(feature = "spam_log")) {
+            return;
         }
+        log!("STACK ");
+        let frame = self.call_stack.last().unwrap();
+        for i in 0..frame.stack_base.0 {
+            if self.value_stack[i] != Value::Poison {
+                log!("({i}|{:?}), ", self.value_stack[i]);
+            }
+        }
+        for i in frame.stack_base.0..self.value_stack.len() {
+            if self.value_stack[i] != Value::Poison {
+                let slot = i - frame.stack_base.0;
+                log!("[{i}|${slot}|{:?}], ", self.value_stack[i]);
+            }
+        }
+        logln!("END");
+    }
+
+    fn log_callstack(&self) -> String {
+        let mut s = String::new();
+        write!(s, "CALLS ").unwrap();
+        for frame in &self.call_stack {
+            write!(s, "[{}], ", self.pool.get(frame.debug_name)).unwrap();
+        }
+        write!(s, "END").unwrap();
+        s
     }
 }

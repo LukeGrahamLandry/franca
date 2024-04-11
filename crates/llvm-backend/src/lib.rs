@@ -33,7 +33,6 @@ use compiler::{
     bc_to_asm::ConstBytes,
     compiler::{ExecTime, Res},
     err, extend_options,
-    interp::Interp,
     logging::PoolLog,
     pool::Ident,
     unwrap,

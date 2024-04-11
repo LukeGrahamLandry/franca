@@ -7,8 +7,7 @@
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, BcReady, InterpBox, StackOffset, StackRange, Value, Values};
 use crate::bootstrap_gen::*;
-use crate::compiler::{Compile, ExecTime, Executor, Res};
-use crate::interp::Interp;
+use crate::compiler::{Compile, ExecTime, Res};
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
 use std::arch::asm;
@@ -16,15 +15,13 @@ use std::cell::UnsafeCell;
 use std::mem::transmute;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct SpOffset(usize);
+struct SpOffset(usize);
 
-pub struct BcToAsm<'z, 'p> {
-    pub program: &'z mut Program<'p>,
-    pub funcs: &'z mut BcReady<'p>,
-    pub asm: Jitted,
-    pub slots: Vec<Option<SpOffset>>,
-    pub open_slots: Vec<(SpOffset, usize)>,
-    pub next_slot: SpOffset,
+struct BcToAsm<'z, 'p, 'a> {
+    compile: &'z mut Compile<'a, 'p>,
+    slots: Vec<Option<SpOffset>>,
+    open_slots: Vec<(SpOffset, usize)>,
+    next_slot: SpOffset,
     f: FuncId,
     wip: Vec<FuncId>, // make recursion work
 }
@@ -52,15 +49,17 @@ const sp: i64 = 31;
 const X64: i64 = 0b1;
 
 pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
-    BcToAsm::new(&mut compile.ready, compile.program).bc_to_asm(f)
+    compile.aarch64.reserve(compile.program.funcs.len());
+    let mut a = BcToAsm::new(compile);
+    a.compile(f)?;
+    assert!(a.wip.is_empty());
+    Ok(())
 }
 
-impl<'z, 'p> BcToAsm<'z, 'p> {
-    pub fn new(interp: &'z mut BcReady<'p>, program: &'z mut Program<'p>) -> Self {
+impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
+    fn new(compile: &'z mut Compile<'a, 'p>) -> Self {
         Self {
-            program,
-            funcs: interp,
-            asm: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
+            compile,
             slots: vec![],
             open_slots: vec![],
             next_slot: SpOffset(0),
@@ -70,22 +69,22 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     // TODO: i cant keep copy pasting this shape. gonna cry.
-    pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
-        self.asm.reserve(f.0);
-        if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
+    fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
+        self.compile.aarch64.reserve(f.0);
+        if self.compile.aarch64.get_fn(f).is_some() || self.wip.contains(&f) {
             return Ok(());
         }
-        self.asm.make_write();
+        self.compile.aarch64.make_write();
 
         self.wip.push(f);
-        if let Some(template) = self.program[f].any_reg_template {
+        if let Some(template) = self.compile.program[f].any_reg_template {
             // TODO: want to use asm instead of interp so will need to compile.
             //       but really it would be better to have the separation of compiling for host vs target so I could cross compile once I support other architectures.
             // self.compile(template)?;
-        } else if self.program[f].comptime_addr.is_some() && self.program[f].jitted_code.is_none() {
+        } else if self.compile.program[f].comptime_addr.is_some() && self.compile.program[f].jitted_code.is_none() {
             // println!("Skip asm for {f:?}");
         } else {
-            let callees = self.program[f].wip.as_ref().unwrap().callees.clone();
+            let callees = self.compile.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
                 // TODO: change
                 if c.1 != ExecTime::Comptime {
@@ -93,17 +92,17 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
             }
 
-            let func = &self.program[f];
+            let func = &self.compile.program[f];
             if let Some(insts) = func.jitted_code.as_ref() {
                 // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
                 // TODO: this needs to be aware of the distinction between comptime and runtime target.
                 for op in insts {
-                    self.asm.push(*op as i64);
+                    self.compile.aarch64.push(*op as i64);
                 }
             } else {
                 self.bc_to_asm(f)?;
             }
-            self.asm.save_current(f);
+            self.compile.aarch64.save_current(f);
         }
 
         self.wip.retain(|c| c != &f);
@@ -112,14 +111,14 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     #[track_caller]
     fn slot_type(&self, slot: StackOffset) -> TypeId {
-        self.funcs[self.f].as_ref().unwrap().slot_types[slot.0]
+        self.compile.ready[self.f].as_ref().unwrap().slot_types[slot.0]
     }
 
     // TODO: now with my result ptrs i messed ip the order of things? need to handle grouped stack slots. before it worked out because i would always copy into a new chunk.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
-        let func = self.funcs[f].as_ref().unwrap();
-        // println!("{}", func.log(self.program.pool));
-        let ff = &self.program[func.func];
+        let func = self.compile.ready[f].as_ref().unwrap();
+        // println!("{}", func.log(self.compile.program.pool));
+        let ff = &self.compile.program[func.func];
         self.f = f;
         self.next_slot = SpOffset(0);
         self.slots.clear();
@@ -129,11 +128,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         // TODO: match the frame pointer usage that would make lldb see my stack frames.
         //       what zig thinks: https://github.com/ziglang/zig/blob/master/lib/std/debug.zig#L644
-        self.asm.push(sub_im(X64, sp, sp, 16, 0));
-        self.asm.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
-        self.asm.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
-        self.asm.push(brk(0));
-        let reserve_stack = self.asm.prev();
+        self.compile.aarch64.push(sub_im(X64, sp, sp, 16, 0));
+        self.compile.aarch64.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
+        self.compile.aarch64.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
+        self.compile.aarch64.push(brk(0));
+        let reserve_stack = self.compile.aarch64.prev();
 
         let mut release_stack = vec![];
         let arg_range = func.arg_range;
@@ -162,10 +161,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let mut patch_cbz = vec![];
         let mut patch_b = vec![];
 
-        let func = self.funcs[f].as_ref().unwrap();
+        let func = self.compile.ready[f].as_ref().unwrap();
         for i in 0..func.insts.len() {
-            let inst = &(self.funcs[f].as_ref().unwrap().insts[i].clone());
-            self.asm.mark_next_ip();
+            let inst = &(self.compile.ready[f].as_ref().unwrap().insts[i].clone());
+            self.compile.aarch64.mark_next_ip();
             match inst {
                 &Bc::MarkContiguous(slots) => {
                     self.find_many(slots, true);
@@ -182,7 +181,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 &Bc::CallDirect { f, ret, arg } => {
                     self.call_direct(f, ret, arg)?;
                 }
-                Bc::CallBuiltin { name, .. } => todo!("{}", self.program.pool.get(*name)),
+                Bc::CallBuiltin { name, .. } => todo!("{}", self.compile.program.pool.get(*name)),
                 Bc::LoadConstant { slot, value } => match value {
                     &Value::F64(n) => {
                         // Don't care that its a float since we always write it to memory anyway.
@@ -203,7 +202,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         self.set_slot(x0, *slot);
                     }
                     &Value::Bool(b) => {
-                        self.asm.push(movz(X64, x0, b as i64, 0));
+                        self.compile.aarch64.push(movz(X64, x0, b as i64, 0));
                         self.set_slot(x0, *slot);
                     }
                     Value::Unit => {}
@@ -216,12 +215,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     } => {
                         let ty = self.slot_type(*slot);
                         assert!(
-                            self.program.unptr_ty(ty).is_some(),
+                            self.compile.program.unptr_ty(ty).is_some(),
                             "Expected Value::Heap to be ptr, not {:?}",
-                            self.program.log_type(ty)
+                            self.compile.program.log_type(ty)
                         );
                         // TODO: this needs to be different when I actually want to emit an executable.
-                        let ptr = self.asm.constants.copy_heap(value, physical_first, physical_count);
+                        let ptr = self.compile.aarch64.constants.copy_heap(value, physical_first, physical_count);
                         self.load_imm(x0, ptr as u64);
                         self.set_slot(x0, *slot);
                     }
@@ -230,13 +229,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
                     self.get_slot(x0, cond);
-                    self.asm.push(brk(0));
+                    self.compile.aarch64.push(brk(0));
                     assert_eq!(true_ip, i + 1);
-                    patch_cbz.push((self.asm.prev(), false_ip));
+                    patch_cbz.push((self.compile.aarch64.prev(), false_ip));
                 }
                 &Bc::Goto { ip } => {
-                    self.asm.push(brk(0));
-                    patch_b.push((self.asm.prev(), ip));
+                    self.compile.aarch64.push(brk(0));
+                    patch_b.push((self.compile.aarch64.prev(), ip));
                 }
                 &Bc::Ret(slot) => {
                     // if is_c_call {
@@ -262,13 +261,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         }
                         _ => err!("c_call only supports 7 return value. TODO: structs",),
                     }
-                    self.asm.push(brk(0));
-                    let a = self.asm.prev();
-                    self.asm.push(brk(0));
-                    let b = self.asm.prev();
-                    self.asm.push(brk(0));
-                    release_stack.push((a, b, self.asm.prev()));
-                    self.asm.push(ret(()));
+                    self.compile.aarch64.push(brk(0));
+                    let a = self.compile.aarch64.prev();
+                    self.compile.aarch64.push(brk(0));
+                    let b = self.compile.aarch64.prev();
+                    self.compile.aarch64.push(brk(0));
+                    release_stack.push((a, b, self.compile.aarch64.prev()));
+                    self.compile.aarch64.push(ret(()));
                     // } else {
                     //     todo!()
                     // }
@@ -306,18 +305,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 &Bc::AbsoluteStackAddr { of, to } => {
                     let offset = self.find_many(of, false);
-                    self.asm.push(add_im(X64, x0, sp, offset.0 as i64, 0));
+                    self.compile.aarch64.push(add_im(X64, x0, sp, offset.0 as i64, 0));
                     self.set_slot(x0, to);
                 }
                 &Bc::SlicePtr { base, offset, ret, .. } => {
                     self.get_slot(x0, base); // x0 = ptr
-                    self.asm.push(add_im(X64, x0, x0, (offset * 8) as i64, 0)); // x0 += offset * size_of(i64)
+                    self.compile.aarch64.push(add_im(X64, x0, x0, (offset * 8) as i64, 0)); // x0 += offset * size_of(i64)
                     self.set_slot(x0, ret);
                 }
                 &Bc::Load { from, to } => {
                     self.get_slot(x0, from); // x0 = ptr
                     for i in 0..to.count {
-                        self.asm.push(ldr_uo(X64, x1, x0, i as i64)); // x1 = *x0[i]
+                        self.compile.aarch64.push(ldr_uo(X64, x1, x0, i as i64)); // x1 = *x0[i]
                         self.set_slot(x1, StackOffset(to.first.0 + i)); // out = x1
                     }
                 }
@@ -325,15 +324,16 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.get_slot(x0, to); // x0 = ptr
                     for i in 0..from.count {
                         self.get_slot(x1, StackOffset(from.first.0 + i)); // x1 = val
-                        self.asm.push(str_uo(X64, x1, x0, i as i64)); // *x0[i] = val
+                        self.compile.aarch64.push(str_uo(X64, x1, x0, i as i64));
+                        // *x0[i] = val
                     }
                 }
                 &Bc::TagCheck { enum_ptr, value } => {
                     self.get_slot(x0, enum_ptr); // x0 = ptr
-                    self.asm.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
-                    self.asm.push(cmp_im(X64, x0, value, 0));
-                    self.asm.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
-                    self.asm.push(brk(456));
+                    self.compile.aarch64.push(ldr_uo(X64, x0, x0, 0)); // x0 = *x0 = tag
+                    self.compile.aarch64.push(cmp_im(X64, x0, value, 0));
+                    self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                    self.compile.aarch64.push(brk(456));
                 }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                     self.get_slot(x16, *f);
@@ -341,54 +341,54 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.release_one(*f);
                 }
                 Bc::Unreachable => {
-                    self.asm.push(brk(123));
+                    self.compile.aarch64.push(brk(123));
                 }
             }
         }
         for (inst, false_ip) in patch_cbz {
-            let offset = self.asm.offset_words_inst_ip(inst, false_ip);
-            self.asm.patch(inst, cbz(X64, signed_truncate(offset, 19), x0));
+            let offset = self.compile.aarch64.offset_words_inst_ip(inst, false_ip);
+            self.compile.aarch64.patch(inst, cbz(X64, signed_truncate(offset, 19), x0));
         }
         for (from_inst, to_ip) in patch_b {
-            let dist = self.asm.offset_words_inst_ip(from_inst, to_ip);
+            let dist = self.compile.aarch64.offset_words_inst_ip(from_inst, to_ip);
             debug_assert_ne!(dist, 0, "while(1);");
-            self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
+            self.compile.aarch64.patch(from_inst, b(signed_truncate(dist, 26), 0));
         }
 
-        let mut slots = self.next_slot.0; //self.funcs[self.f].as_ref().unwrap().stack_slots * 8;
+        let mut slots = self.next_slot.0; //self.compile.ready[self.f].as_ref().unwrap().stack_slots * 8;
         assert!(slots < 4096, "not enough bits to refer to all slots");
         if slots % 16 != 0 {
             slots += 16 - (slots % 16); // play by the rules
         }
-        self.asm.patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
+        self.compile.aarch64.patch(reserve_stack, sub_im(X64, sp, sp, slots as i64, 0));
         for (fst, snd, thd) in release_stack {
-            self.asm.patch(fst, add_im(X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
-            self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
-            self.asm.patch(thd, add_im(X64, sp, sp, 16, 0));
+            self.compile.aarch64.patch(fst, add_im(X64, sp, fp, 0, 0)); // Note: normal mov encoding can't use sp
+            self.compile.aarch64.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
+            self.compile.aarch64.patch(thd, add_im(X64, sp, sp, 16, 0));
         }
         Ok(())
     }
 
     fn set_slot(&mut self, src_reg: i64, slot: StackOffset) {
         let offset = self.find_one(slot, true);
-        self.asm.push(str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
+        self.compile.aarch64.push(str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
     }
 
     #[track_caller]
     fn get_slot(&mut self, dest_reg: i64, slot: StackOffset) {
         let offset = self.find_one(slot, false);
-        self.asm.push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
+        self.compile.aarch64.push(ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
     }
 
     fn set_slot_f(&mut self, src_reg: i64, slot: StackOffset) {
         let offset = self.find_one(slot, true);
-        self.asm.push(f_str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
+        self.compile.aarch64.push(f_str_uo(X64, src_reg, sp, offset.0 as i64 / 8));
     }
 
     #[track_caller]
     fn get_slot_f(&mut self, dest_reg: i64, slot: StackOffset) {
         let offset = self.find_one(slot, false);
-        self.asm.push(f_ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
+        self.compile.aarch64.push(f_ldr_uo(X64, dest_reg, sp, offset.0 as i64 / 8));
     }
 
     fn find_many(&mut self, slot: StackRange, allow_create: bool) -> SpOffset {
@@ -471,11 +471,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     fn load_imm(&mut self, reg: i64, mut value: u64) {
         let bottom = u16::MAX as u64;
-        self.asm.push(movz(X64, reg, (value & bottom) as i64, 0));
+        self.compile.aarch64.push(movz(X64, reg, (value & bottom) as i64, 0));
         value >>= 16;
         if value != 0 {
             for shift in 1..4 {
-                self.asm.push(movk(X64, reg, (value & bottom) as i64, shift));
+                self.compile.aarch64.push(movk(X64, reg, (value & bottom) as i64, shift));
                 value >>= 16;
                 if value == 0 {
                     break;
@@ -507,11 +507,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
         if comp_ctx {
             // TODO: this has gotta be UB
-            self.load_imm(x0, self.program as *const Program as u64);
+            self.load_imm(x0, self.compile.program as *const Program as u64);
         }
         // The symptom of not resetting sp is you get a stack overflow which is odd.
         // maybe it keeps calling me in a loop because rust loses where it put its link register.
-        self.asm.push(br(f_addr_reg, 1));
+        self.compile.aarch64.push(br(f_addr_reg, 1));
         // TODO: you cant call release many because it assumes they were made in one chunk
         for i in arg {
             self.release_one(StackOffset(i));
@@ -544,13 +544,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         //     ops.push(op);
         // }
         // let arg = (((&mut out) as *mut Vec<i64> as usize, consume as usize), registers).serialize_one();
-        // self.funcs.run(template, arg, ExecTime::Comptime, 1, self.program).unwrap();
+        // self.compile.ready.run(template, arg, ExecTime::Comptime, 1, self.compile.program).unwrap();
         // out
     }
 
     fn _emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
         todo!()
-        // let f = self.asm.get_fn(template).unwrap().as_ptr();
+        // let f = self.compile.aarch64.get_fn(template).unwrap().as_ptr();
         // // TODO: this relies on my slice layout. use ffi types.
         // type TemplateFn = extern "C" fn(&mut Vec<i64>, extern "C" fn(&mut Vec<i64>, i64), *const i64, usize);
         // let f: TemplateFn = unsafe { transmute(f) };
@@ -558,8 +558,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
         //     ops.push(op);
         // }
-        // self.asm.make_exec();
-        // let indirect_fns = self.asm.get_dispatch();
+        // self.compile.aarch64.make_exec();
+        // let indirect_fns = self.compile.aarch64.get_dispatch();
         // unsafe {
         //     asm!(
         //     "mov x21, {fns}",
@@ -568,17 +568,17 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         //     );
         // }
         // f(&mut out, consume, registers.as_ptr(), registers.len());
-        // self.asm.make_write();
+        // self.compile.aarch64.make_write();
         // // TODO: cache these so I don't have to keep doing sys-calls to toggle the permissions every call?
         // out
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.funcs[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.compile.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
 
     fn call_direct(&mut self, f: FuncId, ret: StackRange, arg: StackRange) -> Res<'p, ()> {
-        let target = &self.program[f];
+        let target = &self.compile.program[f];
         let target_c_call = target.has_tag(Flag::C_Call);
         let comp_ctx = target.has_tag(Flag::Ct);
         if let Some(template) = target.any_reg_template {
@@ -598,7 +598,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             assert_eq!(ret.count, 1);
             for op in ops {
                 // println!("{op:#05x}, ");
-                self.asm.push(op);
+                self.compile.aarch64.push(op);
             }
 
             if !self.slot_type(ret.single()).is_unit() {
@@ -606,7 +606,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
         } else {
             //if target_c_call {
-            // if let Some(bytes) = self.asm.get_fn(*f) {
+            // if let Some(bytes) = self.compile.aarch64.get_fn(*f) {
             //     // TODO: should only do this for comptime functions. for runtime, want to be able to squash everything down.
             //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
             //     //       since need to allow that for cross compiling anyway.
@@ -618,7 +618,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             // } else {
             // TODO: have a mapping. funcs for other arches take up slots.
             assert!(f.0 < 4096);
-            self.asm.push(ldr_uo(X64, x16, x21, f.0 as i64));
+            self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.0 as i64));
             self.dyn_c_call(x16, arg, ret, target.unwrap_ty(), comp_ctx);
             // }
         }
@@ -810,20 +810,13 @@ pub mod jit {
 
 /// https://developer.arm.com/documentation/100076/0100/A32-T32-Instruction-Set-Reference/Condition-Codes/Condition-code-suffixes-and-related-flags?lang=en
 #[derive(Debug, Copy, Clone)]
-pub enum CmpFlags {
-    EQ = 0b0000, // equal
-    NE = 0b0001, // not equal
-    HS = 0b0010, // unsigned greater than or equal
-    LO = 0b0011, // unsigned less than
-    HI = 0b1000, // unsigned greater than
-    LS = 0b1001, // unsigned less than or equal
-    LT = 0b1011, // signed less than
-    GT = 0b1100, // signed greater than
-    AL = 0b1111, // Always
+enum CmpFlags {
+    EQ = 0b0000,
 }
+
 // There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
 /// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
-pub fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
+fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
     debug_assert!(x > -(1 << (bit_count - 1)) && (x < (1 << (bit_count - 1))));
     let mask = (1 << bit_count) - 1;
     if x < 0 {

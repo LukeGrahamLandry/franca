@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo, VarType};
 use crate::ast::{FatStmt, Var};
-use crate::bc_to_asm::BcToAsm;
+use crate::bc_to_asm::emit_aarch64;
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::pool::StringPool;
@@ -23,17 +23,16 @@ pub fn bootstrap() -> (String, String) {
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
     }
-    let mut asm = BcToAsm::new(&mut comp.ready, comp.program);
-    asm.asm.reserve(asm.program.funcs.len());
+
     for f in &bs {
-        asm.compile(*f).unwrap();
+        emit_aarch64(&mut comp, *f).unwrap();
     }
 
     let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.fr\n");
     for f in &bs {
-        let bytes = unsafe { &*asm.asm.get_fn(*f).unwrap() };
+        let bytes = unsafe { &*comp.aarch64.get_fn(*f).unwrap() };
 
-        let annotations: String = asm.program[*f]
+        let annotations: String = comp.program[*f]
             .annotations
             .iter()
             .filter(|a| a.name != Flag::Bs.ident())
@@ -43,7 +42,7 @@ pub fn bootstrap() -> (String, String) {
             })
             .collect();
 
-        let sig = pool.get(asm.program.sig_str(*f).unwrap());
+        let sig = pool.get(comp.program.sig_str(*f).unwrap());
         let bytes: String = bytes
             .iter()
             .copied()
