@@ -166,7 +166,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             let inst = &(self.compile.ready[f].as_ref().unwrap().insts[i].clone());
             self.compile.aarch64.mark_next_ip();
             match inst {
-                &Bc::MarkContiguous(slots) => {
+                &Bc::MarkContiguous(slots, _) => {
                     self.find_many(slots, true);
                 }
                 &Bc::LastUse(slots) => {

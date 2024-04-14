@@ -16,6 +16,8 @@
 - enum bitset
 - c style flags: fn Enum(Arr(Symbol)) Type; so Enum(A, B, C) === @enum(i64) (A = 0, B = 1, C = 2). could be macro so don't have to deal with passing symbols.
 - quick union types: fn Enum(Arr(Type)) Type; so Enum(A, B, C) === (A: A, B: B, C: C)!enum;
+  - if you had all the tags unique (use TypeId) instead of starting at 0, you could make it free to convert to a super set.
+    that probably gives up u8 or niche tags but even u16 is enough that its fine.
 - user defined operators so you can pick what meaning of &T makes sense for you (per module)
 - some sort of prefix call syntax because brackets are annoying.
   - maybe Rc(RefCell(T)) === Rc$ RefCell$ T
@@ -60,6 +62,9 @@
 - something that tried randomly deleting statements in your files to warn you if tests still passed would be cool.
 - let macros access requested type (of thier call site, not just infered of thier args) or provide an infered a type before processing.
 - split up different types of casts. @as is weird. Don't do the implicit voidptr cast based on result location.
+- should expose untagged unions because you might need them for ffi.
+  tho really that can be done with a blob of bytes and casting through a void pointer.
+  so would be cooler to add more powerful custom types and do unions as a library.
 
 ## UB
 

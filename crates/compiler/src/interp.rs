@@ -123,7 +123,7 @@ impl<'a, 'p: 'a> Interp<'p> {
 
             logln!("I: {:?}", i.log(self.pool));
             match i {
-                Bc::MarkContiguous(_) | Bc::LastUse(_) => {
+                Bc::MarkContiguous(_, _) | Bc::LastUse(_) => {
                     self.bump_ip();
                 }
                 Bc::NoCompile => err!("Ran empty function",),

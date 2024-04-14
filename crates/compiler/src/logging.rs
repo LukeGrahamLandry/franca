@@ -715,7 +715,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::Load { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
             Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
-            Bc::MarkContiguous(_) | Bc::LastUse(_) | Bc::Drop(_) => write!(f, "{:?};", self),
+            Bc::MarkContiguous(_, _) | Bc::LastUse(_) | Bc::Drop(_) => write!(f, "{:?};", self),
             Bc::SlicePtr { base, offset, count, ret } => write!(f, "{:?} = slice({:?}, first={}, count={});", ret, base, offset, count),
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
             Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),

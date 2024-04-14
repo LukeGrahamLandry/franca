@@ -105,7 +105,7 @@ pub enum Bc<'p> {
     LastUse(StackRange),
     NoCompile,
     Unreachable,
-    MarkContiguous(StackRange),
+    MarkContiguous(StackRange, TypeId),
 }
 
 #[derive(Clone)]

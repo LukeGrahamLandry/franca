@@ -907,7 +907,7 @@ impl<'p> FnBody<'p> {
             return;
         }
         let first = StackOffset(self.stack_slots);
-        self.push(Bc::MarkContiguous(StackRange { first, count }));
+        self.push(Bc::MarkContiguous(StackRange { first, count }, ty));
     }
 
     #[track_caller]

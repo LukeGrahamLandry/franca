@@ -35,6 +35,7 @@ use compiler::{
     err, extend_options,
     logging::PoolLog,
     pool::Ident,
+    reflect::BitSet,
     unwrap,
 };
 
@@ -249,6 +250,7 @@ pub struct BcToLlvm<'z, 'p, 'a> {
     f: FuncId,
     wip: Vec<FuncId>, // makes recursion work
     slots: Vec<Option<LLVMValueRef>>,
+    val_is_ptr: BitSet,
     blocks: HashMap<usize, LLVMBasicBlockRef>,
 }
 
@@ -261,6 +263,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
             wip: vec![],
             slots: vec![],
             blocks: Default::default(),
+            val_is_ptr: BitSet::empty(),
         }
     }
 
@@ -316,6 +319,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
             self.slots.clear();
             self.slots.extend(vec![None; func.stack_slots]);
             self.blocks.clear();
+            self.val_is_ptr = func.slot_is_var.clone();
 
             // TODO: iterate BitSet using the magic intrinsics.
             for b in 0..func.insts.len() {
@@ -324,14 +328,36 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                     self.blocks.insert(b, LLVMAppendBasicBlock(llvm_f, name.as_ptr()));
                 }
             }
-
             LLVMPositionBuilderAtEnd(self.llvm.builder, *self.blocks.get(&0).unwrap());
+            let int = LLVMInt64TypeInContext(self.llvm.context);
+            for b in 0..func.insts.len() {
+                if let Bc::MarkContiguous(slot, ty) = func.insts[b] {
+                    let name = null_terminate(&format!(".ALLOC{}", slot.first.0));
+                    // Not using the 'ty' from bc because I'm not consistant about representing structs.
+                    // GEP uses multiple indexes for nesting instead of flattening them.
+                    let ty = LLVMArrayType(int, slot.count as u32);
+                    let ptr = LLVMBuildAlloca(self.llvm.builder, ty, name.as_ptr());
+                    for i in slot {
+                        let offset = i - slot.first.0;
+                        // The first one is because you're going through the pointer.
+                        let mut index_values = vec![
+                            LLVMConstInt(self.llvm.i32_ty, 0, LLVMBool::from(false)),
+                            LLVMConstInt(self.llvm.i32_ty, offset as u64, LLVMBool::from(false)),
+                        ];
+                        // https://llvm.org/docs/GetElementPtr.html
+                        let field_ptr_value =
+                            LLVMBuildInBoundsGEP2(self.llvm.builder, ty, ptr, index_values.as_mut_ptr(), index_values.len() as c_uint, EMPTY);
+                        self.slots[i] = Some(field_ptr_value);
+                        self.val_is_ptr.set(i);
+                    }
+                }
+            }
 
             for i in 0..func.stack_slots {
-                if func.slot_is_var.get(i) {
+                if func.slot_is_var.get(i) && self.slots[i].is_none() {
                     let name = null_terminate(&format!(".VAR{}", i));
                     let ty = self.llvm.get_type(self.compile.program, func.slot_types[i]);
-                    let ptr = LLVMBuildAlloca(self.llvm.builder, ty, name.as_ptr()); // TODO: sometimes tuples need consecutive addresses.
+                    let ptr = LLVMBuildAlloca(self.llvm.builder, ty, name.as_ptr());
                     self.slots[i] = Some(ptr);
                 }
             }
@@ -370,7 +396,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
 
                 let inst = &(func.insts[i].clone());
                 match inst {
-                    Bc::MarkContiguous(_) => {} // TODO: use this to force a shared alloca.
+                    Bc::MarkContiguous(_, _) => {}
                     Bc::NoCompile => unreachable!(),
                     Bc::Unreachable => {
                         LLVMBuildUnreachable(self.llvm.builder);
@@ -463,18 +489,16 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                         for slot in of {
                             assert!(self.slot_is_var(StackOffset(slot)));
                         }
-                        if of.count == 1 {
-                            let ptr = self.slots[of.first.0].unwrap();
-                            self.write_slot(to, ptr);
-                        } else {
-                            todo!()
-                        }
+                        // TODO: for structs, this would be the GEP of the first field. do i need to tell it it means the whole thing somehow?
+                        let ptr = self.slots[of.first.0].unwrap();
+                        self.write_slot(to, ptr);
                     }
                     &Bc::SlicePtr { base, offset, ret, .. } => {
                         let ty = self.slot_type(base);
                         let ty = unwrap!(self.compile.program.unptr_ty(ty), "not ptr");
-                        assert!(matches!(self.compile.program[ty], TypeInfo::Struct { .. }));
-                        let ty = self.llvm.get_type(self.compile.program, ty);
+                        let size = self.compile.ready.sizes.slot_count(self.compile.program, ty);
+                        debug_assert!(offset <= size);
+                        let ty = LLVMArrayType(int, size as u32);
                         let ptr = self.read_slot(base);
                         // The first one is because you're going through the pointer.
                         let mut index_values = vec![
@@ -536,7 +560,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
     }
 
     fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.compile.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
+        self.val_is_ptr.get(slot.0)
     }
 
     fn llvm_type(&mut self, slot: StackOffset) -> LLVMTypeRef {

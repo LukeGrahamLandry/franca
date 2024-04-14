@@ -1,3 +1,15 @@
+## passing by pointer (Apr 14)
+
+Llvm doesn't do all the c ABI stuff for you. Need to use pointers to pass structs by value.
+Other backends are likely need the same thing.
+Currently my asm one just hopes all the args will fit in 8 registers but that doesn't follow the abi for calling other c code
+so needs to change too.
+So it would be nice to do it on the bytecode representation instead of in the backend,
+but that gets a bit sketchy because what if different abis have different rules about when to use registers vs pointers?
+Like the aarch64 one sometimes passes on the stack without passing that pointer in a register (because the caller knows where to look).
+(https://learn.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions?view=msvc-170).  
+Tho following the calling convention only matters for ffi but if I have to support it anyway, why not do it all the time.
+
 ## burn it with fire (Apr 10)
 
 Code is evil. I want less of it.

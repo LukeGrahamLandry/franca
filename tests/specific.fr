@@ -141,6 +141,102 @@ fn an_uninit_var(c: i64) i64 = {
 }
 */
 
+@hacktest(interp, aarch64, llvm)
+fn fields(c: i64) i64 = {
+    fn inner(n: i64) i64 = {
+        const A = (a: i64, b: i64)!struct;
+        var a: A = (a: n, b: 0);
+        a&.b[] = add(a&.a[], 7);
+        a&.b[]
+    }
+    
+    assert_eq(inner(3), 10);
+    c
+}
+
+@hacktest(interp, aarch64, llvm)
+fn single_nested_struct(canary: i64) i64 = {
+    const A = (a: i64, b: i64)!struct;
+    const B = (c: A)!struct;
+    
+    assert_eq(A.size_of(), B.size_of());
+    
+    let f: A = (a: 1, b: 2);
+    var thing: B = (c: f);
+    
+    let a = thing&.c.a[];
+    assert_eq(a, 1);
+    let b = thing&.c.b[];
+    assert_eq(b, 2);
+    
+    canary
+}
+
+
+// TODO: this doesn't work on llvm becuase ((a, b), c) is not seen as (a, b, c)
+@hacktest(interp, aarch64, llvm)
+fn nested_struct(canary: i64) i64 = {
+    const A = (a: i64, b: i64)!struct;
+    const B = (fst: A, snd: i64)!struct;
+    
+    assert_eq(A.size_of(), i64.size_of().mul(2));
+    assert_eq(B.size_of(), i64.size_of().mul(3));
+    
+    let f: A = (a: 1, b: 2);
+    var thing: B = (fst: f, snd: 3);
+    
+    let c = thing&.snd[];
+    assert_eq(c, 3);
+    let a = thing&.fst.a[];
+    assert_eq(a, 1);
+    let b = thing&.fst.b[];
+    assert_eq(b, 2);
+    
+    canary
+}
+
+
+// This caused interp to drop Poison when I just added to result.to_drop for !slice,
+// because the branch that wasn't taken didn't get initilized. 
+// Originally found much more confusing case in @switch,
+// because !unquote uses !slice to pass the placeholder arguments to the compiler. 
+// Fixed by having !slice backing slots dropped at the end of the block, not the function.
+@hacktest(interp, aarch64, llvm)
+fn branching_slice(c: i64) i64 = {
+    if(true, fn = {
+        let a = (1, 2, 3)!slice;
+    }, fn = {
+       let b = (4, 5, 6)!slice;
+    });
+    c
+}
+
+// TODO: I really need to make @test work in a less painful way. 
+
+@test(interp, aarch64, llvm)
+fn main(c: i64) i64 = {
+    assert_eq(c, trivial(c));
+    assert_eq(c, trivial_indirect(c));
+    assert_eq(c, test_ifa(c)); 
+    assert_eq(c, test_ifb(c));
+    assert_eq(c, nested(c)); 
+    assert_eq(c, math(c));  
+    assert_eq(c, test_while(c)); 
+    assert_eq(c, var_addr(c)); 
+    assert_eq(c, use_ptr(c)); 
+    assert_eq(c, float_calling_conv1(c)); 
+    assert_eq(c, float_calling_conv2(c)); 
+    assert_eq(c, add_floats(c)); 
+    assert_eq(c, branching_uninit_var(c)); 
+    assert_eq(c, shadow_aliased(c)); 
+    assert_eq(c, fields(c)); 
+    assert_eq(c, single_nested_struct(c));
+    assert_eq(c, nested_struct(c));
+    assert_eq(c, branching_slice(c)); 
+    
+    c
+}
+
 //////////
 /// BROKEN
 
@@ -171,24 +267,3 @@ fn use_any_reg(c: i64) i64 = {
     c
 }
 */
-
-// TODO: I really need to make @test work in a less painful way. 
-
-@test(interp, aarch64, llvm)
-fn main(c: i64) i64 = {
-    assert_eq(c, trivial(c));
-    assert_eq(c, trivial_indirect(c));
-    assert_eq(c, test_ifa(c)); 
-    assert_eq(c, test_ifb(c));
-    assert_eq(c, nested(c)); 
-    assert_eq(c, math(c));  
-    assert_eq(c, test_while(c)); 
-    assert_eq(c, var_addr(c)); 
-    assert_eq(c, use_ptr(c)); 
-    assert_eq(c, float_calling_conv1(c)); 
-    assert_eq(c, float_calling_conv2(c)); 
-    assert_eq(c, add_floats(c)); 
-    assert_eq(c, branching_uninit_var(c)); 
-    assert_eq(c, shadow_aliased(c)); 
-    c
-}
