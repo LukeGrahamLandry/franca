@@ -6,7 +6,7 @@ use std::{
     ffi::{c_uint, CStr, CString},
     mem::MaybeUninit,
     num::NonZeroU8,
-    ptr::null,
+    ptr::{null, null_mut},
 };
 
 use llvm_sys::{
@@ -523,7 +523,23 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                     }
                     &Bc::TagCheck { enum_ptr, value } => {
                         let ptr = self.read_slot(enum_ptr);
-                        todo!()
+                        let int = LLVMInt64TypeInContext(self.llvm.context);
+                        let tag_val = LLVMBuildLoad2(self.llvm.builder, int, ptr, EMPTY);
+                        let expect_val = LLVMConstInt(int, value as u64, 0);
+
+                        let name = null_terminate(&format!(".CHECK{}", i));
+                        let pass = LLVMAppendBasicBlock(llvm_f, name.as_ptr());
+                        let name = null_terminate(&format!(".FAIL{}", i));
+                        let fail = LLVMAppendBasicBlock(llvm_f, name.as_ptr());
+                        let cond = LLVMBuildICmp(self.llvm.builder, llvm_sys::LLVMIntPredicate::LLVMIntEQ, tag_val, expect_val, EMPTY);
+                        LLVMBuildCondBr(self.llvm.builder, cond, pass, fail);
+
+                        LLVMPositionBuilderAtEnd(self.llvm.builder, fail);
+
+                        // TODO: !!!! need to actually crash. i think unreachable is just UB !!!!
+                        LLVMBuildUnreachable(self.llvm.builder);
+
+                        LLVMPositionBuilderAtEnd(self.llvm.builder, pass);
                     }
                     &Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                         let ty = self.llvm.get_function_type(self.compile.program, ty, comp_ctx);
