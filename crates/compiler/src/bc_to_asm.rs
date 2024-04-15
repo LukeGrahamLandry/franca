@@ -6,9 +6,9 @@
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
 use crate::bc::{Bc, BcReady, InterpBox, StackOffset, StackRange, Value, Values};
-use crate::bootstrap_gen::*;
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::{ast::Program, bc::FnBody};
+use crate::{bootstrap_gen::*, unwrap};
 use crate::{err, logging::PoolLog};
 use std::arch::asm;
 use std::cell::UnsafeCell;
@@ -224,7 +224,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.load_imm(x0, ptr as u64);
                         self.set_slot(x0, *slot);
                     }
-                    Value::GetNativeFnPtr(f) => todo!(),
+                    &Value::GetNativeFnPtr(f) => {
+                        // TODO: use adr+adrp instead of an integer.
+                        // TODO: do linker-ish things to allow forward references.
+                        //       actually the way i do that rn is with the dispatch table so could just use that for now.
+                        let ptr = unwrap!(self.compile.aarch64.get_fn(f), "GetNativeFnPtr not compiled yet. TODO: mutual recursion.");
+                        self.load_imm(x0, ptr.as_ptr() as u64);
+                        self.set_slot(x0, *slot);
+                    }
                     Value::SplitFunc { ct, rt } => todo!(),
                 },
                 &Bc::JumpIf { cond, true_ip, false_ip } => {

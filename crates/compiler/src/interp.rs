@@ -308,13 +308,15 @@ impl<'a, 'p: 'a> Interp<'p> {
 
                     // TODO: HACK! just want to test function pointers dynamic dispatch. this wont work on asm!
                     //      this goes away when i properly implement GetNativeFnPtr
-                    if let Some(f) = f.to_func() {
+                    if let Value::GetNativeFnPtr(f) = f {
                         self.bump_ip(); // pre-bump
                         let when = self.call_stack.last().unwrap().when;
                         self.push_callframe(f, ret, arg, when, compile)?;
                         // don't bump ip here, we're in a new call frame.
                         continue;
                     }
+
+                    assert!(!matches!(f, Value::GetFn(_)), "CallC through GetFn is no longer allowed");
 
                     self.bump_ip();
                     let ptr = f.to_int()?.to_bytes() as usize;

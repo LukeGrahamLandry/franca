@@ -504,9 +504,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             ret: output.single(),
                         });
                     }
-                    Flag::Fn_Ptr => {
-                        self.compile_expr(result, arg, output)?;
-                    }
+                    Flag::Fn_Ptr => unreachable!(),
                     Flag::Construct => {
                         if let Expr::StructLiteralP(pattern) = &arg.expr {
                             self.construct_struct(result, pattern, arg.ty, output)?

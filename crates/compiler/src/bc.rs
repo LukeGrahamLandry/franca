@@ -421,8 +421,8 @@ impl Values {
 }
 
 impl Value {
-    pub fn to_func(self) -> Option<FuncId> {
-        if let Value::GetFn(f) | Value::GetNativeFnPtr(f) = self {
+    pub fn to_func(&self) -> Option<FuncId> {
+        if let &Value::GetFn(f) | &Value::GetNativeFnPtr(f) = self {
             Some(f)
         } else {
             None

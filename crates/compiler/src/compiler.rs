@@ -1123,17 +1123,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(value)
                     }
                     "fn_ptr" => {
+                        // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
+                        //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
                         let fn_val = self.compile_expr(result, arg, None)?.get()?;
-                        if let Values::One(Value::GetFn(id)) = fn_val {
-                            assert!(!self.program[id].any_const_args());
-                            add_unique(&mut result.callees, (id, ExecTime::Both));
-                            self.ensure_compiled(id, result.when)?;
-                            // The backend still needs to do something with this, so just leave it
-                            let ty = self.program.func_type(id);
-                            let ty = self.program.fn_ty(ty).unwrap();
-                            Structured::RuntimeOnly(self.program.intern_type(TypeInfo::FnPtr(ty)))
-                        } else {
-                            err!("!fn_ptr expected const fn not {fn_val:?}",)
+                        match fn_val {
+                            Values::One(Value::GetFn(id)) => {
+                                assert!(!self.program[id].any_const_args());
+                                add_unique(&mut result.callees, (id, ExecTime::Both));
+                                self.ensure_compiled(id, result.when)?;
+                                // The backend still needs to do something with this, so just leave it
+                                let ty = self.program.func_type(id);
+                                let ty = self.program.fn_ty(ty).unwrap();
+                                let ty = self.program.intern_type(TypeInfo::FnPtr(ty));
+                                expr.expr = Expr::Value {
+                                    ty,
+                                    value: Values::One(Value::GetNativeFnPtr(id)),
+                                };
+                                expr.ty = ty;
+                                Structured::RuntimeOnly(ty)
+                            }
+                            Values::One(Value::GetNativeFnPtr(_)) => err!("redundant use of !fn_ptr",),
+                            _ => err!("!fn_ptr expected const fn not {fn_val:?}",),
                         }
                     }
                     "construct" => {
