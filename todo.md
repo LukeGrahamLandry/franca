@@ -1,3 +1,18 @@
+## Deeply annoying
+
+- no u32/u16/u8
+- constants must be forward declared. no mutual recursion
+- comptime runs on interp instead of asm
+- no typechecking through fn arg/ret so if/loop body closures need annotations
+- can't output an exe, only jit
+- no way to say trait bounds on generics (it just tries to compile like c++ templates)
+- need to explicitly instantiate generics
+- asm no print stack traces
+- stdlib isn't in seperate modules
+- no nonlocal returns for break/continue
+- test runner glue code is done in rust instead of fancy metaprogram
+- no string escape codes like "\n"
+
 ## Feature Ideas
 
 - fold infinite loops so it knows when you dont need a return at the end of the function to typecheck

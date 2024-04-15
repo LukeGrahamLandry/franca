@@ -12,8 +12,9 @@
 #![feature(backtrace_frames)]
 extern crate core;
 
+use std::arch::asm;
 use std::env;
-use std::mem::ManuallyDrop;
+use std::mem::{transmute, ManuallyDrop};
 use std::path::PathBuf;
 use std::{fs, sync::atomic::Ordering};
 
@@ -58,6 +59,7 @@ pub mod pool;
 pub mod reflect;
 pub mod scope;
 
+use crate::bc_to_asm::emit_aarch64;
 use crate::logging::PoolLog;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId, EXPR_COUNT},
@@ -156,7 +158,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, mut arg: Value, mut expect: Value, save: Option<&str>, leak: bool) -> bool {
     log_tag_info();
     let start = timestamp();
-    let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
+    let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
     let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
 
@@ -190,33 +192,35 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, mut arg: Valu
                             );
                             outln!(Perf, "===============");
                             let start = timestamp();
-                            if comp.program[f].finished_ret == Some(TypeId::unit()) && comp.program[f].finished_arg == Some(TypeId::unit()) {
-                                arg = Value::Unit;
-                                expect = Value::Unit;
+
+                            if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
+                                log_err(&comp, e, save);
+                                return false;
                             }
-                            match comp.run(f, arg.into(), ExecTime::Runtime) {
-                                Err(e) => {
-                                    log_err(&comp, e, save);
-                                    return false;
-                                }
-                                Ok(result) => {
-                                    let end = timestamp();
-                                    let seconds = end - start;
-                                    outln!(Perf, "===============");
-                                    outln!(Perf, "Interpreter finished running main() in {seconds:.5} seconds.");
-                                    debug_assert_eq!(result, expect.into());
-                                    // TODO: change this when i add assert(bool)
-                                    let assertion_count = src.split("assert_eq(").count() - 1;
-                                    // debug so dont crash in web if not using my system of one run per occurance.
-                                    debug_assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
-                                    outln!(
-                                        Perf,
-                                        "   - {} assertions passed. {} comptime evaluations.",
-                                        comp.program.assertion_count,
-                                        comp.anon_fn_counter
-                                    );
-                                }
+                            comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
+                            comp.aarch64.make_exec();
+                            let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
+
+                            let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
+                            let indirect_fns = comp.aarch64.get_dispatch();
+                            let a = arg.to_int().unwrap();
+                            unsafe {
+                                asm!(
+                                "mov x21, {fns}",
+                                fns = in(reg) indirect_fns,
+                                // I'm hoping this is how I declare that I intend to clobber the register.
+                                // https://doc.rust-lang.org/reference/inline-assembly.html
+                                // "[...] the contents of the register to be discarded at the end of the asm code"
+                                // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
+                                out("x21") _
+                                );
                             }
+                            let res = code(a);
+
+                            let end = timestamp();
+                            let seconds = end - start;
+                            outln!(Perf, "===============");
+                            outln!(Perf, "Interpreter finished running main() in {seconds:.5} seconds.");
                         }
                     }
                 }

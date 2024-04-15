@@ -23,7 +23,8 @@ struct BcToAsm<'z, 'p, 'a> {
     open_slots: Vec<(SpOffset, usize)>,
     next_slot: SpOffset,
     f: FuncId,
-    wip: Vec<FuncId>, // make recursion work
+    wip: Vec<FuncId>,
+    when: ExecTime, // make recursion work
 }
 
 const x0: i64 = 0;
@@ -50,14 +51,14 @@ const X64: i64 = 0b1;
 
 pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, ()> {
     compile.aarch64.reserve(compile.program.funcs.len());
-    let mut a = BcToAsm::new(compile);
+    let mut a = BcToAsm::new(compile, when);
     a.compile(f)?;
     assert!(a.wip.is_empty());
     Ok(())
 }
 
 impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
-    fn new(compile: &'z mut Compile<'a, 'p>) -> Self {
+    fn new(compile: &'z mut Compile<'a, 'p>, when: ExecTime) -> Self {
         Self {
             compile,
             slots: vec![],
@@ -65,6 +66,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             next_slot: SpOffset(0),
             f: FuncId(0), // TODO: bad
             wip: vec![],
+            when,
         }
     }
 
@@ -175,8 +177,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
                 &Bc::CallSplit { rt, ct, ret, arg } => {
-                    // TODO: update when we support comptime here.
-                    self.call_direct(rt, ret, arg)?;
+                    let f = if self.when == ExecTime::Comptime { ct } else { rt };
+                    self.call_direct(f, ret, arg)?;
                 }
                 &Bc::CallDirect { f, ret, arg } => {
                     self.call_direct(f, ret, arg)?;

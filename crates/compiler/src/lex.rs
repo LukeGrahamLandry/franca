@@ -141,6 +141,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                         self.pop();
                         self.lex_hex()
                     }
+                    '.' => self.lex_num(),
                     '0'..='9' => self.err(LexErr::DenyLeadingZero),
                     _ => self.token(Number(0), self.start, self.current),
                 }

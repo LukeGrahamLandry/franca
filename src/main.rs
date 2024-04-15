@@ -8,7 +8,7 @@ use compiler::{
     compiler::{Compile, ExecTime},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
-    find_std_lib, load_program, log_dbg, log_err,
+    find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
     run_main, timestamp,
@@ -233,7 +233,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
 }
 
 /// This is the thing we exec.
-fn actually_run_it(name: String, src: String, assertion_count: usize, arch: TargetArch) {
+fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
     // init_logs_flag(0xFFFFFFFF);
     // let save = format!("{name}_{arch:?}/");
