@@ -1,25 +1,63 @@
 const BoxMmap = VoidPtr;
 const CodePtr = VoidPtr;
-fn copy_to_mmap_exec(insts: Slice(u32)) (BoxMmap, CodePtr);
+@interp fn copy_to_mmap_exec(insts: Slice(u32)) (BoxMmap, CodePtr);
 
 // TODO: fix !slice doesn't return a real Slice(T)
-fn call_jit(input: i64, code: Ty(*u32, i64)) i64 = {
+@interp fn call_jit(input: i64, code: Ty(*u32, i64)) i64 = {
     let code: Slice(u32) = code;
     var res = copy_to_mmap_exec(code);
     let f: FnPtr(i64, i64) = res&[1][];
     f(input)
 }
 
+
+// TODO: HACK: i only have i64 but code needs to be a packed array of u32. 
+fn pack_u32(dest: Slice$i64, src: Slice$i64) Unit = {
+    range(0, dest.len()) {(i: i64)|
+        var value = src.get(i.mul(2));
+        let next = i.mul(2).add(1);
+        
+        if(src.len().gt(next)) {|
+            let v = src.get(next).shift_left(32);
+            value = value.bit_or(v);
+        }{|
+            // it must be the last one
+        
+        };
+        
+        dest.index(i)[] = value;
+    };
+}
+
+@no_interp @aarch64 
+fn call_jit(input: i64, code: Ty(*u32, i64)) i64 = {
+    let code: Slice$i64 = (ptr: code&[0][], len: code&[1][]);
+    var bytes = code.len().mul(4);
+    code.len().mod(2).eq(1).if {|
+        bytes = bytes.add(4);
+    };
+    
+    let mapped = os_alloc(bytes);
+    pack_u32(mapped, code);
+    var exec = make_exec(mapped);
+    let f: FnPtr(i64, i64) = exec&.ptr[];
+    let out = f(input);
+    os_dealloc(exec);
+    out
+}
+
+
 // TODO: can't say a return type here (Ty(*u32, i64) or Slice(u32)) because compiler wants an ffi Vec<u32>
 // TODO: cant say arg is Slice(u32) because !slice doesn't infer the right type because compiler can't refer to it. 
 fn heap(ops: Ty(*u32, i64)) = {
     var out: List(u32) = list(ops&[1][]);
     push_all(out!addr, @as(Slice(u32)) ops);
+    
     var out: Slice(u32) = items(out!addr);
     out
 }
 
-@test(interp)
+@test(interp, aarch64)
 fn main(canary: i64) i64 = {
     { let a: u5 = 0b10101010101010; }!assert_compile_error;
     ((fn(a: u1) u1 = 0x1)(0b11))!assert_compile_error;
@@ -32,6 +70,7 @@ fn main(canary: i64) i64 = {
     )!slice;
     assert_eq(call_jit(90, code), 100);
     
+    
     // Decimal literals auto cast to any bit size. 
     // TODO: bounds checking for constants. 
     let code = (
@@ -41,6 +80,7 @@ fn main(canary: i64) i64 = {
     )!slice;
     assert_eq(call_jit(80, code), 200);
     
+    
     @c_call
     fn add_by_asm(a: i64, b: i64) i64 = heap((
         add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], 0b000000),
@@ -49,6 +89,7 @@ fn main(canary: i64) i64 = {
     
     let three = add_by_asm(1, 2);
     assert_eq(three, 3);
+    
     
     @c_call
     fn add_one(a: i64) i64 = heap((
@@ -64,6 +105,8 @@ fn main(canary: i64) i64 = {
     )!slice)!asm;
     assert_eq(sub_one(10), 9);
 
+
+    
     @c_call
     fn use_stack(a: i64) i64 = heap((
         sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
@@ -71,42 +114,52 @@ fn main(canary: i64) i64 = {
         movz(Bits.X64[], x0, @as(u16) 10, Hw.Left0[]), 
         ldr_uo(Bits.X64[], x1, sp, @as(u12) 1),
         add_sr(Bits.X64[], x0, x0, x1, Shift.LSL[], @as(u6) 0),
+        add_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
         ret(),
     )!slice)!asm;
     assert_eq(use_stack(15), 25);
 
+    // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
+    //       NOT offset 1 and 2, that will stomp the first slot of the outer function (in this case canary so luckily you notice)
+    //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
+    //       I also didn't notice that I forgot to reset sp, I guess rust set the value after the call instead of trusing callee to offset it back? 
     @c_call
     fn read_pair(a: i64, b: i64) i64 = heap((
         sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
-        str_uo(Bits.X64[], x0, sp, @as(u12) 1),
-        str_uo(Bits.X64[], x1, sp, @as(u12) 2),
-        ldp_so(Bits.X64[], x2, x3, sp, @as(i7) 1),
+        str_uo(Bits.X64[], x0, sp, @as(u12) 0),
+        str_uo(Bits.X64[], x1, sp, @as(u12) 1),
+        ldp_so(Bits.X64[], x2, x3, sp, @as(i7) 0),
         sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], @as(u6) 0),
+        add_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
         ret(),
     )!slice)!asm;
     assert_eq(read_pair(30, 20), 10);
-
+    
     @c_call
     fn write_pair(a: i64, b: i64) i64 = heap((
         sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
-        stp_so(Bits.X64[], x0, x1, sp, @as(i7) 1),
-        ldr_uo(Bits.X64[], x2, sp, @as(u12) 1),
-        ldr_uo(Bits.X64[], x3, sp, @as(u12) 2),
+        stp_so(Bits.X64[], x0, x1, sp, @as(i7) 0),
+        ldr_uo(Bits.X64[], x2, sp, @as(u12) 0),
+        ldr_uo(Bits.X64[], x3, sp, @as(u12) 1),
         sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], @as(u6) 0),
+        add_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
         ret(),
     )!slice)!asm;
     assert_eq(write_pair(30, 20), 10);
 
+    
     @c_call
     fn both_pair(a: i64, b: i64) i64 = heap((
         sub_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
-        stp_so(Bits.X64[], x0, x1, sp, @as(i7) 1),
-        ldp_so(Bits.X64[], x2, x3, sp, @as(i7) 1),
+        stp_so(Bits.X64[], x0, x1, sp, @as(i7) 0),
+        ldp_so(Bits.X64[], x2, x3, sp, @as(i7) 0),
         sub_sr(Bits.X64[], x0, x2, x3, Shift.LSL[], @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
+        add_im(Bits.X64[], sp, sp, @as(u12) 16, 0b0),
         ret(),
     )!slice)!asm;
     assert_eq(both_pair(30, 20), 10);
 
+    
     @c_call
     fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = heap((
         cmp_im(Bits.X64[], x2, @as(u12) 7, 0b0),

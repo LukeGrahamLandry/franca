@@ -247,7 +247,7 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
     let result = load_program(&mut comp, &src);
     if let Err(e) = result {
         log_err(&comp, e, save);
-        return;
+        exit(1);
     }
     assert_eq!(comp.tests.len(), 1);
     // TODO: run multiple and check thier arches.
@@ -256,7 +256,7 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
     let result = comp.compile(f, ExecTime::Runtime);
     if let Err(e) = result {
         log_err(&comp, e, save);
-        return;
+        exit(1);
     }
 
     assert_eq!(comp.program[f].finished_ret, Some(TypeId::i64()));
@@ -268,7 +268,7 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
         TargetArch::Aarch64 => {
             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
                 log_err(&comp, e, save);
-                return;
+                exit(1);
             }
             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
             comp.aarch64.make_exec();
@@ -298,12 +298,12 @@ fn actually_run_it(name: String, src: String, assertion_count: usize, arch: Targ
 
             if let Err(e) = asm.compile(f) {
                 log_err(&comp, e, None);
-                return;
+                exit(1);
             }
 
             if let Err(e) = verify_module(asm.llvm.module) {
                 log_err(&comp, e, None);
-                return;
+                exit(1);
             }
 
             let code = asm.llvm.get_fn_jitted(f).unwrap();

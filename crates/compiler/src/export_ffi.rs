@@ -31,6 +31,12 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
     ("@env fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
     ("@env fn puts(s: CStr) i64", libc::puts as *const u8),
+    (
+        "@env fn mmap(addr: VoidPtr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) VoidPtr",
+        libc::mmap as *const u8,
+    ),
+    ("fn munmap(addr: VoidPtr, len: i64) i64", libc::munmap as *const u8),
+    ("fn mprotect(addr: VoidPtr, len: i64, prot: i64) i64", libc::mprotect as *const u8),
 ];
 
 pub const COMPILER: &[(&str, *const u8)] = &[
@@ -95,6 +101,24 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::O_RDONLY,
                 libc::O_WRONLY,
                 libc::O_RDWR
+            )
+            .unwrap();
+            // TODO: this should be a bitflag. presumably PROT_NONE is always 0.
+            //       distinguish between flags whose value is shifting (i.e. 0/1/2 vs 1/2/4)
+            writeln!(
+                out,
+                "@pub const MapProt = @enum(i64) (Exec = {}, Read = {}, Write = {}, None = {});",
+                libc::PROT_EXEC,
+                libc::PROT_READ,
+                libc::PROT_WRITE,
+                libc::PROT_NONE
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "@pub const MapFlag = @enum(i64) (Private = {}, Anonymous = {});",
+                libc::MAP_PRIVATE,
+                libc::MAP_ANONYMOUS,
             )
             .unwrap();
             writeln!(out, "@pub const DlHandle = VoidPtr; @pub const CStr = Unique$Ptr(i64);").unwrap();
