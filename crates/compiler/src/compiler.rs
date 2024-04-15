@@ -2424,6 +2424,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                             *arg_expr = mem::take(v.iter_mut().next().unwrap());
                         }
                     }
+                    // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
+                    // Symptom of forgetting this was emit_bc passing extra uninit args.
+                    arg_expr.ty = arg_ty;
+
                     let ty = self.program.func_type(current_fn);
                     f_expr.expr = Expr::Value {
                         ty,
@@ -2810,18 +2814,22 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             // This will have changed from baking the args.
             f_ty = self.program.func_type(rt);
+            let ct_ty = self.program.func_type(ct);
+            assert_eq!(f_ty, ct_ty);
         }
 
-        add_unique(&mut result.callees, (ct, ExecTime::Comptime));
-        add_unique(&mut result.callees, (rt, ExecTime::Runtime));
-        self.ensure_compiled(ct, ExecTime::Comptime)?;
-        self.ensure_compiled(rt, ExecTime::Runtime)?;
         // Since we just baked args, the ids might have changed so we have to update them.
         f_expr.ty = f_ty;
         f_expr.expr = Expr::Value {
             ty: f_ty,
             value: Value::SplitFunc { ct, rt }.into(),
         };
+
+        add_unique(&mut result.callees, (ct, ExecTime::Comptime));
+        add_unique(&mut result.callees, (rt, ExecTime::Runtime));
+        self.ensure_compiled(ct, ExecTime::Comptime)?;
+        self.ensure_compiled(rt, ExecTime::Runtime)?;
+
         Ok(Structured::RuntimeOnly(ret_ty))
     }
 }

@@ -1,3 +1,5 @@
+// TODO: rename this file. split into Slice and List? 
+
 // TODO: fix scope resolution for generics 
 @pub fn list() Unit = {unit};
 @pub fn push() Unit = {unit};
@@ -6,7 +8,7 @@
 @pub fn subslice() Unit = {unit};
 @pub fn push_all() Unit = {unit};
 @pub fn list_clone() Unit = {unit};
-@pub fn foreach() Unit = {unit};
+@pub fn for() Unit = {unit};
 @pub fn enumerate() Unit = {unit};
 @pub fn index() Unit = {unit};
 @pub fn slice() Unit = {unit};
@@ -29,7 +31,7 @@ fn range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
     var i = start;
     while(fn = i.lt(end)) {|
         yield(i);
-        i = add(i, 1);
+        i = i.add(1);
     };
 }
 
@@ -57,19 +59,19 @@ fn Slice(T: Type) Type = {
     @pub fn assume(ptr: *T, len: i64) Self = (ptr: ptr, len: len);
     
     @pub fn get(self: Self, i: i64) T = {
-        let v: *T = index(self, i);  // TODO: fix so dont need useless binding 
+        let v: *T = self.index(i);  // TODO: fix so dont need useless binding 
         v[]
     }
     
     @pub fn index(self: Self, i: i64) *T = {
-        var s = subslice(self, i, 1);
+        var s = self.subslice(i, 1);
         s&.ptr[]
     }
     
     @pub fn set(self: Self, i: i64, v: T) Unit = {
         // TODO: allowing this is a bit creepy if I don't specify order of evaluation. 
         //       and having it be placement is scary if you aliased the lhs ptr on the rhs. 
-        index(self, i)[] = v;
+        self.index(i)[] = v;
     }
     
     @pub fn slice(self: Self, first: i64, past_last: i64) Self = {
@@ -77,19 +79,19 @@ fn Slice(T: Type) Type = {
         // TODO: its sad that im doing double bounds check in common case where its just index()
         assert(first.le(self.len()).and(past_last.le(self.len())), "OOB"); 
         const slots = size_of(T);
-        let raw_first = mul(first, slots);
-        let raw_past_last = mul(past_last, slots);
+        let raw_first = first.mul(slots);
+        let raw_past_last = past_last.mul(slots);
         let ptr: VoidPtr = self&.ptr[];
-        let new_ptr: VoidPtr = raw_slice(ptr, raw_first, raw_past_last);
-        (ptr: new_ptr, len: sub(past_last, first))
+        let new_ptr: VoidPtr = ptr.raw_slice(raw_first, raw_past_last);
+        (ptr: new_ptr, len: past_last.sub(first))
     }
     
-    @pub fn subslice(ptr: Self, first: i64, count: i64) Self = {
-        slice(ptr, first, add(first, count))
+    @pub fn subslice(self: Self, first: i64, count: i64) Self = {
+        self.slice(first, first.add(count))
     }
     
     @pub fn rest(self: Self, first: i64) Self = {
-        slice(self, first, self.len())
+        self.slice(first, self.len())
     }
     
     // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
@@ -107,41 +109,40 @@ fn Slice(T: Type) Type = {
     // TODO: I don't love that I have to write the deref version seperatly
     //       but I dont have let destructuring (only function args) so its a pain to take tuples by pointer. 
     //       I should be able to destructure Ptr(A, B) to (Ptr(A), Ptr(B))
-    @pub fn foreach(arr: Self, const f: Fn(T, Unit)) Unit = {
-        foreach(arr, fn(v: *T) Unit = f(v[]))
+    @pub fn for(arr: Self, const f: Fn(T, Unit)) Unit = {
+        for(arr, fn(v: *T) Unit = f(v[]))
     }
     
-    // TODO: why didn't I call this 'fn for'? maybe because 'for' was originally a fancy generics keyword. 
-    @pub fn foreach(arr: Self, const f: Fn(*T, Unit)) Unit = {
+    @pub fn for(arr: Self, const f: Fn(*T, Unit)) Unit = {
         var i = 0;
-        let l: i64 = len(arr);
+        let l = arr.len();
         while(fn() bool = lt(i, l)) {|
             f(arr.index(i));
-            i = add(i, 1);
+            i = i.add(1);
         };
     }
     
     @pub fn memcpy(dest: Self, src: Self) Unit = {
         assert(eq(len(dest), len(src)), "OOB");  // Note: not using `asser t_eq` because the vm tracks those for my tests
         // TODO: sad that this does the bounds check every iteration but a real optimiser would fix it for me anyway so meh. 
-        const f = fn(i: i64, e: *T) Unit = set(dest, i, e[]);
-        enumerate(src, f);
+        const f = fn(i: i64, e: *T) Unit = dest.set(i, e[]);
+        src.enumerate(f);
     }
     
     // TODO: add addr_eq/identical if that's really what you want but like... it never is I feel. 
     @pub fn eq(lhs: Self, rhs: Self) bool = {
-        (eq(len(lhs), len(rhs)), fn() bool = {
+        (eq(lhs.len(), rhs.len()), fn() bool = {
             var i = 0;
             while(fn=i.lt(len(lhs)).and(fn = lhs.get(i).eq(rhs.get(i)))) {| 
-                i = add(i, 1); 
+                i = i.add(1); 
             };
-            eq(i, len(lhs))
+            eq(i, lhs.len())
         }, fn() bool = false)!if
     }
     
     /// Set all elements of the slice to 't'. 
     @pub fn fill(self: *Self, t: T) Unit = {
-        foreach(self) { (ptr: *T) |
+        for(self) { (ptr: *T) |
             ptr[] = t;
         };
     }
@@ -167,17 +168,18 @@ fn List(T: Type) Type = {
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
     @pub fn list_clone(from: Slice$T) Self = {  // TODO: better error message if you put the = on the wrong side of the type
-        var self: Self = list(len(from));
-        push_all(self&, from);
+        var self: Self = list(from.len());
+        self&.push_all(from);
         self
     }
     
     @pub fn items(self: *Self) Slice$T = {
-        slice(self.maybe_uninit[], 0, self.len[])
+        self.maybe_uninit[].slice(0, self.len[])
     }
     
     @pub fn index(self: *Self, i: i64) *T = {
-        index(self.maybe_uninit[], i)
+        assert(i.lt(self.len[]), "OOB");
+        self.maybe_uninit[].index(i)
     }
     
     @pub fn get(self: *Self, i: i64) T = {
@@ -186,18 +188,18 @@ fn List(T: Type) Type = {
     }
     
     @pub fn get(self: Self, i: i64) T = {
-        let ptr: *T = index(self&, i);
+        let ptr: *T = self&.index(i);
         ptr[]
     }
     
     @pub fn reserve(self: *Self, extra: i64) Unit = {
-        let total = add(self.len[], extra);
+        let total = self.len[].add(extra);
         let old_cap = self.maybe_uninit.len[];
         if(lt(old_cap, total)) {|
-            let cap = 4.max$ old_cap.add(extra).max$ old_cap.mul(2);
+            let cap = 4.max(old_cap.add(extra).max(old_cap.mul(2)));
             var new: Self = list(cap);
             if(self.len[].gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
-                let dest: Slice$T = subslice(new&.maybe_uninit[], 0, self.len[]);
+                let dest: Slice$T = new&.maybe_uninit[].subslice(0, self.len[]);
                 memcpy(dest, items(self));
                 new&.len[] = self.len[];
             };
@@ -235,6 +237,11 @@ fn List(T: Type) Type = {
     @pub fn drop(self: *Self) Unit = {
         if(self.maybe_uninit.len[].ne(0)) {|
             let ptr: VoidPtr = self.maybe_uninit.ptr[];
+            // TODO: calling this makes fmt.fr fail when runtime target is aarch64,
+            //       but it fails in the comptime interp still which is scary. 
+            //       its a poison on taking args of a SplitFunc. 
+            //       but its fine when collections.fr calls drop and that targets both too tho maybe doesnt cause a split because simpler comptime. 
+            //       
             dealloc(T, ptr, self.maybe_uninit.len[]);
             self.maybe_uninit.len[] = 0;
             self.len[] = 0;
@@ -266,7 +273,7 @@ fn List(T: Type) Type = {
 
 // TODO: this is really inefficient if you already own 'a'
 @pub fn concat(a: Str, b: Str) List$i64 = {
-    var c: List(i64) = list$ a.len().add(b.len());
+    var c: List$i64 = list$ a.len().add(b.len());
     c&.push_all(a);
     c&.push_all(b);
     c
@@ -376,7 +383,7 @@ fn List(T: Type) Type = {
 }
 
 @pub fn multi_println(s: Slice$Str) Unit = {
-    foreach(s) {(s: *Str)| println(s[]); };
+    for(s) {(s: *Str)| println(s[]); };
 }
 
 // TODO: this is stupid. i have a whole house of cards going on with unique types. ""!type needs to die. 

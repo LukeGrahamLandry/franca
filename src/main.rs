@@ -2,7 +2,7 @@
 #![feature(pattern)]
 
 use compiler::{
-    ast::{Flag, Program, TargetArch, TypeId},
+    ast::{Program, TargetArch, TypeId},
     bc::Value,
     bc_to_asm::emit_aarch64,
     compiler::{Compile, ExecTime},
@@ -233,29 +233,30 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
 }
 
 /// This is the thing we exec.
-fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) {
+fn actually_run_it(name: String, src: String, assertion_count: usize, arch: TargetArch) {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
+    // init_logs_flag(0xFFFFFFFF);
+    // let save = format!("{name}_{arch:?}/");
+    // let save = Some(save.as_str());
+    let save = None;
+
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, arch);
     let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
     if let Err(e) = result {
-        log_err(&comp, e, None);
-        exit(1);
+        log_err(&comp, e, save);
+        return;
     }
-    result.unwrap();
-    let f = comp.program.find_unique_func(Flag::Main.ident());
-    if f.is_none() {
-        println!("'fn main' NOT FOUND");
-        log_dbg(&comp, None);
-        exit(1);
-    }
-    let f = f.unwrap();
+    assert_eq!(comp.tests.len(), 1);
+    // TODO: run multiple and check thier arches.
+    //       But how to not run the lib tests a billion times
+    let f = comp.tests[0];
     let result = comp.compile(f, ExecTime::Runtime);
     if let Err(e) = result {
-        log_err(&comp, e, None);
-        exit(1);
+        log_err(&comp, e, save);
+        return;
     }
 
     assert_eq!(comp.program[f].finished_ret, Some(TypeId::i64()));
@@ -265,9 +266,9 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let result = match arch {
         TargetArch::Interp => comp.run(f, arg.into(), ExecTime::Runtime),
         TargetArch::Aarch64 => {
-            if let Err(e) = emit_aarch64(&mut comp, f) {
-                log_err(&comp, e, None);
-                exit(1);
+            if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
+                log_err(&comp, e, save);
+                return;
             }
             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
             comp.aarch64.make_exec();
@@ -315,7 +316,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
         }
     };
     if let Err(e) = result {
-        log_err(&comp, e, None);
+        log_err(&comp, e, save);
         return;
     }
     let result = result.unwrap();
@@ -323,6 +324,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let _seconds = end - start;
     debug_assert_eq!(result, arg.into());
 
+    // log_dbg(&comp, save);
     assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");
     // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
 }

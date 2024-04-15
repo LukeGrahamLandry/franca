@@ -48,7 +48,7 @@ const sp: i64 = 31;
 // const W32: i64 = 0b0;
 const X64: i64 = 0b1;
 
-pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
+pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, ()> {
     compile.aarch64.reserve(compile.program.funcs.len());
     let mut a = BcToAsm::new(compile);
     a.compile(f)?;
@@ -174,7 +174,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 Bc::NoCompile => unreachable!(),
                 Bc::CallDynamic { .. } => todo!(),
-                &Bc::CallSplit { rt, ret, arg, .. } => {
+                &Bc::CallSplit { rt, ct, ret, arg } => {
                     // TODO: update when we support comptime here.
                     self.call_direct(rt, ret, arg)?;
                 }

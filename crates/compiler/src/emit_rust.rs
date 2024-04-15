@@ -25,7 +25,7 @@ pub fn bootstrap() -> (String, String) {
     }
 
     for f in &bs {
-        emit_aarch64(&mut comp, *f).unwrap();
+        emit_aarch64(&mut comp, *f, ExecTime::Both).unwrap();
     }
 
     let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.fr\n");

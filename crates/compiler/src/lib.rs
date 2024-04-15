@@ -58,6 +58,7 @@ pub mod pool;
 pub mod reflect;
 pub mod scope;
 
+use crate::logging::PoolLog;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId, EXPR_COUNT},
     compiler::{Compile, CompileError, ExecTime},
@@ -234,7 +235,10 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, mut arg: Valu
 }
 
 pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
-    // outln!(Bytecode, "{}", comp.runtime_executor.log(comp.pool));
+    for b in comp.ready.ready.iter().flatten() {
+        outln!(Bytecode, "{}", b.log(comp.pool));
+    }
+
     if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
         outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
     }

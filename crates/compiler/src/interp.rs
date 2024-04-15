@@ -140,9 +140,11 @@ impl<'a, 'p: 'a> Interp<'p> {
                 }
                 &Bc::CallSplit { ct, rt, ret, arg } => {
                     self.bump_ip();
+
                     let arg = self.take_slots(arg);
 
                     let when = self.call_stack.last().unwrap().when;
+                    debug_assert_ne!(when, ExecTime::Both);
                     let f = if when == ExecTime::Runtime { rt } else { ct };
 
                     // TODO: this is super ugly recreation of all the other calling types. need to factor out calling convention better.
@@ -916,7 +918,7 @@ impl<'p> Interp<'p> {
         let mut s = String::new();
         write!(s, "CALLS ").unwrap();
         for frame in &self.call_stack {
-            write!(s, "[{}], ", self.pool.get(frame.debug_name)).unwrap();
+            write!(s, "[{:?}={}], ", frame.current_func, self.pool.get(frame.debug_name)).unwrap();
         }
         write!(s, "END").unwrap();
         s
