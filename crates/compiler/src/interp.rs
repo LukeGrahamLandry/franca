@@ -134,8 +134,19 @@ impl<'a, 'p: 'a> Interp<'p> {
                     self.bump_ip();
                     let arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
-                    self.push_callframe(f, ret, arg, when, compile)?;
-                    logln!("{}", self.log_callstack());
+                    if let Some(addr) = compile.program[f].comptime_addr {
+                        debug_assert_eq!(addr % 4, 0);
+                        let ty = compile.program[f].unwrap_ty();
+                        let comp_ctx = compile.program[f].has_tag(Flag::Ct);
+                        let ptr = addr as usize;
+                        let result = ffi::c::call(compile.program, ptr, ty, arg, comp_ctx)?;
+                        *self.get_slot_mut(ret.single()) = result.single()?;
+                    // TODO: why can body be none but ready be some?
+                    // } else if compile.program[f].body.is_none() {
+                    // unreachable!()
+                    } else {
+                        self.push_callframe(f, ret, arg, when, compile)?;
+                    }
                     // don't bump ip here, we're in a new call frame.
                 }
                 &Bc::CallSplit { ct, rt, ret, arg } => {
@@ -620,7 +631,8 @@ impl<'a, 'p: 'a> Interp<'p> {
     }
 
     fn call_compiler(&mut self, name: Ident<'p>, arg: Values, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, Values> {
-        compile.handle_macro_msg(result.as_mut().unwrap(), Flag::try_from(name)?, arg)
+        let result = unwrap!(result.as_mut(), "ICE: unexpected call_compiler: {}", compile.pool.get(name));
+        compile.handle_macro_msg(result, Flag::try_from(name)?, arg)
     }
 
     fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, compile: &Compile<'a, 'p>) -> Res<'p, ()> {

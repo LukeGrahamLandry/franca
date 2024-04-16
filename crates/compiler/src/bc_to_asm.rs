@@ -584,20 +584,46 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn branch_with_link(&mut self, f: FuncId) {
         // If we already emitted the target function, can just branch there directly.
         // This covers the majority of cases because I try to handle callees first.
+        // Note: checking this before comptime_addr means we handle inline asm as a normal function.
         if let Some(bytes) = self.compile.aarch64.get_fn(f) {
             let mut offset = bytes.as_ptr() as i64 - self.compile.aarch64.get_current() as i64;
             debug_assert!(offset % 4 == 0, "instructions are u32");
             offset /= 4;
-            assert!(offset < 0, "currently always emit in order");
-            assert!(offset.abs() < (1 << 25), "can't jump that far"); // TODO: use adr/adrp
+            assert!(offset.abs() < (1 << 26), "can't jump that far"); // TODO: use adr/adrp
             offset = signed_truncate(offset, 26);
             self.compile.aarch64.push(b(offset, 1));
             return;
         }
 
-        // TODO: have a mapping. funcs for other arches take up slots.
-        assert!(f.0 < 4096);
-        self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.0 as i64));
+        // TODO: maybe its prefereable to use the dispatch table even when its const because then runtime code could setup the pointers with dlopen,
+        //       and could reuse the same code for comptime and runtime.
+        if let Some(bytes) = self.compile.program[f].comptime_addr {
+            debug_assert!(self.compile.program[f].jitted_code.is_none(), "inline asm should be emitted normally");
+            let mut offset = bytes as i64 - self.compile.aarch64.get_current() as i64;
+            debug_assert!(offset % 4 == 0, "instructions are u32");
+            offset /= 4;
+
+            // If its a comptime_addr into the compiler, (which happens a lot because of assert_eq and tag_value),
+            //     aslr might be our friend and just put the mmaped pages near where it originally loaded the compiler.
+            if offset.abs() < (1 << 26) {
+                offset = signed_truncate(offset, 26);
+                self.compile.aarch64.push(b(offset, 1));
+                return;
+            } else {
+                // If its a comptime_addr into libc, its probably far away, but that's fine, we're not limited to one instruction.
+                let f = &self.compile.program[f];
+                self.load_imm(x16, bytes);
+                // fall though to finish the indirect call
+            }
+        } else {
+            // It's a function we haven't emitted yet, so we don't know where to jump to.
+            // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
+            // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
+            // TODO: have a mapping. funcs take up slots even if never indirect called.
+            assert!(f.0 < 4096);
+            self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.0 as i64));
+        }
+
         self.compile.aarch64.push(br(x16, 1))
     }
 }

@@ -225,26 +225,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));
 
-        if let Some(ptr) = func.comptime_addr {
-            debug_assert_eq!(ptr % 4, 0);
-            if func.has_tag(Flag::C_Call) {
-                // We could emit its body as just a Bc::CallC but might as well skip the indirection.
-                let ty = func.unwrap_ty();
-                let ptr_ty = self.program.find_interned(TypeInfo::FnPtr(ty));
-                let f = result.load_constant(self, Values::One(Value::I64(ptr as i64)), ptr_ty)?;
-                result.push(Bc::CallC {
-                    f: f.0.single(),
-                    arg,
-                    ret,
-                    ty,
-                    comp_ctx: func.has_tag(Flag::Ct),
-                });
-            } else {
-                result.push(Bc::CallDirect { f, ret, arg });
-            }
-        } else {
-            result.push(Bc::CallDirect { f, ret, arg });
-        }
+        result.push(Bc::CallDirect { f, ret, arg });
 
         assert_eq!(self.return_stack_slots(f), ret.count);
         assert_eq!(self.slot_count(f_ty.ret), ret.count);

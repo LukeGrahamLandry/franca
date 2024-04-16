@@ -60,7 +60,7 @@ pub mod reflect;
 pub mod scope;
 
 use crate::bc_to_asm::emit_aarch64;
-use crate::logging::PoolLog;
+use crate::logging::{init_logs_flag, PoolLog};
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId, EXPR_COUNT},
     compiler::{Compile, CompileError, ExecTime},
@@ -156,6 +156,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
 pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _expect: Value, save: Option<&str>, leak: bool) -> bool {
+    init_logs_flag(0xFFFFFFFFF);
     log_tag_info();
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);

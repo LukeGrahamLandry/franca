@@ -2530,6 +2530,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       but then interp can't use it.
         self.program[f].jitted_code = Some(ops.clone());
         let map = crate::export_ffi::copy_to_mmap_exec(ops);
+        // Need to set comptime_addr because interp might try to call it and it doesn't know it needs to go through bc_to_asm first.
         self.program[f].comptime_addr = Some(map.1 as u64);
         let _ = Box::leak(map.0); // TODO: dont leak
         Ok(())
