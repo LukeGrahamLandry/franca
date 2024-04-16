@@ -11,20 +11,6 @@
     system(parts)
 }
 
-
-/*
-@comptime @pub fn Result(ok: Type, err: Type) Type = {
-    const Self = (Ok: ok, Err: err)!enum;
-    @pub fn unwrap(r: Self) ok = r.ok[];
-
-    Self
-}
-@enum @pub fn FileErr(NotExists: Unit, Other: Unit);
-
-@env @pub fn write(path: Str, content: Str) Result(Unit, FileErr);
-@env @pub fn read(path: Str) Result(Slice(u8), FileErr);
-*/
-
 // TODO: stack trace
 @llvm @pub fn panic(msg: ""!type) Never = {
     println(msg);
@@ -46,70 +32,4 @@ fn panic(msg: ""!type) Never = {
     // TODO: this will try to write a bunch of zeros because i dont have bytes as a data type yet. 
     let written: isize = write(STD_OUT, ptr, len.mul(8));
     // TODO: check errno. loop if not all written. 
-}
-
-@no_interp @pub fn alloc(const Element: Type, count: i64) VoidPtr = {
-    let bytes = Element.size_of().mul(8).mul(count);
-    malloc(bytes)
-}
-
-// This is only const because it has to match on all arches and it's reasonable for an implementation to want it const. 
-@no_interp @pub fn dealloc(const Element: Type, ptr: VoidPtr, len: i64) Unit = free(ptr);
-
-/// https://man7.org/linux/man-pages/man2/mmap.2.html
-@no_interp @aarch64 @pub 
-fn os_alloc(bytes: i64) Slice$i64 = {
-    assert(bytes.mod(8).eq(0), "TODO: address a byte");
-    
-    // TODO: subtyping so working with enum flags sucks less. 
-    let prot = bit_or(@as(i64) MapProt.Write[], @as(i64) MapProt.Read[]);
-    let flag = bit_or(@as(i64) MapFlag.Private[], @as(i64) MapFlag.Anonymous[]);
-    let n1 = 1.neg();
-    let fd: Fd = @as(Fd) n1;
-    let addr: VoidPtr = 0.int_to_ptr();
-    let ptr = mmap(addr, bytes, prot, flag, fd, 0);
-    
-    if(ptr.ptr_to_int().eq(1.neg())) {|
-        panic("mmap failed");
-    };
-    
-    let ptr: *i64 = ptr;
-    (ptr: ptr, len: bytes.div(8))
-}
-
-/// SAFETY: EASY: 'arr' must be from 'os_alloc', only passed to this function once, and never accessed again. 
-///         HARD: If you're careful, its fine to split an allocation from 'os_alloc' and release seperate pages at different times. 
-@no_interp @aarch64 @pub 
-fn os_dealloc(arr: Slice$i64) Unit = {
-    let bytes = arr.len().mul(8);
-    let ptr: VoidPtr = arr&.ptr[];
-    let res = munmap(ptr, bytes);
-    assert(res.eq(0), "munmap failed");
-}
-
-const ExecSlice = (ptr: VoidPtr, len: i64)!struct.Unique(); 
-
-@no_interp @aarch64 @pub 
-fn make_write(arr: ExecSlice) Slice$i64 = {
-    let ptr: VoidPtr = arr&.ptr[];
-    let prot = bit_or(@as(i64) MapProt.Write[], @as(i64) MapProt.Read[]);
-    let res = mprotect(ptr, arr&.len[], prot);
-    assert(res.eq(0), "mprotect failed");
-    (ptr: ptr, len: arr&.len[].div(8))
-}
-
-/// SAFETY: 'arr' must be from 'os_alloc' and not written to until 'make_write' is called on it.   
-@no_interp @aarch64 @pub 
-fn make_exec(arr: Slice$i64) ExecSlice = {
-    let bytes = arr.len().mul(8);
-    let ptr: VoidPtr = arr&.ptr[];
-    let prot = bit_or(@as(i64) MapProt.Exec[], @as(i64) MapProt.Read[]);
-    let res = mprotect(ptr, bytes, prot);
-    assert(res.eq(0), "mprotect failed");
-    (ptr: ptr, len: bytes)
-}
-
-@no_interp @aarch64 @pub 
-fn os_dealloc(arr: ExecSlice) Unit = {
-    os_dealloc(make_write(arr)); // TODO: dont do an extra syscall just for type
 }

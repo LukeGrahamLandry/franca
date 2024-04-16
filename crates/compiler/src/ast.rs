@@ -601,6 +601,7 @@ pub struct FatStmt<'p> {
 }
 
 // NOTE: you can't store the FuncId in here because I clone it!
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
@@ -763,6 +764,7 @@ pub struct VarInfo {
     pub loc: Span,
 }
 
+#[repr(C)]
 pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,

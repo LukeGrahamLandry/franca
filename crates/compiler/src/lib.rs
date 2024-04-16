@@ -155,7 +155,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
-pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, mut arg: Value, mut expect: Value, save: Option<&str>, leak: bool) -> bool {
+pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _expect: Value, save: Option<&str>, leak: bool) -> bool {
     log_tag_info();
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
@@ -215,7 +215,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, mut arg: Valu
                                 out("x21") _
                                 );
                             }
-                            let res = code(a);
+                            code(a);
 
                             let end = timestamp();
                             let seconds = end - start;

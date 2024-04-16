@@ -30,7 +30,6 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("@env fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
     ("@env fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
     ("@env fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
-    ("@env fn puts(s: CStr) i64", libc::puts as *const u8),
     (
         "@env fn mmap(addr: VoidPtr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) VoidPtr",
         libc::mmap as *const u8,

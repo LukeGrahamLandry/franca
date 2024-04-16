@@ -57,6 +57,28 @@ pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime
     Ok(())
 }
 
+macro_rules! cc_reg {
+    ($self:expr, $slots:expr, $skip_units:expr, $first_int:expr, $is_int:expr, $is_float:expr) => {{
+        let mut floats = 0;
+        let mut ints = $first_int;
+        #[allow(clippy::redundant_closure_call)]
+        for i in $slots {
+            let slot = StackOffset(i);
+            let ty = $self.slot_type(slot);
+            if $skip_units && ty.is_unit() {
+                continue;
+            }
+            if ty == TypeId::f64() {
+                $is_float(floats, slot);
+                floats += 1;
+            } else {
+                $is_int(ints as i64, slot);
+                ints += 1;
+            }
+        }
+    }};
+}
+
 impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn new(compile: &'z mut Compile<'a, 'p>, when: ExecTime) -> Self {
         Self {
@@ -140,25 +162,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let arg_range = func.arg_range;
         // if is_c_call {
         assert!(func.arg_range.count <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-        let mut floats = 0;
-        let mut ints = 0;
-        for i in arg_range {
-            // TODO: removing this fixes allow_create debug check for enum init when payload is unit.
-            //       in general need to just handle unit better so im not special casing everywhere.
-            // if self.slot_type(StackOffset(i)).is_unit() {
-            //     continue;
-            // }
+        assert!(
+            !ff.has_tag(Flag::Ct),
+            "compiler context is implicitly passed as first argument for @ct builtins."
+        );
 
-            let ty = self.slot_type(StackOffset(i));
-            if ty == TypeId::f64() {
-                self.set_slot_f(floats, StackOffset(i));
-                floats += 1;
-            } else {
-                self.set_slot(ints as i64, StackOffset(i));
-                ints += 1
-            }
-        }
-        // }
+        // TODO: not skipping unit fixes allow_create debug check for enum init when payload is unit.
+        //       in general need to just handle unit better so im not special casing everywhere.
+        cc_reg!(self, arg_range, false, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
+            .set_slot_f(floats, slot));
 
         let mut patch_cbz = vec![];
         let mut patch_b = vec![];
@@ -246,27 +258,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(brk(0));
                     patch_b.push((self.compile.aarch64.prev(), ip));
                 }
-                &Bc::Ret(slot) => {
-                    // if is_c_call {
-                    match slot.count {
+                &Bc::Ret(slots) => {
+                    match slots.count {
                         0 => {}
                         1..=7 => {
-                            let mut floats = 0;
-                            let mut ints = 0;
-                            for i in slot {
-                                let slot = StackOffset(i);
-                                let ty = self.slot_type(slot);
-                                if ty.is_unit() {
-                                    continue;
-                                }
-                                if ty == TypeId::f64() {
-                                    self.get_slot_f(floats, slot);
-                                    floats += 1;
-                                } else {
-                                    self.get_slot(ints, slot);
-                                    ints += 1
-                                }
-                            }
+                            cc_reg!(self, slots, true, 0, |ints, slot| self.get_slot(ints, slot), |floats, slot| self
+                                .get_slot_f(floats, slot));
                         }
                         _ => err!("c_call only supports 7 return value. TODO: structs",),
                     }
@@ -277,9 +274,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(brk(0));
                     release_stack.push((a, b, self.compile.aarch64.prev()));
                     self.compile.aarch64.push(ret(()));
-                    // } else {
-                    //     todo!()
-                    // }
                 }
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
                 Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
@@ -346,7 +340,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
                     self.get_slot(x16, *f);
-                    self.dyn_c_call(x16, *arg, *ret, *ty, *comp_ctx);
+                    self.dyn_c_call(*arg, *ret, *ty, *comp_ctx, |s| s.compile.aarch64.push(br(x16, 1)));
                     self.release_one(*f);
                 }
                 Bc::Unreachable => {
@@ -452,8 +446,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     #[track_caller]
     fn find_one(&mut self, slot: StackOffset, allow_create: bool) -> SpOffset {
-        // SpOffset(slot.0 * 8)
-
         if let Some(slot) = self.slots[slot.0] {
             slot
         } else if let Some((made, size)) = self.open_slots.pop() {
@@ -493,56 +485,26 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
     }
 
-    fn dyn_c_call(&mut self, f_addr_reg: i64, arg: StackRange, ret: StackRange, _: FnType, comp_ctx: bool) {
+    fn dyn_c_call(&mut self, arg: StackRange, ret: StackRange, _: FnType, comp_ctx: bool, do_call: impl FnOnce(&mut Self)) {
         let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
         assert!(arg.count <= 7, "indirect c_call only supports 7 arguments. TODO: pass on stack");
         assert!(ret.count <= 7, "indirect c_call only supports 7 returns. TODO: pass on stack");
 
-        let mut floats = 0;
-        let mut ints = reg_offset;
-        for i in arg {
-            let slot = StackOffset(i);
-            let ty = self.slot_type(slot);
-            if ty.is_unit() {
-                continue;
-            }
-            if ty == TypeId::f64() {
-                self.get_slot_f(floats, slot);
-                floats += 1;
-            } else {
-                self.get_slot(ints, slot);
-                ints += 1;
-            }
-        }
+        cc_reg!(self, arg, true, reg_offset, |ints, slot| self.get_slot(ints, slot), |floats, slot| self
+            .get_slot_f(floats, slot));
+
         if comp_ctx {
             // TODO: this has gotta be UB
             self.load_imm(x0, self.compile.program as *const Program as u64);
         }
-        // The symptom of not resetting sp is you get a stack overflow which is odd.
-        // maybe it keeps calling me in a loop because rust loses where it put its link register.
-        self.compile.aarch64.push(br(f_addr_reg, 1));
+        do_call(self);
         // TODO: you cant call release many because it assumes they were made in one chunk
         for i in arg {
             self.release_one(StackOffset(i));
         }
 
-        let mut floats = 0;
-        let mut ints = 0;
-        for i in ret {
-            let slot = StackOffset(i);
-            let ty = self.slot_type(slot);
-            if ty.is_unit() {
-                continue;
-            }
-
-            if ty == TypeId::f64() {
-                self.set_slot_f(floats, slot);
-                floats += 1;
-            } else {
-                self.set_slot(ints as i64, slot);
-                ints += 1
-            }
-        }
+        cc_reg!(self, ret, true, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
+            .set_slot_f(floats, slot));
     }
 
     // TODO: i want to do this though asm but that means i need to bootstrap more stuff.
@@ -614,27 +576,29 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.set_slot(x0, ret.single());
             }
         } else {
-            //if target_c_call {
-            // if let Some(bytes) = self.compile.aarch64.get_fn(*f) {
-            //     // TODO: should only do this for comptime functions. for runtime, want to be able to squash everything down.
-            //     //       or maybe should have two Jitted. full seperation between comptime and runtime and compile everything twice,
-            //     //       since need to allow that for cross compiling anyway.
-            //     // Would be interesting to always use the indirect because then you could do super powerful things
-            //     // for mixin patching other code. redirect any call. tho couldn't rely on that cause it might inline.
-            //     // also feels gross. but i've kinda just invented a super heavy handed context pointer which some languages
-            //     // do for allocators/logging anyway
-            //     todo!("if we already emitted the function, don't need to do an indirect call, can just branch there since we know the offset")
-            // } else {
-            // TODO: have a mapping. funcs for other arches take up slots.
-            assert!(f.0 < 4096);
-            self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.0 as i64));
-            self.dyn_c_call(x16, arg, ret, target.unwrap_ty(), comp_ctx);
-            // }
+            self.dyn_c_call(arg, ret, target.unwrap_ty(), comp_ctx, |s| s.branch_with_link(f));
         }
-        // else {
-        //     todo!()
-        // }
         Ok(())
+    }
+
+    fn branch_with_link(&mut self, f: FuncId) {
+        // If we already emitted the target function, can just branch there directly.
+        // This covers the majority of cases because I try to handle callees first.
+        if let Some(bytes) = self.compile.aarch64.get_fn(f) {
+            let mut offset = bytes.as_ptr() as i64 - self.compile.aarch64.get_current() as i64;
+            debug_assert!(offset % 4 == 0, "instructions are u32");
+            offset /= 4;
+            assert!(offset < 0, "currently always emit in order");
+            assert!(offset.abs() < (1 << 25), "can't jump that far"); // TODO: use adr/adrp
+            offset = signed_truncate(offset, 26);
+            self.compile.aarch64.push(b(offset, 1));
+            return;
+        }
+
+        // TODO: have a mapping. funcs for other arches take up slots.
+        assert!(f.0 < 4096);
+        self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.0 as i64));
+        self.compile.aarch64.push(br(x16, 1))
     }
 }
 
@@ -813,6 +777,10 @@ pub mod jit {
             if let Some(map) = self.map_exec.take() {
                 self.map_mut = Some(map.make_mut().unwrap())
             }
+        }
+
+        pub fn get_current(&self) -> *const u8 {
+            self.next
         }
     }
 }

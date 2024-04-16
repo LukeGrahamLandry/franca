@@ -223,11 +223,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         result
     }
 
-    fn compile_and_run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
-        self.compile(f, when)?;
-        self.run(f, arg, when)
-    }
-
     // This is much less painful than threading it through the macros
     fn tag_err<T>(&self, mut res: Res<'p, T>) -> Res<'p, T> {
         if let Err(err) = &mut res {
@@ -540,14 +535,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         func.referencable_name = false;
         func.closed_constants.add_all(&result.constants);
 
-        let arg_value = mut_replace!(func.closed_constants, |constants| {
-            let types = self.infer_pattern(&constants, &mut func.arg.bindings)?;
-            // TODO: update self.program[f]
-            let arg_ty = self.program.tuple_of(types);
-            self.compile_expr(result, arg_expr, Some(arg_ty))?;
-            let arg_value = self.immediate_eval_expr(&constants, arg_expr.clone(), arg_ty)?;
-            Ok((constants, arg_value))
-        });
+        // I used to use func.closed_constants instead of result.constants. But it seems fine this way. --Apr 15.
+        let types = self.infer_pattern(&result.constants, &mut func.arg.bindings)?;
+        // TODO: update self.program[f]
+        let arg_ty = self.program.tuple_of(types);
+        self.compile_expr(result, arg_expr, Some(arg_ty))?;
+        let arg_value = self.immediate_eval_expr_in(result, arg_expr.clone(), arg_ty)?;
 
         // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
         // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
@@ -1053,7 +1046,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Type(ty))
                     }
                     "size_of" => {
-                        let ty = self.immediate_eval_expr(&result.constants, mem::take(arg), TypeId::ty())?;
+                        let ty = self.immediate_eval_expr_in(result, mem::take(arg), TypeId::ty())?;
                         let ty = self.to_type(ty)?;
                         let size = self.ready.sizes.slot_count(self.program, ty);
                         expr.expr = Expr::int(size as i64);
@@ -1071,7 +1064,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     "comptime_print" => {
                         outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
-                        let value = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::unknown());
+                        let value = self.immediate_eval_expr_in(result, *arg.clone(), TypeId::unknown());
                         outln!(ShowPrint, "VALUE: {:?}", value);
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
@@ -1176,7 +1169,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Index { ptr, index } => {
                 let ptr = self.compile_expr(result, ptr, None)?;
                 self.compile_expr(result, index, Some(TypeId::i64()))?;
-                let value = self.immediate_eval_expr(&result.constants, *index.clone(), TypeId::i64())?;
+                let value = self.immediate_eval_expr_in(result, *index.clone(), TypeId::i64())?;
                 let i = value.clone().single()?.to_int()? as usize;
                 index.expr = Expr::Value { ty: TypeId::i64(), value };
                 self.index_expr(result, ptr, i)?
@@ -1232,7 +1225,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 } else if name_str == "enum" {
                     self.compile_expr(result, arg, Some(TypeId::ty()))?;
-                    let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
+                    let ty = self.immediate_eval_expr_in(result, *arg.clone(), TypeId::ty())?;
                     let ty = self.to_type(ty)?;
                     if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
                         let mut the_type = Pattern::empty(loc);
@@ -1266,12 +1259,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         });
                         let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
                         let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
-                        let the_type = self.immediate_eval_expr(&result.constants, the_type, TypeId::ty())?;
+                        let the_type = self.immediate_eval_expr_in(result, the_type, TypeId::ty())?;
                         let the_type = self.to_type(the_type)?;
                         // *expr = FatExpr::synthetic(Expr::PrefixMacro { name: var, arg, target: mem::take(target) }, loc);
 
                         let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), mem::take(target)), loc);
-                        let value = self.immediate_eval_expr(&result.constants, construct_expr, the_type)?;
+                        let value = self.immediate_eval_expr_in(result, construct_expr, the_type)?;
                         let value = Value::new_box(value.vec(), true).into();
                         let ty = self.program.ptr_type(the_type);
                         *expr = FatExpr::synthetic(Expr::Value { ty, value }, loc);
@@ -1800,6 +1793,21 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
+    // If we have access to a 'result' context, might as well try compiling the expression first and see if its something trivial that doesn't need to spin up a whole new function.
+    // It shouldn't really waste any time because most of the work compiling will be saved and you'd have to do anyway for the shim function body.
+    // There's some subtle order of execution difference that means you can't use this for the type in @as which is a bit scary.
+    // TODO: maybe i need to renumber declared variables?
+    fn immediate_eval_expr_in(&mut self, result: &mut FnWip<'p>, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+        let res = self.compile_expr(result, &mut e, Some(ret_ty))?;
+        match res {
+            Structured::Const(ty, val) => {
+                self.type_check_arg(ty, ret_ty, "immediate_eval_expr_in")?;
+                Ok(val)
+            }
+            _ => self.immediate_eval_expr(&result.constants, e, ret_ty),
+        }
+    }
+
     // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
     fn immediate_eval_expr(&mut self, constants: &Constants<'p>, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
         // println!("- Eval {} as {:?}", e.log(self.pool), ret_ty);
@@ -1848,7 +1856,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
         logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
-        let result = self.compile_and_run(func_id, Value::Unit.into(), ExecTime::Comptime)?;
+        self.compile(func_id, ExecTime::Comptime)?;
+        let result = self.run(func_id, Value::Unit.into(), ExecTime::Comptime)?;
         logln!(
             "COMPUTED: {} -> {:?} under {}",
             e.log(self.pool),
@@ -2649,7 +2658,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // This makes addr_of const for @enum work
                         let res = self.compile_expr(result, value, ty.ty())?;
 
-                        self.immediate_eval_expr(&result.constants, value.clone(), res.ty())?
+                        self.immediate_eval_expr_in(result, value.clone(), res.ty())?
                     }
                     None => {
                         if let Some(import_path) = annotations.iter().find(|a| a.name == Flag::Import.ident()) {
