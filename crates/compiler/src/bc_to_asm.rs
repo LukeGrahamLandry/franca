@@ -495,7 +495,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         if comp_ctx {
             // TODO: this has gotta be UB
-            self.load_imm(x0, self.compile.program as *const Program as u64);
+            let c = self.compile as *const Compile as u64;
+            let p = &self.compile.program as *const &mut Program as u64;
+            debug_assert_eq!(c, p, "need repr c");
+            self.load_imm(x0, c);
         }
         do_call(self);
         // TODO: you cant call release many because it assumes they were made in one chunk

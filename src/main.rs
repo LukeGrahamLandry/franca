@@ -317,7 +317,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     };
     if let Err(e) = result {
         log_err(&comp, e, save);
-        return;
+        exit(1);
     }
     let result = result.unwrap();
     let end = timestamp();

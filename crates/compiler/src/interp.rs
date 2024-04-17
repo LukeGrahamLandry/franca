@@ -1,20 +1,17 @@
 #![allow(clippy::wrong_self_convention)]
 
-use std::env;
 use std::mem::replace;
-use std::process::Command;
 
 use codemap::Span;
 
 use crate::ast::Flag;
 use crate::compiler::{CErr, Compile, ExecTime, FnWip, Res, ToBytes};
-use crate::export_ffi::CmdResult;
 use crate::ffi::InterpSend;
 use crate::logging::LogTag::ShowPrint;
 use crate::logging::{unwrap, PoolLog};
 use crate::{assert, assert_eq, err, logln};
 use crate::{
-    ast::{FuncId, TypeInfo},
+    ast::FuncId,
     export_ffi,
     pool::{Ident, StringPool},
 };
@@ -139,7 +136,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                         let ty = compile.program[f].unwrap_ty();
                         let comp_ctx = compile.program[f].has_tag(Flag::Ct);
                         let ptr = addr as usize;
-                        let result = ffi::c::call(compile.program, ptr, ty, arg, comp_ctx)?;
+                        let result = ffi::c::call(compile, ptr, ty, arg, comp_ctx)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     // TODO: why can body be none but ready be some?
                     // } else if compile.program[f].body.is_none() {
@@ -164,7 +161,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                         let ty = compile.program[f].unwrap_ty();
                         let comp_ctx = compile.program[f].has_tag(Flag::Ct);
                         let ptr = addr as usize;
-                        let result = ffi::c::call(compile.program, ptr, ty, arg, comp_ctx)?;
+                        let result = ffi::c::call(compile, ptr, ty, arg, comp_ctx)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     } else if compile.program[f].body.is_none() {
                         let abs = self.range_to_index(ret);
@@ -332,7 +329,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                     self.bump_ip();
                     let ptr = f.to_int()?.to_bytes() as usize;
                     debug_assert_eq!(ptr % 4, 0);
-                    let result = ffi::c::call(compile.program, ptr, ty, arg, comp_ctx)?;
+                    let result = ffi::c::call(compile, ptr, ty, arg, comp_ctx)?;
                     *self.get_slot_mut(ret.single()) = result.single()?;
                 }
             }
@@ -436,29 +433,6 @@ impl<'a, 'p: 'a> Interp<'p> {
                 compile.program.assertion_count += 1; // sanity check for making sure tests actually ran
                 Value::Unit.into()
             }
-            "is_comptime" => {
-                assert_eq!(arg, Values::One(Value::Unit));
-                let when = self.call_stack.last().unwrap().when;
-                Value::Bool(when == ExecTime::Comptime).into()
-            }
-            "is_uninit" => {
-                let range = match arg {
-                    Values::One(Value::InterpAbsStackAddr(addr)) => &self.value_stack[addr.first.0..addr.first.0 + addr.count],
-                    Values::One(Value::Heap {
-                        value,
-                        physical_first: first,
-                        physical_count: count,
-                        ..
-                    }) => {
-                        let data = unsafe { &*value };
-                        assert!(data.references > 0 && (first) < data.values.len() && (count) < data.values.len());
-                        &data.values[(first)..(first + count)]
-                    }
-                    _ => err!("Wanted ptr found {:?}", arg),
-                };
-                let result = range.iter().all(|v| v == &Value::Poison);
-                Value::Bool(result).into()
-            }
             "raw_slice" => {
                 // last is not included
                 let (addr, new_first, new_last) = arg.to_triple()?;
@@ -516,10 +490,6 @@ impl<'a, 'p: 'a> Interp<'p> {
                 }
                 .into()
             }
-            "dump_ffi_types" => {
-                let msg = compile.program.dump_ffi_types();
-                msg.serialize_one()
-            }
             "dealloc_inner" => {
                 let (ty, ptr, count) = arg.to_triple()?;
                 let (ty, count, (ptr, ptr_first, ptr_count)) =
@@ -533,63 +503,10 @@ impl<'a, 'p: 'a> Interp<'p> {
                 let _ = unsafe { Box::from_raw(ptr) };
                 Value::Unit.into()
             }
-            "reflect_print" => {
-                outln!(ShowPrint, "=== start print ===");
-                self.reflect_print(arg, 0)?;
-                outln!(ShowPrint, "=== end print ===");
-                Value::Unit.into()
-            }
-            "IntType" => {
-                let (bit_count, signed) = arg.to_pair()?;
-                let (bit_count, signed) = (bit_count.to_int()?, Values::One(signed).to_bool()?);
-                let ty = compile.program.intern_type(TypeInfo::Int(crate::ast::IntTypeInfo { bit_count, signed }));
-                Value::Type(ty).into()
-            }
-            "system" => {
-                self.fail_on_wasm("fn system")?;
-                let mut arg = unwrap!(
-                    Vec::<String>::deserialize_one(arg.clone()),
-                    "expected Vec<string> not {arg:?}. TODO: support stack slices"
-                )
-                .into_iter();
-                let cmd = unwrap!(arg.next(), "cmd");
-                let mut cmd = Command::new(cmd);
-                for arg in arg {
-                    cmd.arg(arg);
-                }
-                match cmd.output() {
-                    Ok(output) => CmdResult {
-                        status: output.status.code().unwrap(),
-                        stdout: output.stdout,
-                        stderr: output.stderr,
-                    }
-                    .serialize_one(),
-                    Err(e) => err!("Error running {cmd:?}: {e:?}",),
-                }
-            }
             "println" => {
                 let arg = unwrap!(String::deserialize_one(arg.clone()), "expect str not {arg:?}");
                 outln!(ShowPrint, "{arg}");
                 Value::Unit.into()
-            }
-            "cli_args" => {
-                self.fail_on_wasm("fn cli_args")?;
-                let mut args = env::args();
-                args.next(); // The interpreter's exe.
-                let args: Vec<_> = args.collect();
-                args.serialize_one()
-            }
-            "clone_const" => {
-                let (ptr, first, count) = arg.to_heap_ptr()?;
-                let ptr = unsafe { &mut *ptr };
-                assert!(ptr.is_constant, "clone_const but not const, you could just mutate it");
-                let values = ptr.values[first..(first + count)].to_vec();
-                Value::new_box(values, false).into()
-            }
-            "str" => {
-                let arg = unwrap!(Ident::deserialize_one(arg.clone()), "expected symbol found {arg:?}");
-                let s = self.pool.get(arg).to_string();
-                s.serialize_one()
             }
             #[cfg(target_arch = "aarch64")]
             "copy_to_mmap_exec" => {
@@ -803,53 +720,6 @@ impl<'a, 'p: 'a> Interp<'p> {
             },
             _ => err!("Wanted ptr found {:?}", addr),
         })
-    }
-
-    fn reflect_print(&mut self, arg: Values, mut depth: usize) -> Res<'p, ()> {
-        for mut v in arg.vec() {
-            loop {
-                outln!(ShowPrint, "{}{}", "=".repeat(depth), v);
-                match v {
-                    Value::InterpAbsStackAddr(slot) => {
-                        if slot.count == 1 {
-                            v = self.deref_ptr(v)?.single()?;
-                        } else {
-                            for i in 0..slot.count {
-                                self.reflect_print(
-                                    Value::InterpAbsStackAddr(StackAbsoluteRange {
-                                        first: StackAbsolute(slot.first.0 + i),
-                                        count: 1,
-                                    })
-                                    .into(),
-                                    depth + 2,
-                                )?;
-                            }
-                            break;
-                        }
-                    }
-                    Value::Heap {
-                        value,
-                        physical_first: first,
-                        physical_count: count,
-                    } => {
-                        let values = unsafe { &mut *value };
-                        outln!(ShowPrint, "{}{:?}", "=".repeat(depth), &values.values[first..(first + count)]);
-
-                        break;
-                    }
-                    _ => break,
-                }
-                depth += 2;
-            }
-        }
-        Ok(())
-    }
-
-    fn fail_on_wasm(&self, name: &str) -> Res<'p, ()> {
-        if cfg!(target_arch = "wasm32") {
-            err!("Operation {name:?} suported on wasm target.",)
-        }
-        Ok(())
     }
 }
 

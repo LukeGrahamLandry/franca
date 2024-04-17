@@ -66,7 +66,9 @@ pub enum CErr<'p> {
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
+#[repr(C)]
 pub struct Compile<'a, 'p: 'a> {
+    pub program: &'a mut Program<'p>, // SAFETY: this must be the first field (repr(C))
     pub pool: &'p StringPool<'p>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
     pub debug_trace: Vec<DebugState<'p>>,
@@ -74,7 +76,6 @@ pub struct Compile<'a, 'p: 'a> {
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     pub last_loc: Option<Span>,
-    pub program: &'a mut Program<'p>,
     pub save_bootstrap: Vec<FuncId>,
     pub tests: Vec<FuncId>,
     pub aarch64: Jitted,
@@ -1697,7 +1698,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             "true" => (Value::Bool(true), TypeId::bool()),
             "false" => (Value::Bool(false), TypeId::bool()),
             "Symbol" => ffi_type!(Ident),
-            "CmdResult" => ffi_type!(crate::export_ffi::CmdResult),
             "FatExpr" => ffi_type!(FatExpr),
             _ => {
                 let name = self.pool.intern(name);

@@ -574,6 +574,7 @@ pub mod c {
     use libffi::middle::{Arg, Type};
 
     use crate::ast::IntTypeInfo;
+    use crate::compiler::Compile;
     use crate::err;
     use crate::ffi::InterpSend;
     use crate::pool::Ident;
@@ -617,7 +618,7 @@ pub mod c {
         }
     }
 
-    pub fn call<'p>(program: &Program<'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, Values> {
+    pub fn call<'p>(program: &Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, Values> {
         let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
@@ -628,25 +629,26 @@ pub mod c {
         }
         let mut args: Vec<_> = if f_ty.arg == TypeId::unit() {
             vec![]
-        } else if let TypeInfo::Tuple(fields) = &program[f_ty.arg] {
+        } else if let TypeInfo::Tuple(fields) = &program.program[f_ty.arg] {
             for ty in fields {
-                b = b.arg(program.as_c_type(*ty)?);
+                b = b.arg(program.program.as_c_type(*ty)?);
             }
             args.iter().map(crate::ffi::c::to_void_ptr).collect()
         } else {
-            b = b.arg(program.as_c_type(f_ty.arg)?);
+            b = b.arg(program.program.as_c_type(f_ty.arg)?);
             args.iter().map(crate::ffi::c::to_void_ptr).collect()
         };
 
         if f_ty.ret != TypeId::unit() {
-            b = b.res(program.as_c_type(f_ty.ret)?)
+            b = b.res(program.program.as_c_type(f_ty.ret)?)
         }
-        let int32 = program.find_interned(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true }));
-        let sym = *program.ffi_types.get(&Ident::get_type_key()).unwrap();
+        let int32 = program.program.find_interned(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true }));
+        let sym = *program.program.ffi_types.get(&Ident::get_type_key()).unwrap();
 
         if comp_ctx {
             // IMPORTANT: extra &indirection. We want a pointer to the argument, even if the argument is already a pointer.
-            args.insert(0, Arg::new(&program));
+            let v: &&mut Program = &program.program;
+            args.insert(0, Arg::new(&v));
         }
 
         // TODO: this is getting deranged. !!
@@ -674,7 +676,7 @@ pub mod c {
             let _: () = unsafe { b.into_cif().call(ptr, &args) };
             unreachable!("Called 'fn(_) Never' but it returned.")
         } else {
-            todo!("unsupported c ret type {}", program.log_type(f_ty.ret))
+            todo!("unsupported c ret type {}", program.program.log_type(f_ty.ret))
         })
     }
 }

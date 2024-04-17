@@ -605,7 +605,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
             debug_assert!(LLVMIsNull(function) == 0);
             let mut args = arg.into_iter().map(|i| self.read_slot(StackOffset(i))).collect::<Vec<_>>();
             if comp_ctx {
-                let ptr = self.llvm.const_ptr(self.compile.program as *mut Program as usize as *const u8); // TODO: this has gotta be UB
+                let ptr = self.llvm.const_ptr(self.compile as *mut Compile as usize as *const u8); // TODO: this has gotta be UB
                 args.insert(0, ptr); // TODO: cri
             }
             let value = LLVMBuildCall2(self.llvm.builder, ty, function, args.as_mut_ptr(), args.len() as c_uint, EMPTY);

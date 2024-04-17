@@ -1,3 +1,7 @@
+//! Functions and types are first class values during compilation. 
+//! That allows a simple (but verbose) form of generics without relying on the overloading system. 
+//! This is not how the standard library generally defines its generic types. 
+
 @test(interp, aarch64)
 fn main(_canary: i64) i64 = {
 
@@ -10,20 +14,20 @@ fn dup(const T: Type) Fn(T, Ty(T, T)) = {
 }
 
 // dont do this! i probably want tuples to have undefined layout. 
-fn get_i(tuple: *Ty(i64, i64), i: i64) i64 = {
-    let tuple: VoidPtr = tuple;
-    let start = mul(i, size_of(i64));
-    let ptr: VoidPtr = raw_slice(tuple, start, add(start, size_of(i64)));
-    let ptr: Ptr(i64) = ptr;
-    ptr[]
+@generic @comptime
+fn get_index(const T: Type) Fn(Ty(*Ty(T, T), i64), T) = {
+    // TODO: without the leading '(' it treats it as a statement and gets mad that there's no name. 
+    (fn(tuple: *Ty(T, T), i: i64) T = {
+        let tuple: VoidPtr = tuple;
+        let start = mul(i, size_of(T));
+        let ptr: VoidPtr = raw_slice(tuple, start, add(start, size_of(T)));
+        let ptr: Ptr(T) = ptr;
+        ptr[]
+    })
 }
-fn get_t(tuple: *Ty(Type, Type), i: i64) Type = {
-    let tuple: VoidPtr = tuple;
-    let start = mul(i, size_of(Type));
-    let ptr: VoidPtr = raw_slice(tuple, start, add(start, size_of(Type)));
-    let ptr: Ptr(Type) = ptr;
-    ptr[]
-}
+
+const get_i = get_index(i64);
+const get_t = get_index(Type);
 
 const dup_i64 = dup(i64);
 var one_one = dup_i64(1);
@@ -42,18 +46,16 @@ dup_i64(Unit)!assert_compile_error;
 fn MySlice(T: Type) Type = (ptr: Ptr(T), len: i64)!struct;
 
 @comptime @generic
-fn get_first(T: Type) Fn(MySlice(T), T) = {
+fn get_first(T: Type) Fn(MySlice(T), T) = 
     (fn(s: MySlice(T)) T = {
         let ptr: VoidPtr = s&.ptr[];
         let first_thing: VoidPtr = raw_slice(ptr, 0, size_of(T));
         let first_thing: Ptr(T) = first_thing;
         first_thing[]
-    })
-}
+    });
 
 const i64_s = MySlice(i64);
-let five = 5; // TODO: full cosnt args
-let things = alloc(i64, five);
+let things = alloc(i64, 5);
 var a: i64_s = (ptr: things, len: 5);
 let ptr: VoidPtr = a&.ptr[];
 let first_thing: VoidPtr = raw_slice(ptr, 0, size_of(i64));
@@ -62,23 +64,18 @@ first_thing[] = 12;
 const get_first_i64 = get_first(i64);
 assert_eq(get_first_i64(a), 12);
 
-// TODO: fix this. currently you need any overloaded functions provided by a generic to exist lexiclly as constants in the outer scope,
-//       because the name resolution is done too early. 
-fn is_left() Unit = unit;
-
 @comptime 
-fn Either(Left: Type, Right: Type) Type = {
-    const Self: Type = (left: Left, right: Right)!enum;
-    
-    fn is_left(self: Self) bool = 
-        eq(self&!tag[], tag_value(Self, left!symbol));
-    
-    Self
-}
+fn Either(Left: Type, Right: Type) Type = 
+    (left: Left, right: Right)!enum;
+
+@comptime @generic
+fn is_left(Self: Type) Fn(Self, bool) = 
+    (fn(self: Self) bool = eq(self&!tag[], tag_value(Self, left!symbol)));
 
 const E1 = Either(i64, Ptr(i64));
 let e1: E1 = (left: 15);
-assert_eq(true, is_left(e1));
+const il1 = is_left(E1); // TODO: should be able to inline this and call any expr without the extra binding, even if its comptime.
+assert_eq(true, il1(e1));
 
 // types are memoized 
 assert_eq(Either(i64, Ptr(i64)), Either(i64, Ptr(i64)));
@@ -88,19 +85,9 @@ assert_eq(e1!type, E1);
 
 const E2 = Either(bool, i64);
 let e2: E2 = (left: false);
-assert_eq(true, is_left(e2));
+const il2 = is_left(E2);
+assert_eq(true, il2(e2));
 assert_eq(e2!type, E2);
-
-
-//////
-/// Comptime call args can't just be const
-
-fn weird_add(a: i64, b: i64) i64 = {
-    a = a.add(b);
-    a
-}
-const three = weird_add(1, 2);
-assert_eq(three, 3);
 
 _canary
 }

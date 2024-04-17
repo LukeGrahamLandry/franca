@@ -942,6 +942,7 @@ impl<'p> Program<'p> {
         init_interp_send!(&mut program, Bc, IntTypeInfo); // TODO: aaaa
         program.get_rs_type(SuperSimple::get_ty());
         program.get_rs_type(RsResolvedSymbol::get_ty());
+        program.intern_type(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true })); // HACK: for ffi find_interned after moving IntType to export_ffi -- Apr 17
 
         program
     }
