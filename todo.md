@@ -1,3 +1,6 @@
+- !!!!!! something makes some asm tests fail intermittently.
+  (signed_truncate range check is only in debug so aslr or whatever messes you up somehow and then in release you just get garbage instructions?)
+
 ## Deeply annoying
 
 - no u32/u16/u8
@@ -8,13 +11,20 @@
 - no way to say trait bounds on generics (it just tries to compile like c++ templates)
 - need to explicitly instantiate generics
 - asm no print stack traces
-- stdlib isn't in seperate modules
+- stdlib isn't in seperate modules. need to allow nested modules.
 - no nonlocal returns for break/continue
 - test runner glue code is done in rust instead of fancy metaprogram
 - no string escape codes like "\n"
+- sometimes it can't show the codemap. should never use garbage_loc.
 
 ## Feature Ideas
 
+- need chained compile errors.
+  - maybe loc should be a specific token so you don't highlight the whole expression just to complain about a function signature
+  - macros should show both expansion site and code that generated it.
+- annotations should be powerful enough to derive recursively eq/clone/drop/hash based on fields.
+  - need to let you access the default even if you override.
+    like adding extra drop logic shouldn't mean manually dropping all fields.
 - fold infinite loops so it knows when you dont need a return at the end of the function to typecheck
 - mix named and positional args
 - default arg values (any const expr and inject at callsite? or based on other args so generate shims or multiple entry points to the function)
@@ -80,6 +90,11 @@
 - should expose untagged unions because you might need them for ffi.
   tho really that can be done with a blob of bytes and casting through a void pointer.
   so would be cooler to add more powerful custom types and do unions as a library.
+- a way to say ne=not(eq) for any type that doesn't already have a ne impl
+  - ideally you could just inline the eq and distribute the not so it would never matter if you couldn't define your own ne (other than order)
+  - feels sad if my asm backend doesn't know it can do int ne in one instruction,
+    but for comptime, its probably not worth an opt pass that tries to fix conditionals.
+- comptime code should be able to just compile a string which means
 
 ## UB
 
@@ -92,6 +107,7 @@
 - constructing a slice with a bad length
 - escaping pointer to stack
 - double free, use after free
+- holding pointer accross a collection resize (common case of ^)
 - alias block result location when returning a struct without calling a function
 - void pointer cast
 - hacky rust pointer ffi
@@ -105,6 +121,8 @@
 - output assert_eq counts to stdout and check them from another language so it can't cheat?
 - replace shell scripts with my language?
 - should really make the canary thing optional.
+- define assert_eq in my language so I can use freestanding. maybe have expect_eq that calls record_passed_assertion for currect sanity counting.
+  but maybe its too weird to say you can't use that in loops because it counts lexically. its so comforting tho.
 
 ## QBE
 
@@ -114,6 +132,8 @@
 - they emit assembly not code so I have to write an assembler
   - which would be nice to have anyway because then I could have clang output asm for other libs and link them into my stuff that way
 - setup benchmarking system so I can make sure its dramatically faster than my own shitty asm
+- does it make sense to put all thier statics in a thread local and hope that makes it thread safe?
+- figure out how to make a memory backed \*FILE
 
 ## Sema
 

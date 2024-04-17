@@ -396,6 +396,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::CloneRange { from, to: output });
                     }
                 } else if let Some((value, _)) = result.constants.get(*var) {
+                    // TODO: sometimes you probably want to reference by pointer
+                    //       like this will load a string byte by byte
                     for (i, value) in value.vec().into_iter().enumerate() {
                         result.push(Bc::LoadConstant {
                             slot: output.offset(i),
@@ -407,6 +409,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::Value { value, .. } => {
+                // TODO: sometimes you probably want to reference by pointer
+                //       like this will load a string byte by byte
                 for (i, value) in value.clone().vec().into_iter().enumerate() {
                     result.push(Bc::LoadConstant {
                         slot: output.offset(i),
@@ -803,6 +807,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         value: Value::I64(123),
                     });
                 }
+                // TODO: support explicit uninit so backend doesn't emit code for the padding above.
+                //       current system also means weird type stuff where you write ints into units in bc_to_asm.
+                //       if we staticlly know the tag value, could only copy the size of the active varient (which would be the general case of leaving it uninit when creating one).
+                //       but also eventually we probably want to define and preserve padding so tags could be stored there.
+                //       even without that, maybe its a weird undefined behaviour to just drop some of your bytes,
+                //       should have compiler settings about being allowed to cast *T -> *[size_of(T)]u8 because that would observe the padding.
+                //       I like the idea of granular toggling ub vs optimisations and having those flags as a place to hang comments,
+                //       but that adds a lot of extra work testing all the combinations which might not be worth it.
+                //       -- Apr 17
+                //
             }
             _ => err!("struct literal but expected {:?}", requested),
         }
@@ -908,7 +922,7 @@ impl<'p> FnBody<'p> {
     }
 
     #[track_caller]
-    fn load_constant(&mut self, program: &mut EmitBc<'_, 'p>, value: Values, ty: TypeId) -> Res<'p, (StackRange, TypeId)> {
+    fn _load_constant(&mut self, program: &mut EmitBc<'_, 'p>, value: Values, ty: TypeId) -> Res<'p, (StackRange, TypeId)> {
         match value {
             Values::One(value) => {
                 let to = self.reserve_slots(program, ty)?;

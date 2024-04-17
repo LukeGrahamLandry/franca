@@ -351,7 +351,7 @@ impl<'a, 'p: 'a> Interp<'p> {
             }
             std::cmp::Ordering::Greater => {
                 let values = value.to_seq()?;
-                assert_eq!(values.len(), target.count);
+                assert_eq!(values.len(), target.count, "ICE: {values:?} (wrong compiler message signeture?)");
                 let base = target.first.0;
                 for (i, v) in values.into_iter().enumerate() {
                     // I think this is fine.

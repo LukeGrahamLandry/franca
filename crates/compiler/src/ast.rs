@@ -124,7 +124,10 @@ pub enum Expr<'p> {
 pub static EXPR_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub trait WalkAst<'p> {
-    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    // Return false to not go deeper down this branch.
+    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) -> bool {
+        true
+    }
     fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
     fn pre_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
     fn post_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
@@ -133,7 +136,9 @@ pub trait WalkAst<'p> {
     fn walk_ty(&mut self, _: &mut LazyType<'p>) {}
 
     fn expr(&mut self, expr: &mut FatExpr<'p>) {
-        self.pre_walk_expr(expr);
+        if !self.pre_walk_expr(expr) {
+            return;
+        }
         match &mut expr.expr {
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.expr(fst);
@@ -237,7 +242,7 @@ struct RenumberVars<'a, 'p> {
 }
 
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
-    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
         match &mut expr.expr {
             Expr::GetVar(v) => {
                 if let Some(new) = self.mapping.get(v) {
@@ -251,6 +256,7 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
             }
             _ => {}
         }
+        true
     }
 
     fn post_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
@@ -1478,8 +1484,9 @@ pub fn garbage_loc() -> Span {
 // TODO: replace with new walk
 
 impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
-    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
-        self(&mut expr.expr)
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
+        self(&mut expr.expr);
+        true
     }
 }
 
@@ -1647,6 +1654,8 @@ pub enum Flag {
     Get_Type_Int,
     Compile_Ast,
     Const_Eval_String,
+    Const_Eval_Type,
+    Get_Type_Info,
     _Reserved_Count_,
 }
 

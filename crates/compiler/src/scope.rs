@@ -378,7 +378,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 }
 
 impl<'z, 'a, 'p> WalkAst<'p> for ResolveScope<'z, 'a, 'p> {
-    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
+    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) -> bool {
+        true
+    }
     fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
     fn pre_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
     fn walk_func(&mut self, _: &mut Func<'p>) {}

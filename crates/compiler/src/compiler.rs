@@ -1155,7 +1155,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.expr = Expr::Value { ty, value: value.into() };
                         Structured::Const(ty, value.into())
                     }
-                    _ => err!(CErr::UndeclaredIdent(*macro_name)),
+                    "unquote" | "placeholder" => err!("ICE: Unhandled macro {}", self.pool.get(*macro_name)),
+                    _ => {
+                        err!(CErr::UndeclaredIdent(*macro_name))
+                    }
                 }
             }
             Expr::FieldAccess(e, name) => {
@@ -1418,8 +1421,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let mut expr: FatExpr = unwrap!(arg.deserialize(), "");
                 let ty = String::get_type(self.program);
                 let result = self.compile_expr(result, &mut expr, Some(ty))?;
+                assert_eq!(result.ty(), ty);
                 // TODO: actually typecheck because requested doesn't force it.
                 result.get()
+            }
+            Flag::Const_Eval_Type => {
+                let mut expr: FatExpr = unwrap!(arg.deserialize(), "");
+                let result = self.compile_expr(result, &mut expr, Some(TypeId::ty()))?;
+                assert_eq!(result.ty(), TypeId::ty());
+                result.get()
+            }
+            Flag::Get_Type_Info => {
+                let ty: TypeId = unwrap!(arg.deserialize(), "");
+                let ty = self.program[ty].clone();
+                Ok(ty.serialize_one())
             }
             _ => err!("Macro send unknown message: {name:?} with {arg:?}",),
         }
@@ -2917,7 +2932,7 @@ pub struct Unquote<'z, 'a, 'p> {
 
 impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
     // TODO: track if we're in unquote mode or placeholder mode.
-    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
+    fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
         if let Expr::SuffixMacro(name, arg) = &mut expr.expr {
             if *name == Flag::Unquote.ident() {
                 let expr_ty = FatExpr::get_type(self.compiler.program);
@@ -2939,7 +2954,14 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
                 let index = arg.as_int().expect("!placeholder expected int") as usize;
                 let value = self.placeholders[index].take(); // TODO: make it more obvious that its only one use and the slot is empty.
                 *expr = value.unwrap();
-            }
+            } else if *name == Flag::Quote.ident() {
+                // TODO: add a simpler test case than the derive thing (which is what discovered this problem).
+                // Don't go into nested !quote. This allows having macros expand to other macro calls without stomping eachother.
+                // TODO: feels like you might still end up with two going on at once so need to have a monotonic id number for each expansion stored in the !placeholder.
+                //       but so far this is good enough.
+                return false;
+            };
         }
+        true
     }
 }
