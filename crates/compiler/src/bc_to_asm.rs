@@ -29,13 +29,13 @@ struct BcToAsm<'z, 'p, 'a> {
 
 const x0: i64 = 0;
 const x1: i64 = 1;
-// const x2: i64 = 2;
-// const x3: i64 = 3;
-// const x4: i64 = 4;
+const x2: i64 = 2;
+const x3: i64 = 3;
+const x4: i64 = 4;
 // const x5: i64 = 5;
 // const x6: i64 = 6;
 // const x7: i64 = 7;
-// const x8: i64 = 8;
+const x8: i64 = 8;
 // const x9: i64 = 9;
 /// c_call: "intra-procedure-call scratch register"
 const x16: i64 = 16;
@@ -143,6 +143,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let func = self.compile.ready[f].as_ref().unwrap();
         // println!("{}", func.log(self.compile.program.pool));
         let ff = &self.compile.program[func.func];
+        assert!(!ff.has_tag(Flag::Flat_Call), "Flat call is only supported for calling into the compiler");
         self.f = f;
         self.next_slot = SpOffset(0);
         self.slots.clear();
@@ -339,6 +340,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(brk(456));
                 }
                 Bc::CallC { f, arg, ret, ty, comp_ctx } => {
+                    assert!(!*comp_ctx, "flat call needs special handling");
                     self.get_slot(x16, *f);
                     self.dyn_c_call(*arg, *ret, *ty, *comp_ctx, |s| s.compile.aarch64.push(br(x16, 1)));
                     self.release_one(*f);
@@ -500,6 +502,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             debug_assert_eq!(c, p, "need repr c");
             self.load_imm(x0, c);
         }
+
         do_call(self);
         // TODO: you cant call release many because it assumes they were made in one chunk
         for i in arg {
@@ -578,6 +581,20 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             if !self.slot_type(ret.single()).is_unit() {
                 self.set_slot(x0, ret.single());
             }
+        } else if target.has_tag(Flag::Flat_Call) {
+            // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
+            assert!(comp_ctx, "Flat call is only supported for caling into the compiler");
+            let addr = unwrap!(target.comptime_addr, "");
+            let arg_offset = self.find_many(arg, false);
+            let ret_offset = self.find_many(ret, true);
+            let c = self.compile as *const Compile as u64;
+            self.load_imm(x0, c);
+            debug_assert!(arg_offset.0 < 4096 && ret_offset.0 < 4096);
+            self.compile.aarch64.push(add_im(X64, x1, sp, arg_offset.0 as i64, 0));
+            self.load_imm(x2, arg.count as u64);
+            self.compile.aarch64.push(add_im(X64, x3, sp, ret_offset.0 as i64, 0));
+            self.load_imm(x4, ret.count as u64);
+            self.branch_with_link(f);
         } else {
             self.dyn_c_call(arg, ret, target.unwrap_ty(), comp_ctx, |s| s.branch_with_link(f));
         }

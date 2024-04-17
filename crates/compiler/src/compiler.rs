@@ -1360,18 +1360,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let arg: TypeInfo = unwrap!(arg.deserialize(), "");
                 Ok(self.program.intern_type(arg).serialize_one())
             }
-            Flag::Print_Ast => {
-                outln!(ShowPrint, "print_ast1: {arg:?}");
-                let arg: FatExpr = unwrap!(arg.deserialize(), "");
-                outln!(ShowPrint, "show...");
-                outln!(ShowPrint, "print_ast2: {arg:?}");
-                outln!(ShowPrint, "print_ast3: {}", arg.log(self.pool));
-                Ok(Values::One(Value::Unit))
-            }
-            Flag::Clone_Ast => {
-                let arg: FatExpr = unwrap!(arg.deserialize(), "");
-                Ok(arg.serialize_one())
-            }
             Flag::Unquote_Macro_Apply_Placeholders => {
                 let mut values = arg.vec();
                 let count = unwrap!(values.pop(), "").to_int()?;

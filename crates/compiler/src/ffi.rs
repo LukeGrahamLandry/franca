@@ -618,6 +618,7 @@ pub mod c {
         }
     }
 
+    // NOTE: pointers passed to Arg::new must live until into_cif
     pub fn call<'p>(program: &Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, Values> {
         let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
@@ -647,8 +648,8 @@ pub mod c {
 
         if comp_ctx {
             // IMPORTANT: extra &indirection. We want a pointer to the argument, even if the argument is already a pointer.
-            let v: &&mut Program = &program.program;
-            args.insert(0, Arg::new(&v));
+            // Note: dont put it in a local first because release mode reuses the stack slot.
+            args.insert(0, Arg::new(&program));
         }
 
         // TODO: this is getting deranged. !!

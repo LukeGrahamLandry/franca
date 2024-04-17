@@ -39,7 +39,6 @@ pub enum VarType {
     Const,
 }
 
-#[repr(C)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     #[default]
@@ -1657,6 +1656,7 @@ pub enum Flag {
     Const_Eval_String,
     Const_Eval_Type,
     Get_Type_Info,
+    Flat_Call,
     _Reserved_Count_,
 }
 

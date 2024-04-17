@@ -8,8 +8,9 @@ use crate::compiler::Res;
 use crate::logging::unwrap;
 use crate::pool::Ident;
 use std::fmt::Write;
+use std::hint::black_box;
 use std::path::PathBuf;
-use std::ptr::null;
+use std::ptr::{null, slice_from_raw_parts_mut};
 use std::sync::Mutex;
 use std::{fs, io, slice};
 
@@ -69,6 +70,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
     ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
+    (
+        "@flat_call fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;",
+        test_flat_call as *const u8,
+    ),
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
@@ -330,6 +335,16 @@ extern "C-unwind" fn do_ptr_type(program: &mut &mut Program<'_>, ty: TypeId) -> 
 
 extern "C-unwind" fn do_unique_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
     program.unique_ty(ty)
+}
+
+extern "C-unwind" fn test_flat_call(program: &mut &mut Program<'_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
+    assert!(arg_count == 3);
+    assert!(ret_count == 1);
+    let _ = black_box(program.assertion_count); // dereference the pointer.
+    unsafe {
+        let s = &mut *slice_from_raw_parts_mut(arg, arg_count as usize);
+        *ret = (s[0] * s[1]) + s[2];
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
