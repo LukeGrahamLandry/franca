@@ -1,10 +1,12 @@
-use std::{collections::HashMap, mem};
+use std::{collections::HashMap, mem, ptr::slice_from_raw_parts};
 
 use codemap::Span;
 
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::{Value, Values},
+    bc_to_asm::ConstBytes,
+    find_std_lib,
     logging::LogTag::ShowErr,
     outln,
 };
@@ -28,6 +30,7 @@ pub trait InterpSend<'p>: Sized {
         values.into()
     }
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self>;
     fn deserialize_one(value: Values) -> Option<Self> {
         let value: Vec<_> = value.into();
         debug_assert_eq!(value.len(), Self::size(), "{value:?}");
@@ -50,10 +53,12 @@ macro_rules! init_interp_send {
 
 pub(crate) use init_interp_send;
 
-impl Value {
-    pub fn deserialize_from<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = Value>) -> Option<T> {
-        T::deserialize(values)
-    }
+pub fn deserialize<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = Value>) -> Option<T> {
+    T::deserialize(values)
+}
+
+pub fn deserialize_from_ints<'p, 'a, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = &'a i64>) -> Option<T> {
+    T::deserialize_from_ints(values)
 }
 
 impl Values {
@@ -76,6 +81,10 @@ macro_rules! send_num {
 
             fn serialize(self, values: &mut Vec<Value>) {
                 values.push(Value::I64(self as i64))
+            }
+
+            fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+                Some(*values.next()? as $ty)
             }
 
             fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
@@ -120,6 +129,10 @@ impl<'p> InterpSend<'p> for bool {
         }
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        Some(*values.next()? != 0)
+    }
+
     fn size() -> usize {
         1
     }
@@ -145,6 +158,10 @@ impl<'p> InterpSend<'p> for char {
         }
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        char::from_u32(*values.next()? as u32)
+    }
+
     fn size() -> usize {
         1
     }
@@ -160,6 +177,10 @@ impl<'p> InterpSend<'p> for f64 {
 
     fn serialize(self, values: &mut Vec<Value>) {
         values.push(Value::F64(self.to_bits()))
+    }
+
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        Some(f64::from_bits(*values.next()? as u64))
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
@@ -195,6 +216,10 @@ impl<'p> InterpSend<'p> for TypeId {
         }
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        Some(TypeId(*values.next()? as u32))
+    }
+
     fn size() -> usize {
         1
     }
@@ -218,6 +243,12 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         let a = A::deserialize(values)?;
         let b = B::deserialize(values)?;
+        Some((a, b))
+    }
+
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        let a = A::deserialize_from_ints(values)?;
+        let b = B::deserialize_from_ints(values)?;
         Some((a, b))
     }
 
@@ -277,6 +308,21 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         }
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        let ptr = *values.next()?;
+        let len = usize::deserialize_from_ints(values)?;
+        let entries = T::size() * len;
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, entries) };
+        let mut values = s.iter();
+
+        let mut res = vec![];
+        for _ in 0..len {
+            res.push(T::deserialize_from_ints(&mut values)?);
+        }
+
+        Some(res)
+    }
+
     fn size() -> usize {
         2
     }
@@ -324,6 +370,14 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         }
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        let ptr = *values.next()?;
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, T::size()) };
+        let mut values = s.iter();
+        let v = T::deserialize_from_ints(&mut values)?;
+        Some(Box::new(v))
+    }
+
     fn size() -> usize {
         1
     }
@@ -348,6 +402,10 @@ impl<'p> InterpSend<'p> for Value {
 
     fn size() -> usize {
         1
+    }
+
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        todo!()
     }
 }
 
@@ -391,6 +449,19 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         }
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        match values.next()? {
+            0 => Some(T::deserialize_from_ints(values)),
+            1 => {
+                for _ in 0..T::size() {
+                    let unit = values.next()?;
+                }
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+
     fn size() -> usize {
         1 + T::size()
     }
@@ -417,6 +488,11 @@ impl<'p> InterpSend<'p> for Span {
         let res: Span = unsafe { mem::transmute((a, b)) };
         Some(res)
     }
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        let (a, b) = <(u32, u32)>::deserialize_from_ints(values)?;
+        let res: Span = unsafe { mem::transmute((a, b)) };
+        Some(res)
+    }
 
     fn size() -> usize {
         <(u32, u32)>::size()
@@ -439,6 +515,9 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         Some(Vec::<(K, V)>::deserialize(values)?.into_iter().collect::<Self>())
     }
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        Some(Vec::<(K, V)>::deserialize_from_ints(values)?.into_iter().collect::<Self>())
+    }
 
     fn size() -> usize {
         Vec::<(K, V)>::size()
@@ -460,6 +539,10 @@ impl<'p> InterpSend<'p> for String {
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         Self::from_utf8(Vec::<u8>::deserialize(values)?).ok()
+    }
+
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
     }
 
     fn size() -> usize {
@@ -503,17 +586,25 @@ fn interp_send() {
         j: Option<i64>,
     }
 
+    let mut bytes = ConstBytes::default();
+
     let pool = Box::leak(Box::<StringPool>::default());
     let mut p = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let one = HelloWorld { a: 123, b: 345 };
     let two = one.serialize_one();
-    let three = HelloWorld::deserialize_one(two).unwrap();
+    let three = HelloWorld::deserialize_one(two.clone()).unwrap();
     assert_eq!(one, three);
+    let two_b = bytes.store_to_ints(two.vec().iter());
+    let three_b = HelloWorld::deserialize_from_ints(&mut two_b.iter()).unwrap();
+    assert_eq!(one, three_b);
 
     let four = vec![one, one, HelloWorld { a: 678, b: 910 }, one];
     let five = four.clone().serialize_one();
-    let six = Vec::<HelloWorld>::deserialize_one(five).unwrap();
+    let six = Vec::<HelloWorld>::deserialize_one(five.clone()).unwrap();
     assert_eq!(four, six);
+    let five_b = bytes.store_to_ints(five.vec().iter());
+    let six_b = Vec::<HelloWorld>::deserialize_from_ints(&mut five_b.iter()).unwrap();
+    assert_eq!(four, six_b);
 
     let seven = Nested {
         c: 314,
@@ -525,8 +616,11 @@ fn interp_send() {
         j: Some(123),
     };
     let eight = seven.serialize_one();
-    let nine = Nested::deserialize_one(eight).unwrap();
+    let nine = Nested::deserialize_one(eight.clone()).unwrap();
     assert_eq!(seven, nine);
+    let eight_b = bytes.store_to_ints(eight.vec().iter());
+    let nine_b = Nested::deserialize_from_ints(&mut eight_b.iter()).unwrap();
+    assert_eq!(seven, nine_b);
 
     assert_eq!(HelloWorld::get_type(&mut p), HelloWorld::get_type(&mut p));
     assert_ne!(HelloWorld::get_type(&mut p), Nested::get_type(&mut p));
@@ -554,6 +648,7 @@ fn interp_send_libs_ast() {
     use crate::{ast::FatStmt, parse::Parser};
     use codemap::CodeMap;
 
+    assert!(find_std_lib());
     let pool = Box::leak(Box::<StringPool>::default());
     let mut codemap = CodeMap::new();
 

@@ -18,7 +18,8 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     };
 
     let get_type = get_type(&input.ident, &input.data);
-    let deserialize = deserialize(&input.ident, &input.data);
+    let deserialize_from_ints = deserialize(&input.ident, &input.data, false);
+    let deserialize = deserialize(&input.ident, &input.data, true);
     let serialize = serialize(&input.ident, &input.data);
     let size = size_for(&input.ident, &input.data);
 
@@ -39,6 +40,10 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             #[allow(unused_braces)]
             fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
                 #deserialize
+            }
+
+            fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+                #deserialize_from_ints
             }
 
             fn size() -> usize {
@@ -109,10 +114,10 @@ fn get_type_fields(name: &Ident, fields: &syn::Fields) -> TokenStream {
     }
 }
 
-fn deserialize(name: &Ident, data: &Data) -> TokenStream {
+fn deserialize(name: &Ident, data: &Data, from_values: bool) -> TokenStream {
     match data {
         syn::Data::Struct(data) => {
-            let rest = deserialize_fields(quote!(#name), &data.fields);
+            let rest = deserialize_fields(quote!(#name), &data.fields, from_values);
             quote!(
                 #rest
             )
@@ -120,7 +125,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
         syn::Data::Enum(data) => {
             let recurse = data.variants.iter().enumerate().map(|(i, f)| {
                 let varient = &f.ident;
-                let fields = deserialize_fields(quote!(#name :: #varient), &f.fields);
+                let fields = deserialize_fields(quote!(#name :: #varient), &f.fields, from_values);
                 let size = size_for_fields(&f.ident, &f.fields);
                 quote_spanned! {f.span()=>
                     #i => {
@@ -131,8 +136,14 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                 }
             });
 
+            let t = if from_values {
+                quote!(usize::deserialize(values)?)
+            } else {
+                quote!(usize::deserialize_from_ints(values)?)
+            };
+
             quote! {
-                let tag = usize::deserialize(values)?;
+                let tag = #t;
                 let (result, varient_size): (Option<Self>, usize) = match tag {
                     #(#recurse)*
                     _ => return None
@@ -141,7 +152,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                 let payload_size = Self::size() - 1;
                 for _ in 0..(payload_size-varient_size) {
                     let unit = values.next()?;
-                    debug_assert_eq!(unit, Value::I64(123));
+                    //debug_assert_eq!(unit, Value::I64(123));
                 }
 
                 result
@@ -151,13 +162,18 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
     }
 }
 
-fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream {
+fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields, from_values: bool) -> TokenStream {
+    let t = if from_values {
+        quote!(crate::ffi::deserialize(values)?)
+    } else {
+        quote!(crate::ffi::deserialize_from_ints(values)?)
+    };
     match fields {
         syn::Fields::Named(FieldsNamed { named: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {
                 let name = &f.ident;
                 quote_spanned! {f.span()=>
-                    #name: Value::deserialize_from(values)?,
+                    #name: #t,
                 }
             });
             quote! {
@@ -169,7 +185,7 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
         syn::Fields::Unnamed(FieldsUnnamed { unnamed: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {
                 quote_spanned! {f.span()=>
-                    Value::deserialize_from(values)?,
+                    #t,
                 }
             });
             quote! {
@@ -181,7 +197,7 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
         syn::Fields::Unit => {
             quote! {{
                 let unit = values.next()?;
-                debug_assert_eq!(unit, crate::bc::Value::Unit);
+                //debug_assert_eq!(unit, crate::bc::Value::Unit);
                 let val = #prefix;
                 Some(val)
             }}

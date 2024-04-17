@@ -328,3 +328,9 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");
     // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
 }
+
+#[test]
+fn run_code_tests() {
+    find_std_lib();
+    run_tests();
+}

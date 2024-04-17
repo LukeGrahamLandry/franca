@@ -614,4 +614,8 @@ impl<'p, 't> InterpSend<'p> for &'t RsType<'t> {
     fn size() -> usize {
         todo!()
     }
+
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        todo!()
+    }
 }

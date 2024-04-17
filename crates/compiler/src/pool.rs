@@ -189,4 +189,13 @@ impl<'p> InterpSend<'p> for Ident<'p> {
     fn size() -> usize {
         1
     }
+
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        let i = *values.next()?;
+        if i < 0 {
+            return None;
+        }
+
+        Some(Ident(i as u32, PhantomData))
+    }
 }

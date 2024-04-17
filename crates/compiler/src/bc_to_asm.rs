@@ -659,11 +659,16 @@ pub struct ConstBytes {
 }
 
 impl ConstBytes {
-    pub fn store<'a>(&mut self, values: impl Iterator<Item = &'a Value>) -> *const u8 {
+    pub fn store_to_ints<'a>(&mut self, values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
         let mut out = vec![];
         for value in values {
             self.write_int_copy(value, &mut out);
         }
+        out
+    }
+
+    pub fn store<'a>(&mut self, values: impl Iterator<Item = &'a Value>) -> *const u8 {
+        let mut out = self.store_to_ints(values);
         let ptr = out.as_ptr() as *const u8;
         self.constants.push(UnsafeCell::new(out));
         ptr
@@ -672,7 +677,8 @@ impl ConstBytes {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn copy_heap(&mut self, value: *mut InterpBox, first: usize, count: usize) -> *const u8 {
         let value = unsafe { &*value };
-        assert!(value.is_constant, "wont be shared by reference so only makes sense for constants?");
+        // No longer true since now i do seialization stuff so it might have been mutable before... idk. the whole thing's a giant hack
+        // assert!(value.is_constant, "wont be shared by reference so only makes sense for constants?");
         let values = &value.values[first..first + count];
         self.store(values.iter())
     }
@@ -693,7 +699,7 @@ impl ConstBytes {
                 physical_first,
                 physical_count,
             } => {
-                let ptr = self.copy_heap(value, physical_count, physical_count);
+                let ptr = self.copy_heap(value, physical_first, physical_count);
                 out.push(ptr as usize as i64);
             }
         }

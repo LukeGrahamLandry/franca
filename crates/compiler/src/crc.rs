@@ -58,6 +58,10 @@ impl<'p, T: Clone + InterpSend<'p>> InterpSend<'p> for CRc<T> {
         T::deserialize(values).map(|t| Self::new(t))
     }
 
+    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+        T::deserialize_from_ints(values).map(|t| Self::new(t))
+    }
+
     fn size() -> usize {
         T::size()
     }
