@@ -1,8 +1,8 @@
 //! Low level instructions that the interpreter can execute.
+use crate::ast::{Program, TypeInfo};
 use crate::compiler::CErr;
 use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
-use crate::impl_index;
 use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId, Var},
@@ -11,6 +11,7 @@ use crate::{
     ffi::InterpSend,
     pool::Ident,
 };
+use crate::{impl_index, unwrap};
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
@@ -550,4 +551,53 @@ impl<'p> Value {
             err!(CErr::TypeError("i64", self.into()))
         }
     }
+}
+
+pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
+    match &program[ty] {
+        TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => err!("bad type",),
+        TypeInfo::Unit => {
+            let _ = unwrap!(ints.next(), "");
+            out.push(Value::Unit);
+        }
+        TypeInfo::F64 => {
+            let n = unwrap!(ints.next(), "") as u64;
+            out.push(Value::F64(n));
+        }
+        TypeInfo::Int(_) => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::I64(n));
+        }
+        TypeInfo::Bool => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::Bool(n != 0));
+        }
+        TypeInfo::Fn(_) => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::GetFn(FuncId(n as usize)));
+        }
+        TypeInfo::Type => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::Type(TypeId(n as u32)));
+        }
+        TypeInfo::OverloadSet => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::OverloadSet(n as usize));
+        }
+        &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(program, ty, ints, out)?,
+        TypeInfo::Tuple(types) => {
+            for ty in types {
+                values_from_ints(program, *ty, ints, out)?;
+            }
+        }
+        TypeInfo::Enum { cases } => {
+            let tag = unwrap!(ints.next(), "");
+            let ty = cases[tag as usize].1;
+            values_from_ints(program, ty, ints, out)?;
+        }
+        TypeInfo::FnPtr(_) => todo!(),
+        TypeInfo::Ptr(_) => todo!(),
+        TypeInfo::VoidPtr => todo!(),
+    };
+    Ok(())
 }

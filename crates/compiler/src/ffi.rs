@@ -393,11 +393,14 @@ impl<'p> InterpSend<'p> for Value {
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
-        values.push(self)
+        let addr = Box::into_raw(Box::new(self)) as *const Self as usize as i64;
+        values.push(Value::I64(addr))
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-        values.next()
+        let addr = i64::deserialize(values)? as usize as *const Self;
+        // TODO: leak
+        Some(unsafe { *addr })
     }
 
     fn size() -> usize {
@@ -405,7 +408,9 @@ impl<'p> InterpSend<'p> for Value {
     }
 
     fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        todo!()
+        let addr = i64::deserialize_from_ints(values)? as usize as *const Self;
+        // TODO: leak
+        Some(unsafe { *addr })
     }
 }
 
@@ -587,7 +592,6 @@ fn interp_send() {
     }
 
     let mut bytes = ConstBytes::default();
-
     let pool = Box::leak(Box::<StringPool>::default());
     let mut p = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
     let one = HelloWorld { a: 123, b: 345 };
@@ -649,6 +653,7 @@ fn interp_send_libs_ast() {
     use codemap::CodeMap;
 
     assert!(find_std_lib());
+    let mut bytes = ConstBytes::default();
     let pool = Box::leak(Box::<StringPool>::default());
     let mut codemap = CodeMap::new();
 
@@ -658,9 +663,12 @@ fn interp_send_libs_ast() {
     for s in stmts {
         let prev = format!("{s:?}");
         let value = s.serialize_one();
-        let after: FatStmt = value.deserialize().unwrap();
+        let after: FatStmt = value.clone().deserialize().unwrap();
         // Note: this relies on you not printing out addresses in there.
         assert_eq!(prev, format!("{after:?}"));
+        let value_b = bytes.store_to_ints(value.vec().iter());
+        let after_b = FatStmt::deserialize_from_ints(&mut value_b.iter()).unwrap();
+        assert_eq!(prev, format!("{after_b:?}"));
     }
 }
 

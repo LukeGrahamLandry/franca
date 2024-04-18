@@ -32,7 +32,7 @@ const x1: i64 = 1;
 const x2: i64 = 2;
 const x3: i64 = 3;
 const x4: i64 = 4;
-// const x5: i64 = 5;
+const x5: i64 = 5;
 // const x6: i64 = 6;
 // const x7: i64 = 7;
 const x8: i64 = 8;
@@ -143,7 +143,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let func = self.compile.ready[f].as_ref().unwrap();
         // println!("{}", func.log(self.compile.program.pool));
         let ff = &self.compile.program[func.func];
-        assert!(!ff.has_tag(Flag::Flat_Call), "Flat call is only supported for calling into the compiler");
+        let is_flat_call = ff.has_tag(Flag::Flat_Call);
         self.f = f;
         self.next_slot = SpOffset(0);
         self.slots.clear();
@@ -151,8 +151,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.open_slots.clear();
         let is_c_call = ff.has_tag(Flag::C_Call);
 
-        // TODO: match the frame pointer usage that would make lldb see my stack frames.
-        //       what zig thinks: https://github.com/ziglang/zig/blob/master/lib/std/debug.zig#L644
         self.compile.aarch64.push(sub_im(X64, sp, sp, 16, 0));
         self.compile.aarch64.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
         self.compile.aarch64.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
@@ -163,15 +161,46 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let arg_range = func.arg_range;
         // if is_c_call {
         assert!(func.arg_range.count <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-        assert!(
-            !ff.has_tag(Flag::Ct),
-            "compiler context is implicitly passed as first argument for @ct builtins."
-        );
 
-        // TODO: not skipping unit fixes allow_create debug check for enum init when payload is unit.
-        //       in general need to just handle unit better so im not special casing everywhere.
-        cc_reg!(self, arg_range, false, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
-            .set_slot_f(floats, slot));
+        let mut flat_result = None;
+
+        if is_flat_call {
+            // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
+            assert!(!is_c_call);
+            let ret_size = self.compile.ready.sizes.slot_count(self.compile.program, ff.finished_ret.unwrap());
+
+            // Runtime check that caller agrees on type sizes.
+            // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
+            assert!(arg_range.count < (1 << 12));
+            assert!(ret_size < (1 << 12));
+            self.compile.aarch64.push(cmp_im(X64, x2, arg_range.count as i64, 0));
+            self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+            self.compile.aarch64.push(brk(456));
+            self.compile.aarch64.push(cmp_im(X64, x4, ret_size as i64, 0));
+            self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+            self.compile.aarch64.push(brk(456));
+
+            // Save the result pointer.
+            flat_result = Some(self.next_slot);
+            self.compile.aarch64.push(str_uo(X64, x3, sp, self.next_slot.0 as i64 / 8));
+            self.next_slot = SpOffset(self.next_slot.0 + 8);
+
+            // Copy arguments into their stack slots
+            let on_stack = self.find_many(arg_range, true);
+            for i in 0..arg_range.count {
+                self.compile.aarch64.push(ldr_uo(X64, x5, x1, i as i64));
+                self.set_slot(x5, arg_range.offset(i));
+            }
+        } else {
+            assert!(
+                !ff.has_tag(Flag::Ct),
+                "compiler context is implicitly passed as first argument for @ct builtins."
+            );
+            // TODO: not skipping unit fixes allow_create debug check for enum init when payload is unit.
+            //       in general need to just handle unit better so im not special casing everywhere.
+            cc_reg!(self, arg_range, false, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
+                .set_slot_f(floats, slot));
+        }
 
         let mut patch_cbz = vec![];
         let mut patch_b = vec![];
@@ -260,20 +289,32 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     patch_b.push((self.compile.aarch64.prev(), ip));
                 }
                 &Bc::Ret(slots) => {
-                    match slots.count {
-                        0 => {}
-                        1..=7 => {
-                            cc_reg!(self, slots, true, 0, |ints, slot| self.get_slot(ints, slot), |floats, slot| self
-                                .get_slot_f(floats, slot));
+                    if is_flat_call {
+                        // Retrive result address
+                        self.compile.aarch64.push(ldr_uo(X64, x0, sp, flat_result.unwrap().0 as i64 / 8));
+                        for i in 0..slots.count {
+                            self.get_slot(x1, slots.offset(i));
+                            self.compile.aarch64.push(str_uo(X64, x1, x0, i as i64));
                         }
-                        _ => err!("c_call only supports 7 return value. TODO: structs",),
+                    } else {
+                        match slots.count {
+                            0 => {}
+                            1..=7 => {
+                                cc_reg!(self, slots, true, 0, |ints, slot| self.get_slot(ints, slot), |floats, slot| self
+                                    .get_slot_f(floats, slot));
+                            }
+                            _ => err!("c_call only supports 7 return value. TODO: structs",),
+                        }
                     }
+
+                    // Leave holes for stack fixup code.
                     self.compile.aarch64.push(brk(0));
                     let a = self.compile.aarch64.prev();
                     self.compile.aarch64.push(brk(0));
                     let b = self.compile.aarch64.prev();
                     self.compile.aarch64.push(brk(0));
                     release_stack.push((a, b, self.compile.aarch64.prev()));
+                    // Do the return
                     self.compile.aarch64.push(ret(()));
                 }
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
@@ -584,7 +625,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         } else if target.has_tag(Flag::Flat_Call) {
             // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
             assert!(comp_ctx, "Flat call is only supported for caling into the compiler");
-            let addr = unwrap!(target.comptime_addr, "");
+
+            let addr = target
+                .comptime_addr
+                .unwrap_or_else(|| self.compile.aarch64.get_fn(f).unwrap().as_ptr() as u64);
             let arg_offset = self.find_many(arg, false);
             let ret_offset = self.find_many(ret, true);
             let c = self.compile as *const Compile as u64;

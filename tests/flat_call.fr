@@ -1,0 +1,35 @@
+//! Test my insane @flat_call ffi calling convention. 
+//! This passes arguments and return values as slices of i64 and forces the rust code to deal with deserializing them.
+//! This will be replaced when my language can declare structs as @repr(Rust). 
+//! But for now, I want to remove the interpreter (and just use asm for comptime), without changing too many things at once. 
+
+@test(aarch64)
+fn main(canary: i64) i64 = {
+    // Call a function in the compiler
+    let res = test_flat_call_fma(5, 2, 3);
+    assert_eq(res, 13);
+    
+    @flat_call @ct
+    fn test_flat_call_fma_reverse(a: i64, b: i64, c: i64) i64 = {
+        print(a);
+        print(b);
+        print(c);
+        a.mul(b).add(c)
+    }
+    
+    // TODO: This normal call is needed to make sure its compiled. creating a !fn_ptr should do that too. 
+    // Call a function declared here.
+    let out = test_flat_call_fma_reverse(4, 5, 2);
+    assert_eq(out, 22);
+    
+    const TTT: Type = (i64, i64, i64);
+    const callback: Fn(TTT, i64) = test_flat_call_fma_reverse;
+    const callback_ptr = callback!fn_ptr;
+    let ptr: VoidPtr = callback_ptr;
+    
+    // Call a function in the compiler, but pass it a function pointer so it calls back into a function declared here. 
+    let out = test_flat_call_callback(ptr);
+    assert_eq(out, 57);
+    
+    canary
+}

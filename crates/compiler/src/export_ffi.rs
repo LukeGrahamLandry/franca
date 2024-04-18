@@ -9,6 +9,7 @@ use crate::logging::unwrap;
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::hint::black_box;
+use std::mem::transmute;
 use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts_mut};
 use std::sync::Mutex;
@@ -73,6 +74,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     (
         "@flat_call fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;",
         test_flat_call as *const u8,
+    ),
+    (
+        "@flat_call fn test_flat_call_callback(addr: VoidPtr) i64;",
+        test_flat_call_callback as *const u8,
     ),
 ];
 
@@ -344,6 +349,21 @@ extern "C-unwind" fn test_flat_call(program: &mut &mut Program<'_>, arg: *mut i6
     unsafe {
         let s = &mut *slice_from_raw_parts_mut(arg, arg_count as usize);
         *ret = (s[0] * s[1]) + s[2];
+    }
+}
+extern "C-unwind" fn test_flat_call_callback(program: &mut &mut Program<'_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
+    assert!(arg_count == 1);
+    assert!(ret_count == 1);
+    let _ = black_box(program.assertion_count); // dereference the pointer.
+    unsafe {
+        let addr = *arg as usize;
+        let f: extern "C" fn(program: &mut &mut Program<'_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) = transmute(addr);
+        let mut args = vec![10i64, 5, 7];
+        let mut rets = vec![0i64];
+        f(program, args.as_mut_ptr(), args.len() as i64, rets.as_mut_ptr(), rets.len() as i64);
+        *ret = rets[0];
+        println!("{:?}", args);
+        assert_eq!(*ret, 57);
     }
 }
 
