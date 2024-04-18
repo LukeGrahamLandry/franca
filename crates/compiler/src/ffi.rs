@@ -5,10 +5,8 @@ use codemap::Span;
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::{Value, Values},
-    bc_to_asm::ConstBytes,
-    find_std_lib,
     logging::LogTag::ShowErr,
-    outln,
+    outln, STATS,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
@@ -24,6 +22,9 @@ pub trait InterpSend<'p>: Sized {
     fn create_type(interp: &mut Program<'p>) -> TypeId;
     fn serialize(self, values: &mut Vec<Value>);
     fn serialize_one(self) -> Values {
+        unsafe {
+            STATS.serialize_one += 1;
+        }
         let mut values = vec![];
         self.serialize(&mut values);
         debug_assert_eq!(values.len(), Self::size());
@@ -32,6 +33,9 @@ pub trait InterpSend<'p>: Sized {
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
     fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self>;
     fn deserialize_one(value: Values) -> Option<Self> {
+        unsafe {
+            STATS.deserialize_one += 1;
+        }
         let value: Vec<_> = value.into();
         debug_assert_eq!(value.len(), Self::size(), "{value:?}");
         Self::deserialize(&mut value.into_iter())
@@ -459,7 +463,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
             0 => Some(T::deserialize_from_ints(values)),
             1 => {
                 for _ in 0..T::size() {
-                    let unit = values.next()?;
+                    let _ = values.next()?;
                 }
                 Some(None)
             }
@@ -562,6 +566,7 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 #[test]
 fn interp_send() {
     use crate::ast::TargetArch;
+    use crate::bc_to_asm::ConstBytes;
     use crate::pool::StringPool;
     use interp_derive::InterpSend;
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
@@ -650,6 +655,7 @@ fn interp_send_empty_ast() {
 fn interp_send_libs_ast() {
     use crate::pool::StringPool;
     use crate::{ast::FatStmt, parse::Parser};
+    use crate::{bc_to_asm::ConstBytes, find_std_lib};
     use codemap::CodeMap;
 
     assert!(find_std_lib());

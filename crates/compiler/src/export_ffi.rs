@@ -4,7 +4,8 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{FnType, FuncId, Program, TypeId, TypeInfo};
-use crate::compiler::Res;
+use crate::compiler::{Compile, Res};
+use crate::ffi::InterpSend;
 use crate::logging::unwrap;
 use crate::pool::Ident;
 use std::fmt::Write;
@@ -46,9 +47,9 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: Type, __: Type) Unit", assert_equ32 as *const u8),
+    ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_equ32 as *const u8), // TODO: subtyping
+    ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
     ("fn print_int(v: i64) Unit", print_int as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
@@ -71,14 +72,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
     ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
-    (
-        "@flat_call fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;",
-        test_flat_call as *const u8,
-    ),
-    (
-        "@flat_call fn test_flat_call_callback(addr: VoidPtr) i64;",
-        test_flat_call_callback as *const u8,
-    ),
 ];
 
 pub const COMPILER_LATE: &[(&str, *const u8)] = &[
@@ -94,6 +87,11 @@ pub const COMPILER_LATE: &[(&str, *const u8)] = &[
         "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,
     ),
+];
+
+pub const COMPILER_FLAT: &[(&str, *const u8)] = &[
+    ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call as *const u8),
+    ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback as *const u8),
 ];
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -149,6 +147,15 @@ pub fn get_include_std(name: &str) -> Option<String> {
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER_LATE {
                 writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+            }
+            Some(out)
+        }
+
+        "compiler_flat" => {
+            let mut out = String::new();
+            writeln!(out, "{}", msg).unwrap();
+            for (sig, ptr) in COMPILER_FLAT {
+                writeln!(out, "@pub @comptime_addr({}) @ct @flat_call {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -242,11 +249,6 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
 // Supports bool, i64, and Type which all have the same repr.
 // TODO: track call site
 extern "C-unwind" fn assert_eq(program: &mut &mut Program, a: i64, b: i64) {
-    hope(|| Ok(assert_eq!(a, b)));
-    program.assertion_count += 1;
-}
-
-extern "C-unwind" fn assert_equ32(program: &mut &mut Program, a: u32, b: u32) {
     hope(|| Ok(assert_eq!(a, b)));
     program.assertion_count += 1;
 }
@@ -351,20 +353,27 @@ extern "C-unwind" fn test_flat_call(program: &mut &mut Program<'_>, arg: *mut i6
         *ret = (s[0] * s[1]) + s[2];
     }
 }
-extern "C-unwind" fn test_flat_call_callback(program: &mut &mut Program<'_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
+extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
     assert!(arg_count == 1);
     assert!(ret_count == 1);
-    let _ = black_box(program.assertion_count); // dereference the pointer.
+    let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
         let addr = *arg as usize;
-        let f: extern "C" fn(program: &mut &mut Program<'_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) = transmute(addr);
-        let mut args = vec![10i64, 5, 7];
-        let mut rets = vec![0i64];
-        f(program, args.as_mut_ptr(), args.len() as i64, rets.as_mut_ptr(), rets.len() as i64);
-        *ret = rets[0];
-        println!("{:?}", args);
+        let f: FlatCallFn = transmute(addr);
+        *ret = do_flat_call(compile, f, ((10, 5), 7));
         assert_eq!(*ret, 57);
     }
+}
+
+pub type FlatCallFn = extern "C" fn(program: &mut Compile<'_, '_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64);
+
+pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
+    let arg = arg.serialize_one();
+    let mut arg = compile.aarch64.constants.store_to_ints(arg.vec().iter());
+    let mut ret = vec![0i64; Ret::size()];
+    f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
+    let ret = Ret::deserialize_from_ints(&mut ret.iter()).unwrap();
+    ret
 }
 
 #[cfg(target_arch = "aarch64")]

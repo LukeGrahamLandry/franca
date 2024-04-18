@@ -9,7 +9,7 @@ use crate::compiler::{CErr, Compile, ExecTime, FnWip, Res, ToBytes};
 use crate::ffi::InterpSend;
 use crate::logging::LogTag::ShowPrint;
 use crate::logging::{unwrap, PoolLog};
-use crate::{assert, assert_eq, err, logln};
+use crate::{assert, assert_eq, err, logln, STATS};
 use crate::{
     ast::FuncId,
     export_ffi,
@@ -478,6 +478,10 @@ impl<'a, 'p: 'a> Interp<'p> {
                 let stride = compile.ready.sizes.slot_count(compile.program, ty);
                 assert!(count >= 0);
                 let values = vec![Value::Poison; count as usize * stride];
+                unsafe {
+                    STATS.interp_box += 1;
+                    STATS.interp_box_values += values.len();
+                }
                 let value = Box::into_raw(Box::new(InterpBox {
                     references: 1,
                     values,

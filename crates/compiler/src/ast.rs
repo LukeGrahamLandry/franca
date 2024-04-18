@@ -8,6 +8,7 @@ use crate::{
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
     reflect::{Reflect, RsType},
+    STATS,
 };
 use codemap::{CodeMap, Span};
 use interp_derive::{InterpSend, Reflect};
@@ -17,7 +18,6 @@ use std::{
     hash::Hash,
     mem::{self, transmute},
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[repr(transparent)]
@@ -119,8 +119,6 @@ pub enum Expr<'p> {
         index: Box<FatExpr<'p>>,
     },
 }
-
-pub static EXPR_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub trait WalkAst<'p> {
     // Return false to not go deeper down this branch.
@@ -515,12 +513,12 @@ impl<'p> Pattern<'p> {
     }
 }
 
-// TODO: use this as a canary when I start doing asm stuff.
-pub const MY_SECRET_VALUE: u64 = 0xDEADBEEFCAFEBABE;
-
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
-        EXPR_COUNT.fetch_add(1, Ordering::AcqRel);
+        unsafe {
+            STATS.ast_expr_nodes += 1;
+        }
+
         FatExpr {
             expr,
             loc,

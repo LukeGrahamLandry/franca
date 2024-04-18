@@ -11,7 +11,7 @@ use crate::{
     ffi::InterpSend,
     pool::Ident,
 };
-use crate::{impl_index, unwrap};
+use crate::{impl_index, unwrap, STATS};
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
@@ -437,6 +437,10 @@ impl Value {
             values,
             is_constant,
         }));
+        unsafe {
+            STATS.interp_box += 1;
+            STATS.interp_box_values += count;
+        }
         Value::Heap {
             value,
             physical_first: 0,

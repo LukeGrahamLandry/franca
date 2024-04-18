@@ -227,8 +227,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         result.push(Bc::CallDirect { f, ret, arg });
 
-        assert_eq!(self.return_stack_slots(f), ret.count);
-        assert_eq!(self.slot_count(f_ty.ret), ret.count);
+        if !func.finished_ret.unwrap().is_never() {
+            assert_eq!(self.return_stack_slots(f), ret.count);
+            assert_eq!(self.slot_count(f_ty.ret), ret.count);
+        }
         Ok(())
     }
 

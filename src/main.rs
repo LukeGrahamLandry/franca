@@ -11,7 +11,7 @@ use compiler::{
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp,
+    run_main, timestamp, STATS,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
@@ -189,6 +189,7 @@ fn run_tests_serial_for_profile() {
     let end = timestamp();
     let seconds = end - start;
     println!("Done in {} ms.", (seconds * 1000.0) as i64);
+    println!("{:#?}", unsafe { &STATS });
 }
 
 fn set_colour(r: u8, g: u8, b: u8) {

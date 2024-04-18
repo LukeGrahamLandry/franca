@@ -14,9 +14,9 @@ extern crate core;
 
 use std::arch::asm;
 use std::env;
+use std::fs;
 use std::mem::{transmute, ManuallyDrop};
 use std::path::PathBuf;
-use std::{fs, sync::atomic::Ordering};
 
 use ast::FuncId;
 use bc::Value;
@@ -62,7 +62,7 @@ pub mod scope;
 use crate::bc_to_asm::emit_aarch64;
 use crate::logging::{init_logs_flag, PoolLog};
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId, EXPR_COUNT},
+    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
     compiler::{Compile, CompileError, ExecTime},
     logging::{
         get_logs, log_tag_info, save_logs,
@@ -70,6 +70,23 @@ use crate::{
     },
     parse::Parser,
     scope::ResolveScope,
+};
+
+#[derive(Debug)]
+pub struct Stats {
+    pub interp_box: usize,
+    pub interp_box_values: usize,
+    pub serialize_one: usize,
+    pub deserialize_one: usize,
+    pub ast_expr_nodes: usize,
+}
+
+pub static mut STATS: Stats = Stats {
+    interp_box: 0,
+    interp_box_values: 0,
+    serialize_one: 0,
+    deserialize_one: 0,
+    ast_expr_nodes: 0,
 };
 
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
@@ -231,7 +248,6 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _
 
     outln!(Perf, "===============");
     log_dbg(&comp, save);
-    outln!(Perf, "Created {} AST nodes.", EXPR_COUNT.load(Ordering::Acquire));
     if leak {
         let _ = ManuallyDrop::new(comp);
         let _ = ManuallyDrop::new(program);

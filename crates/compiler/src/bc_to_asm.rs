@@ -138,7 +138,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.compile.ready[self.f].as_ref().unwrap().slot_types[slot.0]
     }
 
-    // TODO: now with my result ptrs i messed ip the order of things? need to handle grouped stack slots. before it worked out because i would always copy into a new chunk.
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let func = self.compile.ready[f].as_ref().unwrap();
         // println!("{}", func.log(self.compile.program.pool));
@@ -196,8 +195,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 !ff.has_tag(Flag::Ct),
                 "compiler context is implicitly passed as first argument for @ct builtins."
             );
-            // TODO: not skipping unit fixes allow_create debug check for enum init when payload is unit.
-            //       in general need to just handle unit better so im not special casing everywhere.
+            self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as @flat_call later
+                                                                   // TODO: not skipping unit fixes allow_create debug check for enum init when payload is unit.
+                                                                   //       in general need to just handle unit better so im not special casing everywhere.
             cc_reg!(self, arg_range, false, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
                 .set_slot_f(floats, slot));
         }
@@ -290,6 +290,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 &Bc::Ret(slots) => {
                     if is_flat_call {
+                        assert!(!is_c_call);
                         // Retrive result address
                         self.compile.aarch64.push(ldr_uo(X64, x0, sp, flat_result.unwrap().0 as i64 / 8));
                         for i in 0..slots.count {
@@ -545,10 +546,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
 
         do_call(self);
-        // TODO: you cant call release many because it assumes they were made in one chunk
-        for i in arg {
-            self.release_one(StackOffset(i));
-        }
+        self.release_many(arg); // TODO: this assumes they're not variables? are we sure args always make a copy? apperently since this works.
 
         cc_reg!(self, ret, true, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
             .set_slot_f(floats, slot));
@@ -609,10 +607,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 self.get_slot(i as i64, StackOffset(arg.first.0 + i));
             }
-            // TODO: you cant call release many because it assumes they were made in one chunk
-            for i in arg {
-                self.release_one(StackOffset(i));
-            }
+            self.release_many(arg);
             assert_eq!(ret.count, 1);
             for op in ops {
                 // println!("{op:#05x}, ");
@@ -624,7 +619,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
         } else if target.has_tag(Flag::Flat_Call) {
             // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
-            assert!(comp_ctx, "Flat call is only supported for caling into the compiler");
+            assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
+            assert!(!target.has_tag(Flag::C_Call), "multiple calling conventions doesn't make sense");
 
             let addr = target
                 .comptime_addr
@@ -639,8 +635,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.compile.aarch64.push(add_im(X64, x3, sp, ret_offset.0 as i64, 0));
             self.load_imm(x4, ret.count as u64);
             self.branch_with_link(f);
+            self.release_many(arg); // Note: release after to make sure they don't alias ret which might not be what the callee is expecting (even tho it would be fine for current uses).
         } else {
             self.dyn_c_call(arg, ret, target.unwrap_ty(), comp_ctx, |s| s.branch_with_link(f));
+            self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as @flat_call later
         }
         Ok(())
     }
@@ -653,7 +651,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             let mut offset = bytes.as_ptr() as i64 - self.compile.aarch64.get_current() as i64;
             debug_assert!(offset % 4 == 0, "instructions are u32");
             offset /= 4;
-            assert!(offset.abs() < (1 << 26), "can't jump that far"); // TODO: use adr/adrp
+            assert!(offset.abs() < (1 << 25), "can't jump that far"); // TODO: use adr/adrp
             offset = signed_truncate(offset, 26);
             self.compile.aarch64.push(b(offset, 1));
             return;
@@ -669,7 +667,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             // If its a comptime_addr into the compiler, (which happens a lot because of assert_eq and tag_value),
             //     aslr might be our friend and just put the mmaped pages near where it originally loaded the compiler.
-            if offset.abs() < (1 << 26) {
+            if offset.abs() < (1 << 25) {
                 offset = signed_truncate(offset, 26);
                 self.compile.aarch64.push(b(offset, 1));
                 return;

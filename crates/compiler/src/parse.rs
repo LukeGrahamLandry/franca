@@ -1,14 +1,12 @@
 //! Convert a stream of tokens into ASTs.
-use std::sync::atomic::Ordering;
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{CodeMap, File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType, EXPR_COUNT};
+use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType};
 use crate::bc::Values;
 use crate::export_ffi::get_include_std;
-use crate::outln;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
     bc::Value,
@@ -16,6 +14,7 @@ use crate::{
     logging::{LogTag::Parsing, PoolLog},
     pool::{Ident, StringPool},
 };
+use crate::{outln, STATS};
 use TokenType::*;
 
 pub struct Parser<'a, 'p> {
@@ -673,7 +672,11 @@ impl<'a, 'p> Parser<'a, 'p> {
             expr.log(self.pool)
         );
         self.expr_id += 1;
-        EXPR_COUNT.fetch_add(1, Ordering::AcqRel);
+
+        unsafe {
+            STATS.ast_expr_nodes += 1;
+        }
+
         FatExpr {
             expr,
             loc: self.end_subexpr(),
