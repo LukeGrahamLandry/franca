@@ -2056,7 +2056,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
         let mut unit_expr = FatExpr::synthetic(Expr::unit(), arg.loc);
         if let Expr::Tuple(parts) = arg.deref_mut() {
-            let _force_inline = self.pool.intern("inline"); // TODO
             if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
                 let cond_fn = cond_fn.single()?;
                 self.program[cond_fn].add_tag(Flag::Inline);

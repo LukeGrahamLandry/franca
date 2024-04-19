@@ -1,11 +1,12 @@
 #![allow(clippy::wrong_self_convention)]
 
-use std::mem::replace;
+use std::mem::{replace, transmute};
 
 use codemap::Span;
 
 use crate::ast::Flag;
 use crate::compiler::{CErr, Compile, ExecTime, FnWip, Res, ToBytes};
+use crate::export_ffi::do_flat_call_values;
 use crate::ffi::InterpSend;
 use crate::logging::LogTag::ShowPrint;
 use crate::logging::{unwrap, PoolLog};
@@ -135,7 +136,19 @@ impl<'a, 'p: 'a> Interp<'p> {
                         let ty = compile.program[f].unwrap_ty();
                         let comp_ctx = compile.program[f].has_tag(Flag::Ct);
                         let ptr = addr as usize;
-                        let result = ffi::c::call(compile, ptr, ty, arg, comp_ctx)?;
+                        let c_call = compile.program[f].has_tag(Flag::C_Call);
+                        let flat_call = compile.program[f].has_tag(Flag::Flat_Call);
+
+                        let result = if c_call {
+                            assert!(!flat_call);
+                            ffi::c::call(compile, ptr, ty, arg, comp_ctx)?
+                        } else if flat_call {
+                            assert!(comp_ctx && !c_call);
+                            do_flat_call_values(compile, unsafe { transmute(addr) }, arg, ty.ret)?
+                        } else {
+                            todo!()
+                        };
+
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     // TODO: why can body be none but ready be some?
                     // } else if compile.program[f].body.is_none() {
@@ -160,6 +173,8 @@ impl<'a, 'p: 'a> Interp<'p> {
                         let ty = compile.program[f].unwrap_ty();
                         let comp_ctx = compile.program[f].has_tag(Flag::Ct);
                         let ptr = addr as usize;
+                        assert!(compile.program[f].has_tag(Flag::C_Call));
+                        assert!(!compile.program[f].has_tag(Flag::Flat_Call));
                         let result = ffi::c::call(compile, ptr, ty, arg, comp_ctx)?;
                         *self.get_slot_mut(ret.single()) = result.single()?;
                     } else if compile.program[f].body.is_none() {
@@ -316,11 +331,15 @@ impl<'a, 'p: 'a> Interp<'p> {
                     // TODO: HACK! just want to test function pointers dynamic dispatch. this wont work on asm!
                     //      this goes away when i properly implement GetNativeFnPtr
                     if let Value::GetNativeFnPtr(f) = f {
-                        self.bump_ip(); // pre-bump
-                        let when = self.call_stack.last().unwrap().when;
-                        self.push_callframe(f, ret, arg, when, compile)?;
-                        // don't bump ip here, we're in a new call frame.
-                        continue;
+                        if compile.program[f].has_tag(Flag::Flat_Call) {
+                            todo!()
+                        } else {
+                            self.bump_ip(); // pre-bump
+                            let when = self.call_stack.last().unwrap().when;
+                            self.push_callframe(f, ret, arg, when, compile)?;
+                            // don't bump ip here, we're in a new call frame.
+                            continue;
+                        }
                     }
 
                     assert!(!matches!(f, Value::GetFn(_)), "CallC through GetFn is no longer allowed");

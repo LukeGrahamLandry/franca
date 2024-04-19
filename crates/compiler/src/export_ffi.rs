@@ -4,6 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{FnType, FuncId, Program, TypeId, TypeInfo};
+use crate::bc::{values_from_ints, Values};
 use crate::compiler::{Compile, Res};
 use crate::ffi::InterpSend;
 use crate::logging::unwrap;
@@ -15,6 +16,33 @@ use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts_mut};
 use std::sync::Mutex;
 use std::{fs, io, slice};
+
+// This lets rust _declare_ a flat_call like its normal
+// Ideally you could do this with a generic but you can't be generic over a function value whose type depends on other generic parameters.
+macro_rules! bounce_flat_call {
+    ($Arg:ty, $Ret:ty, $f:ident) => {{
+        // weird hack becuase you can't concat_idents! for a function name and you can't declare an unnamed function as an expression.
+        mod $f {
+            use super::*;
+            const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
+            pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut i64, arg_count: i64, retptr: *mut i64, ret_count: i64) {
+                debug_assert_eq!(arg_count, <$Arg>::size() as i64);
+                debug_assert_eq!(ret_count, <$Ret>::size() as i64);
+                unsafe {
+                    let arg = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
+                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut arg.iter()).unwrap();
+                    let ret: $Ret = F(compile, arg);
+                    let ret = ret.serialize_one();
+                    let ret = compile.aarch64.constants.store_to_ints(ret.vec().iter());
+                    let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
+                    out.copy_from_slice(&ret);
+                }
+            }
+        }
+
+        $f::bounce
+    }};
+}
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
@@ -89,9 +117,13 @@ pub const COMPILER_LATE: &[(&str, *const u8)] = &[
     ),
 ];
 
-pub const COMPILER_FLAT: &[(&str, *const u8)] = &[
-    ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call as *const u8),
-    ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback as *const u8),
+pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
+    ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
+    ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback),
+    (
+        "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
+        bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
+    ),
 ];
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -344,10 +376,10 @@ extern "C-unwind" fn do_unique_type(program: &mut &mut Program<'_>, ty: TypeId) 
     program.unique_ty(ty)
 }
 
-extern "C-unwind" fn test_flat_call(program: &mut &mut Program<'_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
+extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
     assert!(arg_count == 3);
     assert!(ret_count == 1);
-    let _ = black_box(program.assertion_count); // dereference the pointer.
+    let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
         let s = &mut *slice_from_raw_parts_mut(arg, arg_count as usize);
         *ret = (s[0] * s[1]) + s[2];
@@ -365,8 +397,9 @@ extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg:
     }
 }
 
-pub type FlatCallFn = extern "C" fn(program: &mut Compile<'_, '_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64);
+pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64);
 
+// This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
     let arg = arg.serialize_one();
     let mut arg = compile.aarch64.constants.store_to_ints(arg.vec().iter());
@@ -374,6 +407,21 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     let ret = Ret::deserialize_from_ints(&mut ret.iter()).unwrap();
     ret
+}
+
+// This the interpreter call a flat_call without knowing its types
+pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
+    let ret_count = compile.ready.sizes.slot_count(compile.program, ret_type);
+    let mut arg = compile.aarch64.constants.store_to_ints(arg.vec().iter());
+    let mut ret = vec![0i64; ret_count];
+    f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
+    let mut out = vec![];
+    values_from_ints(compile.program, ret_type, &mut ret.into_iter(), &mut out)?;
+    Ok(out.into())
+}
+
+fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
+    a * b + c
 }
 
 #[cfg(target_arch = "aarch64")]

@@ -735,7 +735,11 @@ impl ConstBytes {
             &Value::Symbol(i) | &Value::Type(TypeId(i)) => out.push(i as i64),
             Value::Unit => out.push(0), // TODO
             Value::Poison | Value::InterpAbsStackAddr(_) => unreachable!(),
-            Value::GetNativeFnPtr(_) => todo!(),
+            &Value::GetNativeFnPtr(i) => {
+                // TODO: not sure if we want to preserve the id or use the actual address
+                // out.push(i.0 as i64);
+                todo!()
+            }
             &Value::Heap {
                 value,
                 physical_first,
