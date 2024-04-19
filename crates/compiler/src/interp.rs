@@ -49,15 +49,15 @@ pub fn interp_run<'p: 'a, 'a>(
     assert!(!ret.is_any() && !ret.is_unknown());
     let return_slot_count = compile.ready.sizes.slot_count(compile.program, ret);
     if let Some(result) = &mut result {
-        compile.pending_ffi.push(*result as *mut FnWip);
+        compile.pending_ffi.push(Some(*result as *mut FnWip));
+    } else {
+        compile.pending_ffi.push(None);
     }
 
     let mut interp = Interp::new(compile.pool);
-    let res = interp.run(f, arg, when, return_slot_count, compile);
-    if result.is_some() {
-        compile.pending_ffi.pop().unwrap();
-    }
-    res
+    let res = interp.run(f, arg, when, return_slot_count, compile)?;
+    compile.pending_ffi.pop().unwrap();
+    Ok(res)
 }
 
 impl<'a, 'p: 'a> Interp<'p> {
@@ -139,17 +139,22 @@ impl<'a, 'p: 'a> Interp<'p> {
                         let c_call = compile.program[f].has_tag(Flag::C_Call);
                         let flat_call = compile.program[f].has_tag(Flag::Flat_Call);
 
-                        let result = if c_call {
+                        if c_call {
+                            let ret_count = compile.ready.sizes.slot_count(compile.program, ty.ret);
+                            assert!(ret_count <= 1);
                             assert!(!flat_call);
-                            ffi::c::call(compile, ptr, ty, arg, comp_ctx)?
+                            let result = ffi::c::call(compile, ptr, ty, arg, comp_ctx)?;
+                            // TODO: my c_call doesn't follow the calling convention for agregate return values yet (it just uses registers).
+                            *self.get_slot_mut(ret.single()) = result.single()?;
                         } else if flat_call {
                             assert!(comp_ctx && !c_call);
-                            do_flat_call_values(compile, unsafe { transmute(addr) }, arg, ty.ret)?
+                            let result = do_flat_call_values(compile, unsafe { transmute(addr) }, arg, ty.ret)?;
+                            let abs = self.range_to_index(ret);
+                            self.expand_maybe_tuple(result, abs)?;
                         } else {
                             todo!()
-                        };
+                        }
 
-                        *self.get_slot_mut(ret.single()) = result.single()?;
                     // TODO: why can body be none but ready be some?
                     // } else if compile.program[f].body.is_none() {
                     // unreachable!()
@@ -570,11 +575,15 @@ impl<'a, 'p: 'a> Interp<'p> {
     }
 
     fn call_compiler(&mut self, name: Ident<'p>, arg: Values, compile: &mut Compile<'a, 'p>) -> Res<'p, Values> {
+        let before = compile.pending_ffi.len();
         let result = unwrap!(compile.pending_ffi.pop(), "ICE: unexpected call_compiler: {}", compile.pool.get(name));
         // SAFETY: this should be pointing up somewhere higher on the stack.
-        let result = unsafe { &mut *result };
+        let result = unsafe { &mut *result.unwrap() };
+        // println!("{}", compile.pool.get(name));
         let res = compile.handle_macro_msg(result, Flag::try_from(name)?, arg);
-        compile.pending_ffi.push(result as *mut FnWip);
+        compile.pending_ffi.push(Some(result as *mut FnWip));
+        let after = compile.pending_ffi.len();
+        assert_eq!(before, after);
         res
     }
 

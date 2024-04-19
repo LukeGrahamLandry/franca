@@ -1,6 +1,6 @@
 //! Low level instructions that the interpreter can execute.
-use crate::ast::{Program, TypeInfo};
-use crate::compiler::CErr;
+use crate::ast::TypeInfo;
+use crate::compiler::{CErr, Compile};
 use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
@@ -16,6 +16,7 @@ use codemap::Span;
 use interp_derive::InterpSend;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::ptr::slice_from_raw_parts_mut;
 
 #[derive(Clone, InterpSend, Debug)]
 pub enum Bc<'p> {
@@ -557,8 +558,8 @@ impl<'p> Value {
     }
 }
 
-pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
-    match &program[ty] {
+pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
+    match &compile.program[ty] {
         TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => err!("bad type",),
         TypeInfo::Unit => {
             let _ = unwrap!(ints.next(), "");
@@ -588,19 +589,59 @@ pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<
             let n = unwrap!(ints.next(), "");
             out.push(Value::OverloadSet(n as usize));
         }
-        &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(program, ty, ints, out)?,
+        &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
         TypeInfo::Tuple(types) => {
-            for ty in types {
-                values_from_ints(program, *ty, ints, out)?;
+            if types.len() == 2 && types[1] == TypeId::i64() && matches!(compile.program[types[0]], TypeInfo::Ptr(_)) {
+                // (ptr, len)
+                // TODO: HACK. just assuming this is a slice so we can reconstruct the box
+                let addr = unwrap!(ints.next(), "") as usize;
+                let len = unwrap!(ints.next(), "") as usize;
+                let val_ty = unwrap!(compile.program.unptr_ty(types[0]), "unreachable");
+                let count = len * compile.ready.sizes.slot_count(compile.program, val_ty);
+                let values = unsafe { &*slice_from_raw_parts_mut(addr as *mut i64, count) };
+                let mut output = vec![];
+                let mut values = values.iter().copied(); // NOTE: outside the loop, you dont want to read the first element n times!
+                for _ in 0..len {
+                    values_from_ints(compile, val_ty, &mut values, &mut output)?;
+                }
+                out.push(Value::new_box(output, false)); // ptr
+                out.push(Value::I64(len as i64)); // len
+
+                return Ok(());
+            }
+            // TODO: no clone
+            for ty in types.clone() {
+                values_from_ints(compile, ty, ints, out)?;
             }
         }
         TypeInfo::Enum { cases } => {
+            let start = out.len();
+            let payload_size = compile.ready.sizes.slot_count(compile.program, ty) - 1;
             let tag = unwrap!(ints.next(), "");
+            out.push(Value::I64(tag));
             let ty = cases[tag as usize].1;
-            values_from_ints(program, ty, ints, out)?;
+            let value_size = compile.ready.sizes.slot_count(compile.program, ty);
+            values_from_ints(compile, ty, ints, out)?;
+
+            for _ in 0..payload_size - value_size {
+                out.push(Value::I64(123)); // padding
+            }
+            let end = out.len();
+            assert_eq!(end - start, payload_size + 1, "{out:?}");
         }
         TypeInfo::FnPtr(_) => todo!(),
-        TypeInfo::Ptr(_) => todo!(),
+        &TypeInfo::Ptr(ty) => {
+            // TODO: untested -- Apr 19
+            // TODO: this assumes that it points to exactly one thing so slices had special handling somewhere else.
+            let addr = unwrap!(ints.next(), "") as usize;
+            let val_ty = unwrap!(compile.program.unptr_ty(ty), "unreachable");
+            let count = compile.ready.sizes.slot_count(compile.program, val_ty);
+            let values = unsafe { &*slice_from_raw_parts_mut(addr as *mut i64, count) };
+            let mut output = vec![];
+            let mut values = values.iter().copied();
+            values_from_ints(compile, val_ty, &mut values, &mut output)?;
+            out.push(Value::new_box(output, false));
+        }
         TypeInfo::VoidPtr => todo!(),
     };
     Ok(())

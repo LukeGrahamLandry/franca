@@ -24,14 +24,16 @@ macro_rules! bounce_flat_call {
         // weird hack becuase you can't concat_idents! for a function name and you can't declare an unnamed function as an expression.
         mod $f {
             use super::*;
-            const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
+            // TODO: can't do this because of lifetimes. you still get the error message if it doesn't compile so its not a big deal but I find it less clear.
+            // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
+
             pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut i64, arg_count: i64, retptr: *mut i64, ret_count: i64) {
                 debug_assert_eq!(arg_count, <$Arg>::size() as i64);
                 debug_assert_eq!(ret_count, <$Ret>::size() as i64);
                 unsafe {
                     let arg = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     let arg: $Arg = <$Arg>::deserialize_from_ints(&mut arg.iter()).unwrap();
-                    let ret: $Ret = F(compile, arg);
+                    let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_one();
                     let ret = compile.aarch64.constants.store_to_ints(ret.vec().iter());
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
@@ -115,6 +117,7 @@ pub const COMPILER_LATE: &[(&str, *const u8)] = &[
         "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,
     ),
+    ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
 ];
 
 pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
@@ -124,6 +127,9 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
         bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
     ),
+    ("fn intern_type(ty: TypeInfo) Type;", bounce_flat_call!(TypeInfo, TypeId, intern_type)),
+    // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
+    ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
 ];
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -352,6 +358,10 @@ extern "C-unwind" fn print_int(_: &mut &mut Program, a: i64) {
     println!("{a}");
 }
 
+extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
+    println!("{}", p.log_type(a));
+}
+
 extern "C-unwind" fn number_of_functions(program: &mut &mut Program) -> i64 {
     program.funcs.len() as i64
 }
@@ -416,12 +426,20 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
     let mut ret = vec![0i64; ret_count];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     let mut out = vec![];
-    values_from_ints(compile.program, ret_type, &mut ret.into_iter(), &mut out)?;
+    values_from_ints(compile, ret_type, &mut ret.into_iter(), &mut out)?;
     Ok(out.into())
 }
 
 fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
     a * b + c
+}
+
+fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
+    compile.program.intern_type(ty)
+}
+
+fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
+    compile.program[ty].clone()
 }
 
 #[cfg(target_arch = "aarch64")]

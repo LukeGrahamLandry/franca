@@ -1663,14 +1663,12 @@ pub enum Flag {
     Operator_Ampersand_Prefix,
     Infer_Raw_Deref_Type,
     Promote_Closure,
-    Intern_Type,
     Print_Ast,
     Clone_Ast,
     Get_Type_Int,
     Compile_Ast,
     Const_Eval_String,
     Const_Eval_Type,
-    Get_Type_Info,
     Flat_Call,
     Builtin,
     _Reserved_Count_,
@@ -1686,7 +1684,7 @@ impl<'p> TryFrom<Ident<'p>> for Flag {
         if value.0 > Flag::_Reserved_Null_ as u32 && value.0 < Flag::_Reserved_Count_ as u32 {
             Ok(unsafe { transmute(value.0 as u8) })
         } else {
-            err!("Unknown Ident",)
+            err!("Unknown Ident {:?}", value)
         }
     }
 }

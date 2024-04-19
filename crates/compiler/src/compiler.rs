@@ -80,7 +80,7 @@ pub struct Compile<'a, 'p: 'a> {
     pub tests: Vec<FuncId>,
     pub aarch64: Jitted,
     pub ready: BcReady<'p>,
-    pub pending_ffi: Vec<*mut FnWip<'p>>,
+    pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1405,10 +1405,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ast = result.serialize_one();
                 Ok(ast)
             }
-            Flag::Intern_Type => {
-                let arg: TypeInfo = unwrap!(arg.deserialize(), "");
-                Ok(self.program.intern_type(arg).serialize_one())
-            }
             Flag::Unquote_Macro_Apply_Placeholders => {
                 let mut values = arg.vec();
                 let count = unwrap!(values.pop(), "").to_int()?;
@@ -1467,11 +1463,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let result = self.compile_expr(result, &mut expr, Some(TypeId::ty()))?;
                 assert_eq!(result.ty(), TypeId::ty());
                 result.get()
-            }
-            Flag::Get_Type_Info => {
-                let ty: TypeId = unwrap!(arg.deserialize(), "");
-                let ty = self.program[ty].clone();
-                Ok(ty.serialize_one())
             }
             _ => err!("Macro send unknown message: {name:?} with {arg:?}",),
         }
