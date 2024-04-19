@@ -1398,6 +1398,14 @@ impl<'p> Expr<'p> {
         }
     }
 
+    // TODO: handle Value
+    pub fn as_string(&self) -> Option<Ident<'p>> {
+        match self {
+            &Expr::String(v) => Some(v),
+            _ => None,
+        }
+    }
+
     pub fn as_fn(&self) -> Option<FuncId> {
         match self {
             &Expr::Value {
@@ -1438,6 +1446,15 @@ impl<'p> Expr<'p> {
                 ..
             }
         )
+    }
+
+    pub fn as_prefix_macro(&self, flag: Flag) -> Option<(&FatExpr, &FatExpr)> {
+        if let Expr::PrefixMacro { name, arg, target } = self {
+            if name.0 == flag.ident() {
+                return Some((arg, target));
+            }
+        }
+        None
     }
 }
 
@@ -1655,6 +1672,7 @@ pub enum Flag {
     Const_Eval_Type,
     Get_Type_Info,
     Flat_Call,
+    Builtin,
     _Reserved_Count_,
 }
 

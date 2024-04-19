@@ -766,6 +766,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
 
+                // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
+                //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
+                //       then have @test(.aarch64, .llvm) instead of current special handling.
+                //       also add a new annotation for declaring macros with some other type as the argument where it const evals the expr before calling the macro.
+                //       that should be doable in the language once I allow user macros to modify functions like the builtin ones do.
+                //       -- Apr 19
                 if func.has_tag(Flag::Test) {
                     // TODO: actually use this.
                     // TODO: probably want referencable_name=false?
@@ -1191,6 +1197,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::PrefixMacro { name, arg, target } => {
                 let name_str = self.pool.get(name.0);
+                // TODO: dont do the builtin ones this way. put them in thier own function and expose them as @ct @comptime_addr(_) @call_conv(RustPrefixMacro) === fn name(&mut self, arg: FatExpr, target: FatExpr) -> FatExpr;
+                //       then you don't have to eat the these checks every time, you just get there when you get there.
+                //       plus it makes the transition to writing them in the language smoother. until then, the only cost is that it becomes a virtual call.
                 // TODO: this doesn't work in general because it doesnt recalculate closure captures.
                 if name_str == "with_var" {
                     if let Expr::Tuple(exprs) = &mut arg.expr {
@@ -2657,12 +2666,29 @@ impl<'a, 'p> Compile<'a, 'p> {
             VarType::Const => {
                 let mut val = match value {
                     Some(value) => {
-                        // You don't need to precompile, immediate_eval_expr will do it for you.
-                        // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
-                        // This makes addr_of const for @enum work
-                        let res = self.compile_expr(result, value, ty.ty())?;
-
-                        self.immediate_eval_expr_in(result, value.clone(), res.ty())?
+                        // TODO: just treat @builtin as a normal expression instead of a magic thing that const looks for so you can do 'const Type: @builtin("Type") = @builtin("Type");'
+                        //       then you dont have to eat this check for every constant, you just get there when you get there.
+                        if let Some((arg, _)) = value.expr.as_prefix_macro(Flag::Builtin) {
+                            let name_str = self.pool.get(name.0);
+                            let expected = unwrap!(arg.as_string(), "@builtin requires string argument: {name_str}");
+                            assert_eq!(name.0, expected, "builtin name mismatch: {:?}", name_str);
+                            if no_type {
+                                if name_str == "Type" {
+                                    *ty = LazyType::Finished(TypeId::ty());
+                                } else {
+                                    err!("@builtin const requires type hint {}", name.log(self.pool));
+                                }
+                            }
+                            unwrap!(self.builtin_constant(name_str), "non-blessed const marked @builtin: {:?}", name_str)
+                                .0
+                                .into()
+                        } else {
+                            // You don't need to precompile, immediate_eval_expr will do it for you.
+                            // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
+                            // This makes addr_of const for @enum work
+                            let res = self.compile_expr(result, value, ty.ty())?;
+                            self.immediate_eval_expr_in(result, value.clone(), res.ty())?
+                        }
                     }
                     None => {
                         if let Some(import_path) = annotations.iter().find(|a| a.name == Flag::Import.ident()) {
@@ -2683,7 +2709,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             val
                         } else {
                             let name = self.pool.get(name.0);
-                            unwrap!(self.builtin_constant(name), "uninit (non-blessed) const: {:?}", name).0.into()
+                            err!("const binding '{name}' must have a value",)
                         }
                     }
                 };

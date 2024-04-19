@@ -19,6 +19,7 @@
 
 ## Feature Ideas
 
+- adding 'e->name(a) === (e.vptr.name)(e, a)' would make <- the "function oriented programming" operator and -> the "object-al programming" operator.
 - need chained compile errors.
   - maybe loc should be a specific token so you don't highlight the whole expression just to complain about a function signature
   - macros should show both expansion site and code that generated it.

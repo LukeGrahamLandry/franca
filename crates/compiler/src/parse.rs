@@ -212,6 +212,10 @@ impl<'a, 'p> Parser<'a, 'p> {
             At => {
                 self.start_subexpr();
                 self.eat(At)?;
+                if self.peek() == TokenType::LeftParen {
+                    return Err(self.error_next(String::from("'@(' is reserved for complex macro calls")));
+                }
+
                 let name = self.ident()?;
                 let arg = Box::new(self.parse_tuple()?);
 
@@ -229,6 +233,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     target,
                 }))
             }
+            Dot => Err(self.error_next(String::from("leading '.' is reserved for inferred type enum constants."))),
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }
     }
@@ -385,6 +390,24 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn parse_stmt(&mut self) -> Res<FatStmt<'p>> {
+        let stmt = self.parse_stmt_inner()?;
+        // TODO: if you're sad that this check is slow... fix the ambiguity problem...
+        if !stmt.annotations.is_empty() && !matches!(stmt.stmt, Stmt::DeclFunc(_)) {
+            for s in &stmt.annotations {
+                match Flag::try_from(s.name) {
+                    Ok(Flag::Pub | Flag::Import) => {}
+                    _ => {
+                        // TODO: error in wrong place.
+                        return Err(self.error_next(
+                            "TODO: unknown stmt annotation would be ignored. for now you can wrap the expression in brackets to invoke the macro as an expression".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(stmt)
+    }
+    fn parse_stmt_inner(&mut self) -> Res<FatStmt<'p>> {
         self.start_subexpr();
         let annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
