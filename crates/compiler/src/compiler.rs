@@ -867,14 +867,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
+    pub fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
+        assert!(expr.ty.0 < self.program.types.len() as u64);
+
         // TODO: it seems like i shouldn't compile something twice
         // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
         let old = expr.ty;
 
         let mut res = self.compile_expr_inner(result, expr, requested)?;
         if !expr.ty.is_unknown() {
-            self.type_check_arg(expr.ty, res.ty(), "sanity ICE")?;
+            self.type_check_arg(expr.ty, res.ty(), format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak())?;
+            //"sanity ICE")?;
         }
         if let Some(requested) = requested {
             // TODO: its possible to write code that gets here without being caught first.
@@ -1398,7 +1401,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // assert_eq!(self.program.slot_count(ty), value.len());
                 if ty == TypeId::ty() {
                     if let Ok(id) = value.clone().single()?.to_int() {
-                        value = Values::One(Value::Type(TypeId(id as u32)))
+                        value = Values::One(Value::Type(TypeId(id as u64)))
                     }
                 }
                 let result = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
@@ -1444,25 +1447,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 err!("expected binary literal not {arg:?}",);
-            }
-            Flag::Compile_Ast => {
-                let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
-                self.compile_expr(result, &mut expr, None)?;
-                Ok(expr.serialize_one())
-            }
-            // TODO: need to be able to have generics like  fn const_eval_ast(T) Fn(AstExpr, T);
-            Flag::Const_Eval_String => {
-                let mut expr: FatExpr = unwrap!(arg.deserialize(), "");
-                let ty = String::get_type(self.program);
-                let result = self.compile_expr(result, &mut expr, Some(ty))?;
-                assert_eq!(result.ty(), ty);
-                result.get()
-            }
-            Flag::Const_Eval_Type => {
-                let mut expr: FatExpr = unwrap!(arg.deserialize(), "");
-                let result = self.compile_expr(result, &mut expr, Some(TypeId::ty()))?;
-                assert_eq!(result.ty(), TypeId::ty());
-                result.get()
             }
             _ => err!("Macro send unknown message: {name:?} with {arg:?}",),
         }

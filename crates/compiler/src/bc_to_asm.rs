@@ -241,8 +241,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.load_imm(x0, *i as u64);
                         self.set_slot(x0, *slot);
                     }
-                    Value::Symbol(i) | Value::Type(TypeId(i)) => {
+                    Value::Symbol(i) => {
                         self.load_imm(x0, *i as u64);
+                        self.set_slot(x0, *slot);
+                    }
+                    Value::Type(TypeId(i)) => {
+                        self.load_imm(x0, *i);
                         self.set_slot(x0, *slot);
                     }
                     &Value::Bool(b) => {
@@ -732,7 +736,8 @@ impl ConstBytes {
             &Value::I64(i) => out.push(i),
             &Value::Bool(i) => out.push(i as i64),
             &Value::OverloadSet(i) | &Value::GetFn(FuncId(i)) => out.push(i as i64),
-            &Value::Symbol(i) | &Value::Type(TypeId(i)) => out.push(i as i64),
+            &Value::Symbol(i) => out.push(i as i64),
+            &Value::Type(TypeId(i)) => out.push(i as i64),
             Value::Unit => out.push(0), // TODO
             Value::Poison | Value::InterpAbsStackAddr(_) => unreachable!(),
             &Value::GetNativeFnPtr(i) => {

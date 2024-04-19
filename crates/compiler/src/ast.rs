@@ -22,7 +22,7 @@ use std::{
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
-pub struct TypeId(pub u32);
+pub struct TypeId(pub u64);
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
@@ -932,7 +932,7 @@ impl<'p> Program<'p> {
         };
 
         for (i, ty) in program.types.iter().enumerate() {
-            program.type_lookup.insert(ty.clone(), TypeId(i as u32));
+            program.type_lookup.insert(ty.clone(), TypeId(i as u64));
         }
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -950,7 +950,7 @@ impl<'p> Program<'p> {
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            let ty_final = TypeId(placeholder as u32);
+            let ty_final = TypeId(placeholder as u64);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::simple_struct(vec![], n));
@@ -975,7 +975,7 @@ impl<'p> Program<'p> {
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            let ty_final = TypeId(placeholder as u32);
+            let ty_final = TypeId(placeholder as u64);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::Struct {
@@ -1079,7 +1079,7 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
         let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
-        TypeId(id as u32)
+        TypeId(id as u64)
     }
 
     pub fn emit_inline_llvm_ir(&mut self) -> String {
@@ -1150,8 +1150,8 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
-            self.type_lookup.insert(ty, TypeId(id as u32));
-            TypeId(id as u32)
+            self.type_lookup.insert(ty, TypeId(id as u64));
+            TypeId(id as u64)
         })
     }
 
@@ -1663,12 +1663,8 @@ pub enum Flag {
     Operator_Ampersand_Prefix,
     Infer_Raw_Deref_Type,
     Promote_Closure,
-    Print_Ast,
-    Clone_Ast,
     Get_Type_Int,
     Compile_Ast,
-    Const_Eval_String,
-    Const_Eval_Type,
     Flat_Call,
     Builtin,
     _Reserved_Count_,

@@ -425,7 +425,8 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                             }
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
                             Value::OverloadSet(n) | Value::GetFn(FuncId(n)) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
-                            Value::Type(TypeId(n)) | Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
+                            Value::Type(TypeId(n)) => LLVMConstInt(ty, n, LLVMBool::from(false)),
+                            Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
                             Value::GetNativeFnPtr(ff) => {
                                 ty = self.func_type(ff);
                                 unwrap!(self.llvm.get_fn(f), "GetNativeFnPtr on uncompiled {f:?}")

@@ -464,6 +464,14 @@ impl Value {
             None
         }
     }
+
+    pub(crate) fn to_type(self) -> Option<TypeId> {
+        if let Value::Type(f) = self {
+            Some(f)
+        } else {
+            None
+        }
+    }
 }
 
 impl From<Value> for Values {
@@ -560,7 +568,8 @@ impl<'p> Value {
 
 pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
     match &compile.program[ty] {
-        TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => err!("bad type",),
+        // TODO: ::any must mean it was a value so serialized as *const Value? -- Apr 19. czurremnt brokwn thes
+        TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => err!("bad type {}", compile.program.log_type(ty)),
         TypeInfo::Unit => {
             let _ = unwrap!(ints.next(), "");
             out.push(Value::Unit);
@@ -583,7 +592,7 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         }
         TypeInfo::Type => {
             let n = unwrap!(ints.next(), "");
-            out.push(Value::Type(TypeId(n as u32)));
+            out.push(Value::Type(TypeId(n as u64)));
         }
         TypeInfo::OverloadSet => {
             let n = unwrap!(ints.next(), "");
@@ -624,17 +633,23 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             values_from_ints(compile, ty, ints, out)?;
 
             for _ in 0..payload_size - value_size {
-                out.push(Value::I64(123)); // padding
+                // NOTE: the other guy must have already put padding there, so we have to pop that, not just add our own.
+                // TODO: should preserve the value so you can do weird void cast tricks but meh until i remove the interp since I can't reconstruct the right types anyway.
+                let padding = unwrap!(ints.next(), "");
+                debug_assert!(
+                    padding == 88888 || padding == 99999,
+                    "TODO: this can be removed if you don't want to require specific padding values anymore."
+                );
+                out.push(Value::I64(99999));
             }
             let end = out.len();
             assert_eq!(end - start, payload_size + 1, "{out:?}");
         }
         TypeInfo::FnPtr(_) => todo!(),
-        &TypeInfo::Ptr(ty) => {
+        &TypeInfo::Ptr(val_ty) => {
             // TODO: untested -- Apr 19
             // TODO: this assumes that it points to exactly one thing so slices had special handling somewhere else.
             let addr = unwrap!(ints.next(), "") as usize;
-            let val_ty = unwrap!(compile.program.unptr_ty(ty), "unreachable");
             let count = compile.ready.sizes.slot_count(compile.program, val_ty);
             let values = unsafe { &*slice_from_raw_parts_mut(addr as *mut i64, count) };
             let mut output = vec![];

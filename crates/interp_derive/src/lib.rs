@@ -224,7 +224,7 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                     },
                 }
             });
-            let recurse = data.variants.iter().map(|f| {
+            let recurse_fields = data.variants.iter().map(|f| {
                 let left = enum_match_left(&f.ident, &f.fields);
                 let (extra, prefix) = if let syn::Fields::Unnamed(unnamed) = &f.fields {
                     let recurse = unnamed.unnamed.iter().enumerate().map(|(i, f)| {
@@ -250,10 +250,10 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
             quote! {
                 #[allow(unused_variables)]
                 let varient_size = match &self {  #(#recurse_tag)* };
-                match self {  #(#recurse)* };
+                match self {  #(#recurse_fields)* };
                 let payload_size = Self::size() - 1;
                 for _ in 0..(payload_size-varient_size) {
-                    values.push(Value::I64(123));  // TODO: less dumb padding
+                    values.push(Value::I64(88888));  // TODO: less dumb padding
                 }
 
             }

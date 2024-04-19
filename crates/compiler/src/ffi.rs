@@ -38,7 +38,12 @@ pub trait InterpSend<'p>: Sized {
         }
         let value: Vec<_> = value.into();
         debug_assert_eq!(value.len(), Self::size(), "{value:?}");
-        Self::deserialize(&mut value.into_iter())
+        let mut the_iter = value.into_iter();
+        let out = Self::deserialize(&mut the_iter);
+        if out.is_some() {
+            debug_assert!(the_iter.next().is_none(), "didnt consume all values");
+        }
+        out
     }
 
     fn size() -> usize;
@@ -67,9 +72,7 @@ pub fn deserialize_from_ints<'p, 'a, T: InterpSend<'p> + Sized>(values: &mut imp
 
 impl Values {
     pub fn deserialize<'p, T: InterpSend<'p> + Sized>(self) -> Option<T> {
-        let values = self.vec(); // TODO: no alloc for one
-        debug_assert_eq!(values.len(), T::size());
-        T::deserialize(&mut values.into_iter()) // TODO: deeper flatten?
+        T::deserialize_one(self) // TODO: deeper flatten?
     }
 }
 
@@ -221,7 +224,7 @@ impl<'p> InterpSend<'p> for TypeId {
     }
 
     fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        Some(TypeId(*values.next()? as u32))
+        Some(TypeId(*values.next()? as u64))
     }
 
     fn size() -> usize {
@@ -720,7 +723,8 @@ pub mod c {
         match v {
             Value::I64(v) => Arg::new(v),
             Value::Bool(v) => Arg::new(v),
-            Value::Symbol(v) | Value::Type(TypeId(v)) => Arg::new(v),
+            Value::Symbol(v) => Arg::new(v),
+            Value::Type(TypeId(v)) => Arg::new(v),
             // This is weird because I want Value to impl Hash so it can't contain a float, but the u64 is f64::to_bits so it works as a pointer
             Value::F64(v) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
@@ -766,7 +770,7 @@ pub mod c {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
         } else if f_ty.ret == TypeId::ty() {
-            let result: u32 = unsafe { b.into_cif().call(ptr, &args) };
+            let result: u64 = unsafe { b.into_cif().call(ptr, &args) };
             Value::Type(TypeId(result)).into()
         } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 || f_ty.ret == TypeId::void_ptr() {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.

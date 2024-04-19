@@ -3,11 +3,11 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{FnType, FuncId, Program, TypeId, TypeInfo};
+use crate::ast::{FatExpr, FnType, FuncId, Program, TypeId, TypeInfo};
 use crate::bc::{values_from_ints, Values};
 use crate::compiler::{Compile, Res};
 use crate::ffi::InterpSend;
-use crate::logging::unwrap;
+use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
 use std::fmt::Write;
 use std::hint::black_box;
@@ -31,13 +31,15 @@ macro_rules! bounce_flat_call {
                 debug_assert_eq!(arg_count, <$Arg>::size() as i64);
                 debug_assert_eq!(ret_count, <$Ret>::size() as i64);
                 unsafe {
-                    let arg = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
-                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut arg.iter()).unwrap();
+                    let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
+                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter()).unwrap();
                     let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_one();
                     let ret = compile.aarch64.constants.store_to_ints(ret.vec().iter());
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
+                    out.fill(0); // TODO: remove
                     out.copy_from_slice(&ret);
+                    argslice.fill(0); // TODO: remove
                 }
             }
         }
@@ -118,18 +120,6 @@ pub const COMPILER_LATE: &[(&str, *const u8)] = &[
         resolve_backtrace_symbol as *const u8,
     ),
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
-];
-
-pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
-    ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
-    ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback),
-    (
-        "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
-        bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
-    ),
-    ("fn intern_type(ty: TypeInfo) Type;", bounce_flat_call!(TypeInfo, TypeId, intern_type)),
-    // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
-    ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
 ];
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -262,24 +252,24 @@ extern "C-unwind" fn tag_symbol<'p>(program: &&Program<'p>, enum_ty: TypeId, tag
 
 extern "C-unwind" fn pair_type(program: &mut &mut Program, a: TypeId, b: TypeId) -> TypeId {
     hope(|| {
-        assert!(a.0 < program.types.len() as u32, "TypeId OOB {}", a.0);
-        assert!(b.0 < program.types.len() as u32, "TypeId OOB {}", b.0);
+        assert!(a.0 < program.types.len() as u64, "TypeId OOB {}", a.0);
+        assert!(b.0 < program.types.len() as u64, "TypeId OOB {}", b.0);
         Ok(program.intern_type(TypeInfo::Tuple(vec![a, b])))
     })
 }
 
 extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
-        assert!(arg.0 < program.types.len() as u32, "TypeId OOB {}", arg.0);
-        assert!(ret.0 < program.types.len() as u32, "TypeId OOB {}", ret.0);
+        assert!(arg.0 < program.types.len() as u64, "TypeId OOB {}", arg.0);
+        assert!(ret.0 < program.types.len() as u64, "TypeId OOB {}", ret.0);
         Ok(program.intern_type(TypeInfo::Fn(FnType { arg, ret })))
     })
 }
 
 extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
-        assert!(arg.0 < program.types.len() as u32, "TypeId OOB {}", arg.0);
-        assert!(ret.0 < program.types.len() as u32, "TypeId OOB {}", ret.0);
+        assert!(arg.0 < program.types.len() as u64, "TypeId OOB {}", arg.0);
+        assert!(ret.0 < program.types.len() as u64, "TypeId OOB {}", ret.0);
         Ok(program.intern_type(TypeInfo::FnPtr(FnType { arg, ret })))
     })
 }
@@ -362,6 +352,11 @@ extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
     println!("{}", p.log_type(a));
 }
 
+extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) -> i64 {
+    println!("{}", a.log(p.program.pool));
+    0 // HACK
+}
+
 extern "C-unwind" fn number_of_functions(program: &mut &mut Program) -> i64 {
     program.funcs.len() as i64
 }
@@ -427,6 +422,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     let mut out = vec![];
     values_from_ints(compile, ret_type, &mut ret.into_iter(), &mut out)?;
+    assert_eq!(out.len(), ret_count);
     Ok(out.into())
 }
 
@@ -434,12 +430,67 @@ fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
     a * b + c
 }
 
+pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
+    ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
+    ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback),
+    (
+        "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
+        bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
+    ),
+    ("fn intern_type(ty: TypeInfo) Type;", bounce_flat_call!(TypeInfo, TypeId, intern_type)),
+    // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
+    ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
+    // TODO: need to be able to have generics like  fn const_eval_ast(T) Fn(AstExpr, T);
+    (
+        "fn const_eval_type(value: FatExpr) Type;",
+        bounce_flat_call!(FatExpr, TypeId, const_eval_type),
+    ),
+    (
+        "fn const_eval_string(value: FatExpr) Str;",
+        bounce_flat_call!(FatExpr, String, const_eval_string),
+    ),
+    // Calls Compiler::compile_expr
+    // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
+    (
+        "fn compile_ast(value: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, compile_ast),
+    ),
+    ("fn debug_log_ast(expr: FatExpr) i64;", bounce_flat_call!(FatExpr, i64, log_ast)),
+];
+
 fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
     compile.program.intern_type(ty)
 }
 
 fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
     compile.program[ty].clone()
+}
+
+fn const_eval_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> TypeId {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let res = compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(TypeId::ty())).unwrap();
+    assert_eq!(res.ty(), TypeId::ty());
+    compile.pending_ffi.push(Some(result));
+    res.get().unwrap().single().unwrap().to_type().unwrap()
+}
+
+fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> String {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let ty = String::get_type(compile.program);
+    let res = compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(ty)).unwrap();
+    assert_eq!(res.ty(), ty);
+    compile.pending_ffi.push(Some(result));
+    let res = res.get().unwrap();
+    String::deserialize_one(res).unwrap()
+}
+
+fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    println!("START {}", expr.log(compile.pool));
+    compile.compile_expr(unsafe { &mut *result }, &mut expr, None).unwrap();
+    println!("DONE  {} {:?}", expr.log(compile.pool), expr.ty);
+    compile.pending_ffi.push(Some(result));
+    expr
 }
 
 #[cfg(target_arch = "aarch64")]

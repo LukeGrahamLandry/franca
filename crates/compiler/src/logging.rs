@@ -268,7 +268,7 @@ impl<'p> Program<'p> {
         let mut s = String::new();
         writeln!(s, "=== {} CACHED TYPES ===", self.types.len());
         for (i, ty) in self.types.iter().enumerate() {
-            writeln!(s, "- {:?} = {} = {:?};", TypeId(i as u32), self.log_type(TypeId(i as u32)), ty,);
+            writeln!(s, "- {:?} = {} = {:?};", TypeId(i as u64), self.log_type(TypeId(i as u64)), ty,);
         }
         writeln!(s, "====================");
         s
