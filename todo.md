@@ -96,6 +96,15 @@
   - feels sad if my asm backend doesn't know it can do int ne in one instruction,
     but for comptime, its probably not worth an opt pass that tries to fix conditionals.
 - comptime code should be able to just compile a string which means
+- 'Fn(Arg, Ret)' is trash because you have problem with tuples being flattened so its hard to say multiple args.
+  - 'fn(arg: Arg) Ret' would be consistant with declaration.
+  - maybe '@fn(arg: Arg) Ret' for function type is less ambigous? but then need to allow keyword as name. maybe @func instead?
+  - maybe its dumb to use macro for something so basic. if thats the only solution to weird tuples,
+    you'll be tempted to define those wrappers for any function that takes a type, which is lots of them.
+    really I should just be more consistant with flattening.
+- I like multi-argument functions just taking tuples so you can refer to function types generically.
+  but that means if tuple type is written as tuple of types, you can't have a function that takes multiple types as arguments in a row
+  because it doesn't know where to split them if you flatten too soon. when fn f(X: Type, Y: Type) then f((a, b), c) vs f(a, (b, c))
 
 ## UB
 

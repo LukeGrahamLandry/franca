@@ -397,10 +397,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else {
                         result.push(Bc::CloneRange { from, to: output });
                     }
-                } else if let Some((value, _)) = result.constants.get(*var) {
+                } else if let Some((value, ty)) = result.constants.get(*var) {
+                    let value = value.vec();
+                    debug_assert_eq!(output.count, self.slot_count(ty));
+                    debug_assert_eq!(output.count, value.len(), "const: {} = {value:?}", self.program.log_type(ty));
                     // TODO: sometimes you probably want to reference by pointer
                     //       like this will load a string byte by byte
-                    for (i, value) in value.vec().into_iter().enumerate() {
+                    for (i, value) in value.into_iter().enumerate() {
                         result.push(Bc::LoadConstant {
                             slot: output.offset(i),
                             value,

@@ -47,9 +47,16 @@ pub fn interp_run<'p: 'a, 'a>(
     let ret = compile.program[f].unwrap_ty().ret;
     assert!(!ret.is_any() && !ret.is_unknown());
     let return_slot_count = compile.ready.sizes.slot_count(compile.program, ret);
+    if let Some(result) = &mut result {
+        compile.pending_ffi.push(*result as *mut FnWip);
+    }
 
     let mut interp = Interp::new(compile.pool);
-    interp.run(f, arg, when, return_slot_count, compile, &mut result)
+    let res = interp.run(f, arg, when, return_slot_count, compile);
+    if result.is_some() {
+        compile.pending_ffi.pop().unwrap();
+    }
+    res
 }
 
 impl<'a, 'p: 'a> Interp<'p> {
@@ -62,15 +69,7 @@ impl<'a, 'p: 'a> Interp<'p> {
         }
     }
 
-    fn run(
-        &mut self,
-        f: FuncId,
-        arg: Values,
-        when: ExecTime,
-        return_slot_count: usize,
-        compile: &mut Compile<'a, 'p>,
-        result: &mut Option<&mut FnWip<'p>>,
-    ) -> Res<'p, Values> {
+    fn run(&mut self, f: FuncId, arg: Values, when: ExecTime, return_slot_count: usize, compile: &mut Compile<'a, 'p>) -> Res<'p, Values> {
         // A fake callframe representing the calling rust compile.program.
         let marker_callframe = CallFrame {
             stack_base: StackAbsolute(self.value_stack.len()),
@@ -96,7 +95,7 @@ impl<'a, 'p: 'a> Interp<'p> {
 
         // Call the function
         self.push_callframe(f, ret, arg, when, compile)?;
-        self.run_inst_loop(compile, result)?;
+        self.run_inst_loop(compile)?;
 
         // Give the return value to the caller.
         let frame = unwrap!(self.call_stack.last(), "");
@@ -112,7 +111,7 @@ impl<'a, 'p: 'a> Interp<'p> {
         Ok(result)
     }
 
-    fn run_inst_loop(&mut self, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, ()> {
+    fn run_inst_loop(&mut self, compile: &mut Compile<'a, 'p>) -> Res<'p, ()> {
         loop {
             self.update_debug(&compile.ready);
             let i = self.next_inst(&compile.ready);
@@ -166,7 +165,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                     } else if compile.program[f].body.is_none() {
                         let abs = self.range_to_index(ret);
                         let name = self.pool.get(compile.program[f].name);
-                        let value = self.runtime_builtin(name, arg.clone(), compile, &mut None)?;
+                        let value = self.runtime_builtin(name, arg.clone(), compile)?;
                         self.expand_maybe_tuple(value, abs)?;
                     } else {
                         self.push_callframe(f, ret, arg, when, compile)?;
@@ -193,7 +192,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                     let arg = self.take_slots(arg);
                     let abs = self.range_to_index(ret);
                     self.bump_ip();
-                    let value = self.runtime_builtin(name, arg.clone(), compile, result)?;
+                    let value = self.runtime_builtin(name, arg.clone(), compile)?;
                     self.expand_maybe_tuple(value, abs)?;
                 }
                 &Bc::Ret(slot) => {
@@ -416,7 +415,7 @@ impl<'a, 'p: 'a> Interp<'p> {
         }
     }
 
-    fn runtime_builtin(&mut self, name: &str, arg: Values, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, Values> {
+    fn runtime_builtin(&mut self, name: &str, arg: Values, compile: &mut Compile<'a, 'p>) -> Res<'p, Values> {
         logln!("runtime_builtin: {name} {arg:?}");
         let value = match name {
             "panic" => {
@@ -529,7 +528,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                 let arg = Values::Many(v);
 
                 // aaaaa
-                self.call_compiler(Flag::Literal_Ast.ident(), arg, compile, result)?
+                self.call_compiler(Flag::Literal_Ast.ident(), arg, compile)?
             }
             "unquote_macro_apply_placeholders" => {
                 let (ptr, count) = arg.to_pair()?;
@@ -539,21 +538,25 @@ impl<'a, 'p: 'a> Interp<'p> {
                 let arg = Values::Many(v);
 
                 // aaaaa
-                self.call_compiler(Flag::Unquote_Macro_Apply_Placeholders.ident(), arg, compile, result)?
+                self.call_compiler(Flag::Unquote_Macro_Apply_Placeholders.ident(), arg, compile)?
             }
 
             _ => {
                 // TODO: since this nolonger checks if its an expected name, you get worse error messages.
                 let name = self.pool.intern(name);
-                self.call_compiler(name, arg, compile, result)?
+                self.call_compiler(name, arg, compile)?
             }
         };
         Ok(value)
     }
 
-    fn call_compiler(&mut self, name: Ident<'p>, arg: Values, compile: &mut Compile<'a, 'p>, result: &mut Option<&mut FnWip<'p>>) -> Res<'p, Values> {
-        let result = unwrap!(result.as_mut(), "ICE: unexpected call_compiler: {}", compile.pool.get(name));
-        compile.handle_macro_msg(result, Flag::try_from(name)?, arg)
+    fn call_compiler(&mut self, name: Ident<'p>, arg: Values, compile: &mut Compile<'a, 'p>) -> Res<'p, Values> {
+        let result = unwrap!(compile.pending_ffi.pop(), "ICE: unexpected call_compiler: {}", compile.pool.get(name));
+        // SAFETY: this should be pointing up somewhere higher on the stack.
+        let result = unsafe { &mut *result };
+        let res = compile.handle_macro_msg(result, Flag::try_from(name)?, arg);
+        compile.pending_ffi.push(result as *mut FnWip);
+        res
     }
 
     fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, compile: &Compile<'a, 'p>) -> Res<'p, ()> {

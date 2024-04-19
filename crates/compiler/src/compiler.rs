@@ -80,6 +80,7 @@ pub struct Compile<'a, 'p: 'a> {
     pub tests: Vec<FuncId>,
     pub aarch64: Jitted,
     pub ready: BcReady<'p>,
+    pub pending_ffi: Vec<*mut FnWip<'p>>,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +124,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             ready: BcReady::default(),
             save_bootstrap: vec![],
             tests: vec![],
+            pending_ffi: vec![],
         }
     }
 
@@ -868,9 +870,46 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
         // TODO: it seems like i shouldn't compile something twice
         // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
-        let res = self.compile_expr_inner(result, expr, requested)?;
+        let old = expr.ty;
+
+        let mut res = self.compile_expr_inner(result, expr, requested)?;
+        if !expr.ty.is_unknown() {
+            self.type_check_arg(expr.ty, res.ty(), "sanity ICE")?;
+        }
+        if let Some(requested) = requested {
+            // TODO: its possible to write code that gets here without being caught first.
+            //       should fix so everywhere that relies on 'requested' does thier own typecheck because they can give a more contextual error message.
+            //       but its annoying becuase this happens first so you cant just sanity check here and i dont want to trust that everyone remembered.
+            //       so maybe its better to have more consistant use of the context stack so you always know what you're doing and forwarding typecheck responsibility doesnt mean poor error messages.
+            //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
+            //       -- Apr 19
+            // format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak()
+            self.type_check_arg(res.ty(), requested, "sanity ICE")?;
+        }
+
+        if let Structured::TupleDifferent(_, parts) = &res {
+            if parts.iter().all(|p| matches!(p, Structured::Const(_, _))) {
+                err!("sanity ICE",)
+            }
+        }
+
+        if let Structured::Const(ty_res, _) = &res {
+            if let &Expr::Value { ty, .. } = &expr.expr {
+                self.type_check_arg(ty, *ty_res, "sanity ICE")?;
+            }
+            // TODO: why is that not always true and why do tests fail if i fix it here.
+            //       like: 'else expr.expr = Expr::Value { ty: *ty_res, value: values.clone(), }'
+            //       in const pattern match I destruct ::Const to ::TupleDifferent where it expects the expr to be ::Tuple not ::Value.
+            //       should be fixable by iterating over sizes like emit_bc::bind_args does.     -- Apr 19
+        } else if let Expr::Value { ty, value } = &expr.expr {
+            // TODO: ideally this would either be handled only here (and nowhere else would bother) or never get here.
+            res = Structured::Const(*ty, value.clone());
+        }
         expr.ty = res.ty();
-        // TODO: should be able to .expr=Value:: if Structured::Const
+        if !old.is_unknown() {
+            // TODO: cant just assert_eq because it does change for VoidPtr.
+            self.type_check_arg(expr.ty, old, "sanity ICE")?;
+        }
         Ok(res)
     }
 
@@ -1016,6 +1055,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
                     "deref" => {
+                        let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr.ty()), "deref not ptr: {}", self.program.log_type(ptr.ty()));
 
@@ -1420,7 +1460,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ty = String::get_type(self.program);
                 let result = self.compile_expr(result, &mut expr, Some(ty))?;
                 assert_eq!(result.ty(), ty);
-                // TODO: actually typecheck because requested doesn't force it.
                 result.get()
             }
             Flag::Const_Eval_Type => {
@@ -2056,11 +2095,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
 
-        if found == expected || found.is_any() || expected.is_any() || found.is_never() || expected.is_never() {
+        debug_assert!(!found.is_any() && !expected.is_any(), "wip removing Any");
+
+        if found == expected {
             Ok(())
         } else {
             match (&self.program[found], &self.program[expected]) {
+                // :Coercion // TODO: only one direction makes sense
+                (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
                 (TypeInfo::Int(a), TypeInfo::Int(b)) => {
+                    // :Coercion
                     if a.bit_count == b.bit_count || a.bit_count == 64 || b.bit_count == 64 {
                         return Ok(()); // TODO: not this!
                     }
@@ -2087,12 +2131,33 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
                 (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
-                (TypeInfo::Tuple(_), TypeInfo::Type) | (TypeInfo::Type, TypeInfo::Tuple(_)) => return Ok(()),
+                (TypeInfo::Tuple(found_elements), TypeInfo::Type) => {
+                    // :Coercion
+                    if found_elements.iter().all(|e| self.type_check_arg(*e, TypeId::ty(), msg).is_ok()) {
+                        return Ok(());
+                    }
+                }
+
+                (TypeInfo::Type, TypeInfo::Tuple(_expected_elements)) => {
+                    err!("TODO: expand out a tuple type?",)
+                }
+
+                (TypeInfo::Unit, TypeInfo::Type) => {
+                    // :Coercion
+                    // TODO: more consistant handling of empty tuple?
+                    return Ok(());
+                }
                 // TODO: correct varience
+                // TODO: calling convention for FnPtr
                 (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) | (&TypeInfo::FnPtr(f), &TypeInfo::FnPtr(e)) => {
                     if self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
                         return Ok(());
                     }
+                }
+                (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => {
+                    // :Coercion
+                    // scary because relies on custom handling for constdecls?
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -2426,7 +2491,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         arg_values,
                         func.synth_name(self.pool)
                     );
-                    let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() { v } else { todo!() };
+                    let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() {
+                        v
+                    } else {
+                        err!("TODO: pattern match on non-tuple",)
+                    };
                     assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
                     let mut current_fn = original_f;
                     let mut skipped_args = vec![];
@@ -2756,8 +2825,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // HACK. todo: general overloads for cast()
                         val = Value::Type(self.to_type(val)?).into()
                     } else {
-                        // TODO: you want the type check but doing it against type_of_raw is worthless
-                        // self.type_check_arg(found_ty, expected_ty, "const decl")?;
+                        // TODO: you want the type check but doing it against type_of_raw is kinda worthless
+                        self.type_check_arg(found_ty, expected_ty, "const decl")?;
                     }
 
                     expected_ty
