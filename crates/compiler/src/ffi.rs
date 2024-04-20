@@ -601,7 +601,7 @@ fn interp_send() {
 
     let mut bytes = ConstBytes::default();
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut p = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
+    let mut p = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
     let one = HelloWorld { a: 123, b: 345 };
     let two = one.serialize_one();
     let three = HelloWorld::deserialize_one(two.clone()).unwrap();

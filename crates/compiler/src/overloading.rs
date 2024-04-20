@@ -320,7 +320,7 @@ pub fn has_arch_split<'p>(program: &Program<'p>, overloads: &OverloadSet<'p>) ->
     for o in &overloads.ready {
         for a in &program[o.func].annotations {
             if let Ok(flag) = a.name.try_into() {
-                if matches!(flag, Flag::Llvm | Flag::Interp | Flag::No_Interp | Flag::Aarch64) {
+                if matches!(flag, Flag::Llvm | Flag::Aarch64) {
                     return true;
                 }
             }
@@ -339,14 +339,7 @@ pub fn filter_arch<'p>(program: &Program<'p>, overloads: &mut OverloadSet<'p>, w
 
     // TODO: kinda cringe.
     match target {
-        TargetArch::Interp => overloads
-            .ready
-            .retain(|f| !program[f.func].has_tag(Flag::Llvm) && !program[f.func].has_tag(Flag::No_Interp)),
-        TargetArch::Aarch64 => overloads
-            .ready
-            .retain(|f| !program[f.func].has_tag(Flag::Llvm) && !program[f.func].has_tag(Flag::Interp)),
-        TargetArch::Llvm => overloads
-            .ready
-            .retain(|f| !program[f.func].has_tag(Flag::Aarch64) && !program[f.func].has_tag(Flag::Interp)),
+        TargetArch::Aarch64 => overloads.ready.retain(|f| !program[f.func].has_tag(Flag::Llvm)),
+        TargetArch::Llvm => overloads.ready.retain(|f| !program[f.func].has_tag(Flag::Aarch64)),
     }
 }

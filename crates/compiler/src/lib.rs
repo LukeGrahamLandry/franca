@@ -46,7 +46,6 @@ pub mod emit_bc;
 pub mod emit_rust;
 pub mod export_ffi;
 pub mod ffi;
-pub mod interp;
 pub mod lex;
 #[cfg(feature = "llvm")]
 pub mod llvm;

@@ -1588,7 +1588,6 @@ impl TypeId {
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 #[repr(u8)]
 pub enum TargetArch {
-    Interp = Flag::Interp as u8,
     Aarch64 = Flag::Aarch64 as u8,
     Llvm = Flag::Llvm as u8,
 }
@@ -1600,14 +1599,12 @@ pub enum TargetArch {
 #[repr(u8)]
 pub enum Flag {
     _Reserved_Null_,
-    Interp,
     Aarch64,
     Llvm,
     _Reserved_End_Arch_, // It's important which are above and below this point.
     Comptime,
     Forward,
     Generic,
-    No_Interp,
     As,
     Inline,
     NoInline,

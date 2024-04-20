@@ -3,9 +3,9 @@
 
 use compiler::{
     ast::{Program, TargetArch, TypeId},
-    bc::Value,
+    bc::{Value, Values},
     bc_to_asm::emit_aarch64,
-    compiler::{Compile, ExecTime},
+    compiler::{Compile, ExecTime, Res},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib, load_program, log_err,
@@ -264,8 +264,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     assert_eq!(comp.program[f].finished_arg, Some(TypeId::i64()));
     let arg = Value::I64(982164);
 
-    let result = match arch {
-        TargetArch::Interp => comp.run(f, arg.into(), ExecTime::Runtime, None),
+    let result: Res<'_, Values> = match arch {
         TargetArch::Aarch64 => {
             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
                 log_err(&comp, e, save);

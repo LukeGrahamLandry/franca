@@ -786,6 +786,7 @@ pub mod jit {
         ranges: Vec<*const [u8]>,
         current_start: *const u8,
         next: *mut u8,
+        old: *mut u8,
         ip_to_inst: Vec<*const u8>,
         pub constants: ConstBytes,
     }
@@ -798,6 +799,7 @@ pub mod jit {
             Self {
                 current_start: map.as_ptr(),
                 next: map.as_mut_ptr(),
+                old: map.as_mut_ptr(),
                 map_mut: Some(map),
                 map_exec: None,
                 dispatch: vec![],
@@ -895,6 +897,11 @@ pub mod jit {
 
         pub fn get_current(&self) -> *const u8 {
             self.next
+        }
+        pub fn get_dirty(&mut self) -> (*mut u8, *mut u8) {
+            let dirty = (self.old, self.next);
+            self.old = self.next;
+            dirty
         }
     }
 }

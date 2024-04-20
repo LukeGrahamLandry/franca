@@ -12,8 +12,6 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
-use std::thread::sleep;
-use std::time::Duration;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
@@ -25,7 +23,6 @@ use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::do_flat_call_values;
 use crate::ffi::InterpSend;
-use crate::interp::interp_run;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -230,7 +227,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             ExecTime::Both => todo!(),
         };
         let result = match arch {
-            TargetArch::Interp => interp_run(self, f, arg, when),
             TargetArch::Aarch64 => {
                 emit_aarch64(self, f, when)?;
                 let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr();
@@ -250,7 +246,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // println!("c_call {f:?} {addr:?} {arg:?} -> {}", self.program.log_type(ty.ret));
                     // TODO: !!! removin this makes it illeegal hardware insturciton.
                     //       would be really cool if that gives it time to update the other cache cause instructions and data are seperate ????!!!!
-                    sleep(Duration::from_millis(1));
+                    // sleep(Duration::from_millis(1));
+                    // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
+                    // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
+                    // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
+                    extern "C" {
+                        pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
+                    }
+
+                    let (beg, end) = self.aarch64.get_dirty();
+                    if beg != end {
+                        unsafe { __clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
+                    }
                     let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx);
                     r
                 } else {

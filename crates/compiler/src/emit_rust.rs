@@ -13,7 +13,7 @@ use crate::{err, unwrap};
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Interp);
+    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
     let mut comp = Compile::new(pool, &mut program);
     load_program(&mut comp, "").unwrap();
 
