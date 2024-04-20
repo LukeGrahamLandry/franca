@@ -19,17 +19,14 @@ there must be propoertional terrible things or I'm probably just lying.
 
 ## Progress
 
-- `src` contains the frontend and the interpreter used for comptime execution.
-- The programs in `tests` and `lib` actually work on the existing interpreter.
+- `src` contains the frontend and the jit used for comptime execution.
+- The programs in `tests` and `lib` actually work with the existing jit compiler.
 - The programs in `plan` are just trying out how potential language features feel.
 
 ### Backends
 
 - aarch64 machine code.
   - i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
-- LLVM
+  - used for comptime execution so the compiler can only run on aarch64 currently :(
+- (WIP) LLVM
   - a crossplatform optimising compiler toolchain (used by clang, rustc, swift, julia, the list goes on)
-
-### Architecture
-
-- lex, parse, resolve variable scope happens on all the code at the beginning

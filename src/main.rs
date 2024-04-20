@@ -172,7 +172,6 @@ fn run_tests_serial_for_profile() {
         let assertion_count = src.split("assert_eq(").count() - 1;
         for backend in s[..end].split(", ") {
             let arch = match backend {
-                "interp" => continue, // TargetArch::Interp,
                 "aarch64" => TargetArch::Aarch64,
                 #[cfg(not(feature = "llvm"))]
                 "llvm" => continue,

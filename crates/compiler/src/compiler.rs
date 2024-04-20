@@ -1242,6 +1242,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         match fn_val {
                             Values::One(Value::GetFn(id)) => {
                                 assert!(!self.program[id].any_const_args());
+                                // TODO: for now you just need to not make a mistake lol
+                                //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
+                                // TODO: calling convention in function type so you don't have to keep remembering to check its not both flat_call and c_call.
+                                // self.program[id].add_tag(Flag::C_Call);
+                                // assert!(!self.program[id].has_tag(Flag::Flat_Call), "TODO: cc in ptr ty");
+                                // assert!(!self.program[id].has_tag(Flag::Ct), "TODO: cc in ptr ty");
                                 add_unique(&mut result.callees, (id, ExecTime::Both));
                                 self.ensure_compiled(id, result.when)?;
                                 // The backend still needs to do something with this, so just leave it
@@ -2535,6 +2541,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - tuple of 32-bit int literals -> aarch64 asm ops
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     fn inline_asm_body(&mut self, result: &FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
+        // TODO: assert f has an arch and a calling convention annotation (I'd rather make people be explicit just guess, even if you can always tell arch).
         let src = asm.log(self.pool);
         let asm_ty = Vec::<u32>::get_type(self.program);
         let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
@@ -2581,12 +2588,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         outln!(LogTag::Jitted, "\n=======");
         // TODO: emit into the Jitted thing instead of this.
         //       maybe just keep the vec, defer dealing with it and have bc_to_asm do it?
-        //       but then interp can't use it.
         self.program[f].jitted_code = Some(ops.clone());
-        let map = crate::export_ffi::copy_to_mmap_exec(ops);
-        // Need to set comptime_addr because interp might try to call it and it doesn't know it needs to go through bc_to_asm first.
-        self.program[f].comptime_addr = Some(map.1 as u64);
-        let _ = Box::leak(map.0); // TODO: dont leak
         Ok(())
     }
 

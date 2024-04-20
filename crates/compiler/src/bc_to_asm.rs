@@ -110,8 +110,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         } else {
             let callees = self.compile.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
-                // TODO: change
-                if c.1 != ExecTime::Comptime {
+                if c.1 == self.when || c.1 == ExecTime::Both {
                     self.compile(c.0)?;
                 }
             }
@@ -222,7 +221,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.release_many(slots);
                 }
                 Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
-                Bc::CallDynamic { .. } => todo!(),
+
                 &Bc::CallSplit { rt, ct, ret, arg } => {
                     let f = if self.when == ExecTime::Comptime { ct } else { rt };
                     self.call_direct(f, ret, arg)?;
@@ -230,7 +229,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 &Bc::CallDirect { f, ret, arg } => {
                     self.call_direct(f, ret, arg)?;
                 }
-                Bc::CallBuiltin { name, .. } => todo!("{}", self.compile.program.pool.get(*name)),
                 Bc::LoadConstant { slot, value } => match value {
                     &Value::F64(n) => {
                         // Don't care that its a float since we always write it to memory anyway.
@@ -326,21 +324,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(ret(()));
                 }
                 // Note: drop is on the value, we might immediately write to that slot and someone might have a pointer to it.
-                Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
-                &Bc::Move { from, to } => {
-                    // TODO: it might be part of a struct?
-                    // if !self.slot_is_var(from) && !self.slot_is_var(to) {
-                    //     self.slots[to.0] = self.slots[from.0].take();
-                    // } else {
-                    self.get_slot(x0, from);
-                    self.set_slot(x0, to);
-                    // }
-                }
+                Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
                 &Bc::Clone { from, to } => {
                     self.get_slot(x0, from);
                     self.set_slot(x0, to);
                 }
-                Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
+                Bc::CloneRange { from, to } => {
                     for i in 0..from.count {
                         let to_unit = self.slot_type(StackOffset(to.first.0 + i)).is_unit();
                         let from_unit = self.slot_type(StackOffset(from.first.0 + i)).is_unit();
@@ -388,7 +377,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
                     self.compile.aarch64.push(brk(456));
                 }
-                Bc::CallC { f, arg, ret, ty, comp_ctx } => {
+                Bc::CallFnPtr { f, arg, ret, ty, comp_ctx } => {
                     assert!(!*comp_ctx, "flat call needs special handling");
                     self.get_slot(x16, *f);
                     self.dyn_c_call(*arg, *ret, *ty, *comp_ctx, |s| s.compile.aarch64.push(br(x16, 1)));

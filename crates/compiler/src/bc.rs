@@ -20,12 +20,6 @@ use std::ptr::slice_from_raw_parts_mut;
 
 #[derive(Clone, InterpSend, Debug)]
 pub enum Bc<'p> {
-    // Call through a runtime known function pointer.
-    CallDynamic {
-        f: StackOffset,
-        ret: StackRange,
-        arg: StackRange,
-    },
     CallDirect {
         f: FuncId,
         ret: StackRange,
@@ -34,11 +28,6 @@ pub enum Bc<'p> {
     CallSplit {
         ct: FuncId,
         rt: FuncId,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    CallBuiltin {
-        name: Ident<'p>,
         ret: StackRange,
         arg: StackRange,
     },
@@ -61,7 +50,6 @@ pub enum Bc<'p> {
     },
     DebugMarker(Ident<'p>, Ident<'p>),
     DebugLine(Span),
-    // Clone, Move, and Drop are for managing linear types.
     Clone {
         from: StackOffset,
         to: StackOffset,
@@ -70,15 +58,6 @@ pub enum Bc<'p> {
         from: StackRange,
         to: StackRange,
     },
-    Move {
-        from: StackOffset,
-        to: StackOffset,
-    },
-    MoveRange {
-        from: StackRange,
-        to: StackRange,
-    },
-    Drop(StackRange),
     SlicePtr {
         base: StackOffset,
         offset: usize,
@@ -97,7 +76,7 @@ pub enum Bc<'p> {
         to: StackOffset,
         from: StackRange,
     },
-    CallC {
+    CallFnPtr {
         f: StackOffset,
         arg: StackRange,
         ret: StackRange,

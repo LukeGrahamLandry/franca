@@ -150,51 +150,28 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.locals.last_mut().unwrap().push(full_arg_range);
 
         if !has_body {
-            // Functions without a body are always builtins.
-            // It's convient to give them a FuncId so you can put them in a variable,
-            // but just force inline call.
-
-            if func.comptime_addr.is_some() || func.llvm_ir.is_some() {
+            // These are handled at the callsite, they don't need to emit a bytecode body.
+            if func.comptime_addr.is_some() || func.llvm_ir.is_some() || func.jitted_code.is_some() {
                 // You should never actually try to run this code, the caller should have just done the call,
                 // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
                 // just too ways of emitting the call.
                 result.push(Bc::NoCompile);
-            } else {
-                println!("Bc::CallBuiltin for {f:?} {}", self.program.pool.get(func.name));
-                // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
-                //       but specializing kills the name. But before that will work anyway i need to not blindly pass on the shim args to the builtin
-                //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
-                assert!(func.referencable_name, "fn no body needs name");
-                result.push(Bc::CallBuiltin {
-                    name: func.name,
-                    ret: ret_val,
-                    arg: full_arg_range,
-                });
+                return Ok(());
             }
-            for (var, range, _ty) in args_to_drop {
-                if let Some(var) = var {
-                    let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
-                    assert_eq!(range, slot, "moved arg");
-                }
-                // Don't drop, they were moved to the call.
-            }
-
-            return Ok(());
+            err!("called function without body: {f:?} {}", self.program.pool.get(func.name));
         }
 
         let body = func.body.as_ref().unwrap();
-        self.compile_expr(result, body, ret_val)?; // TODO: this would be where you want to do result ptr param stuff.
-        let func = &self.program[f];
+        // TODO: this would be where you want to do result ptr param stuff.
         // We're done with our arguments, get rid of them. Same for other vars.
         // TODO: once non-copy types are supported, this needs to get smarter because we might have moved out of our argument.
-        result.push(Bc::DebugMarker(Flag::Drop_Args.ident(), func.get_name(self.program.pool)));
+        self.compile_expr(result, body, ret_val)?;
         args_to_drop.extend(result.to_drop.drain(0..).map(|(s, ty)| (None, s, ty)));
         for (var, range, _ty) in args_to_drop {
             if let Some(var) = var {
                 let (slot, _) = unwrap!(result.vars.remove(&var), "lost arg");
                 assert_eq!(range, slot, "moved arg");
             }
-            result.push(Bc::Drop(range));
         }
         // TODO: copy-paste
         for slot in self.locals.pop().unwrap() {
@@ -206,7 +183,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(self.locals.is_empty());
         let slots = self.locals_drop.pop().unwrap();
         for slot in slots {
-            result.push(Bc::Drop(slot));
             result.push(Bc::LastUse(slot));
             for i in slot {
                 assert!(result.slot_is_var.get(i));
@@ -242,7 +218,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Stmt::Eval(expr) => {
                 let ret = result.reserve_slots(self, expr.ty)?;
                 self.compile_expr(result, expr, ret)?;
-                result.push(Bc::Drop(ret));
             }
             Stmt::DeclVar { name, ty, value, kind } => {
                 assert_ne!(VarType::Const, *kind);
@@ -269,10 +244,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     self.locals.last_mut().unwrap().push(full_arg_range);
                     let args_to_drop = self.bind_args(result, full_arg_range, binding)?;
-                    for (name, slot, _) in args_to_drop {
-                        if name.is_none() {
-                            result.push(Bc::Drop(slot));
-                        }
+                    for (name, _, _) in args_to_drop {
+                        if name.is_none() {}
                     }
                 } else {
                     assert!(binding.bindings.is_empty());
@@ -331,7 +304,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let arg_slot = result.reserve_slots(self, arg.ty)?;
                     self.compile_expr(result, arg, arg_slot)?;
 
-                    result.push(Bc::CallC {
+                    result.push(Bc::CallFnPtr {
                         f: f_slot.single(),
                         arg: arg_slot,
                         ret: output,
@@ -351,8 +324,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.compile_expr(result, value, output)?;
 
                 for local in locals.as_ref().expect("resolve failed") {
-                    if let Some((slot, _ty)) = result.vars.remove(local) {
-                        result.push(Bc::Drop(slot));
+                    if let Some((_, _ty)) = result.vars.remove(local) {
                     } else if result.constants.get(*local).is_none() {
                         self.last_loc = Some(expr.loc);
                         ice!("Missing local {}", local.log(self.program.pool))
@@ -370,7 +342,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 let slots = self.locals_drop.pop().unwrap();
                 for slot in slots {
-                    result.push(Bc::Drop(slot));
                     result.push(Bc::LastUse(slot));
                     for i in slot {
                         assert!(result.slot_is_var.get(i));
@@ -508,13 +479,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
                 self.index_expr(result, ptr.ty, container_ptr, index, output)?
             }
-            Expr::StructLiteralP(pattern) => {
-                let requested = expr.ty;
-                self.construct_struct(result, pattern, requested, output)?
-            }
-            Expr::String(_) | Expr::PrefixMacro { .. } => {
-                unreachable!("{}", expr.log(self.program.pool))
-            }
+            Expr::StructLiteralP(pattern) => self.construct_struct(result, pattern, expr.ty, output)?,
+            Expr::String(_) | Expr::PrefixMacro { .. } => unreachable!("{}", expr.log(self.program.pool)),
         };
         Ok(())
     }

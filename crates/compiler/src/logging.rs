@@ -691,9 +691,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let mut f = String::new();
         match self {
-            Bc::NoCompile => write!(f, "UNREACHABLE_BODY"),
-            Bc::Unreachable => write!(f, "UNREACHABLE_CODE"),
-            Bc::CallDynamic { f: func_slot, ret, arg } | Bc::CallC { f: func_slot, ret, arg, .. } => {
+            Bc::CallFnPtr { f: func_slot, ret, arg, .. } => {
                 write!(f, "{ret:?} = call_c({func_slot:?}, {arg:?});")
             }
             Bc::CallDirect { f: func, ret, arg } => {
@@ -702,25 +700,20 @@ impl<'p> PoolLog<'p> for Bc<'p> {
             Bc::CallSplit { ct, rt, ret, arg } => {
                 write!(f, "{ret:?} = call(f({ct:?} | {rt:?}), {arg:?});")
             }
-            Bc::CallBuiltin { name, ret, arg } => {
-                write!(f, "{ret:?} = builtin(S{}, {arg:?});", name.0)
-            }
             Bc::LoadConstant { slot, value } => write!(f, "{:?} = {:?};", slot, value),
             Bc::JumpIf { cond, true_ip, false_ip } => write!(f, "if ({:?}) goto {} else goto {};", cond, true_ip, false_ip),
             Bc::Goto { ip } => write!(f, "goto {ip};",),
             Bc::Ret(i) => write!(f, "return {i:?};"),
             Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
             Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
-            Bc::Move { from, to } => write!(f, "{:?} = move({:?});", to, from),
-            Bc::MoveRange { from, to } => write!(f, "{:?} = move({:?});", to, from),
             Bc::Load { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
             Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
-            Bc::MarkContiguous(_, _) | Bc::LastUse(_) | Bc::Drop(_) => write!(f, "{:?};", self),
             Bc::SlicePtr { base, offset, count, ret } => write!(f, "{:?} = slice({:?}, first={}, count={});", ret, base, offset, count),
             Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
             Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
             Bc::DebugLine(loc) => write!(f, "debug({:?});", loc),
             Bc::TagCheck { enum_ptr, value } => write!(f, "@assert(Tag({enum_ptr:?}) == {value});"),
+            _ => write!(f, "{self:?}"),
         };
         f
     }

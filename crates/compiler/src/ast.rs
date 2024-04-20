@@ -24,34 +24,6 @@ use std::{
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
 pub struct TypeId(u64);
 
-macro_rules! tagged_index {
-    ($name:ty, $magic_offset:expr) => {
-        impl $name {
-            const MASK: u64 = (1 << $magic_offset);
-            pub fn as_index(self) -> usize {
-                debug_assert!(self.is_valid());
-                (self.0 & (!Self::MASK)) as usize
-            }
-            pub fn as_raw(self) -> i64 {
-                debug_assert!(self.is_valid());
-                self.0 as i64
-            }
-            pub fn from_raw(value: i64) -> Self {
-                let s = Self(value as u64);
-                debug_assert!(s.is_valid());
-                s
-            }
-            pub fn from_index(value: usize) -> Self {
-                debug_assert!((value as u64) < Self::MASK);
-                Self(value as u64 | Self::MASK)
-            }
-            pub fn is_valid(self) -> bool {
-                (self.0 & Self::MASK) != 0
-            }
-        }
-    };
-}
-
 impl std::fmt::Debug for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Ty{}", self.as_index())
@@ -563,8 +535,9 @@ impl<'p> FatExpr<'p> {
     pub fn null(loc: Span) -> Self {
         FatExpr::synthetic(
             Expr::Value {
-                ty: TypeId::unknown(),
-                value: Value::I64(7777777777777777777).into(), // TODO: better marker that you'd always choke on
+                // Note: this type doesn't go through ::from_index so trying to read it in debug mode with throw an assertion which is what you want in this case.
+                ty: TypeId(0),
+                value: Value::Type(TypeId(0)).into(),
             },
             loc,
         )
@@ -794,9 +767,6 @@ pub enum LazyType<'p> {
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(u64);
-
-tagged_index!(FuncId, 29);
-tagged_index!(TypeId, 30);
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct VarInfo {
@@ -1664,14 +1634,12 @@ pub enum Flag {
     Unquote,
     Deref,
     Patch,
-    Drop_Args,
     Backpass,
     Ct,
     Bs,
     Rs,
     Any_Reg,
     Impl,
-    Ptr,
     Literal_Ast,
     Main,
     Builtin_If,
@@ -1686,7 +1654,6 @@ pub enum Flag {
     TopLevel,
     Module,
     Include_Std,
-    Alloc,
     Pub,
     Open,
     This,
@@ -1703,33 +1670,64 @@ pub enum Flag {
     _Reserved_Count_,
 }
 
-impl<'p> TryFrom<Ident<'p>> for Flag {
-    type Error = CompileError<'p>;
+macro_rules! flag_subset {
+    ($ty:ty, $before:expr, $after:expr) => {
+        impl<'p> TryFrom<Ident<'p>> for $ty {
+            type Error = CompileError<'p>;
 
-    fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
-        // # Safety
-        // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
-        // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
-        if value.0 > Flag::_Reserved_Null_ as u32 && value.0 < Flag::_Reserved_Count_ as u32 {
-            Ok(unsafe { transmute(value.0 as u8) })
-        } else {
-            err!("Unknown Ident {:?}", value)
+            #[track_caller]
+            fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
+                // # Safety
+                // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
+                // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
+                // I defined thier values to be the values in Flag (where I made sure they're consecutive)
+                if value.0 > $before as u32 && value.0 < $after as u32 {
+                    Ok(unsafe { transmute(value.0 as u8) })
+                } else {
+                    // TODO: make sure getting Caller::locatiom isn't slow
+                    err!(CErr::UndeclaredIdent(value))
+                }
+            }
         }
-    }
+    };
 }
 
-impl<'p> TryFrom<Ident<'p>> for TargetArch {
-    type Error = ();
+flag_subset!(TargetArch, Flag::_Reserved_Null_, Flag::_Reserved_End_Arch_);
+flag_subset!(Flag, Flag::_Reserved_Null_, Flag::_Reserved_Count_);
 
-    fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
-        // # Safety
-        // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
-        // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
-        // I defined thier values to be the values in Flag (where I made sure they're consecutive)
-        if value.0 > Flag::_Reserved_Null_ as u32 && value.0 < Flag::_Reserved_End_Arch_ as u32 {
-            Ok(unsafe { transmute(value.0 as u8) })
-        } else {
-            Err(())
+/// When the compiler is compiled in debug mode, we set specific bits in different index types as a runtime tag to make sure we're right about what type an integer is interpreted as.
+/// Also has the nice property that zero is never valid (in debug mode) so you can catch some uninitilized reads if you zero init all your memory.
+/// This tag is never used for correctness in compiling the program, we track the types of each expression statically and don't need them at runtime.
+/// The tag is not added by release builds of the compiler. In that case, the index types are jsut raw indexes into thier containers.
+macro_rules! tagged_index {
+    ($name:ty, $magic_offset:expr) => {
+        impl $name {
+            const MASK: u64 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
+
+            pub fn as_index(self) -> usize {
+                debug_assert!(self.is_valid());
+                (self.0 & (!Self::MASK)) as usize
+            }
+            pub fn as_raw(self) -> i64 {
+                debug_assert!(self.is_valid());
+                self.0 as i64
+            }
+            pub fn from_raw(value: i64) -> Self {
+                let s = Self(value as u64);
+                debug_assert!(s.is_valid());
+                s
+            }
+            pub fn from_index(value: usize) -> Self {
+                debug_assert!((value as u64) < Self::MASK);
+                Self(value as u64 | Self::MASK)
+            }
+            pub fn is_valid(self) -> bool {
+                (self.0 & Self::MASK) != 0
+            }
         }
-    }
+    };
 }
+
+// Make sure these tag numbers are all different!
+tagged_index!(FuncId, 30);
+tagged_index!(TypeId, 31);

@@ -405,7 +405,6 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                         //       still sometimes puts out the branch over else even tho its unreachable so llvm (rightly) complains about multiple terminators.
                         dead_code = true;
                     }
-                    Bc::CallDynamic { .. } => todo!(),
                     &Bc::CallDirect { f, ret, arg } => {
                         self.call_direct(f, ret, arg)?;
                     }
@@ -413,7 +412,6 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                         // TODO: update this when we support comptime here.
                         self.call_direct(rt, ret, arg)?;
                     }
-                    Bc::CallBuiltin { name, .. } => todo!("{}", self.compile.program.pool.get(*name)),
                     &Bc::LoadConstant { slot, value } => {
                         let mut ty = self.llvm_type(slot);
                         let value = match value {
@@ -473,12 +471,12 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                         }
                         block_finished = true;
                     }
-                    Bc::LastUse(_) | Bc::Drop(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
-                    &Bc::Move { from, to } | &Bc::Clone { from, to } => {
+                    Bc::LastUse(_) | Bc::DebugMarker(_, _) | Bc::DebugLine(_) => {}
+                    &Bc::Clone { from, to } => {
                         let v = self.read_slot(from);
                         self.write_slot(to, v);
                     }
-                    Bc::CloneRange { from, to } | Bc::MoveRange { from, to } => {
+                    Bc::CloneRange { from, to } => {
                         for i in 0..from.count {
                             let from = StackOffset(i + from.first.0);
                             let to = StackOffset(i + to.first.0);
@@ -542,7 +540,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
 
                         LLVMPositionBuilderAtEnd(self.llvm.builder, pass);
                     }
-                    &Bc::CallC { f, arg, ret, ty, comp_ctx } => {
+                    &Bc::CallFnPtr { f, arg, ret, ty, comp_ctx } => {
                         let ty = self.llvm.get_function_type(self.compile.program, ty, comp_ctx);
                         let f = self.read_slot(f);
                         let f = LLVMBuildIntToPtr(self.llvm.builder, f, self.llvm.ptr_ty, EMPTY);
