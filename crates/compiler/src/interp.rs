@@ -129,7 +129,7 @@ impl<'a, 'p: 'a> Interp<'p> {
                     // preincrement our ip because ret doesn't do it.
                     // this would be different if i was trying to do tail calls?
                     self.bump_ip();
-                    let arg = self.take_slots(arg);
+                    let mut arg = self.take_slots(arg);
                     let when = self.call_stack.last().unwrap().when;
                     if let Some(addr) = compile.program[f].comptime_addr {
                         debug_assert_eq!(addr % 4, 0);
@@ -148,6 +148,23 @@ impl<'a, 'p: 'a> Interp<'p> {
                             *self.get_slot_mut(ret.single()) = result.single()?;
                         } else if flat_call {
                             assert!(comp_ctx && !c_call);
+                            // because vm stack pointers aren't a real pointers that ffi can dereference.
+                            match &mut arg {
+                                Values::One(v) => {
+                                    if let Value::InterpAbsStackAddr(_) = v {
+                                        todo!("same as below but not tested")
+                                    }
+                                }
+                                Values::Many(values) => {
+                                    for v in values {
+                                        if let Value::InterpAbsStackAddr(_) = v {
+                                            let values = self.deref_ptr(*v)?;
+                                            *v = Value::new_box(values.vec(), false);
+                                        }
+                                    }
+                                }
+                            }
+
                             let result = do_flat_call_values(compile, unsafe { transmute(addr) }, arg, ty.ret)?;
                             let abs = self.range_to_index(ret);
                             self.expand_maybe_tuple(result, abs)?;
@@ -544,47 +561,11 @@ impl<'a, 'p: 'a> Interp<'p> {
                 let map: usize = Box::leak(map) as *const memmap2::Mmap as usize;
                 Values::Many(vec![Value::I64(map as i64), Value::I64(code as i64)])
             }
-            "literal_ast" => {
-                let (ty, ptr) = arg.to_pair()?;
-                let val = self.deref_ptr(ptr)?;
-                let mut v = val.vec();
-                v.insert(0, ty); // aaaaaa
-                let arg = Values::Many(v);
-
-                // aaaaa
-                self.call_compiler(Flag::Literal_Ast.ident(), arg, compile)?
-            }
-            "unquote_macro_apply_placeholders" => {
-                let (ptr, count) = arg.to_pair()?;
-                let val = self.deref_ptr(ptr)?;
-                let mut v = val.vec();
-                v.push(count);
-                let arg = Values::Many(v);
-
-                // aaaaa
-                self.call_compiler(Flag::Unquote_Macro_Apply_Placeholders.ident(), arg, compile)?
-            }
-
             _ => {
-                // TODO: since this nolonger checks if its an expected name, you get worse error messages.
-                let name = self.pool.intern(name);
-                self.call_compiler(name, arg, compile)?
+                err!("ICE: unknown builtin {name}",)
             }
         };
         Ok(value)
-    }
-
-    fn call_compiler(&mut self, name: Ident<'p>, arg: Values, compile: &mut Compile<'a, 'p>) -> Res<'p, Values> {
-        let before = compile.pending_ffi.len();
-        let result = unwrap!(compile.pending_ffi.pop(), "ICE: unexpected call_compiler: {}", compile.pool.get(name));
-        // SAFETY: this should be pointing up somewhere higher on the stack.
-        let result = unsafe { &mut *result.unwrap() };
-        // println!("{}", compile.pool.get(name));
-        let res = compile.handle_macro_msg(result, Flag::try_from(name)?, arg);
-        compile.pending_ffi.push(Some(result as *mut FnWip));
-        let after = compile.pending_ffi.len();
-        assert_eq!(before, after);
-        res
     }
 
     fn push_callframe(&mut self, f: FuncId, ret: StackRange, arg: Values, when: ExecTime, compile: &Compile<'a, 'p>) -> Res<'p, ()> {

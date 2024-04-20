@@ -567,6 +567,7 @@ impl<'p> Value {
 }
 
 pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
+    let ty = compile.program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
     match &compile.program[ty] {
         TypeInfo::Unknown | TypeInfo::Never => err!("bad type {}", compile.program.log_type(ty)),
         TypeInfo::Unit => {
@@ -604,6 +605,7 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
                 // TODO: HACK. just assuming this is a slice so we can reconstruct the box
                 let addr = unwrap!(ints.next(), "") as usize;
                 let len = unwrap!(ints.next(), "") as usize;
+                debug_assert!(len < 1000, "read padding?");
                 let val_ty = unwrap!(compile.program.unptr_ty(types[0]), "unreachable");
                 let count = len * compile.ready.sizes.slot_count(compile.program, val_ty);
                 let values = unsafe { &*slice_from_raw_parts_mut(addr as *mut i64, count) };
@@ -634,11 +636,11 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             for _ in 0..payload_size - value_size {
                 // NOTE: the other guy must have already put padding there, so we have to pop that, not just add our own.
                 // TODO: should preserve the value so you can do weird void cast tricks but meh until i remove the interp since I can't reconstruct the right types anyway.
-                let padding = unwrap!(ints.next(), "");
-                debug_assert!(
-                    padding == 88888 || padding == 99999,
-                    "TODO: this can be removed if you don't want to require specific padding values anymore."
-                );
+                let _padding = unwrap!(ints.next(), "");
+                // debug_assert!(
+                //     padding == 88888 || padding == 99999,
+                //     "TODO: this can be removed if you don't want to require specific padding values anymore. {padding}"
+                // );
                 out.push(Value::I64(99999));
             }
             let end = out.len();

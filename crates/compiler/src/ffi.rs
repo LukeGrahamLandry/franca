@@ -452,8 +452,8 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
             Value::I64(0) => Some(T::deserialize(values)),
             Value::I64(1) => {
                 for _ in 0..T::size() {
-                    let unit = values.next()?;
-                    debug_assert_eq!(unit, Value::Unit);
+                    let _unit = values.next()?;
+                    //debug_assert_eq!(unit, Value::Unit);
                 }
                 Some(None)
             }

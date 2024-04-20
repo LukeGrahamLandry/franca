@@ -1375,84 +1375,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
-    // TODO: next step is to make these normal functions with serilization seperate so asm can call them directly.
-    //       tho maybe start with still going through array of ints so don't have to deal with rust repr yet.
-    pub fn handle_macro_msg(&mut self, result: &mut FnWip<'p>, name: Flag, arg: Values) -> Res<'p, Values> {
-        match name {
-            Flag::Infer_Raw_Deref_Type => {
-                let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
-                // TODO: make it less painful to return an option
-                let ty = unwrap!(self.type_of(result, &mut expr)?, "could not infer type");
-                // TODO: deref. you want to get enum not ptr(enum)
-                let ty = self.program.raw_type(ty);
-                let ty = self.program[ty].clone();
-                Ok(ty.serialize_one())
-            }
-            Flag::Promote_Closure => {
-                let mut expr: FatExpr<'p> = unwrap!(arg.deserialize(), "");
-                let id = self.promote_closure(result, &mut expr)?;
-                Ok(id.serialize_one())
-            }
-            Flag::Literal_Ast => {
-                let mut args = arg.vec().into_iter();
-                let ty = self.to_type(unwrap!(args.next(), "").into())?;
-                let mut value = Values::Many(args.collect());
-                // TODO: stricter typecheck
-                // assert_eq!(self.program.slot_count(ty), value.len());
-                if ty == TypeId::ty() {
-                    if let Ok(id) = value.clone().single()?.to_int() {
-                        value = Values::One(Value::Type(TypeId(id as u64)))
-                    }
-                }
-                let result = FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc());
-                let ast = result.serialize_one();
-                Ok(ast)
-            }
-            Flag::Unquote_Macro_Apply_Placeholders => {
-                let mut values = arg.vec();
-                let count = unwrap!(values.pop(), "").to_int()?;
-                let mut values = values.into_iter();
-                let mut arg: Vec<FatExpr<'p>> = vec![];
-                for _ in 0..count {
-                    let ast = unwrap!(FatExpr::deserialize(&mut values), "");
-                    arg.push(ast);
-                }
-                assert!(values.next().is_none());
-                let mut template = unwrap!(arg.pop(), "");
-                // println!("before {:?}", template.log(self.pool));
-                let mut walk = Unquote {
-                    compiler: self,
-                    placeholders: arg.into_iter().map(Some).collect(),
-                    result,
-                };
-                walk.expr(&mut template); // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
-                                          // println!("after {:?}", template.log(self.pool));
-                Ok(template.serialize_one())
-            }
-            Flag::Get_Type_Int => {
-                let mut arg: FatExpr = unwrap!(arg.deserialize(), "");
-                match arg.deref() {
-                    Expr::Call(_, _) => {
-                        if let Ok((int, _)) = bit_literal(&arg, self.pool) {
-                            return Ok(int.serialize_one());
-                        }
-                    }
-                    Expr::Value { .. } => err!("todo",),
-                    _ => {
-                        let ty = unwrap!(self.type_of(result, &mut arg)?, "");
-                        let ty = self.program.raw_type(ty);
-                        if let TypeInfo::Int(int) = self.program[ty] {
-                            return Ok(int.serialize_one());
-                        }
-                        err!("expected expr of int type not {}", self.program.log_type(ty));
-                    }
-                }
-                err!("expected binary literal not {arg:?}",);
-            }
-            _ => err!("Macro send unknown message: {name:?} with {arg:?}",),
-        }
-    }
-
     fn addr_macro(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
         match arg.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
@@ -2952,7 +2874,7 @@ fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     false
 }
 
-fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTypeInfo, i64)> {
+pub fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTypeInfo, i64)> {
     if let Expr::SuffixMacro(name, arg) = &expr.expr {
         if *name == Flag::From_Bit_Literal.ident() {
             if let Expr::Tuple(parts) = arg.deref().deref() {

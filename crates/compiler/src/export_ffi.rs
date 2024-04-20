@@ -3,9 +3,10 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{FatExpr, FnType, FuncId, Program, TypeId, TypeInfo};
-use crate::bc::{values_from_ints, Values};
-use crate::compiler::{Compile, Res};
+use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
+use crate::bc::{values_from_ints, Value, Values};
+use crate::compiler::{bit_literal, Compile, Res, Unquote};
+use crate::err;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
@@ -13,7 +14,7 @@ use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::transmute;
 use std::path::PathBuf;
-use std::ptr::{null, slice_from_raw_parts_mut};
+use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::Mutex;
 use std::{fs, io, slice};
 
@@ -28,8 +29,8 @@ macro_rules! bounce_flat_call {
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
             pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut i64, arg_count: i64, retptr: *mut i64, ret_count: i64) {
-                debug_assert_eq!(arg_count, <$Arg>::size() as i64);
-                debug_assert_eq!(ret_count, <$Ret>::size() as i64);
+                debug_assert_eq!(arg_count, <$Arg>::size() as i64, "bad arg count. expected {}", stringify!($Arg));
+                debug_assert_eq!(ret_count, <$Ret>::size() as i64, "bad ret count. expected {}", stringify!($Ret));
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).unwrap();
@@ -454,7 +455,26 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn compile_ast(value: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, compile_ast),
     ),
+    // TODO: InterpSend for Unit
     ("fn debug_log_ast(expr: FatExpr) i64;", bounce_flat_call!(FatExpr, i64, log_ast)),
+    (
+        "fn infer_raw_deref_type(expr: FatExpr) TypeInfo;",
+        bounce_flat_call!(FatExpr, TypeInfo, infer_raw_deref_type),
+    ),
+    (
+        "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
+        bounce_flat_call!(Vec<FatExpr>, FatExpr, unquote_macro_apply_placeholders),
+    ),
+    (
+        "fn get_type_int(e: FatExpr) IntTypeInfo;",
+        bounce_flat_call!(FatExpr, IntTypeInfo, get_type_int),
+    ),
+    // Convert a pointer to a value into an ast that will produce that value when evaluated.
+    // It is illegal to pass a <ty> that does not match the value behind <ptr>.
+    (
+        "fn literal_ast(ty: Type, ptr: VoidPtr) FatExpr;",
+        bounce_flat_call!((TypeId, usize), FatExpr, literal_ast),
+    ),
 ];
 
 fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
@@ -491,6 +511,73 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
     compile.compile_expr(unsafe { &mut *result }, &mut expr, None).unwrap();
     compile.pending_ffi.push(Some(result));
     expr
+}
+
+// TODO: the name is a lie, it doesn't deref!
+fn infer_raw_deref_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> TypeInfo<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let ty = compile.type_of(unsafe { &mut *result }, &mut expr).unwrap().unwrap();
+    let ty = compile.program.raw_type(ty);
+    let ty = compile.program[ty].clone();
+    compile.pending_ffi.push(Some(result));
+    ty
+}
+
+fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+
+    let mut template = args.pop().unwrap();
+    let mut walk = Unquote {
+        compiler: compile,
+        placeholders: args.into_iter().map(Some).collect(),
+        result: unsafe { &mut *result },
+    };
+    // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
+    walk.expr(&mut template);
+    let placeholders = walk.placeholders;
+    assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
+
+    compile.pending_ffi.push(Some(result));
+    template
+}
+
+fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntTypeInfo {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let res = hope(|| {
+        match &mut arg.expr {
+            Expr::Call(_, _) => {
+                if let Ok((int, _)) = bit_literal(&arg, compile.pool) {
+                    return Ok(int);
+                }
+            }
+            Expr::Value { .. } => err!("todo",),
+            _ => {
+                let ty = unwrap!(compile.type_of(unsafe { &mut *result }, &mut arg)?, "");
+                let ty = compile.program.raw_type(ty);
+                if let TypeInfo::Int(int) = compile.program[ty] {
+                    return Ok(int);
+                }
+                err!("expected expr of int type not {}", compile.program.log_type(ty));
+            }
+        }
+        err!("expected binary literal not {arg:?}",);
+    });
+    compile.pending_ffi.push(Some(result));
+    res
+}
+
+fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
+    let slots = compile.ready.sizes.slot_count(compile.program, ty);
+    let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
+    let mut out = vec![];
+    values_from_ints(compile, ty, &mut value.iter().copied(), &mut out).unwrap();
+    let mut value: Values = out.into();
+    if ty == TypeId::ty() {
+        if let Ok(id) = value.clone().single().unwrap().to_int() {
+            value = Values::One(Value::Type(TypeId(id as u64)))
+        }
+    }
+    FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc())
 }
 
 #[cfg(target_arch = "aarch64")]
