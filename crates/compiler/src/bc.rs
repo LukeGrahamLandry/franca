@@ -568,8 +568,7 @@ impl<'p> Value {
 
 pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
     match &compile.program[ty] {
-        // TODO: ::any must mean it was a value so serialized as *const Value? -- Apr 19. czurremnt brokwn thes
-        TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => err!("bad type {}", compile.program.log_type(ty)),
+        TypeInfo::Unknown | TypeInfo::Never => err!("bad type {}", compile.program.log_type(ty)),
         TypeInfo::Unit => {
             let _ = unwrap!(ints.next(), "");
             out.push(Value::Unit);
@@ -658,6 +657,12 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             out.push(Value::new_box(output, false));
         }
         TypeInfo::VoidPtr => todo!(),
+        TypeInfo::Any => {
+            // The actual rust type is 'Value', which is serialized as a box ptr.
+            // We're loading it to values that will deserialized again by the InterpSend impl, so we don't dereference the pointer here.
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::I64(n));
+        }
     };
     Ok(())
 }

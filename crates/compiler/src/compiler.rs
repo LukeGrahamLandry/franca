@@ -1414,7 +1414,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let mut values = values.into_iter();
                 let mut arg: Vec<FatExpr<'p>> = vec![];
                 for _ in 0..count {
-                    arg.push(unwrap!(FatExpr::deserialize(&mut values), ""));
+                    let ast = unwrap!(FatExpr::deserialize(&mut values), "");
+                    arg.push(ast);
                 }
                 assert!(values.next().is_none());
                 let mut template = unwrap!(arg.pop(), "");

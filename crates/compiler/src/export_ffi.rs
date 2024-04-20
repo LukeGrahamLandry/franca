@@ -32,7 +32,7 @@ macro_rules! bounce_flat_call {
                 debug_assert_eq!(ret_count, <$Ret>::size() as i64);
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
-                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter()).unwrap();
+                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).unwrap();
                     let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_one();
                     let ret = compile.aarch64.constants.store_to_ints(ret.vec().iter());
@@ -410,8 +410,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
     let mut arg = compile.aarch64.constants.store_to_ints(arg.vec().iter());
     let mut ret = vec![0i64; Ret::size()];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
-    let ret = Ret::deserialize_from_ints(&mut ret.iter()).unwrap();
-    ret
+    Ret::deserialize_from_ints(&mut ret.into_iter()).unwrap()
 }
 
 // This the interpreter call a flat_call without knowing its types
@@ -466,6 +465,9 @@ fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
     compile.program[ty].clone()
 }
 
+// TODO: at least use hope(|| ...) instead of unwrapping so much.
+//       need to think of better error handling story.
+
 fn const_eval_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> TypeId {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
     let res = compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(TypeId::ty())).unwrap();
@@ -486,9 +488,7 @@ fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -
 
 fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
-    println!("START {}", expr.log(compile.pool));
     compile.compile_expr(unsafe { &mut *result }, &mut expr, None).unwrap();
-    println!("DONE  {} {:?}", expr.log(compile.pool), expr.ty);
     compile.pending_ffi.push(Some(result));
     expr
 }

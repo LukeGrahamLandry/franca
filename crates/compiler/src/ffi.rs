@@ -31,7 +31,7 @@ pub trait InterpSend<'p>: Sized {
         values.into()
     }
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self>;
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self>;
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
     fn deserialize_one(value: Values) -> Option<Self> {
         unsafe {
             STATS.deserialize_one += 1;
@@ -66,7 +66,7 @@ pub fn deserialize<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Ite
     T::deserialize(values)
 }
 
-pub fn deserialize_from_ints<'p, 'a, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = &'a i64>) -> Option<T> {
+pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = i64>) -> Option<T> {
     T::deserialize_from_ints(values)
 }
 
@@ -90,8 +90,8 @@ macro_rules! send_num {
                 values.push(Value::I64(self as i64))
             }
 
-            fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-                Some(*values.next()? as $ty)
+            fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+                Some(values.next()? as $ty)
             }
 
             fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
@@ -136,8 +136,8 @@ impl<'p> InterpSend<'p> for bool {
         }
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        Some(*values.next()? != 0)
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        Some(values.next()? != 0)
     }
 
     fn size() -> usize {
@@ -165,8 +165,8 @@ impl<'p> InterpSend<'p> for char {
         }
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        char::from_u32(*values.next()? as u32)
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        char::from_u32(values.next()? as u32)
     }
 
     fn size() -> usize {
@@ -186,8 +186,8 @@ impl<'p> InterpSend<'p> for f64 {
         values.push(Value::F64(self.to_bits()))
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        Some(f64::from_bits(*values.next()? as u64))
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        Some(f64::from_bits(values.next()? as u64))
     }
 
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
@@ -223,8 +223,8 @@ impl<'p> InterpSend<'p> for TypeId {
         }
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        Some(TypeId(*values.next()? as u64))
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        Some(TypeId(values.next()? as u64))
     }
 
     fn size() -> usize {
@@ -253,7 +253,7 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
         Some((a, b))
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let a = A::deserialize_from_ints(values)?;
         let b = B::deserialize_from_ints(values)?;
         Some((a, b))
@@ -315,12 +315,12 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         }
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        let ptr = *values.next()?;
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        let ptr = values.next()?;
         let len = usize::deserialize_from_ints(values)?;
         let entries = T::size() * len;
         let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, entries) };
-        let mut values = s.iter();
+        let mut values = s.iter().copied();
 
         let mut res = vec![];
         for _ in 0..len {
@@ -377,10 +377,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         }
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        let ptr = *values.next()?;
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        let ptr = values.next()?;
         let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, T::size()) };
-        let mut values = s.iter();
+        let mut values = s.iter().copied();
         let v = T::deserialize_from_ints(&mut values)?;
         Some(Box::new(v))
     }
@@ -414,7 +414,7 @@ impl<'p> InterpSend<'p> for Value {
         1
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let addr = i64::deserialize_from_ints(values)? as usize as *const Self;
         // TODO: leak
         Some(unsafe { *addr })
@@ -461,7 +461,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         }
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         match values.next()? {
             0 => Some(T::deserialize_from_ints(values)),
             1 => {
@@ -500,7 +500,7 @@ impl<'p> InterpSend<'p> for Span {
         let res: Span = unsafe { mem::transmute((a, b)) };
         Some(res)
     }
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let (a, b) = <(u32, u32)>::deserialize_from_ints(values)?;
         let res: Span = unsafe { mem::transmute((a, b)) };
         Some(res)
@@ -527,7 +527,7 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
         Some(Vec::<(K, V)>::deserialize(values)?.into_iter().collect::<Self>())
     }
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Some(Vec::<(K, V)>::deserialize_from_ints(values)?.into_iter().collect::<Self>())
     }
 
@@ -553,7 +553,7 @@ impl<'p> InterpSend<'p> for String {
         Self::from_utf8(Vec::<u8>::deserialize(values)?).ok()
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
     }
 
@@ -607,7 +607,7 @@ fn interp_send() {
     let three = HelloWorld::deserialize_one(two.clone()).unwrap();
     assert_eq!(one, three);
     let two_b = bytes.store_to_ints(two.vec().iter());
-    let three_b = HelloWorld::deserialize_from_ints(&mut two_b.iter()).unwrap();
+    let three_b = HelloWorld::deserialize_from_ints(&mut two_b.into_iter()).unwrap();
     assert_eq!(one, three_b);
 
     let four = vec![one, one, HelloWorld { a: 678, b: 910 }, one];
@@ -615,7 +615,7 @@ fn interp_send() {
     let six = Vec::<HelloWorld>::deserialize_one(five.clone()).unwrap();
     assert_eq!(four, six);
     let five_b = bytes.store_to_ints(five.vec().iter());
-    let six_b = Vec::<HelloWorld>::deserialize_from_ints(&mut five_b.iter()).unwrap();
+    let six_b = Vec::<HelloWorld>::deserialize_from_ints(&mut five_b.into_iter()).unwrap();
     assert_eq!(four, six_b);
 
     let seven = Nested {
@@ -631,7 +631,7 @@ fn interp_send() {
     let nine = Nested::deserialize_one(eight.clone()).unwrap();
     assert_eq!(seven, nine);
     let eight_b = bytes.store_to_ints(eight.vec().iter());
-    let nine_b = Nested::deserialize_from_ints(&mut eight_b.iter()).unwrap();
+    let nine_b = Nested::deserialize_from_ints(&mut eight_b.into_iter()).unwrap();
     assert_eq!(seven, nine_b);
 
     assert_eq!(HelloWorld::get_type(&mut p), HelloWorld::get_type(&mut p));
@@ -676,7 +676,7 @@ fn interp_send_libs_ast() {
         // Note: this relies on you not printing out addresses in there.
         assert_eq!(prev, format!("{after:?}"));
         let value_b = bytes.store_to_ints(value.vec().iter());
-        let after_b = FatStmt::deserialize_from_ints(&mut value_b.iter()).unwrap();
+        let after_b = FatStmt::deserialize_from_ints(&mut value_b.iter().copied()).unwrap();
         assert_eq!(prev, format!("{after_b:?}"));
     }
 }

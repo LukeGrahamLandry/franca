@@ -190,8 +190,8 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         1
     }
 
-    fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
-        let i = *values.next()?;
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        let i = values.next()?;
         if i < 0 {
             return None;
         }

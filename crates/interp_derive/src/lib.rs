@@ -42,7 +42,7 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
                 #deserialize
             }
 
-            fn deserialize_from_ints<'a>(values: &mut impl Iterator<Item = &'a i64>) -> Option<Self> {
+            fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
                 #deserialize_from_ints
             }
 
