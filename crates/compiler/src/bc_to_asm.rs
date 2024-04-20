@@ -86,7 +86,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             slots: vec![],
             open_slots: vec![],
             next_slot: SpOffset(0),
-            f: FuncId(0), // TODO: bad
+            f: FuncId::from_index(0), // TODO: bad
             wip: vec![],
             when,
         }
@@ -94,7 +94,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     // TODO: i cant keep copy pasting this shape. gonna cry.
     fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
-        self.compile.aarch64.reserve(f.0);
+        self.compile.aarch64.reserve(f.as_index());
         if self.compile.aarch64.get_fn(f).is_some() || self.wip.contains(&f) {
             return Ok(());
         }
@@ -242,16 +242,20 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.set_slot(x0, *slot);
                     }
                     // These only make sense during comptime execution, but they're also really just numbers.
-                    Value::OverloadSet(i) | Value::GetFn(FuncId(i)) => {
-                        self.load_imm(x0, *i as u64);
-                        self.set_slot(x0, *slot);
-                    }
                     Value::Symbol(i) => {
                         self.load_imm(x0, *i as u64);
                         self.set_slot(x0, *slot);
                     }
-                    Value::Type(TypeId(i)) => {
-                        self.load_imm(x0, *i);
+                    Value::OverloadSet(i) => {
+                        self.load_imm(x0, *i as u64);
+                        self.set_slot(x0, *slot);
+                    }
+                    Value::Type(ty) => {
+                        self.load_imm(x0, ty.as_raw() as u64);
+                        self.set_slot(x0, *slot);
+                    }
+                    Value::GetFn(f) => {
+                        self.load_imm(x0, f.as_raw() as u64);
                         self.set_slot(x0, *slot);
                     }
                     &Value::Bool(b) => {
@@ -259,8 +263,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.set_slot(x0, *slot);
                     }
                     Value::Unit => {}
-                    Value::Poison => todo!(),
-                    Value::InterpAbsStackAddr(_) => todo!(),
                     &Value::Heap {
                         value,
                         physical_first,
@@ -697,8 +699,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
             // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
             // TODO: have a mapping. funcs take up slots even if never indirect called.
-            assert!(f.0 < 4096);
-            self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.0 as i64));
+            assert!(f.as_index() < 4096);
+            self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.as_index() as i64));
         }
 
         self.compile.aarch64.push(br(x16, 1))
@@ -746,11 +748,11 @@ impl ConstBytes {
             Value::F64(_) => todo!(),
             &Value::I64(i) => out.push(i),
             &Value::Bool(i) => out.push(i as i64),
-            &Value::OverloadSet(i) | &Value::GetFn(FuncId(i)) => out.push(i as i64),
+            &Value::OverloadSet(i) => out.push(i as i64),
+            &Value::GetFn(i) => out.push(i.as_raw()),
             &Value::Symbol(i) => out.push(i as i64),
-            &Value::Type(TypeId(i)) => out.push(i as i64),
+            &Value::Type(ty) => out.push(ty.as_raw()),
             Value::Unit => out.push(0), // TODO
-            Value::Poison | Value::InterpAbsStackAddr(_) => unreachable!(),
             &Value::GetNativeFnPtr(i) => {
                 // TODO: not sure if we want to preserve the id or use the actual address
                 // out.push(i.0 as i64);
@@ -829,7 +831,7 @@ pub mod jit {
         }
 
         pub fn get_fn(&self, f: FuncId) -> Option<*const [u8]> {
-            let ptr = self.ranges[f.0];
+            let ptr = self.ranges[f.as_index()];
             if ptr.len() == 0 {
                 None
             } else {
@@ -875,8 +877,8 @@ pub mod jit {
             unsafe {
                 // TODO: make sure there's not an off by one thing here.
                 let range = slice::from_raw_parts(self.current_start, self.next.offset_from(self.current_start) as usize);
-                self.dispatch[f.0] = self.current_start;
-                self.ranges[f.0] = range as *const [u8];
+                self.dispatch[f.as_index()] = self.current_start;
+                self.ranges[f.as_index()] = range as *const [u8];
                 self.ip_to_inst.clear();
                 debug_assert_eq!(self.current_start as usize % 4, 0);
                 self.current_start = self.next;
@@ -898,7 +900,9 @@ pub mod jit {
         pub fn get_current(&self) -> *const u8 {
             self.next
         }
-        pub fn get_dirty(&mut self) -> (*mut u8, *mut u8) {
+
+        // Returns the range of memory we've written since the last call.
+        pub fn bump_dirty(&mut self) -> (*mut u8, *mut u8) {
             let dirty = (self.old, self.next);
             self.old = self.next;
             dirty

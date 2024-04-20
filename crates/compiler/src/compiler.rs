@@ -21,7 +21,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::do_flat_call_values;
+use crate::export_ffi::{do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
 use crate::scope::ResolveScope;
 use crate::{
@@ -235,29 +235,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let c_call = self.program[f].has_tag(Flag::C_Call);
                 let flat_call = self.program[f].has_tag(Flag::Flat_Call);
 
-                self.aarch64.make_exec(); // otherwise: bus error
+                // symptom if you forget: bus error
+                self.aarch64.make_exec();
+                self.flush_cpu_instruction_cache();
                 if flat_call {
                     assert!(comp_ctx && !c_call);
-                    // println!("flat_call {f:?}");
                     do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
                 } else if c_call {
                     assert!(!flat_call);
                     assert!(addr as usize % 4 == 0);
-                    // println!("c_call {f:?} {addr:?} {arg:?} -> {}", self.program.log_type(ty.ret));
-                    // TODO: !!! removin this makes it illeegal hardware insturciton.
-                    //       would be really cool if that gives it time to update the other cache cause instructions and data are seperate ????!!!!
-                    // sleep(Duration::from_millis(1));
-                    // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
-                    // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
-                    // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
-                    extern "C" {
-                        pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
-                    }
-
-                    let (beg, end) = self.aarch64.get_dirty();
-                    if beg != end {
-                        unsafe { __clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
-                    }
                     let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx);
                     r
                 } else {
@@ -271,6 +257,42 @@ impl<'a, 'p> Compile<'a, 'p> {
         let result = self.tag_err(result);
         self.pop_state(state2);
         result
+    }
+
+    // very similar to the above but nicer api without going though Values for flat_call.
+    fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(
+        &mut self,
+        f: FuncId,
+        when: ExecTime,
+        result: Option<*mut FnWip<'p>>,
+        arg: Arg,
+    ) -> Res<'p, Ret> {
+        emit_aarch64(self, f, when)?;
+        self.pending_ffi.push(result);
+        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr();
+        let ty = self.program[f].unwrap_ty();
+        let comp_ctx = self.program[f].has_tag(Flag::Ct);
+        let c_call = self.program[f].has_tag(Flag::C_Call);
+        let flat_call = self.program[f].has_tag(Flag::Flat_Call);
+
+        // symptom if you forget: bus error
+        self.aarch64.make_exec();
+        self.flush_cpu_instruction_cache();
+        let res = if flat_call {
+            assert!(comp_ctx && !c_call);
+            Ok(do_flat_call(self, unsafe { transmute(addr) }, arg))
+        } else if c_call {
+            assert!(!flat_call);
+            assert!(addr as usize % 4 == 0);
+            let arg = arg.serialize_one();
+            let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx)?;
+            let r = Ret::deserialize(&mut r.vec().into_iter());
+            Ok(unwrap!(r, ""))
+        } else {
+            todo!()
+        };
+        self.pending_ffi.pop().unwrap(); // TODO: should do this before short cirucuiting errpr
+        res
     }
 
     // This is much less painful than threading it through the macros
@@ -313,7 +335,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         mut_replace!(self.program[f].closed_constants, |constants| {
             let mut result = self.empty_fn(
                 ExecTime::Comptime,
-                FuncId(f.0 + 10000000), // TODO: do i even need to pass an index? probably just for debugging
+                FuncId::from_index(f.as_index() + 10000000), // TODO: do i even need to pass an index? probably just for debugging
                 loc,
                 Some(constants),
                 module,
@@ -480,7 +502,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // We close them into f's Func, but we need to emit
         // into the caller's body.
         self.eval_and_close_local_constants(f)?; // TODO: only if this is the first time calling 'f'
-        let func = &self.program.funcs[f.0];
+        let func = &self.program.funcs[f.as_index()];
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
 
@@ -805,7 +827,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
 
-                let func = &self.program.funcs[id.0];
+                let func = &self.program[id];
                 if func.has_tag(Flag::Impl) {
                     for stmt in &func.local_constants {
                         if let Stmt::DeclFunc(new) = &stmt.stmt {
@@ -916,7 +938,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
-        assert!(expr.ty.0 < self.program.types.len() as u64);
+        assert!(expr.ty.as_index() < self.program.types.len());
 
         // TODO: it seems like i shouldn't compile something twice
         // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
@@ -1393,29 +1415,29 @@ impl<'a, 'p> Compile<'a, 'p> {
                     target.log(self.pool)
                 );
                 let expr_ty = FatExpr::get_type(self.program);
-                let mut values = vec![];
-                let arg: &mut FatExpr = arg.deref_mut();
-                mem::take(arg).serialize(&mut values);
-                let target: &mut FatExpr = target.deref_mut();
-                mem::take(target).serialize(&mut values);
+                let arg = mem::take(arg.deref_mut());
+                let target = mem::take(target.deref_mut());
                 let want = FatExpr::get_type(self.program);
-                let full_arg = Expr::Value {
-                    ty: self.program.tuple_of(vec![expr_ty, expr_ty]),
-                    value: Values::Many(values.clone()), // TODO: sad
-                };
-                let mut full_arg = FatExpr::synthetic(full_arg, loc);
-                let f = self.resolve_function(result, *name, &mut full_arg, Some(want))?.single()?;
+                let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
+
+                // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
+                let os = unwrap!(result.constants.get(*name), "missing macro constant");
+                let os = unwrap!(os.0.single()?.to_overloads(), "expected overload set. TODO: allow function");
+                self.compute_new_overloads(os)?;
+                let mut os = self.program.overload_sets[os]
+                    .ready
+                    .iter()
+                    .filter(|o| o.arg == arg_ty && (o.ret.is_none()) || o.ret.unwrap() == want);
+                let f = unwrap!(os.next(), "missing macro overload").func;
+                assert!(os.next().is_none(), "ambigous macro overload");
                 assert!(self.program[f].has_tag(Flag::Annotation));
                 self.infer_types(f)?;
-                // let get_func = FatExpr::synthetic(self.func_expr(f), loc);
-                // let full_call = FatExpr::synthetic(Expr::Call(Box::new(get_func), Box::new(full_arg)), loc);
 
                 // let new_expr = self.immediate_eval_expr(&result.constants, full_call, want)?;
                 self.compile(f, ExecTime::Comptime)?;
 
-                let new_expr = self.run(f, Values::Many(values), ExecTime::Comptime, Some(result as *mut FnWip))?;
-                // TODO: deserialize should return a meaningful error message
-                *expr = unwrap!(FatExpr::deserialize_one(new_expr.clone()), "macro failed. returned {new_expr:?}");
+                let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, Some(result as *mut FnWip), (arg, target))?;
+                *expr = new_expr;
                 outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
                 outln!(LogTag::Macros, "================\n");
                 // Now evaluate whatever the macro gave us.
@@ -1494,7 +1516,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Call(f, arg) => {
                 if let Some(id) = f.as_fn() {
-                    return Ok(self.program.funcs[id.0].finished_ret);
+                    return Ok(self.program.funcs[id.as_index()].finished_ret);
                 }
 
                 if let Expr::Value { value, .. } = f.deref_mut().deref_mut() {
@@ -1813,7 +1835,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Value { value, .. } => return Ok(value.clone()),
             Expr::GetVar(var) => {
                 if let Some((value, _)) = constants.get(*var) {
-                    debug_assert_ne!(value, Values::One(Value::Poison));
                     return Ok(value);
                 }
                 // fallthrough
@@ -2900,6 +2921,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ensure_compiled(rt, ExecTime::Runtime)?;
 
         Ok(Structured::RuntimeOnly(ret_ty))
+    }
+
+    pub fn flush_cpu_instruction_cache(&mut self) {
+        // This fixes 'illegal hardware instruction'.
+        // sleep(Duration::from_millis(1)) also works (in debug mode). That's really cool, it gives it time to update the other cache because instructions and data are seperate?!
+        // Especially fun becuase if you run it in lldb so you break on the error and disassemble... you get perfectly valid instructions because it reads the data cache!
+        // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
+        // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
+        // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
+        // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
+        // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
+        // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
+        // TODO: do this myself
+        extern "C" {
+            pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
+        }
+        let (beg, end) = self.aarch64.bump_dirty();
+        if beg != end {
+            unsafe { __clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
+        }
     }
 }
 

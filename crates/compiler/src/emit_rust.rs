@@ -91,7 +91,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
 
         for f in 0..emit.comp.program.funcs.len() {
             if emit.comp.program.funcs[f].has_tag(Flag::Rs) {
-                emit.compile(FuncId(f))?;
+                emit.compile(FuncId::from_index(f))?;
             }
         }
 
@@ -111,10 +111,10 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
-        while self.ready.len() <= f.0 {
+        while self.ready.len() <= f.as_index() {
             self.ready.push(None);
         }
-        if self.ready[f.0].is_some() {
+        if self.ready[f.as_index()].is_some() {
             return Ok(());
         }
         self.comp.compile(f, ExecTime::Runtime)?;
@@ -143,7 +143,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             })
             .collect();
         let ret = self.emit_type(ty.ret)?;
-        self.ready[f.0] = Some(format!(
+        self.ready[f.as_index()] = Some(format!(
             "#[rustfmt::skip]\n{}fn {name}({args}) -> {ret} {{ \n{body}\n}}\n\n",
             if want_export { "pub " } else { "" }
         ));

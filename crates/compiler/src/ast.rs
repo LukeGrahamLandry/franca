@@ -5,7 +5,7 @@ use crate::{
     err,
     export_ffi::RsResolvedSymbol,
     ffi::{init_interp_send, InterpSend},
-    impl_index, impl_index_imm,
+    impl_as_index_direct, impl_index, impl_index_imm,
     pool::{Ident, StringPool},
     reflect::{Reflect, RsType},
     STATS,
@@ -22,7 +22,41 @@ use std::{
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
-pub struct TypeId(pub u64);
+pub struct TypeId(u64);
+
+macro_rules! tagged_index {
+    ($name:ty, $magic_offset:expr) => {
+        impl $name {
+            const MASK: u64 = (1 << $magic_offset);
+            pub fn as_index(self) -> usize {
+                debug_assert!(self.is_valid());
+                (self.0 & (!Self::MASK)) as usize
+            }
+            pub fn as_raw(self) -> i64 {
+                debug_assert!(self.is_valid());
+                self.0 as i64
+            }
+            pub fn from_raw(value: i64) -> Self {
+                let s = Self(value as u64);
+                debug_assert!(s.is_valid());
+                s
+            }
+            pub fn from_index(value: usize) -> Self {
+                debug_assert!((value as u64) < Self::MASK);
+                Self(value as u64 | Self::MASK)
+            }
+            pub fn is_valid(self) -> bool {
+                (self.0 & Self::MASK) != 0
+            }
+        }
+    };
+}
+
+impl std::fmt::Debug for TypeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ty{}", self.as_index())
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
@@ -530,7 +564,7 @@ impl<'p> FatExpr<'p> {
         FatExpr::synthetic(
             Expr::Value {
                 ty: TypeId::unknown(),
-                value: Value::Poison.into(),
+                value: Value::I64(7777777777777777777).into(), // TODO: better marker that you'd always choke on
             },
             loc,
         )
@@ -759,7 +793,10 @@ pub enum LazyType<'p> {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
-pub struct FuncId(pub usize);
+pub struct FuncId(u64);
+
+tagged_index!(FuncId, 29);
+tagged_index!(TypeId, 30);
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct VarInfo {
@@ -792,6 +829,7 @@ pub struct Program<'p> {
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
 impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
 impl_index!(Program<'p>, ModuleId, Module<'p>, modules);
+impl_as_index_direct!(ModuleId);
 
 #[derive(Clone)]
 pub struct Module<'p> {
@@ -901,8 +939,7 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
-            // Any needs to be first becuase I use TypeId(0) as a place holder.
-            // The rest are just common ones that i want to find faster if i end up iterating the array.
+            // these are hardcoded numbers in TypeId constructors
             types: vec![
                 TypeInfo::Unknown,
                 TypeInfo::Any,
@@ -932,7 +969,7 @@ impl<'p> Program<'p> {
         };
 
         for (i, ty) in program.types.iter().enumerate() {
-            program.type_lookup.insert(ty.clone(), TypeId(i as u64));
+            program.type_lookup.insert(ty.clone(), TypeId::from_index(i));
         }
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
@@ -950,7 +987,7 @@ impl<'p> Program<'p> {
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            let ty_final = TypeId(placeholder as u64);
+            let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::simple_struct(vec![], n));
@@ -975,7 +1012,7 @@ impl<'p> Program<'p> {
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
-            let ty_final = TypeId(placeholder as u64);
+            let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::Struct {
@@ -1022,7 +1059,7 @@ impl<'p> Program<'p> {
     }
 
     pub fn sig_str(&self, f: FuncId) -> Res<'p, Ident<'p>> {
-        let func = &self.funcs[f.0];
+        let func = &self.funcs[f.as_index()];
 
         let args: String = func
             .arg
@@ -1079,16 +1116,16 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
         let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
-        TypeId(id as u64)
+        TypeId::from_index(id)
     }
 
     pub fn emit_inline_llvm_ir(&mut self) -> String {
         let mut out = String::new();
 
         for f in self.inline_llvm_ir.clone() {
-            let arg = self.funcs[f.0].arg.clone();
-            let ret = self.funcs[f.0].finished_ret.unwrap();
-            let body = self.funcs[f.0]
+            let arg = self.funcs[f.as_index()].arg.clone();
+            let ret = self.funcs[f.as_index()].finished_ret.unwrap();
+            let body = self.funcs[f.as_index()]
                 .llvm_ir
                 .as_ref()
                 .unwrap()
@@ -1102,7 +1139,11 @@ impl<'p> Program<'p> {
                 .map(|(name, ty, _)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().0)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            out += &format!("define {} @FN{}({args}) alwaysinline {{ {body} }}\n\n", self.for_llvm_ir(ret), f.0);
+            out += &format!(
+                "define {} @FN{}({args}) alwaysinline {{ {body} }}\n\n",
+                self.for_llvm_ir(ret),
+                f.as_index()
+            );
         }
 
         out
@@ -1150,21 +1191,21 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
-            self.type_lookup.insert(ty, TypeId(id as u64));
-            TypeId(id as u64)
+            self.type_lookup.insert(ty, TypeId::from_index(id));
+            TypeId::from_index(id)
         })
     }
 
     // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
-        let id = FuncId(self.funcs.len());
+        let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id
     }
 
     pub fn returns_type(&self, f: FuncId) -> bool {
-        let func = &self.funcs[f.0];
+        let func = &self.funcs[f.as_index()];
         let ret = func.ret.unwrap();
         let ty = &self[ret];
         ty == &TypeInfo::Type
@@ -1180,9 +1221,8 @@ impl<'p> Program<'p> {
             // TODO: assert SplitFunc branches are the same type.
             Value::SplitFunc { rt: f, .. } | Value::GetNativeFnPtr(f) | Value::GetFn(f) => self.func_type(*f),
             Value::Unit => TypeId::unit(),
-            Value::Poison => panic!("Tried to typecheck Value::Poison"),
             Value::Symbol(_) => Ident::get_type(self),
-            Value::InterpAbsStackAddr(_) | Value::Heap { .. } => TypeId::void_ptr(),
+            Value::Heap { .. } => TypeId::void_ptr(),
             Value::OverloadSet(_) => TypeId::overload_set(),
         }
     }
@@ -1210,7 +1250,7 @@ impl<'p> Program<'p> {
 
     #[track_caller]
     pub fn func_type(&mut self, id: FuncId) -> TypeId {
-        let ty = self.funcs[id.0].unwrap_ty();
+        let ty = self[id].unwrap_ty();
         self.intern_type(TypeInfo::Fn(ty))
     }
 
@@ -1522,11 +1562,11 @@ impl TypeId {
     }
 
     pub fn is_unknown(&self) -> bool {
-        self.0 == 0
+        *self == Self::unknown()
     }
 
     pub fn is_any(&self) -> bool {
-        self.0 == 1
+        *self == Self::any()
     }
 
     pub fn is_never(&self) -> bool {
@@ -1535,51 +1575,51 @@ impl TypeId {
 
     // Be careful that this is in the pool correctly!
     pub fn unknown() -> TypeId {
-        TypeId(0)
+        TypeId::from_index(0)
     }
 
     // Be careful that this is in the pool correctly!
     /// Placeholder to use while working on typechecking.
     pub fn any() -> TypeId {
-        TypeId(1)
+        TypeId::from_index(1)
     }
 
     // Be careful that this is in the pool correctly!
     pub fn unit() -> TypeId {
-        TypeId(2)
+        TypeId::from_index(2)
     }
 
     // Be careful that this is in the pool correctly!
     pub fn ty() -> TypeId {
-        TypeId(3)
+        TypeId::from_index(3)
     }
 
     // Be careful that this is in the pool correctly!
     pub fn i64() -> TypeId {
-        TypeId(4)
+        TypeId::from_index(4)
     }
 
     // Be careful that this is in the pool correctly!
     pub fn bool() -> TypeId {
-        TypeId(5)
+        TypeId::from_index(5)
     }
 
     // Be careful that this is in the pool correctly!
     pub fn void_ptr() -> TypeId {
-        TypeId(6)
+        TypeId::from_index(6)
     }
 
     // Be careful that this is in the pool correctly!
     pub fn never() -> TypeId {
-        TypeId(7)
+        TypeId::from_index(7)
     }
 
     pub fn f64() -> TypeId {
-        TypeId(8)
+        TypeId::from_index(8)
     }
 
     pub fn overload_set() -> TypeId {
-        TypeId(9)
+        TypeId::from_index(9)
     }
 }
 

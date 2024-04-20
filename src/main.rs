@@ -272,6 +272,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
             }
             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
             comp.aarch64.make_exec();
+            comp.flush_cpu_instruction_cache();
             let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
 
             let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };

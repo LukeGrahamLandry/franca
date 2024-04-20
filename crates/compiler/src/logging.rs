@@ -268,7 +268,7 @@ impl<'p> Program<'p> {
         let mut s = String::new();
         writeln!(s, "=== {} CACHED TYPES ===", self.types.len());
         for (i, ty) in self.types.iter().enumerate() {
-            writeln!(s, "- {:?} = {} = {:?};", TypeId(i as u64), self.log_type(TypeId(i as u64)), ty,);
+            writeln!(s, "- {:?} = {} = {:?};", TypeId::from_index(i), self.log_type(TypeId::from_index(i)), ty,);
         }
         writeln!(s, "====================");
         s
@@ -304,7 +304,7 @@ impl<'p> Program<'p> {
                 continue;
             }
 
-            let func = &self.funcs[next.0];
+            let func = &self.funcs[next.as_index()];
             if let Some(body) = &func.body {
                 collect_func_references(body, &mut pending, &mut const_reads);
                 log_one(&mut out, next, func);
@@ -538,7 +538,7 @@ impl<'p> Expr<'p> {
             Expr::Value {
                 value: Values::One(Value::GetFn(f)),
                 ..
-            } => format!("Fn{}", f.0),
+            } => format!("Fn{}", f.as_index()),
             Expr::Value { value, .. } => match value {
                 Values::One(Value::I64(i)) => format!("{i}"),
                 Values::One(Value::Type(i)) => format!("{i:?}"),
@@ -697,7 +697,7 @@ impl<'p> PoolLog<'p> for Bc<'p> {
                 write!(f, "{ret:?} = call_c({func_slot:?}, {arg:?});")
             }
             Bc::CallDirect { f: func, ret, arg } => {
-                write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.0)
+                write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.as_index())
             }
             Bc::CallSplit { ct, rt, ret, arg } => {
                 write!(f, "{ret:?} = call(f({ct:?} | {rt:?}), {arg:?});")
@@ -740,12 +740,6 @@ impl Debug for StackRange {
     }
 }
 
-impl Debug for TypeId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Ty{}", self.0)
-    }
-}
-
 impl Stmt<'_> {
     pub fn get_loc(&self) -> Option<Span> {
         match self {
@@ -783,7 +777,14 @@ impl<'p> Debug for CompileError<'p> {
 
 impl<'p> DebugState<'p> {
     pub fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
-        let show_f = |func: FuncId| format!("f{}:{:?}:{}", func.0, program[func].get_name(pool), program[func].synth_name(pool));
+        let show_f = |func: FuncId| {
+            format!(
+                "f{}:{:?}:{}",
+                func.as_index(),
+                program[func].get_name(pool),
+                program[func].synth_name(pool)
+            )
+        };
         match self {
             DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f) => {
@@ -894,8 +895,6 @@ impl Debug for Value {
             &Value::Type(v) => write!(f, "{:?}", v),
             &Value::GetFn(v) => write!(f, "{:?}", v),
             &Value::Unit => write!(f, "unit"),
-            &Value::Poison => write!(f, "POISON"),
-            &Value::InterpAbsStackAddr(a) => write!(f, "{a:?}"),
             Value::Heap {
                 value,
                 physical_first,
@@ -920,6 +919,6 @@ impl Debug for Values {
 
 impl Debug for FuncId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Fn{}", self.0)
+        write!(f, "Fn{}", self.as_index())
     }
 }

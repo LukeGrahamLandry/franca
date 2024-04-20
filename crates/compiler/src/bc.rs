@@ -152,10 +152,6 @@ pub enum Value {
     GetFn(FuncId),
     /// The empty tuple.
     Unit,
-    // This is unsed to represent a function's empty stack space.
-    // Crash if you try to read one.
-    Poison,
-    InterpAbsStackAddr(StackAbsoluteRange),
     // Note: you can't just put these in a function's arena because they get copied by value.
     Heap {
         value: *mut InterpBox,
@@ -510,13 +506,6 @@ impl From<Vec<Values>> for Values {
 }
 
 impl Values {
-    pub fn is_poison(&self) -> bool {
-        match self {
-            Values::One(v) => *v == Value::Poison,
-            Values::Many(v) => v.iter().any(|v| *v == Value::Poison),
-        }
-    }
-
     #[track_caller]
     pub fn single(self) -> Res<'static, Value> {
         match self {
@@ -588,11 +577,11 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         }
         TypeInfo::Fn(_) => {
             let n = unwrap!(ints.next(), "");
-            out.push(Value::GetFn(FuncId(n as usize)));
+            out.push(Value::GetFn(FuncId::from_raw(n)));
         }
         TypeInfo::Type => {
             let n = unwrap!(ints.next(), "");
-            out.push(Value::Type(TypeId(n as u64)));
+            out.push(Value::Type(TypeId::from_raw(n)));
         }
         TypeInfo::OverloadSet => {
             let n = unwrap!(ints.next(), "");

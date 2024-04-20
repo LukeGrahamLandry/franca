@@ -39,7 +39,7 @@ pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     pub fn compile(program: &'z Program<'p>, interp: &'z mut BcReady<'p>, f: FuncId) -> Res<'p, ()> {
-        extend_options(&mut interp.ready, f.0);
+        extend_options(&mut interp.ready, f.as_index());
         if interp[f].is_some() {
             return Ok(());
         }
@@ -827,8 +827,8 @@ impl SizeCache {
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub fn slot_count(&mut self, program: &Program, ty: TypeId) -> usize {
-        extend_options(&mut self.known, ty.0 as usize);
-        if let Some(size) = self.known[ty.0 as usize] {
+        extend_options(&mut self.known, ty.as_index());
+        if let Some(size) = self.known[ty.as_index()] {
             return size;
         }
         let ty = program.raw_type(ty);
@@ -851,7 +851,7 @@ impl SizeCache {
             | TypeInfo::Unit => 1,
             TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };
-        self.known[ty.0 as usize] = Some(size);
+        self.known[ty.as_index()] = Some(size);
         size
     }
 }

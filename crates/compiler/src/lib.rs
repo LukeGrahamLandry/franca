@@ -353,7 +353,7 @@ macro_rules! impl_index_imm {
             type Output = $elem;
 
             fn index(&self, index: $idx) -> &Self::Output {
-                &self.$field[index.0 as usize]
+                &self.$field[index.as_index()]
             }
         }
     };
@@ -365,11 +365,22 @@ macro_rules! impl_index {
 
         impl<'p> std::ops::IndexMut<$idx> for $container {
             fn index_mut(&mut self, index: $idx) -> &mut Self::Output {
-                &mut self.$field[index.0]
+                &mut self.$field[index.as_index()]
             }
         }
     };
 }
+
+macro_rules! impl_as_index_direct {
+    ($idx:ty) => {
+        impl $idx {
+            pub fn as_index(self) -> usize {
+                self.0
+            }
+        }
+    };
+}
+pub(crate) use impl_as_index_direct;
 pub(crate) use impl_index;
 pub(crate) use impl_index_imm;
 

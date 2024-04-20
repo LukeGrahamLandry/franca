@@ -99,14 +99,14 @@ impl JittedLlvm {
             };
 
             for f in program.inline_llvm_ir.clone() {
-                let name = null_terminate(&format!("FN{}", f.0));
+                let name = null_terminate(&format!("FN{}", f.as_index()));
                 let ty = program.func_type(f);
                 let ty = program.fn_ty(ty).unwrap();
                 let ty = this.get_function_type(program, ty, false);
                 // Note: not LLVMGetNamedFunction on inline_asm_module! we're declaring that we plan on importing into the normal module.
                 let value = unsafe { LLVMAddFunction(this.module, name.as_ptr(), ty) };
-                extend_options(&mut this.functions, f.0);
-                this.functions[f.0] = Some((value, name, true));
+                extend_options(&mut this.functions, f.as_index());
+                this.functions[f.as_index()] = Some((value, name, true));
             }
 
             Ok(this)
@@ -114,28 +114,28 @@ impl JittedLlvm {
     }
 
     fn decl_function(&mut self, program: &mut Program, f: FuncId) -> LLVMValueRef {
-        extend_options(&mut self.functions, f.0);
-        if let Some((f, _, _)) = self.functions[f.0] {
+        extend_options(&mut self.functions, f.as_index());
+        if let Some((f, _, _)) = self.functions[f.as_index()] {
             return f;
         }
 
         let target = &program[f];
         let comp_ctx = target.has_tag(Flag::Ct);
-        let name = null_terminate(&format!("FN{}", f.0));
+        let name = null_terminate(&format!("FN{}", f.as_index()));
         let ty = program.func_type(f);
         let ty = program.fn_ty(ty).unwrap();
         let ty = self.get_function_type(program, ty, comp_ctx);
         unsafe {
             let func = unsafe { LLVMAddFunction(self.module, name.as_ptr(), ty) };
             assert_ne!(func as usize, 0);
-            self.functions[f.0] = Some((func, name, false));
+            self.functions[f.as_index()] = Some((func, name, false));
             func
         }
     }
 
     fn get_fn(&mut self, f: FuncId) -> Option<LLVMValueRef> {
-        extend_options(&mut self.functions, f.0);
-        self.functions[f.0].as_ref().and_then(|(f, _, ready)| {
+        extend_options(&mut self.functions, f.as_index());
+        self.functions[f.as_index()].as_ref().and_then(|(f, _, ready)| {
             if *ready {
                 assert_ne!(*f as usize, 0);
                 Some(*f)
@@ -147,7 +147,7 @@ impl JittedLlvm {
 
     pub fn get_fn_jitted(&mut self, f: FuncId) -> Option<*const u8> {
         let value = self.get_fn(f)?;
-        let name = self.functions[f.0].as_ref().unwrap().1.as_ptr();
+        let name = self.functions[f.as_index()].as_ref().unwrap().1.as_ptr();
         let ptr = unsafe { LLVMGetFunctionAddress(self.execution_engine, name) as usize as *const u8 };
         if ptr.is_null() {
             return None; // TODO: does get_fn ever lie?
@@ -157,7 +157,7 @@ impl JittedLlvm {
     }
 
     fn finish_fn(&mut self, f: FuncId) {
-        let func = self.functions[f.0].as_mut().unwrap();
+        let func = self.functions[f.as_index()].as_mut().unwrap();
         func.2 = true;
 
         // unsafe {
@@ -189,8 +189,8 @@ impl JittedLlvm {
     }
 
     fn get_type(&mut self, program: &mut Program, ty: TypeId) -> LLVMTypeRef {
-        extend_options(&mut self.types, ty.0 as usize);
-        if let Some(ty) = self.types[ty.0 as usize] {
+        extend_options(&mut self.types, ty.as_index());
+        if let Some(ty) = self.types[ty.as_index()] {
             return ty;
         }
 
@@ -213,7 +213,7 @@ impl JittedLlvm {
                 TypeInfo::Ptr(_) | TypeInfo::VoidPtr => self.ptr_ty,
             }
         };
-        self.types[ty.0 as usize] = Some(result);
+        self.types[ty.as_index()] = Some(result);
         result
     }
 
@@ -259,7 +259,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
         Self {
             llvm: JittedLlvm::new("franca", compile.program).unwrap(),
             compile,
-            f: FuncId(0), // TODO: bad
+            f: FuncId::from_index(0), // TODO: bad
             wip: vec![],
             slots: vec![],
             blocks: Default::default(),
@@ -279,7 +279,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
         } else if let Some(addr) = self.compile.program[f].comptime_addr {
             // TODO: shouldn't need this since i change at the callsite anyway
             let ptr = self.llvm.const_ptr(addr as *const u8);
-            self.llvm.functions[f.0] = Some((ptr, CString::new(String::new()).unwrap(), true));
+            self.llvm.functions[f.as_index()] = Some((ptr, CString::new(String::new()).unwrap(), true));
         } else {
             let callees = self.compile.program[f].wip.as_ref().unwrap().callees.clone();
             for (c, when) in callees {
@@ -424,8 +424,9 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                                 LLVMConstInt(ty, u64::from_le_bytes(n.to_le_bytes()), LLVMBool::from(false))
                             }
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
-                            Value::OverloadSet(n) | Value::GetFn(FuncId(n)) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
-                            Value::Type(TypeId(n)) => LLVMConstInt(ty, n, LLVMBool::from(false)),
+                            Value::OverloadSet(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
+                            Value::Type(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),
+                            Value::GetFn(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),
                             Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
                             Value::GetNativeFnPtr(ff) => {
                                 ty = self.func_type(ff);
@@ -437,7 +438,6 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                                 let f = f64::from_bits(bits);
                                 LLVMConstReal(LLVMDoubleTypeInContext(self.llvm.context), f)
                             }
-                            Value::Poison | Value::InterpAbsStackAddr(_) => err!("intrp constant in llvm",),
                             Value::Heap {
                                 value,
                                 physical_first,

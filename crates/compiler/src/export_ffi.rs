@@ -87,6 +87,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
+    ("fn index_to_func_id(func_index: i64) FuncId", index_to_func_id as *const u8),
     ("fn assert_eq(_: f64, __: f64) Unit", assert_eqf64 as *const u8),
     // TODO: all these type ones could use ffi TypeInfo if i gave it `@ct fn intern_type`
     //       but to do that here instead of current macro message, I'd need to do ffi of enums in a less insane way.
@@ -253,24 +254,24 @@ extern "C-unwind" fn tag_symbol<'p>(program: &&Program<'p>, enum_ty: TypeId, tag
 
 extern "C-unwind" fn pair_type(program: &mut &mut Program, a: TypeId, b: TypeId) -> TypeId {
     hope(|| {
-        assert!(a.0 < program.types.len() as u64, "TypeId OOB {}", a.0);
-        assert!(b.0 < program.types.len() as u64, "TypeId OOB {}", b.0);
+        assert!(a.as_index() < program.types.len(), "TypeId OOB {:?}", a);
+        assert!(b.as_index() < program.types.len(), "TypeId OOB {:?}", b);
         Ok(program.intern_type(TypeInfo::Tuple(vec![a, b])))
     })
 }
 
 extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
-        assert!(arg.0 < program.types.len() as u64, "TypeId OOB {}", arg.0);
-        assert!(ret.0 < program.types.len() as u64, "TypeId OOB {}", ret.0);
+        assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
+        assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
         Ok(program.intern_type(TypeInfo::Fn(FnType { arg, ret })))
     })
 }
 
 extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
-        assert!(arg.0 < program.types.len() as u64, "TypeId OOB {}", arg.0);
-        assert!(ret.0 < program.types.len() as u64, "TypeId OOB {}", ret.0);
+        assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
+        assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
         Ok(program.intern_type(TypeInfo::FnPtr(FnType { arg, ret })))
     })
 }
@@ -364,6 +365,10 @@ extern "C-unwind" fn number_of_functions(program: &mut &mut Program) -> i64 {
 
 extern "C-unwind" fn function_name<'p>(program: &mut &mut Program<'p>, f: FuncId) -> Ident<'p> {
     program[f].name
+}
+
+extern "C-unwind" fn index_to_func_id(_: &mut &mut Program, f: usize) -> FuncId {
+    FuncId::from_index(f)
 }
 
 extern "C-unwind" fn get_errno() -> i32 {
@@ -561,7 +566,7 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
     let mut value: Values = out.into();
     if ty == TypeId::ty() {
         if let Ok(id) = value.clone().single().unwrap().to_int() {
-            value = Values::One(Value::Type(TypeId(id as u64)))
+            value = Values::One(Value::Type(TypeId::from_raw(id)))
         }
     }
     FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc())

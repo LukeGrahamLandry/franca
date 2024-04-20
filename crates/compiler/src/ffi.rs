@@ -224,7 +224,7 @@ impl<'p> InterpSend<'p> for TypeId {
     }
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(TypeId(values.next()? as u64))
+        Some(TypeId::from_raw(values.next()?))
     }
 
     fn size() -> usize {
@@ -726,7 +726,7 @@ pub mod c {
             Value::I64(v) => Arg::new(v),
             Value::Bool(v) => Arg::new(v),
             Value::Symbol(v) => Arg::new(v),
-            Value::Type(TypeId(v)) => Arg::new(v),
+            Value::Type(v) => Arg::new(v),
             // This is weird because I want Value to impl Hash so it can't contain a float, but the u64 is f64::to_bits so it works as a pointer
             Value::F64(v) => Arg::new(v),
             _ => todo!("to_void_ptr {v:?}"),
@@ -774,8 +774,8 @@ pub mod c {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
             Value::Unit.into()
         } else if f_ty.ret == TypeId::ty() {
-            let result: u64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::Type(TypeId(result)).into()
+            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
+            Value::Type(TypeId::from_raw(result)).into()
         } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 || f_ty.ret == TypeId::void_ptr() {
             // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
             let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
@@ -794,8 +794,8 @@ pub mod c {
             let _: () = unsafe { b.into_cif().call(ptr, &args) };
             unreachable!("Called 'fn(_) Never' but it returned.")
         } else if ret_is_fn {
-            let result: usize = unsafe { b.into_cif().call(ptr, &args) };
-            Value::GetFn(FuncId(result)).into()
+            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
+            Value::GetFn(FuncId::from_raw(result)).into()
         } else {
             todo!("unsupported c ret type {}", program.program.log_type(f_ty.ret))
         })
