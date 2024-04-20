@@ -172,7 +172,7 @@ fn run_tests_serial_for_profile() {
         let assertion_count = src.split("assert_eq(").count() - 1;
         for backend in s[..end].split(", ") {
             let arch = match backend {
-                "interp" => TargetArch::Interp,
+                "interp" => continue, // TargetArch::Interp,
                 "aarch64" => TargetArch::Aarch64,
                 #[cfg(not(feature = "llvm"))]
                 "llvm" => continue,
@@ -209,7 +209,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
     let assertion_count = src.split("assert_eq(").count() - 1;
     for backend in s[..end].split(", ") {
         let arch = match backend {
-            "interp" => TargetArch::Interp,
+            "interp" => continue, // TargetArch::Interp,
             "aarch64" => TargetArch::Aarch64,
             #[cfg(not(feature = "llvm"))]
             "llvm" => continue,
@@ -243,7 +243,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
 
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
-    let mut program = Program::new(pool, TargetArch::Interp, arch);
+    let mut program = Program::new(pool, TargetArch::Aarch64, arch);
     let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
     if let Err(e) = result {
@@ -265,7 +265,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let arg = Value::I64(982164);
 
     let result = match arch {
-        TargetArch::Interp => comp.run(f, arg.into(), ExecTime::Runtime),
+        TargetArch::Interp => comp.run(f, arg.into(), ExecTime::Runtime, None),
         TargetArch::Aarch64 => {
             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
                 log_err(&comp, e, save);

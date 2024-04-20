@@ -176,7 +176,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _
     init_logs_flag(0xFFFFFFFFF);
     log_tag_info();
     let start = timestamp();
-    let mut program = Program::new(pool, TargetArch::Interp, TargetArch::Aarch64);
+    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
     let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
 

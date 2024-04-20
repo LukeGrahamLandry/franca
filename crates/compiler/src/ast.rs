@@ -1661,7 +1661,6 @@ pub enum Flag {
     Operator_Question_Prefix,
     Operator_Up_Arrow_Prefix,
     Operator_Ampersand_Prefix,
-    Compile_Ast,
     Flat_Call,
     Builtin,
     _Reserved_Count_,

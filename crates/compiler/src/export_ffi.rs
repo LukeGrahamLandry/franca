@@ -430,6 +430,7 @@ fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
     a * b + c
 }
 
+// TODO: documenet which ones can only be used in macros because they need the 'result: &mut FnWip'
 pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
     ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback),
@@ -457,10 +458,6 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ),
     // TODO: InterpSend for Unit
     ("fn debug_log_ast(expr: FatExpr) i64;", bounce_flat_call!(FatExpr, i64, log_ast)),
-    (
-        "fn infer_raw_deref_type(expr: FatExpr) TypeInfo;",
-        bounce_flat_call!(FatExpr, TypeInfo, infer_raw_deref_type),
-    ),
     (
         "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
         bounce_flat_call!(Vec<FatExpr>, FatExpr, unquote_macro_apply_placeholders),
@@ -511,16 +508,6 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
     compile.compile_expr(unsafe { &mut *result }, &mut expr, None).unwrap();
     compile.pending_ffi.push(Some(result));
     expr
-}
-
-// TODO: the name is a lie, it doesn't deref!
-fn infer_raw_deref_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> TypeInfo<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let ty = compile.type_of(unsafe { &mut *result }, &mut expr).unwrap().unwrap();
-    let ty = compile.program.raw_type(ty);
-    let ty = compile.program[ty].clone();
-    compile.pending_ffi.push(Some(result));
-    ty
 }
 
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {

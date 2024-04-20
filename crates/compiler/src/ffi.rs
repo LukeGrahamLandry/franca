@@ -685,7 +685,7 @@ pub mod c {
     use libc::c_void;
     use libffi::middle::{Arg, Type};
 
-    use crate::ast::IntTypeInfo;
+    use crate::ast::{FuncId, IntTypeInfo};
     use crate::compiler::Compile;
     use crate::err;
     use crate::ffi::InterpSend;
@@ -714,6 +714,8 @@ pub mod c {
                 TypeInfo::Unit => todo!(),
                 // This is the return type of exit().
                 TypeInfo::Never => CTy::usize(),
+                // just at comptime
+                TypeInfo::Fn(_) => CTy::i64(),
                 _ => err!("No c abi for {}", self.log_type(ty)),
             })
         }
@@ -765,6 +767,8 @@ pub mod c {
             args.insert(0, Arg::new(&program));
         }
 
+        let ret_is_fn = matches!(program.program[f_ty.ret], TypeInfo::Fn(_));
+
         // TODO: this is getting deranged. !!
         Ok(if f_ty.ret == TypeId::unit() {
             unsafe { b.into_cif().call::<c_void>(ptr, &args) };
@@ -789,6 +793,9 @@ pub mod c {
         } else if f_ty.ret.is_never() {
             let _: () = unsafe { b.into_cif().call(ptr, &args) };
             unreachable!("Called 'fn(_) Never' but it returned.")
+        } else if ret_is_fn {
+            let result: usize = unsafe { b.into_cif().call(ptr, &args) };
+            Value::GetFn(FuncId(result)).into()
         } else {
             todo!("unsupported c ret type {}", program.program.log_type(f_ty.ret))
         })

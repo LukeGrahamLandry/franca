@@ -5,7 +5,7 @@ use std::mem::{replace, transmute};
 use codemap::Span;
 
 use crate::ast::Flag;
-use crate::compiler::{CErr, Compile, ExecTime, FnWip, Res, ToBytes};
+use crate::compiler::{CErr, Compile, ExecTime, Res, ToBytes};
 use crate::export_ffi::do_flat_call_values;
 use crate::ffi::InterpSend;
 use crate::logging::LogTag::ShowPrint;
@@ -38,25 +38,12 @@ struct Interp<'p> {
     last_loc: Option<Span>,
 }
 
-pub fn interp_run<'p: 'a, 'a>(
-    compile: &mut Compile<'a, 'p>,
-    mut result: Option<&mut FnWip<'p>>,
-    f: FuncId,
-    arg: Values,
-    when: ExecTime,
-) -> Res<'p, Values> {
+pub fn interp_run<'p: 'a, 'a>(compile: &mut Compile<'a, 'p>, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
     let ret = compile.program[f].unwrap_ty().ret;
     assert!(!ret.is_any() && !ret.is_unknown());
     let return_slot_count = compile.ready.sizes.slot_count(compile.program, ret);
-    if let Some(result) = &mut result {
-        compile.pending_ffi.push(Some(*result as *mut FnWip));
-    } else {
-        compile.pending_ffi.push(None);
-    }
-
     let mut interp = Interp::new(compile.pool);
     let res = interp.run(f, arg, when, return_slot_count, compile)?;
-    compile.pending_ffi.pop().unwrap();
     Ok(res)
 }
 

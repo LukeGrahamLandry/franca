@@ -160,6 +160,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // just too ways of emitting the call.
                 result.push(Bc::NoCompile);
             } else {
+                println!("Bc::CallBuiltin for {f:?} {}", self.program.pool.get(func.name));
                 // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
                 //       but specializing kills the name. But before that will work anyway i need to not blindly pass on the shim args to the builtin
                 //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
@@ -471,15 +472,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::Load {
                             from: ptr.single(),
                             to: output,
-                        });
-                    }
-                    Flag::Reflect_Print => {
-                        let arg_slot = result.reserve_slots(self, arg.ty)?;
-                        self.compile_expr(result, arg, arg_slot)?;
-                        result.push(Bc::CallBuiltin {
-                            name: *macro_name,
-                            ret: output,
-                            arg: arg_slot,
                         });
                     }
                     Flag::Tag => {

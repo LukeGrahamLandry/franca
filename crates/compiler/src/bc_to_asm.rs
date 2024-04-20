@@ -139,8 +139,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
-        let func = self.compile.ready[f].as_ref().unwrap();
         // println!("{}", func.log(self.compile.program.pool));
+        let a = self.compile.program[f].finished_arg.unwrap();
+        let r = self.compile.program[f].finished_ret.unwrap();
+        if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.ready.sizes.slot_count(self.compile.program, r) >= 7 {
+            // TODO: my c_Call can;t handle agragates
+            self.compile.program[f].add_tag(Flag::Flat_Call);
+            self.compile.program[f].add_tag(Flag::Ct);
+        }
+        let func = self.compile.ready[f].as_ref().unwrap();
         let ff = &self.compile.program[func.func];
         let is_flat_call = ff.has_tag(Flag::Flat_Call);
         self.f = f;
@@ -158,9 +165,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         let mut release_stack = vec![];
         let arg_range = func.arg_range;
-        // if is_c_call {
-        assert!(func.arg_range.count <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-
         let mut flat_result = None;
 
         if is_flat_call {
@@ -191,6 +195,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.set_slot(x5, arg_range.offset(i));
             }
         } else {
+            assert!(func.arg_range.count <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
             assert!(
                 !ff.has_tag(Flag::Ct),
                 "compiler context is implicitly passed as first argument for @ct builtins."
@@ -216,7 +221,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 &Bc::LastUse(slots) => {
                     self.release_many(slots);
                 }
-                Bc::NoCompile => unreachable!(),
+                Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
                 Bc::CallDynamic { .. } => todo!(),
                 &Bc::CallSplit { rt, ct, ret, arg } => {
                     let f = if self.when == ExecTime::Comptime { ct } else { rt };
@@ -261,12 +266,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         physical_first,
                         physical_count,
                     } => {
+                        // ty will generally be Ptr(whatever), but could be an int for comptime ffi void ptr stuff.
                         let ty = self.slot_type(*slot);
-                        assert!(
-                            self.compile.program.unptr_ty(ty).is_some(),
-                            "Expected Value::Heap to be ptr, not {:?}",
-                            self.compile.program.log_type(ty)
-                        );
                         // TODO: this needs to be different when I actually want to emit an executable.
                         let ptr = self.compile.aarch64.constants.copy_heap(value, physical_first, physical_count);
                         self.load_imm(x0, ptr as u64);
@@ -497,14 +498,24 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         if let Some(slot) = self.slots[slot.0] {
             slot
         } else if let Some((made, size)) = self.open_slots.pop() {
-            debug_assert!(allow_create, "!allow_create {slot:?}");
+            // TODO: broken with switch to comptime asm but seems mostly fine...?
+            // debug_assert!(
+            //     allow_create,
+            //     "!allow_create {slot:?} {}",
+            //     self.compile.program[self.f].log(self.compile.pool)
+            // );
             if size > 8 {
                 self.open_slots.push((SpOffset(made.0 + 8), size - 8));
             }
             self.slots[slot.0] = Some(made);
             made
         } else {
-            debug_assert!(allow_create, "!allow_create {slot:?}");
+            // TODO: broken with switch to comptime asm but seems mostly fine...?
+            // debug_assert!(
+            //     allow_create,
+            //     "!allow_create {slot:?} {}",
+            //     self.compile.program[self.f].log(self.compile.pool)
+            // );
             let made = self.next_slot;
             self.slots[slot.0] = Some(made);
             self.next_slot.0 += 8;

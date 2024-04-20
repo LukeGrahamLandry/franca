@@ -10,18 +10,20 @@ use interp_derive::InterpSend;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
-use std::mem;
+use std::mem::{self, transmute};
 use std::ops::DerefMut;
+use std::thread::sleep;
+use std::time::Duration;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Module, ModuleBody, ModuleId, Name, OverloadSet, Pattern, Var, VarInfo,
-    VarType, WalkAst,
+    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Module, ModuleBody, ModuleId, Name, OverloadSet, Pattern, TargetArch, Var,
+    VarInfo, VarType, WalkAst,
 };
 
-use crate::bc::*;
-use crate::bc_to_asm::Jitted;
+use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
+use crate::export_ffi::do_flat_call_values;
 use crate::ffi::InterpSend;
 use crate::interp::interp_run;
 use crate::scope::ResolveScope;
@@ -29,6 +31,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
+use crate::{bc::*, ffi};
 use crate::{
     logging::{LogTag, PoolLog},
     outln,
@@ -217,10 +220,47 @@ impl<'a, 'p> Compile<'a, 'p> {
         result
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
+    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime, result: Option<*mut FnWip<'p>>) -> Res<'p, Values> {
         let state2 = DebugState::RunInstLoop(f);
         self.push_state(&state2);
-        let result = interp_run(self, None, f, arg, when);
+        self.pending_ffi.push(result);
+        let arch = match when {
+            ExecTime::Comptime => self.program.comptime_arch,
+            ExecTime::Runtime => self.program.runtime_arch,
+            ExecTime::Both => todo!(),
+        };
+        let result = match arch {
+            TargetArch::Interp => interp_run(self, f, arg, when),
+            TargetArch::Aarch64 => {
+                emit_aarch64(self, f, when)?;
+                let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr();
+                let ty = self.program[f].unwrap_ty();
+                let comp_ctx = self.program[f].has_tag(Flag::Ct);
+                let c_call = self.program[f].has_tag(Flag::C_Call);
+                let flat_call = self.program[f].has_tag(Flag::Flat_Call);
+
+                self.aarch64.make_exec(); // otherwise: bus error
+                if flat_call {
+                    assert!(comp_ctx && !c_call);
+                    // println!("flat_call {f:?}");
+                    do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
+                } else if c_call {
+                    assert!(!flat_call);
+                    assert!(addr as usize % 4 == 0);
+                    // println!("c_call {f:?} {addr:?} {arg:?} -> {}", self.program.log_type(ty.ret));
+                    // TODO: !!! removin this makes it illeegal hardware insturciton.
+                    //       would be really cool if that gives it time to update the other cache cause instructions and data are seperate ????!!!!
+                    sleep(Duration::from_millis(1));
+                    let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx);
+                    r
+                } else {
+                    todo!()
+                }
+            }
+            TargetArch::Llvm => todo!(),
+        };
+
+        self.pending_ffi.pop().unwrap();
         let result = self.tag_err(result);
         self.pop_state(state2);
         result
@@ -649,6 +689,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if func.has_tag(Flag::Annotation) {
                     assert!(!func.has_tag(Flag::Rt));
                     func.add_tag(Flag::Ct);
+                    func.add_tag(Flag::Flat_Call);
                 }
                 assert!(!(is_struct && is_enum));
                 if is_struct {
@@ -1364,7 +1405,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // let new_expr = self.immediate_eval_expr(&result.constants, full_call, want)?;
                 self.compile(f, ExecTime::Comptime)?;
-                let new_expr = interp_run(self, Some(result), f, Values::Many(values), ExecTime::Comptime)?;
+
+                let new_expr = self.run(f, Values::Many(values), ExecTime::Comptime, Some(result as *mut FnWip))?;
                 // TODO: deserialize should return a meaningful error message
                 *expr = unwrap!(FatExpr::deserialize_one(new_expr.clone()), "macro failed. returned {new_expr:?}");
                 outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
@@ -1803,10 +1845,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         fake_func.finished_arg = Some(TypeId::unit());
         fake_func.finished_ret = Some(ret_ty);
         self.anon_fn_counter += 1;
+        if self.ready.sizes.slot_count(self.program, ret_ty) > 1 && self.program.comptime_arch == TargetArch::Aarch64 {
+            // println!("imm_eval as flat_call for ret {}", self.program.log_type(ret_ty));
+            // TODO: my c_call can't handle aggragate returns
+            fake_func.add_tag(Flag::Flat_Call);
+            fake_func.add_tag(Flag::Ct); // not really needed but flat_call always does
+        }
         let func_id = self.program.add_func(fake_func);
         logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
         self.compile(func_id, ExecTime::Comptime)?;
-        let result = self.run(func_id, Value::Unit.into(), ExecTime::Comptime)?;
+        let result = self.run(func_id, Value::Unit.into(), ExecTime::Comptime, None)?;
         logln!(
             "COMPUTED: {} -> {:?} under {}",
             e.log(self.pool),
@@ -2702,7 +2750,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 .ready
                                 .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
                             // TODO: You can't just filter here anymore because what if its a Split FuncRef.
-                            // filter_arch(self.program, &mut overloads, result.when);
                             let found = match overloads.ready.len() {
                                 0 => err!("Missing overload",),
                                 1 => overloads.ready[0].func,
