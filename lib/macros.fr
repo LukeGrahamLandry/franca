@@ -4,8 +4,8 @@
 // TODO: make calling literal_ast less painful. The problem is can't use generics in compiler ffi 
 //       so have to pass by void ptr but currently can't just make lvalue refernce like rust. 
 //       can't decide if this macro is good enough or want ^ as more general solution. 
-@annotation @pub
-fn literal(arg: AstExpr, target: AstExpr) AstExpr = {
+@annotation 
+fun literal(arg: AstExpr, target: AstExpr) AstExpr = {
     var lit_fn: OverloadSet = literal_ast; 
     let lit_fn: VoidPtr = lit_fn&;
     let lit_fn = literal_ast(OverloadSet, lit_fn);
@@ -23,25 +23,25 @@ fn literal(arg: AstExpr, target: AstExpr) AstExpr = {
     // - it needs @ct but so does literal_ast so this macro already had that restriction. 
     // - we dont want to do the check here because its intended for use in macros so the type might not be const yet. 
     // TODO: better error message
-    (@with_var(value, target!unquote) {
-        assert_fn!unquote(check_fn!unquote(value!type, arg!unquote), "ast_literal type err");
-        lit_fn!unquote(arg!unquote, @as(void_ast!unquote) value&)
-    })!quote
+    '@with_var(value, <target>) {
+        <assert_fn>(<check_fn>(value!type, <arg>), "ast_literal type err");
+        <lit_fn>(<arg>, @as(<void_ast>) value&)
+    }'
 }
 
 // TODO: need to have an actual clone method because just relying on stack copy will share heap ptrs. 
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
 // TODO: allow a catch all default if last func has no name. 
-@annotation @pub
-fn match(arg: FatExpr, target: FatExpr) FatExpr = {
+@annotation 
+fun match(arg: FatExpr, target: FatExpr) FatExpr = {
     let stmts: Slice(FatStmt) = target&.expr.Block.body[];
     arg = compile_ast(arg);
     let enum_type = arg&.ty[];
     
     let panic_fn = @literal(OverloadSet) panic;
     // TODO: compile error to not handle all and not have a default branch
-    var body = panic_fn!unquote("unhandled match case")!quote
+    var body = '<panic_fn>("unhandled match case")';
     let eq_fn = @literal(OverloadSet) eq;
     let i64_t = @literal(Type) i64;
     let tag_value_fn = @literal(OverloadSet) tag_value;
@@ -52,7 +52,7 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             var handler_body = stmt.stmt.Eval[];
             // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. 
             var name = handler_body&.expr.Closure[].name[];
-            var case_access = (arg_var&.___)!quote;
+            var case_access = 'arg_var&.___';
             case_access&.expr.FieldAccess[1][] = name;
             // TODO: check that no duplicate handlers
             // TODO: error message here if invalid name instead of it showing up later in the generated code. 
@@ -60,37 +60,32 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
             // TODO: infer function argument type since we know it must match the enum payload,
             //       but allow no arg if you just want to use it as a switch. 
             
-            // TODO: giving in an having unquote syntax is probably worth it. is $(expr) that much better than expr!unquote? this is a bit illegable. 
             // TODO: its too hacky that you only have to call clone_ast when there's no placeholders
-            var cond = eq_fn!unquote(tag_val, @as(i64_t!unquote) tag_value_fn!unquote(
-                (@literal(Type) enum_type)!unquote, 
-                (@literal(Symbol) name)!unquote
-            ))!quote;
+            var cond = '<eq_fn>(tag_val, @as(<i64_t>) <tag_value_fn>(
+                <@literal(Type) enum_type>, 
+                <@literal(Symbol) name>
+            ))';
             
-            body = (cond!unquote,
-                fn= (handler_body!unquote)(case_access!unquote!deref), 
-                fn= body!unquote
-            )!if!quote;
-            
+            body = '(<cond>, fn = <handler_body>(<case_access>[]), fn = <body>)!if';
         };
     };
     
     // TODO: Declaring variables is weird because name resolution has already run.
-    (@with_var(arg_var, arg!unquote) @with_var(tag_val, arg_var&!tag!deref) body!unquote)!quote
+    '@with_var(arg_var, <arg>) @with_var(tag_val, arg_var&!tag[]) <body>'
 }
 
 /// Similar to @match but operates on values instead of enum payloads. 
 /// @switch(value) { @<specifier> fn= <body> }
 /// - @case(v): calls <body> if value.eq(v)
-@annotation @pub
-fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
+@annotation 
+fun switch(arg: FatExpr, target: FatExpr) FatExpr = {
     let stmts: Slice(FatStmt) = target&.expr.Block.body[];
     arg = compile_ast(arg);
     let arg_type = @literal(Type) arg&.ty[];
     
     let panic_fn = @literal(OverloadSet) panic;
     let eq_fn = @literal(OverloadSet) eq;
-    var body = panic_fn!unquote("unhandled switch case")!quote;
+    var body = '<panic_fn>("unhandled switch case")';
     var first = true;
     
     // TODO: reverse order because i build out from the inside
@@ -110,12 +105,12 @@ fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
             // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
             if(name.int().eq(case!symbol.int()), fn = {
                 // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
-                let cond = (eq_fn!unquote(arg_var, @as(arg_type!unquote) arg[]!unquote))!quote;
-                body = ((cond!unquote, fn= action!unquote(), fn=body!unquote)!if)!quote;
+                let cond = '<eq_fn>(arg_var, @as(<arg_type>) <arg[]>)';
+                body = '(<cond>, fn=<action>(), fn=<body>)!if';
             }, fn=if(name.int().eq(default!symbol.int()), fn = {
                 if(first) {|
                     // If expansion err here: forgot argument for default branch handler?
-                    body = (action!unquote(arg_var))!quote;
+                    body = '<action>(arg_var)';
                 }{|
                     panic("@default must be the last handler in @switch");
                 };
@@ -133,12 +128,12 @@ fn switch(arg: FatExpr, target: FatExpr) FatExpr = {
     };
     
     // TODO: Declaring variables is weird because name resolution has already run.
-    (@with_var(arg_var, arg!unquote) body!unquote)!quote
+    '@with_var(arg_var, <arg>) <body>'
 }
 
 // TODO: There are implicit range assertions because we get the bit count from the type of the ints. 
-@annotation @pub
-fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
+@annotation 
+fun bits(arg: AstExpr, target: AstExpr) AstExpr = {
     let fn_trunc = @literal(OverloadSet) signed_truncate;
     let fn_shift = @literal(OverloadSet) shift_left;
     let fn_or = @literal(OverloadSet) bit_or;
@@ -157,13 +152,13 @@ fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
         let bc: i64 = int&.bit_count[];
         shift = sub(shift, bc);
         assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
-        let part_ast = (@as(i64_ast!unquote) part[]!unquote)!quote;
+        let part_ast = '@as(<i64_ast>) <part[]>';
         let next = (int&.signed[], 
-            fn() AstExpr = new_call_ast(fn_trunc, new_pair_ast(part_ast, @literal(i64) int&.bit_count[])),
-            fn() AstExpr = part_ast
+            fn = '<fn_trunc>(<part_ast>, <@literal(i64) int&.bit_count[]>)',
+            fn = part_ast
         )!if;
-        let next = new_call_ast(fn_shift, new_pair_ast(next, @literal(i64) shift));
-        expr = new_call_ast(fn_or, new_pair_ast(expr, next));
+        let next = '<fn_shift>(<next>, <@literal(i64) shift>)';
+        expr = '<fn_or>(<expr>, <next>)';
     });
     
     // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
@@ -173,7 +168,7 @@ fn bits(arg: AstExpr, target: AstExpr) AstExpr = {
         panic(msg.str());
     };
     
-    (@as(i64_ast!unquote) expr!unquote)!quote
+    '@as(<i64_ast>) <expr>'
 }
 
 // Seems like a fairly crippling design problem the range at which adding new code can mess you up. 

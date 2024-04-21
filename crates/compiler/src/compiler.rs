@@ -1072,6 +1072,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
+            Expr::Raw { ty, value } => {
+                // TODO: the whole point is to not always have to deserialize it. allow Structured::ConstRaw
+                let mut out = vec![];
+                values_from_ints(self, *ty, &mut value.iter().copied(), &mut out)?;
+                Structured::Const(*ty, Values::from(out))
+            }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
                 match name {
@@ -1176,6 +1182,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ty = self.compile_expr(result, arg, None)?.ty();
                         expr.expr = Expr::ty(ty);
                         self.program.load_value(Value::Type(ty))
+                    }
+                    "const_eval" => {
+                        let res = self.compile_expr(result, arg, requested)?;
+                        let ty = res.ty();
+                        let value = if let Ok(val) = res.get() {
+                            val
+                        } else {
+                            // TODO: its a bit silly that i have to specifiy the type since the first thing it does is compile it
+                            self.immediate_eval_expr_in(result, mem::take(arg), ty)?
+                        };
+                        expr.expr = Expr::Value { ty, value: value.clone() };
+                        expr.ty = ty;
+                        Structured::Const(ty, value)
                     }
                     "size_of" => {
                         let ty: TypeId = self.immediate_eval_expr_in_known(result, mem::take(arg))?;
@@ -1415,6 +1434,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     target.ty = ty;
                     *expr = mem::take(target);
                     return self.compile_expr(result, expr, Some(ty));
+                } else if name_str == "uninitialized" {
+                    assert!(requested.is_some(), "@uninitialized expr must have known type");
+                    return Ok(Structured::RuntimeOnly(requested.unwrap()));
                 }
 
                 outln!(
@@ -1519,6 +1541,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, value } => {
                 if value.as_overload_set().is_ok() {
+                    return Ok(None);
+                } else {
+                    *ty
+                }
+            }
+            Expr::Raw { ty, .. } => {
+                if ty.is_overload_set() {
                     return Ok(None);
                 } else {
                     *ty
@@ -1834,7 +1863,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.type_check_arg(ty, ret_ty, "immediate_eval_expr_in")?;
                 Ok(val)
             }
-            _ => self.immediate_eval_expr(&result.constants, e, ret_ty),
+            _ => {
+                if let Some(values) = self.check_quick_eval(&result.constants, &mut e, ret_ty)? {
+                    return Ok(values);
+                }
+                let func_id = self.make_lit_function(&result.constants, e, ret_ty)?;
+                self.run(func_id, Value::Unit.into(), ExecTime::Comptime, Some(result as *mut FnWip))
+            }
         }
     }
 
@@ -2746,6 +2781,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             VarType::Const => {
                 let mut val = match value {
                     Some(value) => {
+                        // TODO: doing the check here every time is sad and having @uninit not be a normal expression is kinda dumb.
+                        if value.expr.as_prefix_macro(Flag::Uninitialized).is_some() {
+                            let name = self.pool.get(name.0);
+                            err!("const bindings cannot be reassigned so '{name}' cannot be @uninitialized",)
+                        }
+
                         // TODO: just treat @builtin as a normal expression instead of a magic thing that const looks for so you can do 'const Type: @builtin("Type") = @builtin("Type");'
                         //       then you dont have to eat this check for every constant, you just get there when you get there.
                         if let Some((arg, _)) = value.expr.as_prefix_macro(Flag::Builtin) {
@@ -2870,11 +2911,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let final_ty = match value {
                     None => {
                         if no_type {
-                            err!("uninit vars require type hint {}", name.log(self.pool));
+                            err!(
+                                "binding {} requires a value (use unsafe '@uninitilized()' if thats what you really want)",
+                                name.log(self.pool)
+                            );
                         }
                         ty.unwrap()
                     }
                     Some(value) => {
+                        if kind == VarType::Let && value.expr.as_prefix_macro(Flag::Uninitialized).is_some() {
+                            let name = self.pool.get(name.0);
+                            err!("let bindings cannot be reassigned so '{name}' cannot be @uninitialized",)
+                        }
                         let value = self.compile_expr(result, value, ty.ty())?;
                         if no_type {
                             *ty = LazyType::Finished(value.ty());

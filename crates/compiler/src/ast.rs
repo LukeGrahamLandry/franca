@@ -100,6 +100,10 @@ pub enum Expr<'p> {
         ty: TypeId,
         value: Values,
     },
+    Raw {
+        ty: TypeId,
+        value: Vec<i64>,
+    },
     WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
@@ -211,7 +215,7 @@ pub trait WalkAst<'p> {
                 }
             }
             Expr::WipFunc(_) => todo!("walkwip"),
-            Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
+            Expr::Raw { .. } | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
         }
         self.post_walk_expr(expr);
     }
@@ -1591,6 +1595,10 @@ impl TypeId {
     pub fn overload_set() -> TypeId {
         TypeId::from_index(9)
     }
+
+    pub(crate) fn is_overload_set(&self) -> bool {
+        *self == Self::overload_set()
+    }
 }
 
 /// It's important that these are consecutive in flags for safety of TryFrom
@@ -1668,6 +1676,8 @@ pub enum Flag {
     Flat_Call,
     Builtin,
     No_Memo,
+    Uninitialized,
+    Const_Eval,
     _Reserved_Count_,
 }
 

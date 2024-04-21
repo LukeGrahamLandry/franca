@@ -62,8 +62,12 @@ pub enum TokenType<'p> {
     // Bit count means leading zeros are observable.
     BinaryNum { bit_count: u8, value: u64 },
     LeftArrow,
+    RightArrow,
     IncludeStd,
     Directive(Ident<'p>),
+    Quote,
+    LeftAngle,
+    RightAngle,
     Error(LexErr),
 }
 
@@ -128,7 +132,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         match self.peek_c() {
             '\0' => self.one(TokenType::Eof),
             '#' => self.lex_ident(),
-            '"' | '“' | '”' | '\'' => self.lex_quoted(),
+            '"' | '“' | '”' => self.lex_quoted(),
             '`' => self.lex_quoted_multiline(),
             '0' => {
                 self.pop();
@@ -170,7 +174,9 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '/' => self.one(Slash),
             '+' => self.pair('=', Error(LexErr::Unexpected('+')), PlusEq),
             '-' => self.pair('=', Error(LexErr::Unexpected('-')), MinusEq),
-            '<' => self.pair('-', Error(LexErr::Unexpected('<')), LeftArrow),
+            '<' => self.pair('-', LeftAngle, LeftArrow),
+            '>' => self.pair('-', RightAngle, RightArrow),
+            '\'' => self.one(Quote),
             c => self.err(LexErr::Unexpected(c)),
         }
     }
@@ -215,9 +221,21 @@ impl<'a, 'p> Lexer<'a, 'p> {
         self.pop();
         loop {
             match self.pop() {
-                '"' | '“' | '”' | '\'' => {
+                '"' | '“' | '”' => {
                     // Payload doesn't include quotes.
-                    let text = &self.src.source()[self.start + 1..self.current - 1];
+                    let text = if self.start + 2 == self.current && self.peek_c() == '"' {
+                        let mut count = 0;
+                        while count < 3 {
+                            match self.pop() {
+                                '"' => count += 1,
+                                '\0' => return self.err(LexErr::UnterminatedStr),
+                                _ => count = 0,
+                            }
+                        }
+                        &self.src.source()[self.start + 3..self.current - 3]
+                    } else {
+                        &self.src.source()[self.start + 1..self.current - 1]
+                    };
                     return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
                 }
                 // I could let you have multi-line, but I don't like it because you end up with garbage indentation.

@@ -19,6 +19,10 @@
 
 ## Feature Ideas
 
+- embeding other languages would be a good demo of the comptime/meta programming stuff.
+  - need a raw string syntax that passes it to a macro (like nim?)
+  - lualit would be cool cause they have c abi stuff and dynamic language so notably different from mine.
+- A :: b === const A = b. maybe := for var or let, idk which.
 - adding 'e->name(a) === (e.vptr.name)(e, a)' would make <- the "function oriented programming" operator and -> the "object-al programming" operator.
 - need chained compile errors.
   - maybe loc should be a specific token so you don't highlight the whole expression just to complain about a function signature
@@ -122,6 +126,7 @@
 - void pointer cast
 - hacky rust pointer ffi
 - inline asm
+- reading from @uninitialized()
 
 ## Testing
 

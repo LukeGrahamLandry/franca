@@ -395,6 +395,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     });
                 }
             }
+            Expr::Raw { value, .. } => {
+                // TODO: sometimes you probably want to reference by pointer
+                //       like this will load a string byte by byte
+                for (i, value) in value.iter().enumerate() {
+                    result.push(Bc::LoadConstant {
+                        slot: output.offset(i),
+                        value: Value::I64(*value),
+                    });
+                }
+            }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = if let Ok(f) = Flag::try_from(*macro_name) {
                     f
@@ -480,7 +490,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.index_expr(result, ptr.ty, container_ptr, index, output)?
             }
             Expr::StructLiteralP(pattern) => self.construct_struct(result, pattern, expr.ty, output)?,
-            Expr::String(_) | Expr::PrefixMacro { .. } => unreachable!("{}", expr.log(self.program.pool)),
+            Expr::PrefixMacro { name, .. } => {
+                if name.0 == Flag::Uninitialized.ident() {
+                    assert!(!expr.ty.is_never(), "call exit() to produce a value of type 'Never'");
+                    // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
+                    return Ok(());
+                } else {
+                    unreachable!("unhandled macro {}", expr.log(self.program.pool));
+                }
+            }
+            Expr::String(_) => unreachable!("{}", expr.log(self.program.pool)),
         };
         Ok(())
     }

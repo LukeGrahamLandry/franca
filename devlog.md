@@ -1,4 +1,27 @@
-## passing by pointer (Apr 14)
+## getting rid of interpreter (Apr 20)
+
+So end goal is for comptime repr of values to be the same as rust repr so I don't have to do any serialization when you call into the compiler.
+But that's such a massive change that would be so painful so doing it in tiny steps and keeping the compiler functional throughout the transition.
+
+First step was making all ffi calls in macro handlers go through an array of integers instead of an array of interp values.
+You shouldn't need the runtime type (rust enum) tags since you know the function signetures statically.
+That's what the flat_call calling convention does. Just pass in argptr/len and retptr/len and have both sides serialize the values out.
+But helpfully the int repr is what my asm uses already so that side is a no-op. (most of this was yesterday).
+
+- Seperated out the macro_msg impls from the serialization code.
+- Required some ugly hacks to dereference pointers before going into the flat call because interp stack pointers aren't real pointers.
+- Mistake with enum padding being added twice because of the double serialization.
+
+So after that, we're at the point where all the interesting ffi stuff is happening in native code.
+The interpreter is only doing moves and calls, which asm can do on its own.
+The interface to the interpreter is really thin, its just 'fn run'.
+So now allow TargetArch::Aarch64 at comptime and replace interp run with emit_asm and then jumping to the jitted page like you would for runtime calling main.
+Now that ast functions are in asm, its a problem that I can't do large structs so had to use flat call for internal things too sometimes (not just compiler ffi).
+Really need to implement a less stupid cc than that at some point.
+
+So that kinda worked but caused my favourite bug.
+
+## (plan) passing by pointer (Apr 14)
 
 Llvm doesn't do all the c ABI stuff for you. Need to use pointers to pass structs by value.
 Other backends are likely need the same thing.

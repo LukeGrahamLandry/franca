@@ -93,14 +93,14 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //       (these functions don't use InterpSend, they just rely on C ABI).
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
     ("fn Ty(fst: Type, snd: Type) Type;", pair_type as *const u8),
-    // The type of '@pub fn(Arg) Ret'. This is a comptime only value.
+    // The type of 'fun(Arg) Ret'. This is a comptime only value.
     // All calls are inlined, as are calls that pass one of these as an argument.
     // Captures of runtime variables are allowed since you just inline everything anyway.
     // Const captures behave as you'd expect from first class closures.
     ("fn Fn(Arg: Type, Ret: Type) Type;", fn_type as *const u8),
     // TODO: include calling convention.
-    // Like @pub fn(Arg, Ret) but as a runtime value. Same as a function pointer in c but with less insane syntax :).
-    // Use '!addr' on a normal @pub fn value to get create a value of this type.
+    // Like fun(Arg, Ret) but as a runtime value. Same as a function pointer in c but with less insane syntax :).
+    // Use '!addr' on a normal fun value to get create a value of this type.
     // - The function cannot have any runtime variable captures,
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.

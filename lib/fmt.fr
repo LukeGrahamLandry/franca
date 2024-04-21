@@ -6,21 +6,22 @@
 
 fn todo() Never = panic("Not Yet Implemented");
 
-@pub fn write(fd: *Fd, bytes: Slice(u8)) Unit = {
+fun write(fd: *Fd, bytes: Slice(u8)) Unit = {
     let len = bytes.len().mul(8); // TODO: packed strings
     let written: isize = write(fd[], bytes&.ptr[], len);
     assert(written.eq(len), "Failed Write");
 }
 
-@pub fn write(self: *List$i64, bytes: Str) Unit = self.push_all(bytes);
-@pub fn display(self: Str, writer: *List$i64) Unit = writer.write(self);
+fun write(self: *List$i64, bytes: Str) Unit = self.push_all(bytes);
+fun display(self: Str, writer: *List$i64) Unit = writer.write(self);
 
 /// (@fmt(Writer, fmt_spec_str, ...Args))
 /// Currently display is only implemented with 'Writer' being *List$i64 (TODO: need better generics). 
 /// 'Args' can be any types that have fn display(Self, Writer) Unit;
-/// 'fmt_spec_str' must be a const string value. '%' characters will be replaced (like printf, you just don't need the type hint). 
-@annotation @pub
-fn fmt(arg: AstExpr, target: AstExpr) AstExpr = {
+/// 'fmt_spec_str' must be a const string value. '%' characters will be replaced (like printf, you just don't need the type hint).
+// TODO: double '%%' to actually put a literal '%' 
+@annotation 
+fun fmt(arg: AstExpr, target: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
     let writer: *AstExpr = args.index(0);  // TODO: assert no side effects or use variable so it doesn't run many times. 
     var writer = compile_ast(writer[]);
@@ -39,7 +40,7 @@ fn fmt(arg: AstExpr, target: AstExpr) AstExpr = {
     var display_fn = @literal(OverloadSet) display;
     
     fn emit(msg: AstExpr) Unit = {
-        let action: FatExpr = (display_fn!unquote(msg!unquote, writer!unquote))!quote;
+        let action: FatExpr = '<display_fn>(<msg>, <writer>)';
         actions&.push(action);
     }
     
@@ -59,8 +60,8 @@ fn fmt(arg: AstExpr, target: AstExpr) AstExpr = {
 }
 
 // TODO: I want to call this @concat. fix overload resolution when colliding with macros. 
-@annotation @pub
-fn join(arg: AstExpr, target: AstExpr) AstExpr = {
+@annotation 
+fun join(arg: AstExpr, target: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
     var actions: List(AstExpr) = list(args.len());
     
@@ -74,25 +75,23 @@ fn join(arg: AstExpr, target: AstExpr) AstExpr = {
     
     // TODO: zip iterators 
     args.enumerate(fn(i: i64, param: *AstExpr) Unit = {
-        let action: FatExpr = (@as(()) (push_fn!unquote(join_list&, @as(str_t!unquote) param[]!unquote)))!quote;
+        let action: FatExpr = '@as(()) <push_fn>(join_list&, @as(<str_t>) <param[]>)';
         actions&.push(action);
     });
     
     var actions: Slice(AstExpr) = actions&.items();
     arg&.expr.Tuple[] = actions;
     
-    (@with_var(join_list, @as(list_fn!unquote(i64_t!unquote)) init_fn!unquote()) { arg!unquote; items_fn!unquote(join_list&)})!quote
+    '@with_var(join_list, @as(<list_fn>(<i64_t>)) <init_fn>()) { <arg>; <items_fn>(join_list&)}'
 }
 
 // TODO: HACK. Compiler doesn't know about Slice(_) so string literals are the wrong type. 
-@pub fn display(self: ""!type, writer: *List$i64) Unit = {
-    let ptr: Ptr(Ptr(i64)) = self&[0];
-    let len: Ptr(i64) = self&[1];
-    let s: Str = (ptr: ptr[], len: len[]);  // TODO: why can't I call assume(_, _)
+fun display(self: ""!type, writer: *List$i64) Unit = {
+    let s: Str = @as(Str) self;  // TODO: why do i need the type hint on the variable, not just in the @as (missing @as works tho)? 
     display(s, writer);
 }
 
-@pub fn display(self: i64, writer: *List$i64) Unit = {
+fun display(self: i64, writer: *List$i64) Unit = {
     // TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
     let s = self.str();
     display(s, writer);
@@ -105,13 +104,13 @@ fn join(arg: AstExpr, target: AstExpr) AstExpr = {
 // What's the easiest way to spell generic impls? 
 // const Write: Type = @trait(fn(T: Type) bool = function_exists(write!symbol, Ty(T, Str), Unit));
 // @impl fn(const W: Write) Unit = {
-//     @pub fn display(self: i64, writer: W) Unit = {
+//     fun display(self: i64, writer: W) Unit = {
 //         let s = self.str();
 //         writer.write(s)
 //      }
 // }
 // 
-// @pub fn write(self: *List_i64, bytes: Str) Unit = self.push_all(bytes);
+// fun write(self: *List_i64, bytes: Str) Unit = self.push_all(bytes);
 // List_i64.Ptr().implements(Write).assert();
 // var output: List_i64;
 // 123.display(output&);

@@ -151,6 +151,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let func = Func::new(name, arg, ret, Some(body), loc, false);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
+            Fun => Err(self.error_next("use 'fn' for lambda expression. 'fun' means public which doesn't make sense for an expression".to_string())),
             LeftSquiggle => {
                 self.start_subexpr();
                 self.eat(LeftSquiggle)?;
@@ -234,6 +235,26 @@ impl<'a, 'p> Parser<'a, 'p> {
                 }))
             }
             Dot => Err(self.error_next(String::from("leading '.' is reserved for inferred type enum constants."))),
+            LeftAngle => {
+                self.start_subexpr();
+                self.eat(LeftAngle)?;
+                let e = self.parse_expr()?;
+                self.eat(RightAngle)?;
+                Ok(self.expr(Expr::SuffixMacro(Flag::Unquote.ident(), Box::new(e))))
+            }
+            Quote => {
+                self.start_subexpr();
+                self.eat(Quote)?;
+                let e = self.parse_expr()?;
+                self.eat(Quote)?;
+                Ok(self.expr(Expr::SuffixMacro(Flag::Quote.ident(), Box::new(e))))
+            }
+            DoubleColon => {
+                self.start_subexpr();
+                self.eat(DoubleColon)?;
+                let e = self.parse_expr()?;
+                Ok(self.expr(Expr::SuffixMacro(Flag::Const_Eval.ident(), Box::new(e))))
+            }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }
     }
@@ -407,35 +428,48 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
         Ok(stmt)
     }
+
+    fn fn_stmt(&mut self) -> Res<Stmt<'p>> {
+        let loc = self.next_span();
+        match self.pop().kind {
+            Fn | Fun => {}
+            _ => return Err(self.expected("fn or fun")),
+        }
+
+        let (name, arg, ret) = self.fn_def_signeture(loc)?;
+        if name.is_none() {
+            // TODO: msg in wrong place
+            return Err(self.expected("fn expr to have name"));
+        }
+
+        let body = match self.peek() {
+            Semicolon => {
+                self.eat(Semicolon)?;
+                None
+            }
+            Equals => {
+                self.eat(Equals)?;
+                Some(self.parse_expr()?)
+            }
+            _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
+        };
+
+        let func = Func::new(name.unwrap(), arg, ret, body, loc, true);
+        Ok(Stmt::DeclFunc(func))
+    }
+
     fn parse_stmt_inner(&mut self) -> Res<FatStmt<'p>> {
         self.start_subexpr();
-        let annotations = self.parse_annotations()?;
+        let mut annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
             // Require name, optional body.
-            Fn => {
-                let loc = self.next_span();
-                self.eat(Fn)?;
-
-                let (name, arg, ret) = self.fn_def_signeture(loc)?;
-                if name.is_none() {
-                    // TODO: msg in wrong place
-                    return Err(self.expected("fn expr to have name"));
-                }
-
-                let body = match self.peek() {
-                    Semicolon => {
-                        self.eat(Semicolon)?;
-                        None
-                    }
-                    Equals => {
-                        self.eat(Equals)?;
-                        Some(self.parse_expr()?)
-                    }
-                    _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
-                };
-
-                let func = Func::new(name.unwrap(), arg, ret, body, loc, true);
-                Stmt::DeclFunc(func)
+            Fn => self.fn_stmt()?,
+            Fun => {
+                annotations.push(Annotation {
+                    name: Flag::Pub.ident(),
+                    args: None,
+                });
+                self.fn_stmt()?
             }
             Qualifier(kind) => {
                 self.pop();
@@ -447,10 +481,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                     Name::None => panic!("var decl needs name. {:?}", binding.ty),
                 };
 
-                match self.peek() {
+                let s = match self.peek() {
                     Equals => {
                         self.eat(Equals)?;
                         let value = self.parse_expr()?;
+                        // interestinly, its fine without requiring this semicolon. it was like that for a while and there was only one place it was missing.
+                        self.eat(Semicolon)?;
                         Stmt::DeclNamed {
                             name,
                             ty,
@@ -459,6 +495,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                         }
                     }
                     Semicolon => {
+                        // I think this is better but then I can't use @import the current way.
+                        // return Err(self.error_next("name binding requires initial value".to_string());
                         self.eat(Semicolon)?;
                         Stmt::DeclNamed { name, ty, value: None, kind }
                     }
@@ -486,7 +524,9 @@ impl<'a, 'p> Parser<'a, 'p> {
                         Stmt::Eval(call)
                     }
                     _ => return Err(self.expected("';' or '<-' or '=' after declaration.")),
-                }
+                };
+
+                s
             }
             Semicolon => {
                 self.eat(Semicolon)?;
@@ -520,22 +560,34 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(TokenType::Semicolon)?;
                 Stmt::Noop
             }
+            Symbol(_name) => {
+                let lex = self.lexer.last_mut().unwrap();
+                if matches!(lex.nth(1).kind, TokenType::Colon | TokenType::DoubleColon) {
+                    return Err(self.error_next("reserved for name := value and name :: value".to_string()));
+                }
+                let e = self.parse_expr()?;
+                self.after_expr_stmt(e)?
+            }
             _ => {
                 let e = self.parse_expr()?;
-                let s = if self.maybe(Equals) {
-                    let value = self.parse_expr()?;
-                    Stmt::Set { place: e, value }
-                } else {
-                    // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
-                    Stmt::Eval(e)
-                };
-                if !matches!(self.peek(), Semicolon | RightSquiggle) {
-                    return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
-                }
-                s
+                self.after_expr_stmt(e)?
             }
         };
         Ok(self.stmt(annotations, stmt))
+    }
+
+    fn after_expr_stmt(&mut self, e: FatExpr<'p>) -> Res<Stmt<'p>> {
+        let s = if self.maybe(Equals) {
+            let value = self.parse_expr()?;
+            Stmt::Set { place: e, value }
+        } else {
+            // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
+            Stmt::Eval(e)
+        };
+        if !matches!(self.peek(), Semicolon | RightSquiggle) {
+            return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
+        }
+        Ok(s)
     }
 
     // | @name(args) |
