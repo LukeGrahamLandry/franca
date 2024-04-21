@@ -1667,6 +1667,7 @@ pub enum Flag {
     Operator_Ampersand_Prefix,
     Flat_Call,
     Builtin,
+    No_Memo,
     _Reserved_Count_,
 }
 

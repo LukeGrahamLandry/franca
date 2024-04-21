@@ -34,7 +34,7 @@ use crate::{
     outln,
 };
 
-use crate::logging::LogTag::{ShowErr, ShowPrint};
+use crate::logging::LogTag::ShowErr;
 use crate::{assert, assert_eq, err, ice, logln, unwrap};
 
 #[derive(Clone)]
@@ -244,8 +244,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else if c_call {
                     assert!(!flat_call);
                     assert!(addr as usize % 4 == 0);
-                    let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx);
-                    r
+                    let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx)?;
+                    let mut out = vec![];
+                    values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
+
+                    Ok(out.into())
                 } else {
                     todo!()
                 }
@@ -267,6 +270,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: Option<*mut FnWip<'p>>,
         arg: Arg,
     ) -> Res<'p, Ret> {
+        let state = DebugState::RunInstLoop(f);
+        self.push_state(&state);
         emit_aarch64(self, f, when)?;
         self.pending_ffi.push(result);
         let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr();
@@ -274,6 +279,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         let comp_ctx = self.program[f].has_tag(Flag::Ct);
         let c_call = self.program[f].has_tag(Flag::C_Call);
         let flat_call = self.program[f].has_tag(Flag::Flat_Call);
+
+        let arg_ty = Arg::get_type(self.program);
+        self.type_check_arg(arg_ty, ty.arg, "sanity ICE")?;
+        let ret_ty = Ret::get_type(self.program);
+        self.type_check_arg(ret_ty, ty.ret, "sanity ICE")?;
 
         // symptom if you forget: bus error
         self.aarch64.make_exec();
@@ -286,12 +296,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(addr as usize % 4 == 0);
             let arg = arg.serialize_one();
             let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx)?;
-            let r = Ret::deserialize(&mut r.vec().into_iter());
+            let r = Ret::deserialize_from_ints(&mut [r].into_iter());
             Ok(unwrap!(r, ""))
         } else {
             todo!()
         };
         self.pending_ffi.pop().unwrap(); // TODO: should do this before short cirucuiting errpr
+        self.pop_state(state);
         res
     }
 
@@ -602,6 +613,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
+        // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
+        //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
+        //       or when impl new functions so can only happen once so they dont make redundant overloads.  -- Apr 20
+        let no_memo = func.has_tag(Flag::No_Memo); // Currently this is only used by 'fn Unique' because that doesn't want to go in the generics_memo cache.
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
         func.referencable_name = false;
@@ -624,18 +639,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             value: arg_value.clone(),
         };
 
-        // TODO: !!!! now Unique doesnt work maybe?
-        // if func.body.is_none() {
-        //     // TODO: don't re-eval the arg type every time.
-        //     let name = func.synth_name(self.pool);
-        //     return self.interp.runtime_builtin(name, arg_value, None);
-        // }
-
         // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
         let key = (template_f, arg_value.clone()); // TODO: no clone
-        let found = self.program.generics_memo.get(&key);
-        if let Some(found) = found {
-            return Ok(found.clone());
+        if !no_memo {
+            let found = self.program.generics_memo.get(&key);
+            if let Some(found) = found {
+                return Ok(found.clone());
+            }
         }
 
         // Bind the arg into my new constants so the ret calculation can use it.
@@ -685,7 +695,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         outln!(LogTag::Generics, "{:?}={} of {:?} => {:?}", key.0, self.pool.get(name), key.1, result);
 
-        self.program.generics_memo.insert(key, (result.clone(), ret));
+        if !no_memo {
+            self.program.generics_memo.insert(key, (result.clone(), ret));
+        }
 
         Ok((result, ret))
     }
@@ -1166,8 +1178,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Type(ty))
                     }
                     "size_of" => {
-                        let ty = self.immediate_eval_expr_in(result, mem::take(arg), TypeId::ty())?;
-                        let ty = self.to_type(ty)?;
+                        let ty: TypeId = self.immediate_eval_expr_in_known(result, mem::take(arg))?;
                         let size = self.ready.sizes.slot_count(self.program, ty);
                         expr.expr = Expr::int(size as i64);
                         self.program.load_value(Value::I64(size as i64))
@@ -1179,13 +1190,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(res.is_err());
                         *result = saved_res;
 
-                        expr.expr = Expr::unit();
-                        self.program.load_value(Value::Unit)
-                    }
-                    "comptime_print" => {
-                        outln!(ShowPrint, "EXPR : {}", arg.log(self.pool));
-                        let value = self.immediate_eval_expr_in(result, *arg.clone(), TypeId::unknown());
-                        outln!(ShowPrint, "VALUE: {:?}", value);
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
                     }
@@ -1298,9 +1302,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Index { ptr, index } => {
                 let ptr = self.compile_expr(result, ptr, None)?;
                 self.compile_expr(result, index, Some(TypeId::i64()))?;
-                let value = self.immediate_eval_expr_in(result, *index.clone(), TypeId::i64())?;
-                let i = value.clone().single()?.to_int()? as usize;
-                index.expr = Expr::Value { ty: TypeId::i64(), value };
+                let i: usize = self.immediate_eval_expr_in_known(result, *index.clone())?;
+                index.expr = Expr::Value {
+                    ty: TypeId::i64(),
+                    value: Values::One(Value::I64(i as i64)),
+                };
                 self.index_expr(result, ptr, i)?
             }
             // TODO: replace these with a more explicit node type?
@@ -1357,8 +1363,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 } else if name_str == "enum" {
                     self.compile_expr(result, arg, Some(TypeId::ty()))?;
-                    let ty = self.immediate_eval_expr_in(result, *arg.clone(), TypeId::ty())?;
-                    let ty = self.to_type(ty)?;
+                    let ty: TypeId = self.immediate_eval_expr_in_known(result, *arg.clone())?;
                     if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
                         let mut the_type = Pattern::empty(loc);
                         let unique_ty = self.program.unique_ty(ty);
@@ -1391,8 +1396,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         });
                         let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
                         let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
-                        let the_type = self.immediate_eval_expr_in(result, the_type, TypeId::ty())?;
-                        let the_type = self.to_type(the_type)?;
+                        let the_type: TypeId = self.immediate_eval_expr_in_known(result, the_type)?;
                         // *expr = FatExpr::synthetic(Expr::PrefixMacro { name: var, arg, target: mem::take(target) }, loc);
 
                         let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), mem::take(target)), loc);
@@ -1834,14 +1838,44 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
-    fn immediate_eval_expr(&mut self, constants: &Constants<'p>, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
-        // println!("- Eval {} as {:?}", e.log(self.pool), ret_ty);
+    // Since the rust code often statically knows the return type it wants, this version is more ergonomic to call. the caller doesn't have to bother with the deserialization themself.
+    pub fn immediate_eval_expr_in_known<Ret: InterpSend<'p>>(&mut self, result: &mut FnWip<'p>, mut e: FatExpr<'p>) -> Res<'p, Ret> {
+        let ret_ty = Ret::get_type(self.program);
+        let res = self.compile_expr(result, &mut e, Some(ret_ty))?;
+        match res {
+            Structured::Const(ty, val) => {
+                self.type_check_arg(ty, ret_ty, "immediate_eval_expr_in")?;
+                self.deserialize_values(val)
+            }
+            _ => {
+                if let Some(val) = self.check_quick_eval(&result.constants, &mut e, ret_ty)? {
+                    return self.deserialize_values(val);
+                }
+                let func_id = self.make_lit_function(&result.constants, e, ret_ty)?;
+                self.call_jitted(func_id, ExecTime::Comptime, None, ())
+            }
+        }
+    }
+
+    fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
+        Ok(unwrap!(Ret::deserialize_one(values), ""))
+    }
+
+    fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, constants: &Constants<'p>, mut e: FatExpr<'p>) -> Res<'p, Ret> {
+        let ret_ty = Ret::get_type(self.program);
+        if let Some(val) = self.check_quick_eval(constants, &mut e, ret_ty)? {
+            return self.deserialize_values(val);
+        }
+        let func_id = self.make_lit_function(constants, e, ret_ty)?;
+        self.call_jitted(func_id, ExecTime::Comptime, None, ())
+    }
+
+    fn check_quick_eval(&mut self, constants: &Constants<'p>, e: &mut FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Option<Values>> {
         match e.deref_mut() {
-            Expr::Value { value, .. } => return Ok(value.clone()),
+            Expr::Value { value, .. } => return Ok(Some(value.clone())),
             Expr::GetVar(var) => {
                 if let Some((value, _)) = constants.get(*var) {
-                    return Ok(value);
+                    return Ok(Some(value));
                 }
                 // fallthrough
             }
@@ -1865,13 +1899,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                         pls.push(v);
                     }
                 }
-                return Ok(pls.into());
+                return Ok(Some(pls.into()));
             }
             _ => {} // fallthrough
         }
+        Ok(None)
+    }
 
-        let state = DebugState::ComputeCached(e.clone());
-        self.push_state(&state);
+    fn make_lit_function(&mut self, constants: &Constants<'p>, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
         let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
         let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false);
@@ -1888,15 +1923,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func_id = self.program.add_func(fake_func);
         logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
         self.compile(func_id, ExecTime::Comptime)?;
-        let result = self.run(func_id, Value::Unit.into(), ExecTime::Comptime, None)?;
-        logln!(
-            "COMPUTED: {} -> {:?} under {}",
-            e.log(self.pool),
-            result,
-            self.program[func_id].log(self.pool)
-        );
-        self.pop_state(state);
-        Ok(result)
+        Ok(func_id)
+    }
+
+    // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
+    fn immediate_eval_expr(&mut self, constants: &Constants<'p>, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+        if let Some(values) = self.check_quick_eval(constants, &mut e, ret_ty)? {
+            return Ok(values);
+        }
+        let func_id = self.make_lit_function(constants, e, ret_ty)?;
+        self.run(func_id, Value::Unit.into(), ExecTime::Comptime, None)
     }
 
     #[track_caller]
@@ -2069,7 +2105,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+    pub fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
@@ -2543,7 +2579,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn inline_asm_body(&mut self, result: &FnWip<'p>, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         // TODO: assert f has an arch and a calling convention annotation (I'd rather make people be explicit just guess, even if you can always tell arch).
         let src = asm.log(self.pool);
-        let asm_ty = Vec::<u32>::get_type(self.program);
         let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
             // TODO: allow quick const eval for single expression of correct type instead of just tuples.
             // TODO: annotations to say which target you're expecting.
@@ -2573,12 +2608,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ops
             } else {
                 // TODO: support dynamic eval to string for llvm ir.
-                let ops = self.immediate_eval_expr(&result.constants, asm.clone(), asm_ty)?;
-                unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+                let ops: Vec<u32> = self.immediate_eval_expr_known(&result.constants, asm.clone())?;
+                ops
             }
         } else {
-            let ops = self.immediate_eval_expr(&result.constants, asm.clone(), asm_ty)?;
-            unwrap!(Vec::<u32>::deserialize(&mut ops.vec().into_iter()), "")
+            let ops: Vec<u32> = self.immediate_eval_expr_known(&result.constants, asm.clone())?;
+            ops
         };
         self.program[f].add_tag(Flag::Aarch64);
         outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");

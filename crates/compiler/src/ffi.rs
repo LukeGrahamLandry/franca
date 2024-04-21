@@ -145,6 +145,33 @@ impl<'p> InterpSend<'p> for bool {
     }
 }
 
+impl<'p> InterpSend<'p> for () {
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn create_type(_program: &mut Program<'p>) -> TypeId {
+        TypeId::unit()
+    }
+
+    fn serialize(self, values: &mut Vec<Value>) {
+        values.push(Value::Unit)
+    }
+
+    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
+        values.next()?;
+        Some(())
+    }
+
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        values.next()?;
+        Some(())
+    }
+
+    fn size() -> usize {
+        1
+    }
+}
+
 impl<'p> InterpSend<'p> for char {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -682,14 +709,10 @@ fn interp_send_libs_ast() {
 }
 
 pub mod c {
-    use libc::c_void;
     use libffi::middle::{Arg, Type};
 
-    use crate::ast::{FuncId, IntTypeInfo};
     use crate::compiler::Compile;
     use crate::err;
-    use crate::ffi::InterpSend;
-    use crate::pool::Ident;
     use crate::{
         ast::{Program, TypeId, TypeInfo},
         bc::{Value, Values},
@@ -734,7 +757,7 @@ pub mod c {
     }
 
     // NOTE: pointers passed to Arg::new must live until into_cif
-    pub fn call<'p>(program: &Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, Values> {
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, i64> {
         let args: Vec<Value> = arg.into();
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
@@ -758,46 +781,17 @@ pub mod c {
         if f_ty.ret != TypeId::unit() {
             b = b.res(program.program.as_c_type(f_ty.ret)?)
         }
-        let int32 = program.program.find_interned(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true }));
-        let sym = *program.program.ffi_types.get(&Ident::get_type_key()).unwrap();
-
         if comp_ctx {
             // IMPORTANT: extra &indirection. We want a pointer to the argument, even if the argument is already a pointer.
             // Note: dont put it in a local first because release mode reuses the stack slot.
             args.insert(0, Arg::new(&program));
         }
 
-        let ret_is_fn = matches!(program.program[f_ty.ret], TypeInfo::Fn(_));
-
-        // TODO: this is getting deranged. !!
-        Ok(if f_ty.ret == TypeId::unit() {
-            unsafe { b.into_cif().call::<c_void>(ptr, &args) };
-            Value::Unit.into()
-        } else if f_ty.ret == TypeId::ty() {
-            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::Type(TypeId::from_raw(result)).into()
-        } else if f_ty.ret == TypeId::i64() || f_ty.ret == int32 || f_ty.ret == TypeId::void_ptr() {
-            // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
-            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::I64(result).into()
-        } else if f_ty.ret == TypeId::bool() {
-            // TODO: other return types. probably want to use the low interface so can get a void ptr and do a match on ret type to read it.
-            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::Bool(result != 0).into()
-        } else if f_ty.ret == sym {
-            let result: u32 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::Symbol(result).into()
-        } else if f_ty.ret == TypeId::f64() {
-            let result: f64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::F64(result.to_bits()).into()
-        } else if f_ty.ret.is_never() {
-            let _: () = unsafe { b.into_cif().call(ptr, &args) };
-            unreachable!("Called 'fn(_) Never' but it returned.")
-        } else if ret_is_fn {
-            let result: i64 = unsafe { b.into_cif().call(ptr, &args) };
-            Value::GetFn(FuncId::from_raw(result)).into()
-        } else {
-            todo!("unsupported c ret type {}", program.program.log_type(f_ty.ret))
-        })
+        assert!(
+            program.ready.sizes.slot_count(program.program, f_ty.ret) <= 1,
+            "my c_call doesn't use correct struct calling convention yet"
+        );
+        let ret: i64 = unsafe { b.into_cif().call(ptr, &args) };
+        Ok(ret)
     }
 }

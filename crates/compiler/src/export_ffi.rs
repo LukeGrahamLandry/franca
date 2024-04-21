@@ -76,7 +76,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Ptr(Inner: Type) Type", do_ptr_type as *const u8),
-    ("fn Unique(Backing: Type) Type", do_unique_type as *const u8),
+    ("@no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
     ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
@@ -435,6 +435,7 @@ fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
     a * b + c
 }
 
+// TODO: this needs to be less painful. want to have it just parse rust signetures and expose them.
 // TODO: documenet which ones can only be used in macros because they need the 'result: &mut FnWip'
 pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
@@ -477,6 +478,10 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn literal_ast(ty: Type, ptr: VoidPtr) FatExpr;",
         bounce_flat_call!((TypeId, usize), FatExpr, literal_ast),
     ),
+    (
+        "fn can_assign_types(found: Type, expected: Type) bool;",
+        bounce_flat_call!((TypeId, TypeId), bool, type_check_arg),
+    ),
 ];
 
 fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
@@ -498,14 +503,11 @@ fn const_eval_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> 
     res.get().unwrap().single().unwrap().to_type().unwrap()
 }
 
-fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> String {
+fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, expr: FatExpr<'p>) -> String {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let ty = String::get_type(compile.program);
-    let res = compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(ty)).unwrap();
-    assert_eq!(res.ty(), ty);
+    let res: String = compile.immediate_eval_expr_in_known(unsafe { &mut *result }, expr).unwrap();
     compile.pending_ffi.push(Some(result));
-    let res = res.get().unwrap();
-    String::deserialize_one(res).unwrap()
+    res
 }
 
 fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
@@ -570,6 +572,10 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
         }
     }
     FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc())
+}
+
+fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> bool {
+    compile.type_check_arg(found, expected, "").is_ok()
 }
 
 #[cfg(target_arch = "aarch64")]
