@@ -19,7 +19,6 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
     let get_type = get_type(&input.ident, &input.data);
     let deserialize_from_ints = deserialize(&input.ident, &input.data, false);
-    let deserialize = deserialize(&input.ident, &input.data, true);
     let serialize = serialize(&input.ident, &input.data);
     let size = size_for(&input.ident, &input.data);
 
@@ -36,10 +35,6 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             }
             fn serialize(self, values: &mut Vec<Value>) {
                 #serialize
-            }
-            #[allow(unused_braces)]
-            fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-                #deserialize
             }
 
             fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {

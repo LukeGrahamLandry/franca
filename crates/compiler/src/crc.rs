@@ -54,10 +54,6 @@ impl<'p, T: Clone + InterpSend<'p>> InterpSend<'p> for CRc<T> {
         self.inner.deref().clone().serialize(values)
     }
 
-    fn deserialize(values: &mut impl Iterator<Item = Value>) -> Option<Self> {
-        T::deserialize(values).map(|t| Self::new(t))
-    }
-
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         T::deserialize_from_ints(values).map(|t| Self::new(t))
     }

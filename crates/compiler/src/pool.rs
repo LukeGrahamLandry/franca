@@ -171,21 +171,6 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         self.0.serialize(values)
     }
 
-    fn deserialize(values: &mut impl Iterator<Item = crate::bc::Value>) -> Option<Self> {
-        let i = match values.next()? {
-            Value::I64(i) => {
-                if i < 0 {
-                    return None;
-                }
-                i as u32
-            }
-            Value::Symbol(i) => i,
-            _ => return None,
-        };
-
-        Some(Ident(i, PhantomData))
-    }
-
     fn size() -> usize {
         1
     }

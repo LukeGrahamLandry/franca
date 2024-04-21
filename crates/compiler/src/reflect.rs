@@ -607,10 +607,6 @@ impl<'p, 't> InterpSend<'p> for &'t RsType<'t> {
         todo!()
     }
 
-    fn deserialize(_: &mut impl Iterator<Item = crate::bc::Value>) -> Option<Self> {
-        todo!()
-    }
-
     fn size() -> usize {
         todo!()
     }

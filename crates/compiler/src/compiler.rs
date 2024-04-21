@@ -1858,7 +1858,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
-        Ok(unwrap!(Ret::deserialize_one(values), ""))
+        let ints = self.aarch64.constants.store_to_ints(values.vec().iter());
+        Ok(unwrap!(Ret::deserialize_from_ints(&mut ints.into_iter()), ""))
     }
 
     fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, constants: &Constants<'p>, mut e: FatExpr<'p>) -> Res<'p, Ret> {
