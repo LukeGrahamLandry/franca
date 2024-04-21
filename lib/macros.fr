@@ -12,20 +12,22 @@ fun literal(arg: AstExpr, target: AstExpr) AstExpr = {
     var void_ast = VoidPtr;
     let void_ast: VoidPtr = void_ast&;
     let void_ast = literal_ast(Type, void_ast);
-    var assert_fn: OverloadSet = assert; 
-    let assert_fn: VoidPtr = assert_fn&;
-    let assert_fn = literal_ast(OverloadSet, assert_fn);
-    var check_fn: OverloadSet = can_assign_types; 
-    let check_fn: VoidPtr = check_fn&;
-    let check_fn = literal_ast(OverloadSet, check_fn);
     
-    // - can_assign_types is not as strict as eq. 
-    // - it needs @ct but so does literal_ast so this macro already had that restriction. 
-    // - we dont want to do the check here because its intended for use in macros so the type might not be const yet. 
-    // TODO: better error message
-    '@with_var(value, <target>) {
-        <assert_fn>(<check_fn>(value!type, <arg>), "ast_literal type err");
+    '{
+        var value: <arg> = <target>;
         <lit_fn>(<arg>, @as(<void_ast>) value&)
+    }'
+}
+
+// Same as the two argument version but infers the type. 
+@annotation 
+fun literal(arg: AstExpr) AstExpr = {
+    // TODO: assert that arg isn't 'Unit' because then its ambigous with the two argument version. -- Apr 21
+    const lit_fn = @literal(OverloadSet) literal_ast; 
+    const void_ast = @literal(Type) VoidPtr; 
+    '{
+        var value = <arg>;
+        <lit_fn>(value!type, @as(<void_ast>) value&)
     }'
 }
 
@@ -39,39 +41,39 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
     arg = compile_ast(arg);
     let enum_type = arg&.ty[];
     
-    let panic_fn = @literal(OverloadSet) panic;
     // TODO: compile error to not handle all and not have a default branch
-    var body = '<panic_fn>("unhandled match case")';
-    let eq_fn = @literal(OverloadSet) eq;
-    let i64_t = @literal(Type) i64;
-    let tag_value_fn = @literal(OverloadSet) tag_value;
+    var body = '<@literal(panic)>("unhandled match case")';
     
-    for(stmts) { (stmt: *FatStmt) | 
-        // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
-        if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
-            var handler_body = stmt.stmt.Eval[];
-            // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. 
-            var name = handler_body&.expr.Closure[].name[];
-            var case_access = 'arg_var&.___';
-            case_access&.expr.FieldAccess[1][] = name;
-            // TODO: check that no duplicate handlers
-            // TODO: error message here if invalid name instead of it showing up later in the generated code. 
-            //       maybe add a 'fn compile_error(Span, Str)' instead of making you use panic so its more clear and you can attach context.
-            // TODO: infer function argument type since we know it must match the enum payload,
-            //       but allow no arg if you just want to use it as a switch. 
-            
-            // TODO: its too hacky that you only have to call clone_ast when there's no placeholders
-            var cond = '<eq_fn>(tag_val, @as(<i64_t>) <tag_value_fn>(
-                <@literal(Type) enum_type>, 
-                <@literal(Symbol) name>
-            ))';
-            
-            body = '(<cond>, fn = <handler_body>(<case_access>[]), fn = <body>)!if';
-        };
-    };
+    // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. (1)
+    // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. (2)
+    // TODO: check that no duplicate handlers
+    // TODO: give error message here if invalid name instead of it showing up later in the generated code. (3)
+    //       maybe add a 'fn compile_error(Span, Str)' instead of making you use panic so its more clear and you can attach context.
+    // TODO: infer function argument type since we know it must match the enum payload,
+    //       but allow no arg if you just want to use it as a switch. 
+    // TODO: use default arguments as value eq guards. 
     
-    // TODO: Declaring variables is weird because name resolution has already run.
-    '@with_var(arg_var, <arg>) @with_var(tag_val, arg_var&!tag[]) <body>'
+    '{
+        var arg_var = <arg>;
+        let tag_val = arg_var&!tag[];
+        <{
+            for(stmts) { (stmt: *FatStmt) | 
+                if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|  // (1)
+                    var handler_body = stmt.stmt.Eval[];
+                    var name = handler_body&.expr.Closure[].name[]; // (2)
+                    var case_access = 'arg_var&.___';
+                    case_access&.expr.FieldAccess[1][] = name;  // (3)
+                    let cond = '<@literal(eq)>(tag_val, @as(<@literal(i64)>) <@literal(tag_value)>(
+                        <@literal(Type) enum_type>, 
+                        <@literal(name)>
+                    ))';
+                    
+                    body = '(<cond>, fn = <handler_body>(<case_access>[]), fn = <body>)!if';
+                };
+            };
+            body
+        }>
+    }'
 }
 
 /// Similar to @match but operates on values instead of enum payloads. 
@@ -81,70 +83,66 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
 fun switch(arg: FatExpr, target: FatExpr) FatExpr = {
     let stmts: Slice(FatStmt) = target&.expr.Block.body[];
     arg = compile_ast(arg);
-    let arg_type = @literal(Type) arg&.ty[];
-    
-    let panic_fn = @literal(OverloadSet) panic;
-    let eq_fn = @literal(OverloadSet) eq;
-    var body = '<panic_fn>("unhandled switch case")';
+    let arg_type = @literal(arg&.ty[]); 
+    var body = '<@literal(panic)>("unhandled switch case")';
     var first = true;
-    
     // TODO: reverse order because i build out from the inside
     var i = stmts.len().sub(1);
     
-    while(fn = i.ge(0)) {|
-        let stmt: *FatStmt = stmts.index(i); 
-        // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
-        if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
-            var handler_body = stmt.stmt.Eval[];
-            
-            let branch: *PrefixMacro = handler_body&.expr.PrefixMacro;
-            let name = branch.name[0][];
-            let arg = branch.arg[];
-            let action = branch.target[][];
-            
-            // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
-            if(name.int().eq(case!symbol.int()), fn = {
-                // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
-                let cond = '<eq_fn>(arg_var, @as(<arg_type>) <arg[]>)';
-                body = '(<cond>, fn=<action>(), fn=<body>)!if';
-            }, fn=if(name.int().eq(default!symbol.int()), fn = {
-                if(first) {|
-                    // If expansion err here: forgot argument for default branch handler?
-                    body = '<action>(arg_var)';
-                }{|
-                    panic("@default must be the last handler in @switch");
+    // Declaring variables is weird because name resolution has already run. 
+    // All the references to it need to be in its lexical scope, so the whole code is in an unquote. 
+    '{
+        var arg_var = <arg>;
+        <{
+            while(fn = i.ge(0)) {|
+                let stmt: *FatStmt = stmts.index(i); 
+                // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
+                if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
+                    var handler_body = stmt.stmt.Eval[];
+                    
+                    let branch: *PrefixMacro = handler_body&.expr.PrefixMacro;
+                    let name = branch.name[0][];
+                    let arg = branch.arg[];
+                    let action = branch.target[][];
+                    
+                    // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
+                    if(name.int().eq(case!symbol.int()), fn = {
+                        // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
+                        let cond = '<@literal(eq)>(arg_var, @as(<arg_type>) <arg[]>)';
+                        body = '(<cond>, fn=<action>(), fn=<body>)!if';
+                    }, fn=if(name.int().eq(default!symbol.int()), fn = {
+                        if(first) {|
+                            // If expansion err here: forgot argument for default branch handler?
+                            body = '<action>(arg_var)';
+                        }{|
+                            panic("@default must be the last handler in @switch");
+                        };
+                    }, fn={
+                        // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
+                        let n: Str = name.str();
+                        // TODO: make concat less painful. 
+                        println(n);
+                        panic("unhandled prefix in @switch");
+                    }));
+                    
+                    first = false;
                 };
-            }, fn={
-                // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
-                let n: Str = name.str();
-                // TODO: make concat less painful. 
-                println(n);
-                panic("unhandled prefix in @switch");
-            }));
-            
-            first = false;
-        };
-        i = i.sub(1);
-    };
-    
-    // TODO: Declaring variables is weird because name resolution has already run.
-    '@with_var(arg_var, <arg>) <body>'
+                i = i.sub(1);
+            };
+            body
+        }>
+    }'
 }
 
 // TODO: There are implicit range assertions because we get the bit count from the type of the ints. 
 @annotation 
-fun bits(arg: AstExpr, target: AstExpr) AstExpr = {
-    let fn_trunc = @literal(OverloadSet) signed_truncate;
-    let fn_shift = @literal(OverloadSet) shift_left;
-    let fn_or = @literal(OverloadSet) bit_or;
+fun bits(arg: AstExpr) AstExpr = {
     var zero = 0;
-    var i64_ast = @literal(Type) i64;
-
     var parts: Slice$AstExpr = arg&.expr.Tuple[];
-    var expr = @literal(i64) 0;
+    var expr = @literal(0);
     var shift = 32;
     for(parts, fn(part: *AstExpr) Unit = {
-        var int: IntTypeInfo = get_type_int(part[]);
+        var int = get_type_int(part[]);
         // TODO: fix inference + overloading. 
         //       you only need this annotation if you include instructions.fr so there's another definition of `fn sub`
         //       So it doesn't infer through the field lookup but even without that it should notice that
@@ -152,13 +150,13 @@ fun bits(arg: AstExpr, target: AstExpr) AstExpr = {
         let bc: i64 = int&.bit_count[];
         shift = sub(shift, bc);
         assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
-        let part_ast = '@as(<i64_ast>) <part[]>';
+        let part_ast = '@as(<@literal(i64)>) <part[]>';
         let next = (int&.signed[], 
-            fn = '<fn_trunc>(<part_ast>, <@literal(i64) int&.bit_count[]>)',
+            fn = '<@literal(signed_truncate)>(<part_ast>, <@literal(i64) int&.bit_count[]>)',
             fn = part_ast
         )!if;
-        let next = '<fn_shift>(<next>, <@literal(i64) shift>)';
-        expr = '<fn_or>(<expr>, <next>)';
+        let next = '<@literal(shift_left)>(<next>, <@literal(shift)>)';
+        expr = '<@literal(bit_or)>(<expr>, <next>)';
     });
     
     // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
@@ -168,7 +166,7 @@ fun bits(arg: AstExpr, target: AstExpr) AstExpr = {
         panic(msg.str());
     };
     
-    '@as(<i64_ast>) <expr>'
+    '@as(<@literal(i64)>) <expr>'
 }
 
 // Seems like a fairly crippling design problem the range at which adding new code can mess you up. 

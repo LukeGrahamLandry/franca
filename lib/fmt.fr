@@ -21,7 +21,7 @@ fun display(self: Str, writer: *List$i64) Unit = writer.write(self);
 /// 'fmt_spec_str' must be a const string value. '%' characters will be replaced (like printf, you just don't need the type hint).
 // TODO: double '%%' to actually put a literal '%' 
 @annotation 
-fun fmt(arg: AstExpr, target: AstExpr) AstExpr = {
+fun fmt(arg: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
     let writer: *AstExpr = args.index(0);  // TODO: assert no side effects or use variable so it doesn't run many times. 
     var writer = compile_ast(writer[]);
@@ -59,9 +59,8 @@ fun fmt(arg: AstExpr, target: AstExpr) AstExpr = {
     arg
 }
 
-// TODO: I want to call this @concat. fix overload resolution when colliding with macros. 
 @annotation 
-fun join(arg: AstExpr, target: AstExpr) AstExpr = {
+fun concat(arg: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
     var actions: List(AstExpr) = list(args.len());
     
@@ -73,16 +72,20 @@ fun join(arg: AstExpr, target: AstExpr) AstExpr = {
     let items_fn = @literal(OverloadSet) items;
     let i64_t = @literal(Type) i64;
     
-    // TODO: zip iterators 
-    args.enumerate(fn(i: i64, param: *AstExpr) Unit = {
-        let action: FatExpr = '@as(()) <push_fn>(join_list&, @as(<str_t>) <param[]>)';
-        actions&.push(action);
-    });
-    
-    var actions: Slice(AstExpr) = actions&.items();
-    arg&.expr.Tuple[] = actions;
-    
-    '@with_var(join_list, @as(<list_fn>(<i64_t>)) <init_fn>()) { <arg>; <items_fn>(join_list&)}'
+    '{
+        var join_list: <list_fn>(<i64_t>) = <init_fn>();
+        <{
+            args.enumerate(fn(i: i64, param: *AstExpr) Unit = {  // TODO: zip iterators 
+                let action: FatExpr = '@as(()) <push_fn>(join_list&, @as(<str_t>) <param[]>)';
+                actions&.push(action);
+            });
+            
+            var actions: Slice(AstExpr) = actions&.items();
+            arg&.expr.Tuple[] = actions;
+            arg
+        }>;
+        <items_fn>(join_list&)
+    }'
 }
 
 // TODO: HACK. Compiler doesn't know about Slice(_) so string literals are the wrong type. 

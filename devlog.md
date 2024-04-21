@@ -1,3 +1,22 @@
+## improving macros (Apr 21)
+
+Syntax sugar for !quote/!unquote goes a long way.
+Now its not too bad to put the whole logic in an unquote so I can use that to make lexical scope work instead of @with_var which was really annoying.
+TODO: Still can't do constants because of hoisting tho which is sad.
+
+from a long time ago:
+// TODO: dont do the builtin ones this way. put them in thier own function and expose them as @ct @comptime_addr() @call_conv(RustPrefixMacro) === fn name(&mut self, arg: FatExpr, target: FatExpr) -> FatExpr;
+// then you don't have to eat the these checks every time, you just get there when you get there.
+// plus it makes the transition to writing them in the language smoother. until then, the only cost is that it becomes a virtual call.
+
+started doing that. did it for @enum.
+can't do it for @as yet because I use that in quoted things without @literal so it might not be closed over but I can't invoke an expression as a macro yet.
+I can't decide if the destinction between var resolution and captured const values makes any sense.
+Ideally the vars would always be unique so maybe the extra level of dynamic scope is just because I wasn't rigorous enough with renumbering originally and now its hard to reason about.
+The current thing means a raw identifier is never useful sincei t can't be from the caller's scope (wouldn't resolve) and can't be from the macro's scope (doesn't capture).
+But its applied inconsistantly if caller they happens to have already captured it, you won't get an error.
+I guess its the same problem as rust letting you use relative import paths in macros so I end up needing to import stuff when I add InterpSend to a new file becuase I'm too lazy to actually fix it.
+
 ## getting rid of interpreter (Apr 20)
 
 So end goal is for comptime repr of values to be the same as rust repr so I don't have to do any serialization when you call into the compiler.

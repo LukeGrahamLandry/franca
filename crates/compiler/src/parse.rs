@@ -221,7 +221,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let arg = Box::new(self.parse_tuple()?);
 
                 let target = match self.peek() {
-                    Semicolon | Comma | RightParen | RightSquiggle | Dot => {
+                    Semicolon | Comma | RightParen | RightSquiggle | Dot | RightAngle => {
                         // target is optional.
                         self.start_subexpr();
                         Box::new(self.expr(Expr::unit()))

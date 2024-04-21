@@ -188,6 +188,14 @@ pub fn get_include_std(name: &str) -> Option<String> {
             }
             Some(out)
         }
+        "compiler_macros" => {
+            let mut out = String::new();
+            writeln!(out, "{}", msg).unwrap();
+            for (sig, ptr) in COMPILER_MACROS {
+                writeln!(out, "@pub @comptime_addr({}) @annotation @ct @flat_call {sig};", *ptr as usize).unwrap();
+            }
+            Some(out)
+        }
         "int_type" => {
             let mut out = String::new();
             writeln!(out, "{}", msg).unwrap();
@@ -482,6 +490,18 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ),
 ];
 
+pub const COMPILER_MACROS: &[(&str, FlatCallFn)] = &[(
+    "fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+    bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
+)];
+
+fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let res = compile.enum_constant_macro(unsafe { &mut *result }, arg, target);
+    compile.pending_ffi.push(Some(result));
+    res.unwrap()
+}
+
 fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
     compile.program.intern_type(ty)
 }
@@ -528,6 +548,11 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
     walk.expr(&mut template);
     let placeholders = walk.placeholders;
     assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
+    // TODO: It feels like you should need this but its fine without it.
+    //       tho really its fine for the stuff inside that you're filling in from the macro's caller since they should only be used once.
+    //       you only need to worry about vars declared in the macro handler being copied out multiple times into the same scope.
+    //       -- Apr 21
+    template.renumber_vars(&mut compile.program.vars);
 
     compile.pending_ffi.push(Some(result));
     template

@@ -274,7 +274,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         emit_aarch64(self, f, when)?;
         self.pending_ffi.push(result);
-        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr();
+        let addr = if let Some(addr) = self.program[f].comptime_addr {
+            // it might be a builtin macro that's part of the compiler but is resolved like normal for consistancy (like @enum).
+            addr as *const u8
+        } else {
+            unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr()
+        };
+
         let ty = self.program[f].unwrap_ty();
         let comp_ctx = self.program[f].has_tag(Flag::Ct);
         let c_call = self.program[f].has_tag(Flag::C_Call);
@@ -1341,100 +1347,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::PrefixMacro { name, arg, target } => {
                 let name_str = self.pool.get(name.0);
-                // TODO: dont do the builtin ones this way. put them in thier own function and expose them as @ct @comptime_addr(_) @call_conv(RustPrefixMacro) === fn name(&mut self, arg: FatExpr, target: FatExpr) -> FatExpr;
-                //       then you don't have to eat the these checks every time, you just get there when you get there.
-                //       plus it makes the transition to writing them in the language smoother. until then, the only cost is that it becomes a virtual call.
-                // TODO: this doesn't work in general because it doesnt recalculate closure captures.
-                if name_str == "with_var" {
-                    if let Expr::Tuple(exprs) = &mut arg.expr {
-                        assert_eq!(exprs.len(), 2);
-                        if let Expr::GetNamed(name) = exprs[0].expr {
-                            let name = Var(name, self.program.vars.len());
-                            self.program.vars.push(VarInfo { kind: VarType::Var, loc });
 
-                            let mut res = mem::take(target);
-                            let value = mem::take(&mut exprs[1]);
-                            // TODO: add to closure captures? should really just factor out the scope visitor.
-                            let mut f = |expr: &mut Expr<'p>| {
-                                if let Expr::GetNamed(n) = expr {
-                                    if *n == name.0 {
-                                        *expr = Expr::GetVar(name);
-                                    }
-                                }
-                            };
-                            f.expr(&mut res);
-                            expr.expr = Expr::Block {
-                                body: vec![FatStmt {
-                                    stmt: Stmt::DeclVar {
-                                        name,
-                                        ty: LazyType::Infer,
-                                        value: Some(value),
-                                        kind: VarType::Var,
-                                    },
-                                    annotations: vec![],
-                                    loc,
-                                }],
-                                result: res,
-                                locals: Some(vec![name]),
-                            };
-                            return self.compile_expr(result, expr, requested);
-                        }
-                    }
-                } else if name_str == "enum" {
-                    self.compile_expr(result, arg, Some(TypeId::ty()))?;
-                    let ty: TypeId = self.immediate_eval_expr_in_known(result, *arg.clone())?;
-                    if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
-                        let mut the_type = Pattern::empty(loc);
-                        let unique_ty = self.program.unique_ty(ty);
-                        // Note: we expand target to an anonamus struct literal, not a type.
-                        for b in &mut pattern.bindings {
-                            assert!(b.default.is_some());
-                            assert!(matches!(b.lazy(), LazyType::Infer));
-                            b.ty = LazyType::PendingEval(unwrap!(b.default.take(), ""));
-                            the_type.bindings.push(Binding {
-                                name: b.name,
-                                // ty: LazyType::Finished(unique_ty),
-                                ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
-                                default: None,
-                                kind: VarType::Let,
-                            });
-                        }
-                        let var = Var(self.pool.intern("T"), self.program.vars.len());
-                        self.program.vars.push(VarInfo { kind: VarType::Const, loc });
-                        pattern.bindings.push(Binding {
-                            name: Name::Var(var),
-                            ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
-                            default: None,
-                            kind: VarType::Let,
-                        });
-                        the_type.bindings.push(Binding {
-                            name: Name::Var(var),
-                            ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(TypeId::ty()), loc)),
-                            default: None,
-                            kind: VarType::Let,
-                        });
-                        let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
-                        let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
-                        let the_type: TypeId = self.immediate_eval_expr_in_known(result, the_type)?;
-                        // *expr = FatExpr::synthetic(Expr::PrefixMacro { name: var, arg, target: mem::take(target) }, loc);
-
-                        let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), mem::take(target)), loc);
-                        let value = self.immediate_eval_expr_in(result, construct_expr, the_type)?;
-                        let value = Value::new_box(value.vec(), true).into();
-                        let ty = self.program.ptr_type(the_type);
-                        *expr = FatExpr::synthetic(Expr::Value { ty, value }, loc);
-                        expr.ty = ty;
-                        return self.compile_expr(result, expr, Some(ty));
-                    }
-                    err!("Expected struct literal found {target:?}",)
-                } else if name_str == "as" {
-                    self.compile_expr(result, arg, Some(TypeId::ty()))?;
-                    let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
-                    let ty = self.to_type(ty)?;
-                    target.ty = ty;
-                    *expr = mem::take(target);
-                    return self.compile_expr(result, expr, Some(ty));
+                if name_str == "as" {
+                    // TODO: this can't be resolved normally because I use it in macros but can't invoke on an @literal. -- Apr 21
+                    *expr = self.as_cast_macro(result, mem::take(arg), mem::take(target))?;
+                    return self.compile_expr(result, expr, Some(expr.ty));
                 } else if name_str == "uninitialized" {
+                    // TODO: this is a special case
                     assert!(requested.is_some(), "@uninitialized expr must have known type");
                     return Ok(Structured::RuntimeOnly(requested.unwrap()));
                 }
@@ -1456,16 +1375,38 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let os = unwrap!(result.constants.get(*name), "missing macro constant");
                 let os = unwrap!(os.0.single()?.to_overloads(), "expected overload set. TODO: allow function");
                 self.compute_new_overloads(os)?;
-                let mut os = self.program.overload_sets[os]
+
+                let os = self.program.overload_sets[os]
                     .ready
                     .iter()
-                    .filter(|o| o.arg == arg_ty && (o.ret.is_none()) || o.ret.unwrap() == want);
-                let f = unwrap!(os.next(), "missing macro overload").func;
-                assert!(os.next().is_none(), "ambigous macro overload");
+                    .filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
+                let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
+
+                // If they did '@m(e)' instead of '@m(e) s', prefer a handler that only expects one argument.
+                // TODO: should probably distinguish '@m(e) unit' just incase
+                if target.is_raw_unit() {
+                    let mut os1 = os.clone().filter(|o| o.arg == want);
+                    if let Some(f) = os1.next() {
+                        assert!(os1.next().is_none(), "ambigous macro overload");
+                        let f = f.func;
+                        assert!(self.program[f].has_tag(Flag::Annotation));
+                        self.infer_types(f)?;
+                        self.compile(f, ExecTime::Comptime)?;
+                        let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, Some(result as *mut FnWip), arg)?;
+                        *expr = new_expr;
+                        return self.compile_expr(result, expr, requested);
+                    } else {
+                        err!(
+                            "Missing macro overload (Expr) -> Expr. maybe you forgot a target expr on the invocation of {}",
+                            name.log(self.pool)
+                        )
+                    }
+                }
+
+                let f = unwrap!(os2.next(), "missing macro overload").func;
+                assert!(os2.next().is_none(), "ambigous macro overload");
                 assert!(self.program[f].has_tag(Flag::Annotation));
                 self.infer_types(f)?;
-
-                // let new_expr = self.immediate_eval_expr(&result.constants, full_call, want)?;
                 self.compile(f, ExecTime::Comptime)?;
 
                 let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, Some(result as *mut FnWip), (arg, target))?;
@@ -1473,11 +1414,69 @@ impl<'a, 'p> Compile<'a, 'p> {
                 outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
                 outln!(LogTag::Macros, "================\n");
                 // Now evaluate whatever the macro gave us.
-                self.compile_expr(result, expr, requested)?
+                return self.compile_expr(result, expr, requested);
             }
         })
     }
 
+    // TODO: I think this can just be (arg, target) = '{ let v: <arg> = <target>; v }'
+    //       but it still has special handling in type_of to stop early.
+    //       would need better type inference to make that the same, but probably want that anyway.
+    //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
+    pub fn as_cast_macro(&mut self, result: &mut FnWip<'p>, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+        self.compile_expr(result, &mut arg, Some(TypeId::ty()))?;
+        let ty = self.immediate_eval_expr(&result.constants, arg, TypeId::ty())?;
+        let ty = self.to_type(ty)?;
+        target.ty = ty;
+        Ok(target)
+    }
+
+    pub fn enum_constant_macro(&mut self, result: &mut FnWip<'p>, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+        let loc = arg.loc;
+        let ty: TypeId = self.immediate_eval_expr_in_known(result, arg.clone())?;
+        if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
+            let mut the_type = Pattern::empty(loc);
+            let unique_ty = self.program.unique_ty(ty);
+            // Note: we expand target to an anonamus struct literal, not a type.
+            for b in &mut pattern.bindings {
+                assert!(b.default.is_some());
+                assert!(matches!(b.lazy(), LazyType::Infer));
+                b.ty = LazyType::PendingEval(unwrap!(b.default.take(), ""));
+                the_type.bindings.push(Binding {
+                    name: b.name,
+                    // ty: LazyType::Finished(unique_ty),
+                    ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
+                    default: None,
+                    kind: VarType::Let,
+                });
+            }
+            let var = Var(self.pool.intern("T"), self.program.vars.len());
+            self.program.vars.push(VarInfo { kind: VarType::Const, loc });
+            pattern.bindings.push(Binding {
+                name: Name::Var(var),
+                ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
+                default: None,
+                kind: VarType::Let,
+            });
+            the_type.bindings.push(Binding {
+                name: Name::Var(var),
+                ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(TypeId::ty()), loc)),
+                default: None,
+                kind: VarType::Let,
+            });
+            let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
+            let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
+            let the_type: TypeId = self.immediate_eval_expr_in_known(result, the_type)?;
+            let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), Box::new(target)), loc);
+            let value = self.immediate_eval_expr_in(result, construct_expr, the_type)?;
+            let value = Value::new_box(value.vec(), true).into();
+            let ty = self.program.ptr_type(the_type);
+            let mut e = FatExpr::synthetic(Expr::Value { ty, value }, loc);
+            e.ty = ty;
+            return Ok(e);
+        }
+        err!("Expected struct literal found {target:?}",);
+    }
     fn addr_macro(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
         match arg.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
@@ -2938,7 +2937,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let _prev = result.vars.insert(name, final_ty);
                 // TODO: closures break this
-                // assert!(prev.is_none(), "shadow is still new var");
+                // assert!(prev.is_none(), "shadow is still new var {}", name.log(self.pool));
             }
         }
         Ok(())

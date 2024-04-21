@@ -168,7 +168,10 @@ pub trait WalkAst<'p> {
                         }
                         Stmt::Noop | Stmt::DoneDeclFunc(_) => {}
                         Stmt::Eval(arg) => self.expr(arg),
-                        Stmt::DeclFunc(func) => self.walk_func(func), // TODO: more maybe?
+                        Stmt::DeclFunc(func) => {
+                            self.walk_func(func);
+                            todo!("you never get here becuase constants get hoisted");
+                        }
                         Stmt::DeclVar { ty, value, .. } => {
                             if let Some(value) = value {
                                 self.expr(value);
