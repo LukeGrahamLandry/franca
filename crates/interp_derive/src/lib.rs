@@ -19,7 +19,8 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
     let get_type = get_type(&input.ident, &input.data);
     let deserialize_from_ints = deserialize(&input.ident, &input.data, false);
-    let serialize = serialize(&input.ident, &input.data);
+    let serialize_to_ints = serialize(&input.ident, &input.data, false);
+    let serialize = serialize(&input.ident, &input.data, true);
     let size = size_for(&input.ident, &input.data);
 
     let expanded = quote! {
@@ -37,9 +38,14 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
                 #serialize
             }
 
+            fn serialize_to_ints(self, values: &mut Vec<i64>) {
+                #serialize_to_ints
+            }
+
             fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
                 #deserialize_from_ints
             }
+
 
             fn size() -> usize {
                 use crate::ffi::InterpSend;
@@ -200,10 +206,10 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields, from_values: bo
     }
 }
 
-fn serialize(name: &Ident, data: &Data) -> TokenStream {
+fn serialize(name: &Ident, data: &Data, to_values: bool) -> TokenStream {
     match data {
         syn::Data::Struct(data) => {
-            let rest = serialize_fields(name, &data.fields, quote!(self.));
+            let rest = serialize_fields(name, &data.fields, quote!(self.), to_values);
             quote! {
                 #rest
             }
@@ -212,9 +218,14 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
             let recurse_tag = data.variants.iter().enumerate().map(|(i, f)| {
                 let left = enum_match_left(&f.ident, &f.fields);
                 let size = size_for_fields(&f.ident, &f.fields);
+                let t = if to_values {
+                    quote!(usize::serialize(#i, values);)
+                } else {
+                    quote!(usize::serialize_to_ints(#i, values);)
+                };
                 quote_spanned! {f.span()=>
                     #left => {
-                        usize::serialize(#i, values);
+                        #t
                         #size
                     },
                 }
@@ -237,18 +248,23 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                 } else {
                     (quote!(), quote!())
                 };
-                let fields = serialize_fields(name, &f.fields, prefix);
+                let fields = serialize_fields(name, &f.fields, prefix, to_values);
                 quote_spanned! {f.span()=>
                     #left => { #extra #fields },
                 }
             });
+            let pad = if to_values {
+                quote!( values.push(Value::I64(88888));)
+            } else {
+                quote!(values.push(88888);)
+            };
             quote! {
                 #[allow(unused_variables)]
                 let varient_size = match &self {  #(#recurse_tag)* };
                 match self {  #(#recurse_fields)* };
                 let payload_size = Self::size() - 1;
                 for _ in 0..(payload_size-varient_size) {
-                    values.push(Value::I64(88888));  // TODO: less dumb padding
+                    #pad  // TODO: less dumb padding
                 }
 
             }
@@ -286,13 +302,19 @@ fn enum_match_left(ident: &Ident, fields: &syn::Fields) -> TokenStream {
     quote!(Self::#ident #payload)
 }
 
-fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream) -> TokenStream {
+fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream, to_values: bool) -> TokenStream {
+    let t = if to_values {
+        quote!(crate::ffi::InterpSend::serialize)
+    } else {
+        quote!(crate::ffi::InterpSend::serialize_to_ints)
+    };
     match fields {
         syn::Fields::Named(ref fields) => {
             let recurse = fields.named.iter().map(|f| {
                 let name = &f.ident;
+
                 quote_spanned! {f.span()=>
-                    crate::ffi::InterpSend::serialize(#prefix #name, values)
+                    #t(#prefix #name, values)
                 }
             });
             quote! {
@@ -303,16 +325,24 @@ fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream) ->
             let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let i = syn::Index::from(i);
                 quote_spanned! {f.span()=>
-                    crate::ffi::InterpSend::serialize(#prefix #i, values)
+                    #t(#prefix #i, values)
                 }
             });
             quote! {
                 #(#recurse;)*
             }
         }
-        syn::Fields::Unit => quote! {
-            values.push(crate::bc::Value::Unit);
-        },
+        syn::Fields::Unit => {
+            if to_values {
+                quote! {
+                    values.push(crate::bc::Value::Unit);
+                }
+            } else {
+                quote! {
+                    values.push(55555);
+                }
+            }
+        }
     }
 }
 

@@ -171,6 +171,10 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         self.0.serialize(values)
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        self.0.serialize_to_ints(values)
+    }
+
     fn size() -> usize {
         1
     }

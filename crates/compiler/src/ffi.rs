@@ -30,6 +30,13 @@ pub trait InterpSend<'p>: Sized {
         values.into()
     }
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
+    fn serialize_to_ints(self, values: &mut Vec<i64>);
+    fn serialize_to_ints_one(self) -> Vec<i64> {
+        let mut values = vec![];
+        self.serialize_to_ints(&mut values);
+        debug_assert_eq!(values.len(), Self::size());
+        values
+    }
 
     fn size() -> usize;
 }
@@ -65,6 +72,10 @@ macro_rules! send_num {
                 values.push(Value::I64(self as i64))
             }
 
+            fn serialize_to_ints(self, values: &mut Vec<i64>) {
+                values.push(self as i64)
+            }
+
             fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
                 Some(values.next()? as $ty)
             }
@@ -95,6 +106,10 @@ impl<'p> InterpSend<'p> for bool {
         values.push(Value::Bool(self))
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(if self { 1 } else { 0 })
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Some(values.next()? != 0)
     }
@@ -116,6 +131,10 @@ impl<'p> InterpSend<'p> for () {
         values.push(Value::Unit)
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(77777)
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         values.next()?;
         Some(())
@@ -132,6 +151,10 @@ impl<'p> InterpSend<'p> for char {
     }
     fn create_type(_program: &mut Program<'p>) -> TypeId {
         TypeId::i64()
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(self as i64)
     }
 
     fn serialize(self, values: &mut Vec<Value>) {
@@ -159,6 +182,10 @@ impl<'p> InterpSend<'p> for f64 {
         values.push(Value::F64(self.to_bits()))
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(self.to_bits() as i64)
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Some(f64::from_bits(values.next()? as u64))
     }
@@ -178,6 +205,10 @@ impl<'p> InterpSend<'p> for TypeId {
 
     fn serialize(self, values: &mut Vec<Value>) {
         values.push(Value::Type(self))
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(self.as_raw())
     }
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
@@ -202,6 +233,11 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     fn serialize(self, values: &mut Vec<Value>) {
         self.0.serialize(values);
         self.1.serialize(values);
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        self.0.serialize_to_ints(values);
+        self.1.serialize_to_ints(values);
     }
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
@@ -235,6 +271,18 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         debug_assert_eq!(parts.len(), T::size() * len);
         values.push(Value::new_box(parts, false));
         values.push(Value::I64(len as i64));
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        let len = self.len();
+        let mut parts = vec![];
+        for e in self {
+            e.serialize_to_ints(&mut parts);
+        }
+        debug_assert_eq!(parts.len(), T::size() * len);
+        let (ptr, _, _) = parts.into_raw_parts();
+        values.push(ptr as i64);
+        values.push(len as i64);
     }
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
@@ -275,6 +323,15 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         values.push(Value::new_box(parts, false))
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        let mut parts = vec![];
+        let inner: T = *self;
+        inner.serialize_to_ints(&mut parts);
+        debug_assert_eq!(parts.len(), T::size());
+        let (ptr, _, _) = parts.into_raw_parts();
+        values.push(ptr as i64)
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let ptr = values.next()?;
         let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, T::size()) };
@@ -300,6 +357,11 @@ impl<'p> InterpSend<'p> for Value {
     fn serialize(self, values: &mut Vec<Value>) {
         let addr = Box::into_raw(Box::new(self)) as *const Self as usize as i64;
         values.push(Value::I64(addr))
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        let addr = Box::into_raw(Box::new(self)) as *const Self as usize as i64;
+        values.push(addr)
     }
 
     fn size() -> usize {
@@ -339,6 +401,21 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         }
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        match self {
+            Some(v) => {
+                values.push(0);
+                v.serialize_to_ints(values);
+            }
+            None => {
+                values.push(1);
+                for _ in 0..T::size() {
+                    values.push(66666);
+                }
+            }
+        }
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         match values.next()? {
             0 => Some(T::deserialize_from_ints(values)),
@@ -373,6 +450,11 @@ impl<'p> InterpSend<'p> for Span {
         (a, b).serialize(values)
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        let (a, b): (u32, u32) = unsafe { mem::transmute(self) };
+        (a, b).serialize_to_ints(values)
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let (a, b) = <(u32, u32)>::deserialize_from_ints(values)?;
         let res: Span = unsafe { mem::transmute((a, b)) };
@@ -397,6 +479,10 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
         self.into_iter().collect::<Vec<_>>().serialize(values)
     }
 
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        self.into_iter().collect::<Vec<_>>().serialize_to_ints(values)
+    }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Some(Vec::<(K, V)>::deserialize_from_ints(values)?.into_iter().collect::<Self>())
     }
@@ -417,6 +503,10 @@ impl<'p> InterpSend<'p> for String {
 
     fn serialize(self, values: &mut Vec<Value>) {
         Vec::<u8>::from(self).serialize(values)
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        Vec::<u8>::from(self).serialize_to_ints(values)
     }
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
@@ -557,20 +647,13 @@ pub mod c {
         pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
             Ok(match &self[ty] {
                 TypeInfo::F64 => CTy::f64(),
-                TypeInfo::Type => CTy::u32(),
-                TypeInfo::Int(_) => CTy::i64(),   // TODO: actually different int types
-                TypeInfo::Bool => CTy::c_uchar(), // Not a whole word!
-                TypeInfo::Tuple(_) => {
-                    todo!()
-                }
+                // TODO: actually different int types
+                TypeInfo::Unit | TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::Never => CTy::i64(),
+                // Not a whole word!
+                TypeInfo::Bool => CTy::c_uchar(),
                 TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
-                TypeInfo::Enum { .. } => todo!(),
-                TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) | TypeInfo::Struct { as_tuple: ty, .. } => self.as_c_type(*ty)?,
-                TypeInfo::Unit => todo!(),
-                // This is the return type of exit().
-                TypeInfo::Never => CTy::usize(),
-                // just at comptime
-                TypeInfo::Fn(_) => CTy::i64(),
+                TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) => self.as_c_type(*ty)?,
+                TypeInfo::Enum { .. } | TypeInfo::Tuple(_) | TypeInfo::Struct { .. } => err!("i use wrong c abi for aggragates",),
                 _ => err!("No c abi for {}", self.log_type(ty)),
             })
         }

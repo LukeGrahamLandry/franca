@@ -132,8 +132,6 @@ macro_rules! field_offset {
 }
 pub(crate) use field_offset;
 
-use crate::ffi::InterpSend;
-
 fn _does_it_compile(_: &dyn VReflect) {}
 
 pub fn none_bytes<T>() -> &'static [u8] {
@@ -592,26 +590,4 @@ fn bitset() {
     assert!(b.get(100));
     // b.set(500);
     // assert!(b.get(500));
-}
-
-impl<'p, 't> InterpSend<'p> for &'t RsType<'t> {
-    fn get_type_key() -> u128 {
-        todo!()
-    }
-
-    fn create_type(_: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
-        todo!()
-    }
-
-    fn serialize(self, _: &mut Vec<crate::bc::Value>) {
-        todo!()
-    }
-
-    fn size() -> usize {
-        todo!()
-    }
-
-    fn deserialize_from_ints(_: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        todo!()
-    }
 }

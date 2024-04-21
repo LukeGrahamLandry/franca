@@ -253,15 +253,6 @@ impl From<(Values, TypeId)> for Structured {
 #[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackOffset(pub usize);
 
-#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq, InterpSend)]
-pub struct StackAbsolute(pub usize);
-
-#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq, InterpSend)]
-pub struct StackAbsoluteRange {
-    pub first: StackAbsolute,
-    pub count: usize,
-}
-
 #[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackRange {
     pub first: StackOffset,

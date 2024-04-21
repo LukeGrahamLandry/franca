@@ -35,8 +35,7 @@ macro_rules! bounce_flat_call {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).unwrap();
                     let ret: $Ret = $f(compile, arg);
-                    let ret = ret.serialize_one();
-                    let ret = compile.aarch64.constants.store_to_ints(ret.vec().iter());
+                    let ret = ret.serialize_to_ints_one();
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
                     out.fill(0); // TODO: remove
                     out.copy_from_slice(&ret);
@@ -412,8 +411,7 @@ pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *
 
 // This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
-    let arg = arg.serialize_one();
-    let mut arg = compile.aarch64.constants.store_to_ints(arg.vec().iter());
+    let mut arg = arg.serialize_to_ints_one();
     let mut ret = vec![0i64; Ret::size()];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     Ret::deserialize_from_ints(&mut ret.into_iter()).unwrap()
