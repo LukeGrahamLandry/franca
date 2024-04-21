@@ -12,10 +12,13 @@ fun literal(arg: AstExpr, target: AstExpr) AstExpr = {
     var void_ast = VoidPtr;
     let void_ast: VoidPtr = void_ast&;
     let void_ast = literal_ast(Type, void_ast);
+    var as_fn = as;
+    let as_fn: VoidPtr = as_fn&;
+    let as_fn = literal_ast(OverloadSet, as_fn);
     
     '{
         var value: <arg> = <target>;
-        <lit_fn>(<arg>, @as(<void_ast>) value&)
+        <lit_fn>(<arg>, @(<as_fn>)(<void_ast>) value&)
     }'
 }
 
@@ -25,9 +28,10 @@ fun literal(arg: AstExpr) AstExpr = {
     // TODO: assert that arg isn't 'Unit' because then its ambigous with the two argument version. -- Apr 21
     const lit_fn = @literal(OverloadSet) literal_ast; 
     const void_ast = @literal(Type) VoidPtr; 
+    const as_fn = @literal(OverloadSet) as;
     '{
         var value = <arg>;
-        <lit_fn>(value!type, @as(<void_ast>) value&)
+        <lit_fn>(value!type, @(<as_fn>)(<void_ast>) value&)
     }'
 }
 
@@ -63,7 +67,7 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
                     var name = handler_body&.expr.Closure[].name[]; // (2)
                     var case_access = 'arg_var&.___';
                     case_access&.expr.FieldAccess[1][] = name;  // (3)
-                    let cond = '<@literal(eq)>(tag_val, @as(<@literal(i64)>) <@literal(tag_value)>(
+                    let cond = '<@literal(eq)>(tag_val, @(<@literal(as)>)(<@literal(i64)>) <@literal(tag_value)>(
                         <@literal(Type) enum_type>, 
                         <@literal(name)>
                     ))';
@@ -99,16 +103,18 @@ fun switch(arg: FatExpr, target: FatExpr) FatExpr = {
                 // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
                 if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
                     var handler_body = stmt.stmt.Eval[];
-                    
-                    let branch: *PrefixMacro = handler_body&.expr.PrefixMacro;
-                    let name = branch.name[0][];
+                    let branch = handler_body&.expr.PrefixMacro;
+                    let macro = branch.handler[];
+                    // TODO: better error message that shows more context on how you got to a certain type in the nested exprression. 
+                    //       it took me so long to figure out you don't need .GetNamed[0][] to index through the first single element tuple because it gets flattened. -- Apr 21 
+                    let name: Symbol = macro.expr.GetNamed[]; // TODO: allow GetVar becuase they might have shadowed case and default? 
                     let arg = branch.arg[];
                     let action = branch.target[][];
                     
                     // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
                     if(name.int().eq(case!symbol.int()), fn = {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
-                        let cond = '<@literal(eq)>(arg_var, @as(<arg_type>) <arg[]>)';
+                        let cond = '<@literal(eq)>(arg_var, @(<@literal(as)>)(<arg_type>) <arg[]>)';
                         body = '(<cond>, fn=<action>(), fn=<body>)!if';
                     }, fn=if(name.int().eq(default!symbol.int()), fn = {
                         if(first) {|
@@ -150,7 +156,7 @@ fun bits(arg: AstExpr) AstExpr = {
         let bc: i64 = int&.bit_count[];
         shift = sub(shift, bc);
         assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
-        let part_ast = '@as(<@literal(i64)>) <part[]>';
+        let part_ast = '@(<@literal(as)>)(<@literal(i64)>) <part[]>';
         let next = (int&.signed[], 
             fn = '<@literal(signed_truncate)>(<part_ast>, <@literal(i64) int&.bit_count[]>)',
             fn = part_ast
@@ -166,7 +172,7 @@ fun bits(arg: AstExpr) AstExpr = {
         panic(msg.str());
     };
     
-    '@as(<@literal(i64)>) <expr>'
+    '@(<@literal(as)>)(<@literal(i64)>) <expr>'
 }
 
 // Seems like a fairly crippling design problem the range at which adding new code can mess you up. 

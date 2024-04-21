@@ -1345,23 +1345,21 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.expr = Expr::Value { ty, value: bytes.clone() };
                 Structured::Const(ty, bytes)
             }
-            Expr::PrefixMacro { name, arg, target } => {
-                let name_str = self.pool.get(name.0);
-
-                if name_str == "as" {
-                    // TODO: this can't be resolved normally because I use it in macros but can't invoke on an @literal. -- Apr 21
-                    *expr = self.as_cast_macro(result, mem::take(arg), mem::take(target))?;
-                    return self.compile_expr(result, expr, Some(expr.ty));
-                } else if name_str == "uninitialized" {
-                    // TODO: this is a special case
-                    assert!(requested.is_some(), "@uninitialized expr must have known type");
-                    return Ok(Structured::RuntimeOnly(requested.unwrap()));
+            Expr::PrefixMacro { handler, arg, target } => {
+                if let Some(name) = handler.as_ident() {
+                    // TODO: hack that doesnt follow normal scope resolutioon rules.
+                    let name_str = self.pool.get(name);
+                    if name_str == "uninitialized" {
+                        // TODO: this is a special case
+                        assert!(requested.is_some(), "@uninitialized expr must have known type");
+                        return Ok(Structured::RuntimeOnly(requested.unwrap()));
+                    }
                 }
 
                 outln!(
                     LogTag::Macros,
                     "PrefixMacro: {}\nARG: {}\nTARGET: {}",
-                    self.pool.get(name.0),
+                    handler.log(self.pool),
                     arg.log(self.pool),
                     target.log(self.pool)
                 );
@@ -1372,8 +1370,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
 
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
-                let os = unwrap!(result.constants.get(*name), "missing macro constant");
-                let os = unwrap!(os.0.single()?.to_overloads(), "expected overload set. TODO: allow function");
+                // TODO: OverloadSet: InterpSend so I can use known. cant say usize even tho thats kinda what i want cause its unique and anyway would be dumb to give up the typechecking -- Apr 21
+                // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
+                let os = self.immediate_eval_expr_in(result, *handler.clone(), TypeId::overload_set())?;
+                let os = unwrap!(os.single()?.to_overloads(), "expected overload set. TODO: allow direct function");
                 self.compute_new_overloads(os)?;
 
                 let os = self.program.overload_sets[os]
@@ -1398,7 +1398,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     } else {
                         err!(
                             "Missing macro overload (Expr) -> Expr. maybe you forgot a target expr on the invocation of {}",
-                            name.log(self.pool)
+                            handler.log(self.pool)
                         )
                     }
                 }
@@ -1428,6 +1428,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = self.immediate_eval_expr(&result.constants, arg, TypeId::ty())?;
         let ty = self.to_type(ty)?;
         target.ty = ty;
+        // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
+        self.compile_expr(result, &mut target, Some(ty))?;
         Ok(target)
     }
 
@@ -1631,17 +1633,30 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("TODO: closure inference failed. need to make promote_closure non-destructive")
                 }
             }
-            Expr::PrefixMacro { name, arg, .. } => {
-                if name.0 == Flag::As.ident() {
+            Expr::PrefixMacro { handler, arg, .. } => {
+                if handler.as_ident() == Some(Flag::As.ident()) {
+                    // HACK: sad that 'as' is special
                     let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
-                    self.program.to_type(ty)?
+                    return Ok(Some(self.program.to_type(ty)?));
                 }
-                // TODO: if this fails you might have changed the state.
-                else {
-                    match self.compile_expr(result, expr, None) {
-                        Ok(res) => res.ty(),
-                        Err(e) => ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?\n{e:?}",),
+
+                // TODO: hack yuck. now that i rely on expr working so it can be passed into quoted things, this is extra ugly.
+                match self.compile_expr(result, handler, Some(TypeId::overload_set())) {
+                    Ok(res) => {
+                        let os = res.get()?.as_overload_set()?;
+                        if self.program.overload_sets[os].name == Flag::As.ident() {
+                            // HACK: sad that 'as' is special
+                            let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
+                            return Ok(Some(self.program.to_type(ty)?));
+                        }
                     }
+                    Err(e) => ice!("TODO: PrefixMacro handler inference failed. need to make it non-destructive?\n{e:?}",),
+                }
+
+                // TODO: if this fails you might have changed the state.
+                match self.compile_expr(result, expr, None) {
+                    Ok(res) => res.ty(),
+                    Err(e) => ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?\n{e:?}",),
                 }
             }
             &mut Expr::GetNamed(name) => {
@@ -1742,6 +1757,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "false" => (Value::Bool(false), TypeId::bool()),
             "Symbol" => ffi_type!(Ident),
             "FatExpr" => ffi_type!(FatExpr),
+            "Var" => ffi_type!(Var),
             _ => {
                 let name = self.pool.intern(name);
                 if let Some(ty) = self.program.find_ffi_type(name) {

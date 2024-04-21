@@ -648,7 +648,7 @@ pub mod c {
             Ok(match &self[ty] {
                 TypeInfo::F64 => CTy::f64(),
                 // TODO: actually different int types
-                TypeInfo::Unit | TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::Never => CTy::i64(),
+                TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::Never => CTy::i64(),
                 // Not a whole word!
                 TypeInfo::Bool => CTy::c_uchar(),
                 TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),

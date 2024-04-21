@@ -490,8 +490,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.index_expr(result, ptr.ty, container_ptr, index, output)?
             }
             Expr::StructLiteralP(pattern) => self.construct_struct(result, pattern, expr.ty, output)?,
-            Expr::PrefixMacro { name, .. } => {
-                if name.0 == Flag::Uninitialized.ident() {
+            Expr::PrefixMacro { .. } => {
+                if expr.as_prefix_macro(Flag::Uninitialized).is_some() {
                     assert!(!expr.ty.is_never(), "call exit() to produce a value of type 'Never'");
                     // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
                     return Ok(());

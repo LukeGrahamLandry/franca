@@ -117,7 +117,7 @@ pub enum Expr<'p> {
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
     PrefixMacro {
-        name: Var<'p>,
+        handler: Box<FatExpr<'p>>,
         arg: Box<FatExpr<'p>>,
         target: Box<FatExpr<'p>>,
     },
@@ -204,7 +204,8 @@ pub trait WalkAst<'p> {
                 self.pattern(binding);
             }
             // TODO: idk if i want to be going into macros. maybe inlining should always happen after them.
-            Expr::PrefixMacro { arg, target, .. } => {
+            Expr::PrefixMacro { handler, arg, target } => {
+                self.expr(handler);
                 self.expr(arg);
                 self.expr(target);
             }
@@ -253,18 +254,10 @@ struct RenumberVars<'a, 'p> {
 
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
-        match &mut expr.expr {
-            Expr::GetVar(v) => {
-                if let Some(new) = self.mapping.get(v) {
-                    *v = *new;
-                }
+        if let Expr::GetVar(v) = &mut expr.expr {
+            if let Some(new) = self.mapping.get(v) {
+                *v = *new;
             }
-            Expr::PrefixMacro { name, .. } => {
-                if let Some(new) = self.mapping.get(name) {
-                    *name = *new; // probably never happens?
-                }
-            }
-            _ => {}
         }
         true
     }
@@ -1465,11 +1458,21 @@ impl<'p> Expr<'p> {
         )
     }
 
+    // TODO: this needs to be removed becuase it doesn't respect shadowing or arbitrary expressions that evaluate to the expected builtin thing.
+    //       maybe all the ones the compiler knows about should be a different syntax/node? but the eventual goal is consistancy.     -- Apr 21
     pub fn as_prefix_macro(&self, flag: Flag) -> Option<(&FatExpr, &FatExpr)> {
-        if let Expr::PrefixMacro { name, arg, target } = self {
-            if name.0 == flag.ident() {
-                return Some((arg, target));
+        if let Expr::PrefixMacro { handler, arg, target } = self {
+            if let Some(name) = handler.as_ident() {
+                if name == flag.ident() {
+                    return Some((arg, target));
+                }
             }
+        }
+        None
+    }
+    pub fn as_var(&self) -> Option<Var<'p>> {
+        if let &Expr::GetVar(name) = self {
+            return Some(name);
         }
         None
     }

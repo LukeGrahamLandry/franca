@@ -4,7 +4,7 @@ use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 use codemap::{CodeMap, File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Binding, Flag, Name, TypeId, Var, VarType};
+use crate::ast::{Binding, Flag, Name, TypeId, VarType};
 use crate::bc::Values;
 use crate::export_ffi::get_include_std;
 use crate::{
@@ -213,11 +213,25 @@ impl<'a, 'p> Parser<'a, 'p> {
             At => {
                 self.start_subexpr();
                 self.eat(At)?;
-                if self.peek() == TokenType::LeftParen {
-                    return Err(self.error_next(String::from("'@(' is reserved for complex macro calls")));
+                // Not normal parse_expr here. want '@f(a)t' to parse as '@(f)(a) t' not '@(f(a))t'
+                let handler = match self.peek() {
+                    TokenType::Symbol(name) => {
+                        self.start_subexpr();
+                        self.pop();
+                        self.expr(Expr::GetNamed(name))
+                    }
+                    TokenType::LeftParen => {
+                        self.eat(LeftParen)?;
+                        let res = self.parse_expr()?;
+                        self.eat(RightParen)?;
+                        res
+                    }
+                    _ => return Err(self.expected("ident or '(' for macro expr (arbitrary expr must be wrapped in parens)")),
+                };
+                if self.peek() != TokenType::LeftParen {
+                    return Err(self.expected("'(' for macro arg. (TODO: treat that as single arg?)"));
                 }
 
-                let name = self.ident()?;
                 let arg = Box::new(self.parse_tuple()?);
 
                 let target = match self.peek() {
@@ -229,7 +243,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     _ => Box::new(self.parse_expr()?),
                 };
                 Ok(self.expr(Expr::PrefixMacro {
-                    name: Var(name, 0),
+                    handler: Box::new(handler),
                     arg,
                     target,
                 }))

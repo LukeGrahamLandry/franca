@@ -490,7 +490,7 @@ impl<'p> PoolLog<'p> for Stmt<'p> {
 impl<'p> PoolLog<'p> for LazyType<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         match self {
-            LazyType::EvilUnit => panic!(),
+            LazyType::EvilUnit => "EVIL_UNINIT !!!".into(),
             LazyType::Infer => "Infer".into(),
             LazyType::PendingEval(e) => e.log(pool),
             LazyType::Finished(ty) => format!("{:?}", ty),
@@ -560,7 +560,9 @@ impl<'p> Expr<'p> {
             Expr::FieldAccess(container, name) => {
                 format!("{}.{}", container.logd(pool, depth), pool.get(*name))
             }
-            Expr::PrefixMacro { name, arg, target } => format!("[@{}({}) {}]", name.log(pool), arg.logd(pool, depth), target.logd(pool, depth)),
+            Expr::PrefixMacro { handler, arg, target } => {
+                format!("[@{}({}) {}]", handler.logd(pool, depth), arg.logd(pool, depth), target.logd(pool, depth))
+            }
             Expr::Index { ptr, index } => format!("{}[{}]", ptr.logd(pool, depth), index.logd(pool, depth)),
             _ => format!("{:?}", self),
         }

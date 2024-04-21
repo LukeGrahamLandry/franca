@@ -258,10 +258,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.resolve_expr(fst)?;
                 self.resolve_expr(snd)?;
             }
-            Expr::PrefixMacro { name, arg, target } => {
-                if let Some(var) = self.find_var(&name.0) {
-                    *name = var;
-                }
+            Expr::PrefixMacro { handler, arg, target } => {
+                self.resolve_expr(handler)?;
                 self.resolve_expr(arg)?;
                 self.resolve_expr(target)?;
             }

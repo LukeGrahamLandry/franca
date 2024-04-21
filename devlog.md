@@ -16,6 +16,10 @@ Ideally the vars would always be unique so maybe the extra level of dynamic scop
 The current thing means a raw identifier is never useful sincei t can't be from the caller's scope (wouldn't resolve) and can't be from the macro's scope (doesn't capture).
 But its applied inconsistantly if caller they happens to have already captured it, you won't get an error.
 I guess its the same problem as rust letting you use relative import paths in macros so I end up needing to import stuff when I add InterpSend to a new file becuase I'm too lazy to actually fix it.
+added @(e) for comptime overload set, but its still a bit broken. works for as so at least its slightly more consistant now.
+feels like it made the compiler like 10% slower which is sad but also not worth bothering about until i fix the thousands of redundant ast serilizations.
+
+Really need to stop doing the stupid export_ffi wrappers. got confusted by pasing the wrong macro impl and of course args matched cause they're all exprs so error message wasnt obvious.
 
 ## getting rid of interpreter (Apr 20)
 

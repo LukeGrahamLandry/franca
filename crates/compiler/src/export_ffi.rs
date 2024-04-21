@@ -490,14 +490,27 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ),
 ];
 
-pub const COMPILER_MACROS: &[(&str, FlatCallFn)] = &[(
-    "fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
-    bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
-)];
+pub const COMPILER_MACROS: &[(&str, FlatCallFn)] = &[
+    (
+        "fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+        bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
+    ),
+    (
+        "fun as(T: FatExpr, value: FatExpr) FatExpr;",
+        bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
+    ),
+];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
     let res = compile.enum_constant_macro(unsafe { &mut *result }, arg, target);
+    compile.pending_ffi.push(Some(result));
+    res.unwrap()
+}
+
+fn as_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let res = compile.as_cast_macro(unsafe { &mut *result }, arg, target);
     compile.pending_ffi.push(Some(result));
     res.unwrap()
 }
