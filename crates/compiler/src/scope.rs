@@ -2,26 +2,23 @@ use std::{mem, ops::DerefMut};
 
 use codemap::Span;
 
-use crate::ast::{Pattern, WalkAst};
 use crate::{
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{Compile, Res},
     err,
     logging::LogTag::Scope,
     outln,
-    pool::{Ident, StringPool},
+    pool::Ident,
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {
-    next_var: usize,
     scopes: Vec<Vec<Var<'p>>>,
     track_captures_before_scope: Vec<usize>,
     captures: Vec<Var<'p>>,
     local_constants: Vec<Vec<FatStmt<'p>>>,
-    pool: &'p StringPool<'p>,
-    exports: Vec<Var<'p>>,
     compiler: &'z mut Compile<'a, 'p>,
     last_loc: Span,
+    scope_stack: Vec<ScopeId>,
 }
 
 impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
@@ -31,15 +28,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
     pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
         let mut resolver = ResolveScope {
-            next_var: compiler.program.vars.len(),
             scopes: Default::default(),
             track_captures_before_scope: Default::default(),
             captures: Default::default(),
             local_constants: Default::default(),
-            pool: compiler.pool,
-            exports: vec![],
             compiler,
             last_loc: stmts.loc,
+            scope_stack: vec![ScopeId::from_index(0)],
         };
         if let Err(mut e) = resolver.run(stmts) {
             e.loc = e.loc.or(Some(resolver.last_loc));
@@ -82,7 +77,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
 
         for v in capures {
-            if self.compiler.program.vars[v.1].kind == VarType::Const {
+            if v.3 == VarType::Const {
                 func.capture_vars_const.push(v);
             } else {
                 func.capture_vars.push(v);
@@ -92,21 +87,16 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // Extend because #open pokes some constants in earlier.
         func.local_constants.extend(self.local_constants.pop().unwrap());
 
-        outln!(Scope, "{}", func.log_captures(self.pool));
+        outln!(Scope, "{}", func.log_captures(self.compiler.pool));
         Ok(())
     }
 
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
-        debug_assert_eq!(self.next_var, self.compiler.program.vars.len());
         let loc = stmt.loc;
         self.last_loc = loc;
-        let mut public = false;
         for a in &mut stmt.annotations {
             if let Some(args) = &mut a.args {
                 self.resolve_expr(args)?
-            }
-            if a.name == Flag::Pub.ident() {
-                public = true;
             }
         }
 
@@ -118,7 +108,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
                 }
-                let new = self.decl_var(name, *kind, loc);
+                let new = self.decl_var(name, *kind, loc)?;
                 let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
@@ -126,23 +116,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     kind: *kind,
                 };
                 if *kind == VarType::Const {
-                    // TODO: probably want the reverse too where you can't shadow a const with a let, etc.
-                    if self.scopes.last().unwrap().iter().filter(|v| v.0 == *name).count() != 1 {
-                        // TODO: show other declaration site.
-                        // TODO: different rules for const _ = e;? or better to express that idea as @comptime(e);
-                        err!(
-                            "Constants (will be) order independent, so cannot shadow in the same scope: {}",
-                            self.pool.get(*name)
-                        )
-                    }
                     self.local_constants
                         .last_mut()
                         .unwrap()
                         .push(decl.fat_with(mem::take(&mut stmt.annotations), stmt.loc));
                     stmt.stmt = Stmt::Noop;
-                    if public {
-                        self.exports.push(new);
-                    }
                 } else {
                     stmt.stmt = decl;
                 }
@@ -158,24 +136,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     // Functions don't shadow, they just add to an overload group.
                     // TODO: what happens if you're shadowing a normal variable? just err maybe?
                     // TOOD: @pub vs @private
-                    let name = if let Some(v) = self.find_var(&func.name) {
+                    if let Some(v) = self.find_var(&func.name) {
                         func.var_name = Some(v);
-                        v
                     } else {
-                        let v = self.decl_var(&func.name, VarType::Const, func.loc);
+                        let v = self.decl_var(&func.name, VarType::Const, func.loc)?;
                         func.var_name = Some(v);
-
-                        if self.scopes.last().unwrap().iter().filter(|v| v.0 == func.name).count() != 1 {
-                            // TODO: show other declaration site.
-                            err!(
-                                "Constants (will be) order independent, so cannot shadow in the same scope: {}",
-                                self.pool.get(func.name)
-                            )
-                        }
-                        v
-                    };
-                    if public {
-                        self.exports.push(name);
                     }
                 }
                 func.annotations = aaa;
@@ -206,6 +171,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let loc = expr.loc;
         self.last_loc = loc;
         match expr.deref_mut() {
+            Expr::Poison => err!("ICE: POISON",),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.resolve_expr(fst)?;
@@ -216,7 +182,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.resolve_expr(arg)?;
                 self.resolve_expr(target)?;
             }
-            Expr::Block { body, result, locals } => {
+            Expr::Block {
+                body,
+                result,
+                locals,
+                resolved,
+            } => {
                 assert!(locals.is_none());
                 self.push_scope(false);
                 for stmt in body {
@@ -225,6 +196,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.resolve_expr(result)?;
                 let (vars, _) = self.pop_scope();
                 *locals = Some(vars);
+                *resolved = true;
             }
             Expr::Tuple(values) => {
                 for value in values {
@@ -270,18 +242,35 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         None
     }
 
-    // TODO: move the const shadow check here.
-    #[must_use]
-    fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Var<'p> {
-        let var = Var(*name, self.next_var);
-        self.next_var += 1;
+    fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Res<'p, Var<'p>> {
+        let scope = if kind == VarType::Const {
+            let s = *self.scope_stack.last().unwrap();
+            if self.compiler[s].constants.insert(*name, FatExpr::synthetic(Expr::Poison, loc)).is_some() {
+                // TODO: probably want the reverse too where you can't shadow a const with a let, etc.
+                // TODO: show other declaration site.
+                err!(
+                    "Constants (will be) order independent, so cannot shadow in the same scope: {}",
+                    self.compiler.pool.get(*name)
+                )
+            }
+            s
+        } else {
+            ScopeId::from_index(0)
+        };
+        let var = Var(*name, self.compiler.program.next_var, scope, kind); // TODO:SCOPE
+        self.compiler.program.next_var += 1;
         let current = self.scopes.last_mut().unwrap();
         current.push(var);
-        self.compiler.program.vars.push(VarInfo { kind, loc });
-        var
+        Ok(var)
+    }
+
+    fn get_scope(&self) -> ScopeId {
+        *self.scope_stack.last().unwrap()
     }
 
     fn push_scope(&mut self, track_captures: bool) {
+        let scope = self.get_scope();
+        self.scope_stack.push(self.compiler.new_scope(scope));
         let function_scope = if track_captures {
             self.scopes.len()
         } else {
@@ -293,6 +282,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
     #[must_use]
     fn pop_scope(&mut self) -> (Vec<Var<'p>>, Option<Vec<Var<'p>>>) {
+        self.scope_stack.pop().unwrap();
         let boundery = self.track_captures_before_scope.pop().unwrap();
         let vars = self.scopes.pop().unwrap();
         let captures = if boundery == self.scopes.len() {
@@ -309,7 +299,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.walk_ty(&mut binding.ty);
                 if declaring {
                     // TODO: allow different qualifiers? structs could have const fields, what would that mean exactly?
-                    let var = self.decl_var(&name, VarType::Var, loc);
+                    let var = self.decl_var(&name, VarType::Var, loc)?;
                     *binding = Binding {
                         name: Name::Var(var),
                         ty: mem::replace(&mut binding.ty, LazyType::Infer),
@@ -326,16 +316,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         Ok(())
     }
-}
-
-impl<'z, 'a, 'p> WalkAst<'p> for ResolveScope<'z, 'a, 'p> {
-    fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) -> bool {
-        true
-    }
-    fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
-    fn pre_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
-    fn walk_func(&mut self, _: &mut Func<'p>) {}
-    fn walk_pattern(&mut self, _: &mut Pattern<'p>) {}
     fn walk_ty(&mut self, ty: &mut LazyType<'p>) {
         match ty {
             LazyType::EvilUnit => panic!(),

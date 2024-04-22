@@ -841,6 +841,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             self.expr(Expr::unit())
         };
         Ok(self.expr(Expr::Block {
+            resolved: false,
             body,
             result: Box::new(result),
             locals: None,

@@ -328,6 +328,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     let name = pool.intern("@toplevel@");
     let body = Some(FatExpr::synthetic(
         Expr::Block {
+            resolved: false,
             body: stmts,
             result: Box::new(FatExpr::synthetic(Expr::unit(), user_span)),
             locals: None,

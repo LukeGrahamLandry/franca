@@ -7,6 +7,15 @@ So you do a whole scope to get names before going into implementations and doing
 The more interesting goal being having a normal macro that says "oh you're trying to compile me? i'll parse this header file and spit out all those names into your scope".
 I think my existing broken (they can't even nest) module system is more work to keep than remove and rewrite a better one later.
 Ideally a module could be just a struct of functions (like zig) but then an @using macro can add those names to your scope.
+The other weird thing currently is constant hoisting.
+All constants in a function are pulled out during resolve so macros can't expand to blocks containing constants.
+But I do the resolve pass doesn't backtrack so normal code can only refer to constants lexically before it because otherwise the names wouldn't bind.
+So its the worst of both worlds.
+Also expressions that disappear because of constant folding and shouldn't even be compiled,
+still have thier constants hoisted to the function so you can't use that for platform specific stuff which is sad.
+I want `#[cfg(whatever)]` to just be a normal comptime `if`.
+
+- removed modules. easy. only a toy test relied on them.
 
 ## improving macros (Apr 21)
 

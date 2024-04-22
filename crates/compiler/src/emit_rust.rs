@@ -258,6 +258,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
 
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
         Ok(match expr.deref() {
+            Expr::Poison => err!("ICE: POISON",),
             Expr::Index { .. } => todo!(),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Raw { .. } => todo!(),

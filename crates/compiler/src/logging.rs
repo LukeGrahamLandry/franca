@@ -433,6 +433,7 @@ fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
 // TODO: this could use walk_whatever()
 fn collect_func_references<'p>(expr: &Expr<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
     match expr {
+        Expr::Poison => unreachable!("ICE: POISON"),
         Expr::Value { value, .. } => value.clone().vec().iter().for_each(|v| collect_func_references_value(v, refs)),
         Expr::Raw { .. } => {} // TODO: check the type. there could be functions in there.
         Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {

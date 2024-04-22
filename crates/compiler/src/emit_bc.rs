@@ -273,6 +273,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
+            Expr::Poison => err!("ICE: POISON",),
             Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
                 assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.program.pool));
@@ -315,7 +316,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 unreachable!("{}", f.log(self.program.pool))
             }
-            Expr::Block { body, result: value, locals } => {
+            Expr::Block {
+                body,
+                result: value,
+                locals,
+                resolved,
+            } => {
+                debug_assert!(*resolved);
                 self.locals.push(vec![]);
                 self.locals_drop.push(vec![]);
                 for stmt in body {
@@ -508,10 +515,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         match arg.deref() {
             Expr::GetVar(var) => {
                 if let Some((stack_slot, value_ty)) = result.vars.get(var).cloned() {
-                    let kind = self.program.vars[var.1].kind;
-                    if kind != VarType::Var {
+                    if var.3 != VarType::Var {
                         err!(
-                            "Can only take address of vars not {kind:?} {}. TODO: allow read field.",
+                            "Can only take address of vars not {:?} {}. TODO: allow read field.",
+                            var.3,
                             var.log(self.program.pool)
                         )
                     }

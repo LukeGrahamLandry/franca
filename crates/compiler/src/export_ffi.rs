@@ -565,7 +565,7 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
     //       tho really its fine for the stuff inside that you're filling in from the macro's caller since they should only be used once.
     //       you only need to worry about vars declared in the macro handler being copied out multiple times into the same scope.
     //       -- Apr 21
-    template.renumber_vars(&mut compile.program.vars);
+    compile.program.next_var = template.renumber_vars(compile.program.next_var);
 
     compile.pending_ffi.push(Some(result));
     template

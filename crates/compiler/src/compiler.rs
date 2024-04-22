@@ -15,7 +15,7 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType, WalkAst,
+    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -26,7 +26,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, ffi};
+use crate::{bc::*, ffi, impl_index};
 use crate::{
     logging::{LogTag, PoolLog},
     outln,
@@ -79,7 +79,15 @@ pub struct Compile<'a, 'p: 'a> {
     pub aarch64: Jitted,
     pub ready: BcReady<'p>,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
+    scopes: Vec<Scope<'p>>,
 }
+
+pub struct Scope<'p> {
+    pub parent: ScopeId,
+    pub constants: HashMap<Ident<'p>, FatExpr<'p>>,
+}
+
+impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
 
 #[derive(Clone, Debug)]
 pub enum DebugState<'p> {
@@ -122,6 +130,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             save_bootstrap: vec![],
             tests: vec![],
             pending_ffi: vec![],
+            scopes: vec![Scope {
+                parent: ScopeId::from_index(0),
+                constants: Default::default(),
+            }],
         }
     }
 
@@ -139,6 +151,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         writeln!(out, "=============").unwrap();
         out
+    }
+
+    pub fn new_scope(&mut self, parent: ScopeId) -> ScopeId {
+        self.scopes.push(Scope {
+            parent,
+            constants: Default::default(),
+        });
+        ScopeId::from_index(self.scopes.len() - 1)
     }
 
     #[track_caller]
@@ -502,6 +522,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
         // TODO: need to move the const args to the top before eval_and_close_local_constants
         expr_out.expr = Expr::Block {
+            resolved: true,
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
                     binding: pattern,
@@ -513,7 +534,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             result: Box::new(func.body.as_ref().unwrap().clone()),
             locals: Some(locals), // Note: just the declarations in this block, not recursivly bubbled up.
         };
-        expr_out.renumber_vars(&mut self.program.vars);
+        self.program.next_var = expr_out.renumber_vars(self.program.next_var);
 
         self.currently_inlining.retain(|check| *check != f);
 
@@ -978,6 +999,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
+            Expr::Poison => err!("ICE: POISON",),
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, expr)?;
                 Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
@@ -1006,7 +1028,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
             }
-            Expr::Block { body, result: value, .. } => {
+            Expr::Block {
+                body,
+                result: value,
+                resolved,
+                ..
+            } => {
+                debug_assert!(*resolved); // TODO: this will change
                 for stmt in body {
                     self.compile_stmt(result, stmt)?;
                 }
@@ -1413,8 +1441,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     kind: VarType::Let,
                 });
             }
-            let var = Var(self.pool.intern("T"), self.program.vars.len());
-            self.program.vars.push(VarInfo { kind: VarType::Const, loc });
+            let var = Var(self.pool.intern("T"), self.program.next_var, ScopeId::from_index(0), VarType::Const); // TODO:SCOPE
+            self.program.next_var += 1;
             pattern.bindings.push(Binding {
                 name: Name::Var(var),
                 ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
@@ -1445,10 +1473,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some(value_ty) = result.vars.get(var).cloned() {
                     assert!(!value_ty.is_any(), "took address of Any {}", var.log(self.pool));
-                    let kind = self.program.vars[var.1].kind;
-                    if kind != VarType::Var {
+                    if var.3 != VarType::Var {
                         err!(
-                            "Can only take address of vars not {kind:?} {}. TODO: allow read field.",
+                            "Can only take address of vars not {:?} {}. TODO: allow read field.",
+                            var.3,
                             var.log(self.pool)
                         )
                     }
@@ -1500,6 +1528,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int)))); // but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
+            Expr::Poison => err!("ICE: POISON",),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } | Expr::Raw { ty, .. } => *ty,
             Expr::Call(f, arg) => {
@@ -2209,8 +2238,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn set_deref(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
         match place.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
-                let var_info = self.program.vars[var.1]; // TODO: the type here isn't set.
-                assert_eq!(var_info.kind, VarType::Var, "Only 'var' can be reassigned (not let/const). {:?}", place);
+                assert_eq!(var.3, VarType::Var, "Only 'var' can be reassigned (not let/const).");
                 let oldty = result.vars.get(var);
                 let oldty = *unwrap!(oldty, "SetVar: var must be declared: {}", var.log(self.pool));
 

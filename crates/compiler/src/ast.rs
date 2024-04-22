@@ -90,12 +90,14 @@ pub struct Annotation<'p> {
     pub args: Option<FatExpr<'p>>,
 }
 
+// TODO: this is getting a bit chonky if I want to store the kind here instead of globally. 32 bit indices would make it reasonable again
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
-pub struct Var<'p>(pub Ident<'p>, pub usize);
+pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType);
 
 // TODO: should really get an arena going because boxes make me sad.
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
+    Poison,
     Value {
         ty: TypeId,
         value: Values,
@@ -107,6 +109,7 @@ pub enum Expr<'p> {
     WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
+        resolved: bool,
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
         locals: Option<Vec<Var<'p>>>, // useful information for calling drop
@@ -147,6 +150,7 @@ pub trait WalkAst<'p> {
             return;
         }
         match &mut expr.expr {
+            Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.expr(fst);
                 self.expr(snd);
@@ -248,7 +252,7 @@ pub trait WalkAst<'p> {
 
 // Used for inlining closures.
 struct RenumberVars<'a, 'p> {
-    vars: &'a mut Vec<VarInfo>,
+    vars: usize,
     mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
 }
 
@@ -289,8 +293,8 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
 
 impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
-        let new = Var(name.0, self.vars.len());
-        self.vars.push(self.vars[name.1]);
+        let new = Var(name.0, self.vars, name.2, name.3); // TODO:SCOPE?
+        self.vars += 1;
         let stomp = self.mapping.insert(*name, new);
         debug_assert!(stomp.is_none());
         *name = new;
@@ -298,10 +302,11 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn renumber_vars(&mut self, vars: &mut Vec<VarInfo>) {
+    pub fn renumber_vars(&mut self, vars: usize) -> usize {
         let mut mapping = HashMap::new();
         let mut ctx = RenumberVars { vars, mapping: &mut mapping };
         ctx.expr(self);
+        ctx.vars
     }
 }
 
@@ -533,14 +538,7 @@ impl<'p> FatExpr<'p> {
     }
     // used for moving out of ast
     pub fn null(loc: Span) -> Self {
-        FatExpr::synthetic(
-            Expr::Value {
-                // Note: this type doesn't go through ::from_index so trying to read it in debug mode with throw an assertion which is what you want in this case.
-                ty: TypeId(0),
-                value: Value::Type(TypeId(0)).into(),
-            },
-            loc,
-        )
+        FatExpr::synthetic(Expr::Poison, loc)
     }
 
     pub fn parse_dot_chain(&self) -> Res<'p, Vec<Ident<'p>>> {
@@ -782,7 +780,7 @@ pub struct Program<'p> {
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
     pub generics_memo: HashMap<(FuncId, Values), (Values, TypeId)>,
-    pub vars: Vec<VarInfo>,
+    pub next_var: usize,
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: HashMap<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
@@ -895,7 +893,7 @@ impl<'p> Program<'p> {
             ],
             funcs: Default::default(),
             generics_memo: Default::default(),
-            vars: vec![],
+            next_var: 0,
             pool,
             overload_sets: Default::default(),
             ffi_types: Default::default(),
@@ -1707,3 +1705,7 @@ macro_rules! tagged_index {
 // Make sure these tag numbers are all different!
 tagged_index!(FuncId, 30);
 tagged_index!(TypeId, 31);
+tagged_index!(ScopeId, 29);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
+pub struct ScopeId(pub u64);
