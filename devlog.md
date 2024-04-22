@@ -17,6 +17,18 @@ I want `#[cfg(whatever)]` to just be a normal comptime `if`.
 
 - removed modules. easy. only a toy test relied on them.
 
+doing scan ahead in scope: (end result will be can bind to later declarations but stil generally can't use them because compiled in order).
+
+- needed to move `const FatExpr: Type = @builtin("FatExpr");` up above `#include_std("compiler_macros")`.
+  I guess it worked before because the builtin identifiers get checked if a name is unresolved but now it gets resolved dispite being declared later,
+  but they're stil evaluated in order so it doesn't exist to get closed over?
+- Then my `const T = T;` hack in comptime functions that fixed some old renumbering bug (i think), breaks now because the value T binds to the new declaration T.
+  But i seem to have fixed things enough that sometimes making the arg constant works without the extra binding (even if still seems redundant if the func is comptime but since inner constants need to refer to it, makes sense).
+  Thats enough for half the tests to work.
+- switching memcpy to a trailing lambda instead of const binding make another quarter work. need to go back and fix that.
+  it can't find value for the T in fn set's signeture?
+- now a bunch of no stomp assertions are triggering in comptime functions cause I took out the rebinding hack. forgetting to renumber somewhere?
+
 ## improving macros (Apr 21)
 
 Syntax sugar for !quote/!unquote goes a long way.

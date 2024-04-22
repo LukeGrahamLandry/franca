@@ -84,7 +84,7 @@ pub struct Compile<'a, 'p: 'a> {
 
 pub struct Scope<'p> {
     pub parent: ScopeId,
-    pub constants: HashMap<Ident<'p>, FatExpr<'p>>,
+    pub constants: HashMap<Ident<'p>, (FatExpr<'p>, LazyType<'p>)>,
 }
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
@@ -173,7 +173,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
         let f = self.add_func(ast, &Constants::empty())?;
-        self.ensure_compiled(f, ExecTime::Comptime)?;
+        if let Err(mut e) = self.ensure_compiled(f, ExecTime::Comptime) {
+            e.loc = e.loc.or(self.last_loc);
+            return Err(e);
+        }
         Ok(f)
     }
 
@@ -351,7 +354,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             mut_replace!(self.program[f].local_constants, |mut local_constants| {
                 for stmt in &mut local_constants {
-                    self.compile_stmt(&mut result, stmt)?;
+                    let s: &mut FatStmt = stmt; // wtf bro. this is like my language. tyring to call .log broke type inference.
+                    self.compile_stmt(&mut result, s)?;
                 }
                 // Note: not putting local_constants back. We only need to evaluate them once (even if capturing_call runs many times)
                 //      and they get moved into result.constants, which becomes the closed_constants of 'f' (but as values instead of statements)
@@ -1583,7 +1587,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let before = types.len();
                 let types: Vec<_> = types.into_iter().flatten().collect();
                 self.last_loc = Some(expr.loc);
-                assert_eq!(before, types.len(), "some of tuple not infered");
+                if before != types.len() {
+                    return Ok(None);
+                }
                 self.program.tuple_of(types)
             }
             Expr::FieldAccess(container, _) => {

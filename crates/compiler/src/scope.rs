@@ -1,6 +1,6 @@
 use std::{mem, ops::DerefMut};
 
-use codemap::Span;
+use codemap::{Pos, Span};
 
 use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
@@ -91,6 +91,42 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         Ok(())
     }
 
+    fn resolve_stmt_if_constant(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
+        let loc = stmt.loc;
+        match stmt.deref_mut() {
+            Stmt::DeclNamed { name, ty, value, kind } => {
+                if *kind == VarType::Const {
+                    let new = self.decl_var(name, *kind, loc)?;
+                    let decl = Stmt::DeclVar {
+                        name: new,
+                        ty: mem::replace(ty, LazyType::Infer),
+                        value: mem::replace(value, Some(FatExpr::null(loc))),
+                        kind: *kind,
+                    };
+                    stmt.stmt = decl;
+                    // Don't move to local_constants yet because want value to be able to reference later constants
+                }
+            }
+            Stmt::DeclFunc(func) => {
+                assert!(func.referencable_name);
+                // Functions don't shadow, they just add to an overload group.
+                // TODO: what happens if you're shadowing a normal variable? just err maybe?
+                // TOOD: @pub vs @private
+                if let Some(v) = self.find_var(&func.name) {
+                    func.var_name = Some(v);
+                } else {
+                    let v = self.decl_var(&func.name, VarType::Const, func.loc)?;
+                    func.var_name = Some(v);
+                }
+
+                // Don't move to local_constants yet because want value to be able to reference later constants
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     fn resolve_stmt(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         let loc = stmt.loc;
         self.last_loc = loc;
@@ -104,10 +140,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         match stmt.deref_mut() {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
+                assert!(*kind != VarType::Const);
                 self.walk_ty(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
                 }
+
                 let new = self.decl_var(name, *kind, loc)?;
                 let decl = Stmt::DeclVar {
                     name: new,
@@ -115,34 +153,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     value: mem::replace(value, Some(FatExpr::null(loc))),
                     kind: *kind,
                 };
-                if *kind == VarType::Const {
-                    self.local_constants
-                        .last_mut()
-                        .unwrap()
-                        .push(decl.fat_with(mem::take(&mut stmt.annotations), stmt.loc));
-                    stmt.stmt = Stmt::Noop;
-                } else {
-                    stmt.stmt = decl;
-                }
+                stmt.stmt = decl;
             }
-            Stmt::Set { place, value } => {
-                self.resolve_expr(place)?;
-                self.resolve_expr(value)?;
-            }
-            Stmt::Noop => {}
-            Stmt::Eval(e) => self.resolve_expr(e)?,
             Stmt::DeclFunc(func) => {
-                if func.referencable_name {
-                    // Functions don't shadow, they just add to an overload group.
-                    // TODO: what happens if you're shadowing a normal variable? just err maybe?
-                    // TOOD: @pub vs @private
-                    if let Some(v) = self.find_var(&func.name) {
-                        func.var_name = Some(v);
-                    } else {
-                        let v = self.decl_var(&func.name, VarType::Const, func.loc)?;
-                        func.var_name = Some(v);
-                    }
-                }
                 func.annotations = aaa;
                 self.resolve_func(func)?;
                 self.local_constants
@@ -150,9 +163,24 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     .unwrap()
                     .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
             }
-            Stmt::DeclVar { .. } => {
-                unreachable!("added by this pass {stmt:?}")
+            Stmt::DeclVar { kind, ty, value, .. } => {
+                assert!(*kind == VarType::Const);
+                self.walk_ty(ty);
+                if let Some(value) = value {
+                    self.resolve_expr(value)?;
+                }
+                self.local_constants
+                    .last_mut()
+                    .unwrap()
+                    .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
             }
+            Stmt::Set { place, value } => {
+                self.resolve_expr(place)?;
+                self.resolve_expr(value)?;
+            }
+            Stmt::Noop => {}
+            Stmt::Eval(e) => self.resolve_expr(e)?,
+
             Stmt::DeclVarPattern { binding, value } => {
                 // TODO: this isnt actually tested because only the backend makes these
                 if let Some(value) = value {
@@ -190,7 +218,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             } => {
                 assert!(locals.is_none());
                 self.push_scope(false);
-                for stmt in body {
+                for stmt in body.iter_mut() {
+                    self.resolve_stmt_if_constant(stmt)?;
+                }
+                for stmt in body.iter_mut() {
                     self.resolve_stmt(stmt)?;
                 }
                 self.resolve_expr(result)?;
@@ -245,7 +276,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Res<'p, Var<'p>> {
         let scope = if kind == VarType::Const {
             let s = *self.scope_stack.last().unwrap();
-            if self.compiler[s].constants.insert(*name, FatExpr::synthetic(Expr::Poison, loc)).is_some() {
+            if self.compiler[s]
+                .constants
+                .insert(*name, (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer))
+                .is_some()
+            {
                 // TODO: probably want the reverse too where you can't shadow a const with a let, etc.
                 // TODO: show other declaration site.
                 err!(

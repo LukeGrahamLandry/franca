@@ -627,11 +627,10 @@ impl<'p> PoolLog<'p> for Func<'p> {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
-            "[fn {} {:?} {} = \nCONSTANTS: \n{} \nBODY: \n{}\nEND\nARG: {:?}\n A:{:?}]\n{}\n{}llvm={}, aarch64={}\n",
+            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {:?}\n A:{:?}]\n{}\n{}llvm={}, aarch64={}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ret.log(pool),
-            self.local_constants.iter().map(|e| e.log(pool)).collect::<Vec<_>>().join("\n"),
             self.body.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
             self.arg, // TODO: better formatting.
             self.annotations.iter().map(|i| pool.get(i.name)),
@@ -852,12 +851,6 @@ impl<'p> Func<'p> {
             );
         }
 
-        if !self.local_constants.is_empty() {
-            writeln!(s, "- Const locals:");
-            for d in &self.local_constants {
-                writeln!(s, "    - {}", d.log(pool).replace('\n', " "));
-            }
-        }
         writeln!(s, "====");
         s
     }
