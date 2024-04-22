@@ -141,7 +141,7 @@ pub trait WalkAst<'p> {
     fn post_walk_expr(&mut self, _: &mut FatExpr<'p>) {}
     fn pre_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
     fn post_walk_stmt(&mut self, _: &mut FatStmt<'p>) {}
-    fn walk_func(&mut self, _: &mut Func<'p>) {}
+    fn pre_walk_func(&mut self, _: &mut Func<'p>) {}
     fn walk_pattern(&mut self, _: &mut Pattern<'p>) {}
     fn walk_ty(&mut self, _: &mut LazyType<'p>) {}
 
@@ -157,43 +157,7 @@ pub trait WalkAst<'p> {
             }
             Expr::Block { body, result, .. } => {
                 for stmt in body {
-                    self.pre_walk_stmt(stmt);
-                    for a in &mut stmt.annotations {
-                        if let Some(args) = &mut a.args {
-                            self.expr(args)
-                        }
-                    }
-                    match &mut stmt.stmt {
-                        Stmt::DeclNamed { ty, value, .. } => {
-                            if let Some(value) = value {
-                                self.expr(value);
-                            }
-                            self.ty(ty);
-                        }
-                        Stmt::Noop | Stmt::DoneDeclFunc(_) => {}
-                        Stmt::Eval(arg) => self.expr(arg),
-                        Stmt::DeclFunc(func) => {
-                            self.walk_func(func);
-                            todo!("you never get here becuase constants get hoisted");
-                        }
-                        Stmt::DeclVar { ty, value, .. } => {
-                            if let Some(value) = value {
-                                self.expr(value);
-                            }
-                            self.ty(ty);
-                        }
-                        Stmt::DeclVarPattern { binding, value } => {
-                            self.pattern(binding);
-                            if let Some(arg) = value {
-                                self.expr(arg);
-                            }
-                        }
-                        Stmt::Set { place, value } => {
-                            self.expr(place);
-                            self.expr(value);
-                        }
-                    }
-                    self.post_walk_stmt(stmt);
+                    self.stmt(stmt);
                 }
                 self.expr(result);
             }
@@ -215,17 +179,61 @@ pub trait WalkAst<'p> {
             }
             Expr::GetVar(_) => {}
             Expr::Closure(func) => {
-                // TODO: why am i treating this differently from the other thing
-                self.pattern(&mut func.arg);
-                self.ty(&mut func.ret);
-                if let Some(body) = &mut func.body {
-                    self.expr(body);
-                }
+                self.func(func);
             }
             Expr::WipFunc(_) => todo!("walkwip"),
             Expr::Raw { .. } | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
         }
         self.post_walk_expr(expr);
+    }
+
+    fn func(&mut self, func: &mut Func<'p>) {
+        self.pre_walk_func(func);
+        self.pattern(&mut func.arg);
+        self.ty(&mut func.ret);
+        for s in &mut func.local_constants {
+            self.stmt(s);
+        }
+        if let Some(body) = &mut func.body {
+            self.expr(body);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &mut FatStmt<'p>) {
+        self.pre_walk_stmt(stmt);
+        for a in &mut stmt.annotations {
+            if let Some(args) = &mut a.args {
+                self.expr(args)
+            }
+        }
+        match &mut stmt.stmt {
+            Stmt::DeclNamed { ty, value, .. } => {
+                if let Some(value) = value {
+                    self.expr(value);
+                }
+                self.ty(ty);
+            }
+            Stmt::Noop | Stmt::DoneDeclFunc(_) => {}
+            Stmt::Eval(arg) => self.expr(arg),
+            Stmt::DeclFunc(func) => self.func(func),
+            Stmt::DeclVar { ty, value, .. } => {
+                if let Some(value) = value {
+                    self.expr(value);
+                }
+                self.ty(ty);
+            }
+            Stmt::DeclVarPattern { binding, value } => {
+                self.pattern(binding);
+                if let Some(arg) = value {
+                    self.expr(arg);
+                }
+            }
+            Stmt::Set { place, value } => {
+                self.expr(place);
+                self.expr(value);
+            }
+        }
+        self.post_walk_stmt(stmt);
     }
 
     fn pattern(&mut self, binding: &mut Pattern<'p>) {
@@ -257,6 +265,24 @@ struct RenumberVars<'a, 'p> {
 }
 
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
+    fn pre_walk_func(&mut self, func: &mut Func<'p>) {
+        if let Some(name) = &mut func.var_name {
+            if let Some(new) = self.mapping.get(name) {
+                *name = *new;
+            }
+        }
+        for name in &mut func.capture_vars {
+            if let Some(new) = self.mapping.get(name) {
+                *name = *new;
+            }
+        }
+        for name in &mut func.capture_vars_const {
+            if let Some(new) = self.mapping.get(name) {
+                *name = *new;
+            }
+        }
+    }
+
     fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
         if let Expr::GetVar(v) = &mut expr.expr {
             if let Some(new) = self.mapping.get(v) {
@@ -748,6 +774,20 @@ impl<'p> Func<'p> {
     pub fn any_const_args(&self) -> bool {
         // TODO: include comptime only types
         self.arg.bindings.iter().any(|b| b.kind == VarType::Const)
+    }
+
+    pub(crate) fn renumber_vars(&mut self, vars: usize) -> usize {
+        let mut mapping = HashMap::new();
+        let mut ctx = RenumberVars { vars, mapping: &mut mapping };
+        ctx.pattern(&mut self.arg);
+        ctx.ty(&mut self.ret);
+        for s in &mut self.local_constants {
+            ctx.stmt(s)
+        }
+        if let Some(body) = &mut self.body {
+            ctx.expr(body);
+        }
+        ctx.vars
     }
 }
 

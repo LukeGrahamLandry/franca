@@ -3,7 +3,7 @@
 ## Features
 
 - all code can run at compile time (like nim/jai)
-- macros are functions that run at compile time, all compiler apis, and return ast nodes (like swift/nim)
+- macros are functions that run at compile time, call compiler apis, and return ast nodes (like swift/nim)
 - hygenic quasiquote to generate code in macros (like scheme)
 - types are values at compile time so generics are just functions (like zig)
 - multiple dispatch overload resolution (like julia)

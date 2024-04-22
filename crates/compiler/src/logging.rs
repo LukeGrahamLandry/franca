@@ -773,39 +773,18 @@ impl<'p> Debug for CompileError<'p> {
 
 impl<'p> DebugState<'p> {
     pub fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
-        let show_f = |func: FuncId| {
-            format!(
-                "f{}:{:?}:{}",
-                func.as_index(),
-                program[func].get_name(pool),
-                program[func].synth_name(pool)
-            )
-        };
         match self {
             DebugState::Msg(s) => s.clone(),
-            DebugState::Compile(f) => {
-                format!("| Comptime    | {}", show_f(*f))
-            }
-            DebugState::EnsureCompiled(f, when) => {
-                format!("| Ensure Comp | {} for {:?}", show_f(*f), when)
-            }
-            DebugState::EmitBody(f) => {
-                format!("|  Emit Body  | {}", show_f(*f))
-            }
-            DebugState::EvalConstants(f) => {
-                format!("| Eval Consts | {:?}", show_f(*f))
-            }
-            DebugState::EmitCapturingCall(f) => {
-                format!("| Captur Call | {:?}", show_f(*f))
-            }
-            DebugState::ResolveFnRef(v) => {
-                format!("| Find Fn | {}", v.log(pool))
-            }
-            DebugState::RunInstLoop(f) => format!("| Loop Insts  | {}", show_f(*f)),
-            DebugState::ComputeCached(e) => format!("| Cache Eval  | {}", e.log(pool)),
-            DebugState::ResolveFnType(f) => {
-                format!("| Resolve Type| {}", show_f(*f),)
-            }
+            DebugState::Compile(f, i) => format!("| Compile    | {:?} {}", *f, pool.get(*i)),
+            DebugState::EnsureCompiled(f, i, when) => format!("| Ensure Comp | {:?} {} for {:?}", *f, pool.get(*i), when),
+            DebugState::EmitBody(f, i) => format!("|  Emit Body  | {:?} {}", *f, pool.get(*i)),
+            DebugState::EvalConstants(f, i) => format!("| Eval Consts | {:?} {}", *f, pool.get(*i)),
+            DebugState::EmitCapturingCall(f, i) => format!("| Captur Call | {:?} {}", *f, pool.get(*i)),
+            DebugState::ResolveFnRef(v) => format!("| Find Fn | {}", v.log(pool)),
+            DebugState::RunInstLoop(f, i) => format!("| Loop Insts  | {:?} {}", *f, pool.get(*i)),
+            DebugState::ComptimeCall(f, i) => format!("| Comptime Call | {:?} {}", *f, pool.get(*i)),
+            DebugState::ResolveFnType(f, i) => format!("| Resolve Type| {:?} {}", *f, pool.get(*i)),
+            _ => format!("{self:?}"),
         }
     }
 }

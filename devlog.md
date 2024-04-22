@@ -28,6 +28,8 @@ doing scan ahead in scope: (end result will be can bind to later declarations bu
 - switching memcpy to a trailing lambda instead of const binding make another quarter work. need to go back and fix that.
   it can't find value for the T in fn set's signeture?
 - now a bunch of no stomp assertions are triggering in comptime functions cause I took out the rebinding hack. forgetting to renumber somewhere?
+- adding renumber to emit_comptime_call broke everything. had to add handling for functions. was forgetting to remap function names and closed vars.
+  so it couldn't find like outer comptime args (or anything at all at one point).
 
 ## improving macros (Apr 21)
 

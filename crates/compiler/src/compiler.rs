@@ -91,16 +91,17 @@ impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
 
 #[derive(Clone, Debug)]
 pub enum DebugState<'p> {
-    Compile(FuncId),
-    EnsureCompiled(FuncId, ExecTime),
-    RunInstLoop(FuncId),
-    ComputeCached(FatExpr<'p>),
-    ResolveFnType(FuncId),
-    EvalConstants(FuncId),
+    Compile(FuncId, Ident<'p>),
+    EnsureCompiled(FuncId, Ident<'p>, ExecTime),
+    RunInstLoop(FuncId, Ident<'p>),
+    ComptimeCall(FuncId, Ident<'p>),
+    ResolveFnType(FuncId, Ident<'p>),
+    EvalConstants(FuncId, Ident<'p>),
     Msg(String),
-    EmitBody(FuncId),
-    EmitCapturingCall(FuncId),
+    EmitBody(FuncId, Ident<'p>),
+    EmitCapturingCall(FuncId, Ident<'p>),
     ResolveFnRef(Var<'p>),
+    TypeOf,
 }
 
 #[derive(Clone, Debug, InterpSend)]
@@ -185,7 +186,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // This makes recursion work.
             return Ok(());
         }
-        let state = DebugState::Compile(f);
+        let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
         debug_assert!(!self.program[f].evil_uninit);
         let mut result = self.ensure_compiled(f, when);
@@ -209,7 +210,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime, result: Option<*mut FnWip<'p>>) -> Res<'p, Values> {
-        let state2 = DebugState::RunInstLoop(f);
+        let state2 = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state2);
         self.pending_ffi.push(result);
         let arch = match when {
@@ -267,7 +268,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: Option<*mut FnWip<'p>>,
         arg: Arg,
     ) -> Res<'p, Ret> {
-        let state = DebugState::RunInstLoop(f);
+        let state = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state);
         emit_aarch64(self, f, when)?;
         self.pending_ffi.push(result);
@@ -340,7 +341,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // Maybe no consts, or maybe we've already compiled them.
             return Ok(());
         }
-        let state = DebugState::EvalConstants(f);
+        let state = DebugState::EvalConstants(f, self.program[f].name);
         self.push_state(&state);
         let loc = self.program[f].loc;
 
@@ -385,7 +386,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program.log_consts(&func.closed_constants)
         );
 
-        let state = DebugState::EnsureCompiled(f, when);
+        let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
         self.push_state(&state);
         self.eval_and_close_local_constants(f)?;
 
@@ -404,7 +405,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     /// IMPORTANT: this pulls a little sneaky on ya, so you can't access the body of the function inside the main emit handlers.
     fn emit_body(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, Structured> {
-        let state = DebugState::EmitBody(f);
+        let state = DebugState::EmitBody(f, self.program[f].name);
         self.push_state(&state);
         let has_body = self.program[f].body.is_some();
         debug_assert!(!self.program[f].evil_uninit);
@@ -504,7 +505,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, Structured> {
         let loc = expr_out.loc;
         debug_assert_ne!(f, result.func, "recusive inlining?");
-        let state = DebugState::EmitCapturingCall(f);
+        assert!(!self.program[f].evil_uninit);
+        let state = DebugState::EmitCapturingCall(f, self.program[f].name);
         self.push_state(&state);
         let arg_expr = if let Expr::Call(_, arg) = expr_out.deref_mut() { arg } else { ice!("") };
 
@@ -609,12 +611,16 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: !!! maybe call this @generic instead of @comptime? cause other things can be comptime
     // Return type is allowed to use args.
     fn emit_comptime_call(&mut self, result: &mut FnWip<'p>, template_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, (Values, TypeId)> {
+        let state = DebugState::ComptimeCall(template_f, self.program[template_f].name);
+        self.push_state(&state);
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
         // BUT... the *arguments* to the call need to be evaluated in the caller's scope.
 
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
+        self.program.next_var = func.renumber_vars(self.program.next_var);
+
         // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
         //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
         //       or when impl new functions so can only happen once so they dont make redundant overloads.  -- Apr 20
@@ -666,7 +672,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
 
             if let Some(var) = name {
-                let prev = self.program[f].closed_constants.insert(var, (values.into(), ty));
+                let prev = self.program[f].closed_constants.insert(var, (values.clone().into(), ty));
+                assert!(prev.is_none(), "overwrite arg?");
+                let prev = result.constants.insert(var, (values.into(), ty));
                 assert!(prev.is_none(), "overwrite arg?");
             }
         }
@@ -701,6 +709,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program.generics_memo.insert(key, (result.clone(), ret));
         }
 
+        self.pop_state(state);
         Ok((result, ret))
     }
 
@@ -1512,6 +1521,19 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // HACK: type_of_inner can return None because of errors elsewhere in the compiler (which is a bad idea the way im currently doing it probably) so might leave junk on the context stack.
+    pub(crate) fn type_of(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+        let s = DebugState::TypeOf;
+        self.push_state(&s);
+        let before = self.debug_trace.len();
+        let res = self.type_of_inner(result, expr)?;
+        while self.debug_trace.len() > before {
+            // HACK
+            self.debug_trace.pop();
+        }
+        self.pop_state(s);
+        Ok(res)
+    }
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
     // It's sad that this could mutate expr, but the easiest way to typecheck closures is to promote them to functions,
     // which you have to do anyway eventually so you might as well save that work.
@@ -1521,7 +1543,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       cause like for blocks too, it would be nice to infer a function's return type by just compiling
     //       the function and seeing what you get.
     // this is such a source of wierd nondeterminism bugs because of ^
-    pub(crate) fn type_of(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
+    pub(crate) fn type_of_inner(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, Option<TypeId>> {
         if !expr.ty.is_unknown() {
             return Ok(Some(expr.ty));
         }
@@ -1823,33 +1845,35 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType { arg, ret }));
         }
+        let state = DebugState::ResolveFnType(func, f.name);
+        let mut action = || {
+            Ok(mut_replace!(self.program[func], |mut f: Func<'p>| {
+                self.last_loc = Some(f.loc);
+                self.push_state(&state);
+                if f.finished_arg.is_none() {
+                    let types = self.infer_pattern(&f.closed_constants, &mut f.arg.bindings)?;
+                    let arg = self.program.tuple_of(types);
+                    f.finished_arg = Some(arg);
+                }
+                if f.finished_ret.is_none() {
+                    if !f.has_tag(Flag::Generic) && self.infer_types_progress(&f.closed_constants, &mut f.ret)? {
+                        f.finished_ret = Some(f.ret.unwrap());
 
-        Ok(mut_replace!(self.program[func], |mut f: Func<'p>| {
-            let state = DebugState::ResolveFnType(func);
-            self.last_loc = Some(f.loc);
-            self.push_state(&state);
-            if f.finished_arg.is_none() {
-                let types = self.infer_pattern(&f.closed_constants, &mut f.arg.bindings)?;
-                let arg = self.program.tuple_of(types);
-                f.finished_arg = Some(arg);
-            }
-            if f.finished_ret.is_none() {
-                if !f.has_tag(Flag::Generic) && self.infer_types_progress(&f.closed_constants, &mut f.ret)? {
-                    f.finished_ret = Some(f.ret.unwrap());
-
-                    self.pop_state(state);
+                        let ty = f.unwrap_ty();
+                        Ok((f, Some(ty)))
+                    } else {
+                        Ok((f, None))
+                    }
+                } else {
                     let ty = f.unwrap_ty();
                     Ok((f, Some(ty)))
-                } else {
-                    self.pop_state(state);
-                    Ok((f, None))
                 }
-            } else {
-                self.pop_state(state);
-                let ty = f.unwrap_ty();
-                Ok((f, Some(ty)))
-            }
-        }))
+            }))
+        };
+        let res = action();
+        self.pop_state(state);
+
+        res
     }
 
     // If we have access to a 'result' context, might as well try compiling the expression first and see if its something trivial that doesn't need to spin up a whole new function.
