@@ -160,10 +160,8 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
     };
 
     let mut global = make_toplevel(comp.pool, user_span, parsed.stmts);
-    let current = comp.add_module(Flag::TopLevel.ident(), None)?;
-    global.module = Some(current);
-    ResolveScope::of(&mut global, comp, parsed.directives)?;
-    let f = comp.compile_module(global)?;
+    ResolveScope::of(&mut global, comp)?;
+    let f = comp.compile_top_level(global)?;
     Ok((f, parsed.lines))
 }
 
@@ -370,16 +368,6 @@ macro_rules! impl_index {
     };
 }
 
-macro_rules! impl_as_index_direct {
-    ($idx:ty) => {
-        impl $idx {
-            pub fn as_index(self) -> usize {
-                self.0
-            }
-        }
-    };
-}
-pub(crate) use impl_as_index_direct;
 pub(crate) use impl_index;
 pub(crate) use impl_index_imm;
 

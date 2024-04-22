@@ -4,13 +4,12 @@ use codemap::Span;
 
 use crate::ast::{Pattern, WalkAst};
 use crate::{
-    ast::{Annotation, Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, ModuleBody, Name, Stmt, Var, VarInfo, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, Stmt, Var, VarInfo, VarType},
     compiler::{Compile, Res},
     err,
     logging::LogTag::Scope,
     outln,
     pool::{Ident, StringPool},
-    unwrap,
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {
@@ -30,7 +29,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     //       then functions could be delt with here too.
     // TODO: will need to keep some state about this for macros that want to add vars?
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, directives: Vec<(Ident<'p>, FatExpr<'p>)>) -> Res<'p, ()> {
+    pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
         let mut resolver = ResolveScope {
             next_var: compiler.program.vars.len(),
             scopes: Default::default(),
@@ -42,7 +41,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             compiler,
             last_loc: stmts.loc,
         };
-        if let Err(mut e) = resolver.run(stmts, directives) {
+        if let Err(mut e) = resolver.run(stmts) {
             e.loc = e.loc.or(Some(resolver.last_loc));
             return Err(e);
         }
@@ -50,60 +49,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         Ok(())
     }
 
-    fn run(&mut self, stmts: &mut Func<'p>, directives: Vec<(Ident<'p>, FatExpr<'p>)>) -> Res<'p, ()> {
+    fn run(&mut self, stmts: &mut Func<'p>) -> Res<'p, ()> {
         self.push_scope(true);
-        let current = unwrap!(stmts.module, "unknown module");
-        // Handle imports
-        for (i, arg) in directives {
-            self.last_loc = arg.loc;
-            let i = Flag::try_from(i)?;
-            match i {
-                Flag::Open => {
-                    let name = arg.parse_dot_chain()?;
-                    let module = self.compiler.resolve_module(current, &name)?;
-                    self.compiler.get_module(module)?;
-                    // TODO: something less fragile for making them not collide
-                    self.next_var = self.compiler.program.vars.len();
-                    // TODO: do it lazily
-                    for var in self.compiler.program[module].exports.values() {
-                        let import = Annotation {
-                            name: Flag::Import.ident(),
-                            args: Some(FatExpr::synthetic(Expr::int(module.0 as i64), self.last_loc)),
-                        };
-                        let stmt = FatStmt {
-                            stmt: Stmt::DeclVar {
-                                name: *var,
-                                ty: LazyType::Infer,
-                                value: None,
-                                kind: VarType::Const,
-                            },
-                            annotations: vec![import],
-                            loc: self.last_loc,
-                        };
-                        stmts.local_constants.push(stmt);
-                        self.scopes.last_mut().unwrap().push(*var);
-                    }
-                }
-                Flag::Module => {
-                    let mut body = arg.as_func()?;
-                    let module = self.compiler.add_module(body.name, Some(current))?;
-                    body.module = Some(module);
-                    self.compiler.program[module].toplevel = ModuleBody::Parsed(body);
-                }
-                _ => err!("Unknown directive",),
-            }
-        }
-
         self.push_scope(true);
         self.resolve_func(stmts)?;
         let (_globals, _captured_imports) = self.pop_scope();
         let (_imports, outer_captures) = self.pop_scope();
         let outer_captures = outer_captures.expect("well formed blocks (ICE)");
         assert!(outer_captures.is_empty(), "unreachable? {:?}", outer_captures);
-        assert!(self.compiler.program[current].exports.is_empty());
-        for var in &self.exports {
-            self.compiler.program[current].exports.insert(var.0, *var);
-        }
         Ok(())
     }
 

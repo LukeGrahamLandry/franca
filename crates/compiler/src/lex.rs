@@ -64,7 +64,6 @@ pub enum TokenType<'p> {
     LeftArrow,
     RightArrow,
     IncludeStd,
-    Directive(Ident<'p>),
     Quote,
     LeftAngle,
     RightAngle,
@@ -332,7 +331,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             "#include_std" => IncludeStd,
             text => {
                 if is_directive {
-                    Directive(self.pool.intern(&text[1..]))
+                    return self.err(LexErr::Unexpected('#'));
                 } else {
                     Symbol(self.pool.intern(text))
                 }

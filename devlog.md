@@ -1,3 +1,13 @@
+## remove current module system (Apr 22)
+
+(plan)  
+I want to change how identifier resolution works so its breadth first instead of depth first so you can have out of order constants.
+So I want the resolve pass do be done gradually as part of the compile pass.
+So you do a whole scope to get names before going into implementations and doing thier names, so you can skip resolve if the code never runs.
+The more interesting goal being having a normal macro that says "oh you're trying to compile me? i'll parse this header file and spit out all those names into your scope".
+I think my existing broken (they can't even nest) module system is more work to keep than remove and rewrite a better one later.
+Ideally a module could be just a struct of functions (like zig) but then an @using macro can add those names to your scope.
+
 ## improving macros (Apr 21)
 
 Syntax sugar for !quote/!unquote goes a long way.

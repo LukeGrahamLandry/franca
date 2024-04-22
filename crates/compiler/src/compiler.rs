@@ -15,15 +15,13 @@ use std::ops::DerefMut;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Module, ModuleBody, ModuleId, Name, OverloadSet, Pattern, TargetArch, Var,
-    VarInfo, VarType, WalkAst,
+    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, TargetArch, Var, VarInfo, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
-use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
@@ -107,7 +105,6 @@ pub struct FnWip<'p> {
     pub last_loc: Span,
     pub constants: Constants<'p>,
     pub callees: Vec<(FuncId, ExecTime)>,
-    pub module: Option<ModuleId>,
 }
 
 impl<'a, 'p> Compile<'a, 'p> {
@@ -154,38 +151,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                                              // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
-    pub fn add_module(&mut self, name: Ident<'p>, parent: Option<ModuleId>) -> Res<'p, ModuleId> {
-        let module = ModuleId(self.program.modules.len());
-        self.program.modules.push(Module {
-            name,
-            id: module,
-            parent,
-            toplevel: ModuleBody::Resolving,
-            exports: Default::default(),
-            children: Default::default(),
-            i_depend_on: Default::default(),
-            depend_on_me: Default::default(),
-        });
-        if let Some(parent) = parent {
-            let prev = self.program.modules[parent.0].children.insert(name, module);
-            assert!(prev.is_none(), "Shadowed module {}", self.pool.get(name));
-        }
-        Ok(module)
-    }
-
-    pub fn compile_module(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
-        let module = unwrap!(ast.module, "You must ast.module = Some(compiler.add_module(name, parent))");
-        assert!(matches!(self.program[module].toplevel, ModuleBody::Resolving));
+    pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
         let f = self.add_func(ast, &Constants::empty())?;
-        self.program[module].toplevel = ModuleBody::Compiling(f);
         self.ensure_compiled(f, ExecTime::Comptime)?;
-        self.program[module].toplevel = ModuleBody::Ready(f);
-        // let exports = self.program[f].closed_constants.clone();
-        // for var in exports.local.keys() {
-        //     let _prev = self.program.modules[module.0].exports.insert(var.0, *var);
-        //     // TODO
-        //     // assert!(prev.is_none(), "Shadowed export {} from {}", self.pool.get(var.0), self.pool.get(name));
-        // }
         Ok(f)
     }
 
@@ -328,7 +296,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span, parent: Option<Constants<'p>>, module: Option<ModuleId>) -> FnWip<'p> {
+    fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span, parent: Option<Constants<'p>>) -> FnWip<'p> {
         FnWip {
             stack_slots: 0,
             vars: Default::default(),
@@ -338,7 +306,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: loc,
             constants: parent.unwrap_or_else(|| self.program[func].closed_constants.clone()),
             callees: vec![],
-            module,
         }
     }
 
@@ -353,7 +320,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::EvalConstants(f);
         self.push_state(&state);
         let loc = self.program[f].loc;
-        let module = self.program[f].module;
 
         mut_replace!(self.program[f].closed_constants, |constants| {
             let mut result = self.empty_fn(
@@ -361,7 +327,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 FuncId::from_index(f.as_index() + 10000000), // TODO: do i even need to pass an index? probably just for debugging
                 loc,
                 Some(constants),
-                module,
             );
 
             mut_replace!(self.program[f].local_constants, |mut local_constants| {
@@ -405,7 +370,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(template) = func.any_reg_template {
             self.ensure_compiled(template, ExecTime::Comptime)?;
         } else {
-            let mut result = self.empty_fn(when, f, func.loc, None, func.module);
+            let mut result = self.empty_fn(when, f, func.loc, None);
             self.emit_body(&mut result, f)?;
             self.program[f].wip = Some(result);
         }
@@ -720,10 +685,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         match &mut stmt.stmt {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
-                if let Some(_module_name) = stmt.annotations.iter().find(|a| a.name == Flag::Module.ident()) {
-                    // TODO: need to not pull out constants somehow.
-                    todo!()
-                }
                 self.compile_expr(result, expr, None)?;
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
@@ -733,7 +694,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
                 let mut func = mem::take(func);
-                func.module = result.module;
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(Flag::Bs);
                 let any_reg_template = func.has_tag(Flag::Any_Reg);
@@ -2012,7 +1972,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: calling this in infer is wrong because it might fail and lose the function
     pub fn promote_closure(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
-            func.module = result.module;
             let f = self.add_func(mem::take(func), &result.constants)?;
             if self.infer_types(f)?.is_none() {
                 // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
@@ -2728,56 +2687,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
-    fn resolve_import(&mut self, module: ModuleId, name: Ident<'_>) -> Res<'p, (Values, TypeId)> {
-        let module_f = self.get_module(module)?;
-        if let Some(var) = self.program[module].exports.get(&name) {
-            let value = unwrap!(
-                self.program[module_f].closed_constants.get(*var),
-                "missing export: {}",
-                var.log(self.pool)
-            );
-            Ok(value) // TODO: include type
-        } else {
-            err!("Module {} does not export {}", module.0, self.pool.get(name))
-        }
-    }
-
-    pub fn get_module(&mut self, module: ModuleId) -> Res<'p, FuncId> {
-        match self.program[module].toplevel {
-            ModuleBody::Ready(f) => Ok(f),
-            ModuleBody::Compiling(_) | ModuleBody::Resolving => err!("Module {} is not ready yet. Circular dependency?", module.0),
-            ModuleBody::Parsed(_) => {
-                let body = mem::replace(&mut self.program[module].toplevel, ModuleBody::Resolving);
-                let mut body = if let ModuleBody::Parsed(f) = body { f } else { unreachable!() };
-                ResolveScope::of(&mut body, self, vec![])?; // TODO: nested directives
-                let f = self.compile_module(body)?;
-                Ok(f)
-            }
-            ModuleBody::Src(_) => unreachable!(),
-        }
-    }
-
-    pub fn resolve_module(&mut self, current: ModuleId, mut import_path: &[Ident<'p>]) -> Res<'p, ModuleId> {
-        let mut module = ModuleId(0);
-        if import_path[0] == Flag::This.ident() {
-            module = current;
-            import_path = &import_path[1..];
-        } else if import_path[0] == Flag::Super.ident() {
-            module = unwrap!(self.program[current].parent, "tried to refer to parent of root module");
-            import_path = &import_path[1..];
-        };
-
-        for path in import_path {
-            if let Some(found) = self.program[module].children.get(path) {
-                module = *found
-            } else {
-                err!("Module not found {}", self.pool.get(*path))
-            }
-        }
-
-        Ok(module)
-    }
-
     fn decl_var(
         &mut self,
         result: &mut FnWip<'p>,
@@ -2785,7 +2694,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         ty: &mut LazyType<'p>,
         value: &mut Option<FatExpr<'p>>,
         kind: VarType,
-        annotations: &[Annotation<'p>],
+        _annotations: &[Annotation<'p>],
     ) -> Res<'p, ()> {
         let no_type = matches!(ty, LazyType::Infer);
         self.infer_types_progress(&result.constants, ty)?;
@@ -2829,26 +2738,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     None => {
-                        if let Some(import_path) = annotations.iter().find(|a| a.name == Flag::Import.ident()) {
-                            let import_path = unwrap!(import_path.args.as_ref(), "@import requires argument");
-                            let module = if let Some(module) = import_path.as_int() {
-                                let m = ModuleId(module as usize);
-                                assert!(self.program.modules.len() > m.0);
-                                m
-                            } else {
-                                let import_path = import_path.parse_dot_chain()?;
-                                self.resolve_module(result.module.unwrap(), &import_path)?
-                            };
-                            let (val, found_ty) = self.resolve_import(module, name.0)?;
-                            // This fixes importing const @enum(T) being seen as VoidPtr
-                            if let LazyType::Infer = ty {
-                                *ty = LazyType::Finished(found_ty);
-                            }
-                            val
-                        } else {
-                            let name = self.pool.get(name.0);
-                            err!("const binding '{name}' must have a value",)
-                        }
+                        let name = self.pool.get(name.0);
+                        err!("const binding '{name}' must have a value",)
                     }
                 };
 

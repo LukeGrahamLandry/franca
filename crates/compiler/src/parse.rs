@@ -24,7 +24,6 @@ pub struct Parser<'a, 'p> {
     spans: Vec<Span>,
     codemap: &'a mut CodeMap,
     lines: usize,
-    directives: Vec<(Ident<'p>, FatExpr<'p>)>,
 }
 
 type Res<T> = Result<T, ParseErr>;
@@ -39,7 +38,6 @@ pub struct ParseErr {
 pub struct Parsed<'p> {
     pub stmts: Vec<FatStmt<'p>>,
     pub lines: usize,
-    pub directives: Vec<(Ident<'p>, FatExpr<'p>)>,
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
@@ -57,7 +55,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             spans: vec![],
             codemap,
             lines: 0,
-            directives: vec![],
         };
 
         p.start_subexpr();
@@ -70,11 +67,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         let lex = p.lexer.pop().unwrap();
         p.lines += lex.line - lex.comment_lines;
 
-        Ok(Parsed {
-            stmts,
-            lines: p.lines,
-            directives: p.directives,
-        })
+        Ok(Parsed { stmts, lines: p.lines })
     }
 
     fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
@@ -430,7 +423,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         if !stmt.annotations.is_empty() && !matches!(stmt.stmt, Stmt::DeclFunc(_)) {
             for s in &stmt.annotations {
                 match Flag::try_from(s.name) {
-                    Ok(Flag::Pub | Flag::Import) => {}
+                    Ok(Flag::Pub) => {}
                     _ => {
                         // TODO: error in wrong place.
                         return Err(self.error_next(
@@ -566,13 +559,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                 } else {
                     return Err(self.expected("quoted path"));
                 }
-            }
-            Directive(name) => {
-                self.pop();
-                let expr = self.parse_expr()?;
-                self.directives.push((name, expr));
-                self.eat(TokenType::Semicolon)?;
-                Stmt::Noop
             }
             Symbol(_name) => {
                 let lex = self.lexer.last_mut().unwrap();

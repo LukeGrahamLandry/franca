@@ -5,7 +5,7 @@ use crate::{
     err,
     export_ffi::RsResolvedSymbol,
     ffi::{init_interp_send, InterpSend},
-    impl_as_index_direct, impl_index, impl_index_imm,
+    impl_index, impl_index_imm,
     pool::{Ident, StringPool},
     reflect::{Reflect, RsType},
     STATS,
@@ -643,7 +643,6 @@ pub struct Func<'p> {
     pub jitted_code: Option<Vec<u32>>,
     pub any_reg_template: Option<FuncId>,
     pub llvm_ir: Option<Vec<Ident<'p>>>,
-    pub module: Option<ModuleId>,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -693,7 +692,6 @@ impl<'p> Func<'p> {
             jitted_code: None,
             any_reg_template: None,
             llvm_ir: None,
-            module: None,
         }
     }
 
@@ -792,38 +790,11 @@ pub struct Program<'p> {
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
-    pub modules: Vec<Module<'p>>,
     pub codemap: CodeMap,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
 impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
-impl_index!(Program<'p>, ModuleId, Module<'p>, modules);
-impl_as_index_direct!(ModuleId);
-
-#[derive(Clone)]
-pub struct Module<'p> {
-    pub name: Ident<'p>,
-    pub id: ModuleId,
-    pub parent: Option<ModuleId>,
-    pub toplevel: ModuleBody<'p>,
-    pub exports: HashMap<Ident<'p>, Var<'p>>,
-    pub children: HashMap<Ident<'p>, ModuleId>,
-    pub i_depend_on: Vec<ModuleId>,
-    pub depend_on_me: Vec<ModuleId>,
-}
-
-#[derive(Clone, Debug)]
-pub enum ModuleBody<'p> {
-    Ready(FuncId),
-    Compiling(FuncId),
-    Resolving,
-    Parsed(Func<'p>),
-    Src(String),
-}
-
-#[derive(Copy, Clone, Debug, InterpSend)]
-pub struct ModuleId(pub usize);
 
 #[derive(Clone, Debug)]
 pub struct OverloadSet<'p> {
@@ -933,7 +904,6 @@ impl<'p> Program<'p> {
             runtime_arch,
             comptime_arch,
             inline_llvm_ir: vec![],
-            modules: vec![],
             type_lookup: HashMap::new(),
             codemap: CodeMap::new(),
         };
@@ -1506,7 +1476,6 @@ impl<'p> Default for Func<'p> {
             jitted_code: None,
             any_reg_template: None,
             llvm_ir: None,
-            module: None,
         }
     }
 }
@@ -1659,14 +1628,9 @@ pub enum Flag {
     Tag,
     Reflect_Print,
     Fn_Ptr,
-    Import,
     TopLevel,
-    Module,
     Include_Std,
     Pub,
-    Open,
-    This,
-    Super,
     Unreachable,
     Rt,
     Test,
