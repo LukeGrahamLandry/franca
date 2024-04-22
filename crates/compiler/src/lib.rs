@@ -19,7 +19,6 @@ use std::mem::{transmute, ManuallyDrop};
 use std::path::PathBuf;
 
 use ast::FuncId;
-use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::{CErr, Res};
@@ -171,7 +170,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
-pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _expect: Value, save: Option<&str>, leak: bool) -> bool {
+pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
     init_logs_flag(0xFFFFFFFFF);
     log_tag_info();
     let start = timestamp();
@@ -216,11 +215,11 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _
                             }
                             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
                             comp.aarch64.make_exec();
+                            comp.flush_cpu_instruction_cache();
                             let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
 
                             let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
                             let indirect_fns = comp.aarch64.get_dispatch();
-                            let a = arg.to_int().unwrap();
                             unsafe {
                                 asm!(
                                 "mov x21, {fns}",
@@ -232,7 +231,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, arg: Value, _
                                 out("x21") _
                                 );
                             }
-                            code(a);
+                            code(0);
 
                             let end = timestamp();
                             let seconds = end - start;

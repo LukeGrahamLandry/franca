@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{values_from_ints, Value, Values};
+use crate::bc::{values_from_ints, Values};
 use crate::compiler::{bit_literal, Compile, Res, Unquote};
 use crate::err;
 use crate::ffi::InterpSend;
@@ -531,7 +531,7 @@ fn const_eval_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> 
     let res = compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(TypeId::ty())).unwrap();
     assert_eq!(res.ty(), TypeId::ty());
     compile.pending_ffi.push(Some(result));
-    res.get().unwrap().single().unwrap().to_type().unwrap()
+    compile.program.to_type(res.get().unwrap()).unwrap()
 }
 
 fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, expr: FatExpr<'p>) -> String {
@@ -601,12 +601,7 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
     let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
     let mut out = vec![];
     values_from_ints(compile, ty, &mut value.iter().copied(), &mut out).unwrap();
-    let mut value: Values = out.into();
-    if ty == TypeId::ty() {
-        if let Ok(id) = value.clone().single().unwrap().to_int() {
-            value = Values::One(Value::Type(TypeId::from_raw(id)))
-        }
-    }
+    let value: Values = out.into();
     FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc())
 }
 

@@ -1408,14 +1408,6 @@ impl<'p> Expr<'p> {
         }
     }
 
-    // TODO: handle Value
-    pub fn as_string(&self) -> Option<Ident<'p>> {
-        match self {
-            &Expr::String(v) => Some(v),
-            _ => None,
-        }
-    }
-
     pub fn as_fn(&self) -> Option<FuncId> {
         match self {
             &Expr::Value {
@@ -1466,6 +1458,14 @@ impl<'p> Expr<'p> {
                 if name == flag.ident() {
                     return Some((arg, target));
                 }
+            }
+        }
+        None
+    }
+    pub fn as_suffix_macro(&self, flag: Flag) -> Option<&FatExpr> {
+        if let Expr::SuffixMacro(name, arg) = self {
+            if *name == flag.ident() {
+                return Some(arg);
             }
         }
         None
@@ -1601,10 +1601,6 @@ impl TypeId {
     pub fn overload_set() -> TypeId {
         TypeId::from_index(9)
     }
-
-    pub(crate) fn is_overload_set(&self) -> bool {
-        *self == Self::overload_set()
-    }
 }
 
 /// It's important that these are consecutive in flags for safety of TryFrom
@@ -1654,7 +1650,6 @@ pub enum Flag {
     Rs,
     Any_Reg,
     Impl,
-    Literal_Ast,
     Main,
     Builtin_If,
     Builtin_While,

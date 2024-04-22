@@ -35,6 +35,9 @@ fun literal(arg: AstExpr) AstExpr = {
     }'
 }
 
+/// Ast<?> -> Ast<T>
+fun as(T: Type, expr: FatExpr) FatExpr = '@(<@literal(as)>)(<@literal(T)>) <expr>';
+
 // TODO: need to have an actual clone method because just relying on stack copy will share heap ptrs. 
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
 // TODO: this has a referential transparency problem
@@ -67,11 +70,8 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
                     var name = handler_body&.expr.Closure[].name[]; // (2)
                     var case_access = 'arg_var&.___';
                     case_access&.expr.FieldAccess[1][] = name;  // (3)
-                    let cond = '<@literal(eq)>(tag_val, @(<@literal(as)>)(<@literal(i64)>) <@literal(tag_value)>(
-                        <@literal(Type) enum_type>, 
-                        <@literal(name)>
-                    ))';
-                    
+                    let tag = '<@literal(tag_value)>(<@literal(Type) enum_type>, <@literal(name)>)';
+                    let cond = '<@literal(eq)>(tag_val, <tag>)';
                     body = '(<cond>, fn = <handler_body>(<case_access>[]), fn = <body>)!if';
                 };
             };
@@ -84,14 +84,13 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
 /// @switch(value) { @<specifier> fn= <body> }
 /// - @case(v): calls <body> if value.eq(v)
 @annotation 
-fun switch(arg: FatExpr, target: FatExpr) FatExpr = {
-    let stmts: Slice(FatStmt) = target&.expr.Block.body[];
+fun switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
+    let handlers: Slice(FatStmt) = handlers&.expr.Block.body[];
     arg = compile_ast(arg);
-    let arg_type = @literal(arg&.ty[]); 
+    let inspected_ty: Type = arg&.ty[]; // TODO: if you dont have the type hint you get confusing error message trying to call fn as(Type, Ast) becuase its the unique ffi TypeId type. -- Apr 21 
     var body = '<@literal(panic)>("unhandled switch case")';
     var first = true;
-    // TODO: reverse order because i build out from the inside
-    var i = stmts.len().sub(1);
+    var i = handlers.len().sub(1);
     
     // Declaring variables is weird because name resolution has already run. 
     // All the references to it need to be in its lexical scope, so the whole code is in an unquote. 
@@ -99,7 +98,7 @@ fun switch(arg: FatExpr, target: FatExpr) FatExpr = {
         var arg_var = <arg>;
         <{
             while(fn = i.ge(0)) {|
-                let stmt: *FatStmt = stmts.index(i); 
+                let stmt: *FatStmt = handlers.index(i); 
                 // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
                 if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
                     var handler_body = stmt.stmt.Eval[];
@@ -107,18 +106,19 @@ fun switch(arg: FatExpr, target: FatExpr) FatExpr = {
                     let macro = branch.handler[];
                     // TODO: better error message that shows more context on how you got to a certain type in the nested exprression. 
                     //       it took me so long to figure out you don't need .GetNamed[0][] to index through the first single element tuple because it gets flattened. -- Apr 21 
-                    let name: Symbol = macro.expr.GetNamed[]; // TODO: allow GetVar becuase they might have shadowed case and default? 
+                    let name: Symbol = macro.expr.GetNamed[]; // TODO: allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
                     let arg = branch.arg[];
                     let action = branch.target[][];
                     
                     // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
                     if(name.int().eq(case!symbol.int()), fn = {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
-                        let cond = '<@literal(eq)>(arg_var, @(<@literal(as)>)(<arg_type>) <arg[]>)';
+                        // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
+                        let cond = '<@literal(eq)>(arg_var, <as(inspected_ty, arg[])>)';
                         body = '(<cond>, fn=<action>(), fn=<body>)!if';
                     }, fn=if(name.int().eq(default!symbol.int()), fn = {
                         if(first) {|
-                            // If expansion err here: forgot argument for default branch handler?
+                            // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
                             body = '<action>(arg_var)';
                         }{|
                             panic("@default must be the last handler in @switch");
@@ -156,7 +156,7 @@ fun bits(arg: AstExpr) AstExpr = {
         let bc: i64 = int&.bit_count[];
         shift = sub(shift, bc);
         assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
-        let part_ast = '@(<@literal(as)>)(<@literal(i64)>) <part[]>';
+        let part_ast = as(i64, part[]);
         let next = (int&.signed[], 
             fn = '<@literal(signed_truncate)>(<part_ast>, <@literal(i64) int&.bit_count[]>)',
             fn = part_ast
@@ -172,8 +172,9 @@ fun bits(arg: AstExpr) AstExpr = {
         panic(msg.str());
     };
     
-    '@(<@literal(as)>)(<@literal(i64)>) <expr>'
+    as(i64, expr)
 }
+
 
 // Seems like a fairly crippling design problem the range at which adding new code can mess you up. 
 // But that should get better with a stricter module system that lets you import into a namespace. 

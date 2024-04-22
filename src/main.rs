@@ -3,9 +3,8 @@
 
 use compiler::{
     ast::{Program, TargetArch, TypeId},
-    bc::{Value, Values},
     bc_to_asm::emit_aarch64,
-    compiler::{Compile, ExecTime, Res},
+    compiler::{Compile, ExecTime},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib, load_program, log_err,
@@ -67,17 +66,10 @@ fn main() {
         let path = PathBuf::from(format!("tests/{name}.fr"));
         if path.exists() {
             init_logs_flag(0xFFFFFFFFF);
-            run_main(
-                pool,
-                fs::read_to_string(format!("tests/{name}.fr")).unwrap(),
-                Value::I64(0),
-                Value::I64(0),
-                Some(&name),
-                true,
-            );
+            run_main(pool, fs::read_to_string(format!("tests/{name}.fr")).unwrap(), Some(&name), true);
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
-            run_main(pool, fs::read_to_string(&name).unwrap(), Value::I64(0), Value::I64(0), Some(&name), true);
+            run_main(pool, fs::read_to_string(&name).unwrap(), Some(&name), true);
         }
     } else {
         run_tests();
@@ -261,9 +253,9 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
 
     assert_eq!(comp.program[f].finished_ret, Some(TypeId::i64()));
     assert_eq!(comp.program[f].finished_arg, Some(TypeId::i64()));
-    let arg = Value::I64(982164);
+    let arg = 982164;
 
-    let result: Res<'_, Values> = match arch {
+    let result: i64 = match arch {
         TargetArch::Aarch64 => {
             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
                 log_err(&comp, e, save);
@@ -276,7 +268,6 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
 
             let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
             let indirect_fns = comp.aarch64.get_dispatch();
-            let a = arg.to_int().unwrap();
             unsafe {
                 asm!(
                 "mov x21, {fns}",
@@ -288,7 +279,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
                 out("x21") _
                 );
             }
-            Ok(Value::I64(code(a)).into())
+            code(arg)
         }
         #[cfg(not(feature = "llvm"))]
         TargetArch::Llvm => unreachable!(),
@@ -312,17 +303,12 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
             unsafe {
                 asm.llvm.release();
             }
-            Ok(Value::I64(res).into())
+            res
         }
     };
-    if let Err(e) = result {
-        log_err(&comp, e, save);
-        exit(1);
-    }
-    let result = result.unwrap();
     let end = timestamp();
     let _seconds = end - start;
-    debug_assert_eq!(result, arg.into());
+    debug_assert_eq!(result, arg);
 
     // log_dbg(&comp, save);
     assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");

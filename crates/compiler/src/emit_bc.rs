@@ -479,6 +479,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::Unreachable);
                         // Don't care about setting output to anything.
                     }
+                    Flag::Uninitialized => {
+                        assert!(!expr.ty.is_never(), "call exit() to produce a value of type 'Never'");
+                        // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
+                        return Ok(());
+                    }
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
@@ -491,13 +496,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::StructLiteralP(pattern) => self.construct_struct(result, pattern, expr.ty, output)?,
             Expr::PrefixMacro { .. } => {
-                if expr.as_prefix_macro(Flag::Uninitialized).is_some() {
-                    assert!(!expr.ty.is_never(), "call exit() to produce a value of type 'Never'");
-                    // Wierd special case I have mixed feelings about. should at least set to sentinal value in debug mode.
-                    return Ok(());
-                } else {
-                    unreachable!("unhandled macro {}", expr.log(self.program.pool));
-                }
+                unreachable!("unhandled macro {}", expr.log(self.program.pool));
             }
             Expr::String(_) => unreachable!("{}", expr.log(self.program.pool)),
         };

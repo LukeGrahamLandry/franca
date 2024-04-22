@@ -229,7 +229,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         let result = match arch {
             TargetArch::Aarch64 => {
                 emit_aarch64(self, f, when)?;
-                let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr();
+                let addr = if let Some(addr) = self.program[f].comptime_addr {
+                    // we might be doing ffi at comptime, thats fine
+                    addr as *const u8
+                } else {
+                    unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr()
+                };
+
                 let ty = self.program[f].unwrap_ty();
                 let comp_ctx = self.program[f].has_tag(Flag::Ct);
                 let c_call = self.program[f].has_tag(Flag::C_Call);
@@ -1310,6 +1316,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.expr = Expr::Value { ty, value: value.into() };
                         Structured::Const(ty, value.into())
                     }
+                    "uninitialized" => {
+                        assert!(arg.is_raw_unit());
+                        assert!(requested.is_some(), "!uninitialized expr must have known type");
+                        return Ok(Structured::RuntimeOnly(requested.unwrap()));
+                    }
                     "unquote" | "placeholder" => err!("ICE: Unhandled macro {}", self.pool.get(*macro_name)),
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
@@ -1346,16 +1357,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Structured::Const(ty, bytes)
             }
             Expr::PrefixMacro { handler, arg, target } => {
-                if let Some(name) = handler.as_ident() {
-                    // TODO: hack that doesnt follow normal scope resolutioon rules.
-                    let name_str = self.pool.get(name);
-                    if name_str == "uninitialized" {
-                        // TODO: this is a special case
-                        assert!(requested.is_some(), "@uninitialized expr must have known type");
-                        return Ok(Structured::RuntimeOnly(requested.unwrap()));
-                    }
-                }
-
                 outln!(
                     LogTag::Macros,
                     "PrefixMacro: {}\nARG: {}\nTARGET: {}",
@@ -1425,8 +1426,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
     pub fn as_cast_macro(&mut self, result: &mut FnWip<'p>, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         self.compile_expr(result, &mut arg, Some(TypeId::ty()))?;
-        let ty = self.immediate_eval_expr(&result.constants, arg, TypeId::ty())?;
-        let ty = self.to_type(ty)?;
+        let ty: TypeId = self.immediate_eval_expr_in_known(result, arg)?;
+        assert!(!ty.is_unknown());
         target.ty = ty;
         // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
         self.compile_expr(result, &mut target, Some(ty))?;
@@ -1540,20 +1541,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         Ok(Some(match expr.deref_mut() {
             Expr::WipFunc(_) => return Ok(None),
-            Expr::Value { ty, value } => {
-                if value.as_overload_set().is_ok() {
-                    return Ok(None);
-                } else {
-                    *ty
-                }
-            }
-            Expr::Raw { ty, .. } => {
-                if ty.is_overload_set() {
-                    return Ok(None);
-                } else {
-                    *ty
-                }
-            }
+            Expr::Value { ty, .. } | Expr::Raw { ty, .. } => *ty,
             Expr::Call(f, arg) => {
                 if let Some(id) = f.as_fn() {
                     return Ok(self.program.funcs[id.as_index()].finished_ret);
@@ -1634,20 +1622,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::PrefixMacro { handler, arg, .. } => {
-                if handler.as_ident() == Some(Flag::As.ident()) {
+                // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
+                if handler.as_ident() == Some(Flag::As.ident()) && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                     // HACK: sad that 'as' is special
-                    let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
-                    return Ok(Some(self.program.to_type(ty)?));
+                    let ty: TypeId = self.immediate_eval_expr_in_known(result, *arg.clone())?;
+                    return Ok(Some(ty));
                 }
 
                 // TODO: hack yuck. now that i rely on expr working so it can be passed into quoted things, this is extra ugly.
                 match self.compile_expr(result, handler, Some(TypeId::overload_set())) {
                     Ok(res) => {
                         let os = res.get()?.as_overload_set()?;
-                        if self.program.overload_sets[os].name == Flag::As.ident() {
+                        // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
+                        if self.program.overload_sets[os].name == Flag::As.ident() && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                             // HACK: sad that 'as' is special
-                            let ty = self.immediate_eval_expr(&result.constants, *arg.clone(), TypeId::ty())?;
-                            return Ok(Some(self.program.to_type(ty)?));
+                            let ty: TypeId = self.immediate_eval_expr_in_known(result, *arg.clone())?;
+                            return Ok(Some(ty));
                         }
                     }
                     Err(e) => ice!("TODO: PrefixMacro handler inference failed. need to make it non-destructive?\n{e:?}",),
@@ -1952,6 +1942,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 return Ok(Some(pls.into()));
             }
+            Expr::Call(f, arg) => {
+                // this doesn't help as much as it could because it doesn't have access to the context so it can't try to compile the function if the caller hasn't already
+                if let Some(f) = f.as_fn() {
+                    // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
+                    if self.ready.ready.len() > f.as_index() && self.ready[f].is_some() {
+                        // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
+                        let ret_ty = self.program[f].finished_ret.unwrap();
+                        let arg = self.immediate_eval_expr(constants, mem::take(arg), ret_ty)?;
+                        return Ok(Some(self.run(f, arg, ExecTime::Comptime, None)?));
+                    }
+                }
+
+                // fallthrough
+            }
             _ => {} // fallthrough
         }
         Ok(None)
@@ -1988,17 +1992,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
-        match value {
-            Values::One(Value::Unit) => Ok(TypeId::unit()),
-            Values::One(Value::Type(id)) => Ok(id),
-            Values::Many(values) => {
-                let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v.into())).collect();
-                Ok(self.program.tuple_of(values?))
-            }
-            _ => {
-                err!(CErr::TypeError("Type", value))
-            }
-        }
+        self.program.to_type(value)
     }
 
     pub(crate) fn add_func(&mut self, mut func: Func<'p>, constants: &Constants<'p>) -> Res<'p, FuncId> {
@@ -2066,7 +2060,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             // If its constant, don't even bother emitting the other branch
             // TODO: option to toggle this off for testing.
             if let Structured::Const(_, val) = cond {
-                let cond = val.single()?.to_bool().unwrap();
+                let cond = if let Value::Bool(f) = val.single()? {
+                    f
+                } else {
+                    err!("expected !if cond: bool",)
+                };
                 let cond_index = if cond { 1 } else { 2 };
                 let other_index = if cond { 2 } else { 1 };
                 if let Some(branch_body) = self.maybe_direct_fn(result, &mut parts[cond_index], &mut unit_expr, requested)? {
@@ -2796,17 +2794,21 @@ impl<'a, 'p> Compile<'a, 'p> {
             VarType::Const => {
                 let mut val = match value {
                     Some(value) => {
-                        // TODO: doing the check here every time is sad and having @uninit not be a normal expression is kinda dumb.
-                        if value.expr.as_prefix_macro(Flag::Uninitialized).is_some() {
+                        // TODO: doing the check here every time is sad.
+                        if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
                             let name = self.pool.get(name.0);
-                            err!("const bindings cannot be reassigned so '{name}' cannot be @uninitialized",)
+                            err!("const bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
                         }
 
                         // TODO: just treat @builtin as a normal expression instead of a magic thing that const looks for so you can do 'const Type: @builtin("Type") = @builtin("Type");'
                         //       then you dont have to eat this check for every constant, you just get there when you get there.
                         if let Some((arg, _)) = value.expr.as_prefix_macro(Flag::Builtin) {
                             let name_str = self.pool.get(name.0);
-                            let expected = unwrap!(arg.as_string(), "@builtin requires string argument: {name_str}");
+                            let expected = if let Expr::String(v) = arg.expr {
+                                v
+                            } else {
+                                err!("@builtin requires string argument: {name_str}",);
+                            };
                             assert_eq!(name.0, expected, "builtin name mismatch: {:?}", name_str);
                             if no_type {
                                 if name_str == "Type" {
@@ -2927,16 +2929,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     None => {
                         if no_type {
                             err!(
-                                "binding {} requires a value (use unsafe '@uninitilized()' if thats what you really want)",
+                                "binding {} requires a value (use unsafe '()!uninitilized' if thats what you really want)",
                                 name.log(self.pool)
                             );
                         }
                         ty.unwrap()
                     }
                     Some(value) => {
-                        if kind == VarType::Let && value.expr.as_prefix_macro(Flag::Uninitialized).is_some() {
+                        if kind == VarType::Let && value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
                             let name = self.pool.get(name.0);
-                            err!("let bindings cannot be reassigned so '{name}' cannot be @uninitialized",)
+                            err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
                         }
                         let value = self.compile_expr(result, value, ty.ty())?;
                         if no_type {
@@ -3074,10 +3076,16 @@ pub fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (I
     if let Expr::SuffixMacro(name, arg) = &expr.expr {
         if *name == Flag::From_Bit_Literal.ident() {
             if let Expr::Tuple(parts) = arg.deref().deref() {
-                if let Expr::Value { value, .. } = parts[0].deref() {
-                    let bit_count = value.clone().single()?.to_int()?;
-                    if let Expr::Value { value, .. } = parts[1].deref() {
-                        let val = value.clone().single()?.to_int()?;
+                if let &Expr::Value {
+                    value: Values::One(Value::I64(bit_count)),
+                    ..
+                } = parts[0].deref()
+                {
+                    if let &Expr::Value {
+                        value: Values::One(Value::I64(val)),
+                        ..
+                    } = parts[1].deref()
+                    {
                         return Ok((IntTypeInfo { bit_count, signed: false }, val));
                     }
                 }

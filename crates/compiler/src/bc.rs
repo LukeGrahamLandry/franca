@@ -1,6 +1,6 @@
 //! Low level instructions that the interpreter can execute.
 use crate::ast::TypeInfo;
-use crate::compiler::{CErr, Compile};
+use crate::compiler::Compile;
 use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
@@ -389,14 +389,6 @@ impl Values {
 }
 
 impl Value {
-    pub fn to_func(&self) -> Option<FuncId> {
-        if let &Value::GetFn(f) | &Value::GetNativeFnPtr(f) = self {
-            Some(f)
-        } else {
-            None
-        }
-    }
-
     pub fn new_box(values: Vec<Value>, is_constant: bool) -> Value {
         let count = values.len();
         let value = Box::into_raw(Box::new(InterpBox {
@@ -417,22 +409,6 @@ impl Value {
 
     pub fn to_overloads(&self) -> Option<usize> {
         if let &Value::OverloadSet(f) = self {
-            Some(f)
-        } else {
-            None
-        }
-    }
-
-    pub fn to_bool(&self) -> Option<bool> {
-        if let &Value::Bool(f) = self {
-            Some(f)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn to_type(self) -> Option<TypeId> {
-        if let Value::Type(f) = self {
             Some(f)
         } else {
             None
@@ -508,20 +484,6 @@ impl IntoIterator for StackRange {
 
     fn into_iter(self) -> Self::IntoIter {
         self.first.0..self.first.0 + self.count
-    }
-}
-
-impl<'p> Value {
-    #[track_caller]
-    pub fn to_int(self) -> Res<'p, i64> {
-        if let Value::I64(r) = self {
-            Ok(r)
-        } else if let Value::Symbol(r) = self {
-            // TODO: have a special unwrap method for this
-            Ok(r as i64)
-        } else {
-            err!(CErr::TypeError("i64", self.into()))
-        }
     }
 }
 
