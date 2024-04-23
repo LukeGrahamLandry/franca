@@ -3,6 +3,7 @@ use std::{mem, ops::DerefMut};
 use codemap::Span;
 
 use crate::{
+    assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{Compile, Res},
     err,
@@ -83,9 +84,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 func.capture_vars.push(v);
             }
         }
+        // if !func.allow_rt_capture {
+        //     assert!(func.capture_vars.is_empty(), "{}", func.log(self.compiler.pool));
+        // }
 
-        // Extend because #open pokes some constants in earlier.
-        func.local_constants.extend(self.local_constants.pop().unwrap());
+        debug_assert!(func.local_constants.is_empty());
+        func.local_constants = self.local_constants.pop().unwrap();
 
         outln!(Scope, "{}", func.log_captures(self.compiler.pool));
         Ok(())
@@ -182,13 +186,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::Eval(e) => self.resolve_expr(e)?,
 
             Stmt::DeclVarPattern { binding, value } => {
-                // TODO: this isnt actually tested because only the backend makes these
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
                 }
                 for b in &mut binding.bindings {
                     self.resolve_binding(b, true, loc)?;
                 }
+                // TODO: add 'let (x, y) = whatever()' to the frontend.
+                todo!("this isnt actually tested because only the backend makes these. its probably fine tho other than needing special constant handling.");
             }
         }
         Ok(())
@@ -333,8 +338,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Name::Ident(name) => {
                 self.walk_ty(&mut binding.ty);
                 if declaring {
-                    // TODO: allow different qualifiers? structs could have const fields, what would that mean exactly?
-                    let var = self.decl_var(&name, VarType::Var, loc)?;
+                    let var = self.decl_var(&name, binding.kind, loc)?;
                     *binding = Binding {
                         name: Name::Var(var),
                         ty: mem::replace(&mut binding.ty, LazyType::Infer),

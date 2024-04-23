@@ -1,0 +1,29 @@
+// :ChainedCaptures
+// The problem is that it binds the closures into the args of local_if, 
+// and then decides that new local_if has no runtime captures, 
+// because it hasn't actually tried to compile the closures yet. 
+// the closures don't have runtime captures until you try to compile them and it does the capturing_call of 'value'. 
+// So since it thinks the specialized 'local_if' has no captures, it gets a new 'result: FnWip', 
+// which doesn't have the captures that were added to the specialized 'c_get''s FnWip. 
+// So a hack fix here is just marking 'local_if' as @inline, but then you have to do that for any function with closure arguments, which the compiler should be doing for you. 
+// The reason it worked before when bindings were always resolved as Var even if Const, 
+// was the 'then' branch in the body of 'c_get' would show up as having a runtime capture of 'value' instead of a const one, 
+// so local_if would be inlined, and then it would successfully find the real lost capture of 'number' from the outer scope.
+
+@test(aarch64)
+fn main(canary: i64) i64 = {
+    // same as normal if, just want to make the whole test case self contained. 
+    fn local_if(cond: bool, const then: Fn(Unit, i64), const else: Fn(Unit, i64)) i64 =
+        (cond, then, else)!if;
+
+    fn c_get(cond: bool, const value: Fn(i64, i64)) i64 = {  // inherits runtime captures of 'value'
+        // body calls 'value', so should also inherit its runtime captures, which means local_if should inherit them too. 
+        local_if(cond, fn() i64 = value(4), fn=0)
+    }
+    
+    let number = 7;
+    let result = c_get(true, fn(_: i64) i64 = number);
+    assert_eq(result, 7);
+    
+    canary
+}

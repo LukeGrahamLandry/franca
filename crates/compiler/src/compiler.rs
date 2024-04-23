@@ -392,6 +392,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
+        assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
+        assert!(!self.program[f].any_const_args());
         logln!(
             "BEFORE Closed local consts for {}:\n{}",
             func.synth_name(self.pool),
@@ -430,8 +432,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             let arguments = func.arg.flatten();
             for (name, ty, kind) in arguments {
                 // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
-                assert!(kind != VarType::Const, "Tried to emit before binding const args.");
+                debug_assert!(kind != VarType::Const, "Tried to emit before binding const args.");
                 if let Some(name) = name {
+                    debug_assert!(kind == name.3);
                     let prev = result.vars.insert(name, ty);
                     assert!(prev.is_none(), "overwrite arg?");
                 }
@@ -532,13 +535,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         // into the caller's body.
         self.eval_and_close_local_constants(f)?; // TODO: only if this is the first time calling 'f'
         let func = &self.program.funcs[f.as_index()];
+        assert!(!func.any_const_args());
+        for capture in &func.capture_vars {
+            assert!(capture.3 != VarType::Const);
+            if result.vars.get(capture).is_some() {
+                // Cool, we've handled that.
+            } else {
+                // now whatever function we're inlining _into_ needs to capture this variable.
+                // I think this always happens for things declared in a macro becuase it doesn't recalculate the capture chain, but it works out in the end somehow.
+                // but when it happens for a normal variable its a problem?
+                // println!("- Missing closure capture {}. result fn: {:?}", capture.log(self.pool), result.func);
+            }
+        }
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
 
         let pattern = func.arg.clone();
-        for b in &pattern.bindings {
-            assert!(b.kind != VarType::Const);
-        }
         let locals = func.arg.collect_vars();
 
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
@@ -558,7 +570,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             result: Box::new(func.body.as_ref().unwrap().clone()),
             locals: Some(locals), // Note: just the declarations in this block, not recursivly bubbled up.
         };
-        self.program.next_var = expr_out.renumber_vars(self.program.next_var);
+        self.program.next_var = expr_out.renumber_vars(self.program.next_var); // Note: not renumbering on the function. didn't need to clone it.
 
         self.currently_inlining.retain(|check| *check != f);
 
@@ -582,20 +594,43 @@ impl<'a, 'p> Compile<'a, 'p> {
         let arg_ty = self.get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
         self.type_check_arg(arg.ty(), arg_ty, "bind arg")?;
         let arg_value = arg.get()?;
+        outln!(LogTag::Generics, "bind_const_arg of {o_f:?}");
 
         // TODO: not sure if i actually need this but it seems like i should.
         if let Values::One(Value::GetFn(arg_func)) = &arg_value {
             // TODO: support fns nested in tuples.
-            let extra_captures = &self.program[*arg_func].capture_vars;
-            new_func.capture_vars.extend(extra_captures);
-            // TODO: do I need to take its closed closed constants too?
+            let arg_func_obj = &self.program[*arg_func];
+            for capture in &arg_func_obj.capture_vars {
+                debug_assert!(capture.3 != VarType::Const);
+            }
+            outln!(
+                LogTag::Generics,
+                "   {arg_func:?} with captures {:?}.",
+                arg_func_obj.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
+            );
+            for v in &arg_func_obj.capture_vars {
+                // its fine if same this is there multiple times but this makes it less messy to debug logs.
+                add_unique(&mut new_func.capture_vars, *v);
+            }
+
+            new_func.closed_constants.add_all(&arg_func_obj.closed_constants);
+            // :ChainedCaptures
+            // TODO: HACK: captures aren't tracked properly.
+            new_func.add_tag(Flag::Inline); // just this is enough to fix chained_captures
+            self.program[*arg_func].add_tag(Flag::Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
         }
-        new_func.closed_constants.insert(arg_name, (arg_value, arg_ty));
+        let prev = new_func.closed_constants.insert(arg_name, (arg_value, arg_ty));
+        debug_assert!(prev.is_none(), "stomp");
         new_func.arg.remove_named(arg_name);
 
         let known_type = new_func.finished_arg.is_some();
         new_func.finished_arg = None;
         let f_id = self.program.add_func(new_func);
+        outln!(
+            LogTag::Generics,
+            "  => {f_id:?} with captures {:?}",
+            self.program[f_id].capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
+        );
         // If it was fully resolved before, we can't leave the wrong answer there.
         // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
         if known_type {
@@ -685,7 +720,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program[f];
         let args = func.arg.flatten().into_iter();
         let mut arg_values = arg_value.vec().into_iter();
-        for (name, ty, _) in args {
+        for (name, ty, kind) in args {
             let size = self.ready.sizes.slot_count(self.program, ty); // TODO: better pattern matching
             let mut values = vec![];
             for _ in 0..size {
@@ -693,6 +728,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
 
             if let Some(var) = name {
+                assert_eq!(kind, VarType::Const, "@comptime arg not const in {}", self.pool.get(self.program[f].name)); // not outside the check because of implicit Unit.
                 let prev = self.program[f].closed_constants.insert(var, (values.clone().into(), ty));
                 assert!(prev.is_none(), "overwrite arg?");
                 let prev = result.constants.insert(var, (values.into(), ty));
@@ -2029,7 +2065,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn make_lit_function(&mut self, constants: &Constants<'p>, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
         let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
-        let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false);
+        let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
         fake_func.closed_constants = constants.clone();
         fake_func.finished_arg = Some(TypeId::unit());
         fake_func.finished_ret = Some(ret_ty);
@@ -2066,6 +2102,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         func.closed_constants = constants.close(&func.capture_vars_const)?;
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
+            assert!(capture.3 != VarType::Const);
+            // TODO is this only because i started putting things in consts instead of also somewhere else a long time ago? -- Apr 22
             if let Some(val) = constants.get(*capture) {
                 func.closed_constants.insert(*capture, val);
             }
@@ -2082,7 +2120,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
                 mut_replace!(self.program[f], |mut func: Func<'p>| {
                     if let Some(body) = &mut func.body {
-                        if let Some(ret_ty) = self.type_of(result, body)? {
+                        // TODO: this is very suspisious! what if it has captures
+                        let res = self.type_of(result, body);
+                        debug_assert!(res.is_ok()); // clearly its fine tho...
+                        if let Some(ret_ty) = res? {
                             func.finished_ret = Some(ret_ty);
                         }
                     }

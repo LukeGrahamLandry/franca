@@ -1,3 +1,27 @@
+## stricter closure capture handling (Apr 22)
+
+:ChainedCaptures
+
+trying to have stricter rules about captures. started by marking const args as const vars in resolve binding,
+which caused two tests failing (before this check) on Missing resolved variable. with this check six fail. but this really shouldn't be happening.
+seems the problem is when you call a captured const Fn. but i dont see how it worked before becuase it still must have looked up variables in the rusult for set stmts.
+maybe in emit_body binding the args? the pattern used to say it was a var so it would get added as just a tpye and the constant would get found somehwere else latter?
+Actually I bet the problem is in type_of because it doesn't happen in test/closures, so feels like it could be
+just when complicated generics means it has to backtrack to infer types so hasn't properly got to the point of dealing with the closure but tries to type check it too soon?
+but that doesn't make sense because im hitting the error in capturing_call. surely I don't get there before doing the rest of the body before it?
+I wasn't adding closed_constants in bind_const_arg but that didn't help.
+Oh the other thing is expanded macros don't recompute captures, which might be why changing Option::if to not use @match helped.
+I would make sense if it was broken for fn stmts because of constant hoisting trying to compile the body before, but that doesn't happen because they become an overload set.
+its always Expr::closure values that are broken.
+
+I think there's some situation where it only figures out that it needed to have captures too late so its already created a new result.
+Like you're doing a capturing call and then you pass a closure into another function as a const arg,
+but it doesn't realize that function needs to be a capturing call until it gets to the body where it calls the argument?
+OH! I think when there's a chain of passing const Fn through multiple capturing_call, the first time the argument gets bound,
+it assumes the capture was handled when it might be from an upper caller so should have stayed a requirement of the
+newly specialized function. am i doing it from the inside going out instead of top down?
+bind_const_arg just extends capture list.
+
 ## scan ahead to resolve constants (Apr 22)
 
 (plan)  

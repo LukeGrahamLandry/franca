@@ -655,6 +655,7 @@ pub struct Func<'p> {
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub wip: Option<FnWip<'p>>,
     pub evil_uninit: bool,
+    pub allow_rt_capture: bool,
 
     /// Implies body.is_none(). For native targets this is the symbol to put in the indirect table for this forward declaration.
     /// This can be used for calling at runtime but not at comptime because we can't just ask the linker for the address.
@@ -692,7 +693,15 @@ enum FuncImpl<'p> {
 }
 
 impl<'p> Func<'p> {
-    pub fn new(name: Ident<'p>, arg: Pattern<'p>, ret: LazyType<'p>, body: Option<FatExpr<'p>>, loc: Span, has_name: bool) -> Self {
+    pub fn new(
+        name: Ident<'p>,
+        arg: Pattern<'p>,
+        ret: LazyType<'p>,
+        body: Option<FatExpr<'p>>,
+        loc: Span,
+        has_name: bool,
+        allow_rt_capture: bool,
+    ) -> Self {
         Func {
             annotations: vec![],
             name,
@@ -716,6 +725,7 @@ impl<'p> Func<'p> {
             jitted_code: None,
             any_reg_template: None,
             llvm_ir: None,
+            allow_rt_capture,
         }
     }
 
@@ -1514,6 +1524,7 @@ impl<'p> Default for Func<'p> {
             jitted_code: None,
             any_reg_template: None,
             llvm_ir: None,
+            allow_rt_capture: false,
         }
     }
 }

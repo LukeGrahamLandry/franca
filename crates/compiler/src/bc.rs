@@ -1,5 +1,5 @@
 //! Low level instructions that the interpreter can execute.
-use crate::ast::TypeInfo;
+use crate::ast::{TypeInfo, VarType};
 use crate::compiler::Compile;
 use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
@@ -319,10 +319,11 @@ impl<'p> Constants<'p> {
         Ok(new)
     }
 
+    #[track_caller]
     pub fn add_all(&mut self, other: &Self) {
         debug_assert!(self.is_valid && other.is_valid);
         for (k, v) in other.local.iter() {
-            let _prev = self.local.insert(*k, v.clone());
+            let prev = self.insert(*k, v.clone());
             // TODO: this seems like a problem
             // assert!(prev.is_none() || prev.as_ref().unwrap() == v, "{:?} = {:?} -> {:?}", k, prev.unwrap(), v);
         }
@@ -333,8 +334,10 @@ impl<'p> Constants<'p> {
         self.local.get(&k).cloned()
     }
 
+    #[track_caller]
     pub fn insert(&mut self, k: Var<'p>, v: (Values, TypeId)) -> Option<(Values, TypeId)> {
         debug_assert!(self.is_valid);
+        debug_assert!(k.3 == VarType::Const);
         self.local.insert(k, v)
     }
 

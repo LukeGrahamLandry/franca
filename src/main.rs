@@ -14,7 +14,16 @@ use compiler::{
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
-use std::{arch::asm, env, fs, io::Write, mem::transmute, path::PathBuf, process::exit, str::pattern::Pattern};
+use std::{
+    arch::asm,
+    env,
+    fs::{self, FileType},
+    io::Write,
+    mem::transmute,
+    path::PathBuf,
+    process::exit,
+    str::pattern::Pattern,
+};
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
 //       Make sure theres some prefix that lets you run/compile the next arg as a file path for shabang line.
@@ -101,6 +110,9 @@ fn run_tests() {
             let name = case.file_name();
             let name = name.to_str().unwrap();
             if !".fr".is_suffix_of(name) {
+                if case.file_type().unwrap().is_dir() {
+                    files.extend(fs::read_dir(case.path()).unwrap().collect::<Vec<_>>())
+                }
                 continue;
             }
             let name = name.strip_suffix(".fr").unwrap();
@@ -147,13 +159,16 @@ fn run_tests_serial_for_profile() {
         exit(1);
     }
     let start = timestamp();
-    let files: Vec<_> = fs::read_dir("tests").unwrap().collect();
+    let mut files: Vec<_> = fs::read_dir("tests").unwrap().collect();
 
-    for case in files {
+    while let Some(case) = files.pop() {
         let case = case.unwrap();
         let name = case.file_name();
         let name = name.to_str().unwrap();
         if !".fr".is_suffix_of(name) {
+            if case.file_type().unwrap().is_dir() {
+                files.extend(fs::read_dir(case.path()).unwrap().collect::<Vec<_>>())
+            }
             continue;
         }
         let name = name.strip_suffix(".fr").unwrap();
@@ -299,7 +314,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
 
             let code = asm.llvm.get_fn_jitted(f).unwrap();
             let code: extern "C" fn(i64) -> i64 = unsafe { transmute(code) };
-            let res = code(arg.to_int().unwrap());
+            let res = code(arg);
             unsafe {
                 asm.llvm.release();
             }

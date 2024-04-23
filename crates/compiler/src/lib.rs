@@ -261,9 +261,9 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
         outln!(FinalAst, "============= ABOVE IS JUST FOR RUNTIME ================");
     }
     outln!(FinalAst, "============= BELOW IS ALL INCLUDING COMPTIME================");
-    for f in &comp.program.funcs {
+    for (i, f) in comp.program.funcs.iter().enumerate() {
         if !f.evil_uninit {
-            outln!(FinalAst, "{}", f.log(comp.pool));
+            outln!(FinalAst, "{:?} {}", FuncId::from_index(i), f.log(comp.pool));
         }
     }
 
@@ -344,7 +344,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     ));
 
     let (g_arg, g_ret) = Func::known_args(TypeId::unit(), TypeId::unit(), user_span);
-    Func::new(name, g_arg, g_ret, body, user_span, true)
+    Func::new(name, g_arg, g_ret, body, user_span, true, false)
 }
 
 pub fn timestamp() -> f64 {

@@ -141,7 +141,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.pool.intern(&name)
                 });
 
-                let func = Func::new(name, arg, ret, Some(body), loc, false);
+                let func = Func::new(name, arg, ret, Some(body), loc, false, true);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
             Fun => Err(self.error_next("use 'fn' for lambda expression. 'fun' means public which doesn't make sense for an expression".to_string())),
@@ -294,9 +294,10 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let name = name.unwrap_or_else(|| {
                         let mut name = callback.expr.log(self.pool);
                         name.truncate(25);
+                        name = name.replace('\n', "~");
                         self.pool.intern(&name)
                     });
-                    let callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false);
+                    let callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false, true);
                     let callback = self.expr(Expr::Closure(Box::new(callback)));
 
                     self.push_arg(&mut prefix, callback)?;
@@ -436,7 +437,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(stmt)
     }
 
-    fn fn_stmt(&mut self) -> Res<Stmt<'p>> {
+    fn fn_stmt(&mut self, may_capture: bool) -> Res<Stmt<'p>> {
         let loc = self.next_span();
         match self.pop().kind {
             Fn | Fun => {}
@@ -461,7 +462,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
         };
 
-        let func = Func::new(name.unwrap(), arg, ret, body, loc, true);
+        let func = Func::new(name.unwrap(), arg, ret, body, loc, true, may_capture);
         Ok(Stmt::DeclFunc(func))
     }
 
@@ -470,13 +471,13 @@ impl<'a, 'p> Parser<'a, 'p> {
         let mut annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
             // Require name, optional body.
-            Fn => self.fn_stmt()?,
+            Fn => self.fn_stmt(true)?,
             Fun => {
                 annotations.push(Annotation {
                     name: Flag::Pub.ident(),
                     args: None,
                 });
-                self.fn_stmt()?
+                self.fn_stmt(false)?
             }
             Qualifier(kind) => {
                 self.pop();
@@ -524,7 +525,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         let callback = self.parse_block_until_squiggle()?;
                         // Note: we leave the closing squiggle because the outer code is expecting to be inside a block.
                         let name = Flag::Backpass.ident();
-                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false);
+                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false, true);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 
                         self.push_arg(&mut call, callback)?;

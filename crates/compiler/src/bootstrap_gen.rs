@@ -69,9 +69,8 @@ sub(0, a)
 #[rustfmt::skip]
 fn signed_truncate(x: i64, bit_count: i64, ) -> i64 { 
 { let mut mask = sub(shift_left(1, bit_count), 1);
- (if le(x, 0) { { ();
- { 
- bit_and(add(bit_not(mul(x, neg(1))), 1), mask) } } } else { { ();
+ (if le(x, 0) { { 
+ bit_and(add(bit_not(mul(x, neg(1))), 1), mask) } } else { { 
  x } }) }
 }
 
