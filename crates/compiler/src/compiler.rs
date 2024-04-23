@@ -83,9 +83,10 @@ pub struct Compile<'a, 'p: 'a> {
 
 pub struct Scope<'p> {
     pub parent: ScopeId,
-    pub constants: HashMap<Ident<'p>, (Var<'p>, FatExpr<'p>, LazyType<'p>)>,
+    pub constants: HashMap<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
     pub vars: Vec<Var<'p>>,
     pub depth: usize,
+    pub wip_local_scopes: Vec<Vec<Var<'p>>>,
 }
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
@@ -163,6 +164,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             constants: Default::default(),
             vars: Default::default(),
             depth,
+            wip_local_scopes: vec![],
         });
         ScopeId::from_index(self.scopes.len() - 1)
     }

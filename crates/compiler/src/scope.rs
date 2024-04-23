@@ -13,7 +13,6 @@ use crate::{
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {
-    track_captures_before_scope: Vec<usize>,
     captures: Vec<Var<'p>>,
     local_constants: Vec<Vec<FatStmt<'p>>>,
     compiler: &'z mut Compile<'a, 'p>,
@@ -28,7 +27,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
     pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
         let mut resolver = ResolveScope {
-            track_captures_before_scope: Default::default(),
             captures: Default::default(),
             local_constants: Default::default(),
             compiler,
@@ -66,7 +64,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)?;
         }
-        let (outer_locals, _) = self.pop_scope();
+        let (outer_locals, cap) = self.pop_scope();
+        assert!(cap.is_none());
         assert!(outer_locals.is_empty(), "function needs block");
 
         let (_args, captures) = self.pop_scope();
@@ -235,7 +234,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     self.resolve_stmt(stmt)?;
                 }
                 self.resolve_expr(result)?;
-                let (vars, _) = self.pop_scope();
+                let (vars, cap) = self.pop_scope();
+                assert!(cap.is_none());
                 *locals = Some(vars);
                 *resolved = true;
             }
@@ -270,27 +270,36 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
-        let boundery = *self.track_captures_before_scope.last().unwrap();
+        let find = |comp: &Compile<'_, 'p>, s: ScopeId| {
+            let scope = &comp[s];
+            for block in scope.wip_local_scopes.iter().rev() {
+                if let Some(found) = block.iter().rev().position(|v| v.0 == *name) {
+                    // Reverse so you get the shadowing first.
+                    let v = block[block.len() - found - 1];
+                    return Some(v);
+                }
+            }
+            None
+        };
+
         let mut s = self.get_scope();
+        // Check the current functions scopes.
+        if let Some(v) = find(self.compiler, s) {
+            return Some(v);
+        }
+        s = self.compiler[s].parent;
+
         loop {
             let scope = &self.compiler[s];
             if scope.parent == s {
                 return None;
             }
-            let found = if let Some((found, _, _)) = scope.constants.get(name) {
-                Some(*found)
-            } else if let Some(found) = scope.vars.iter().rev().position(|v| v.0 == *name) {
-                // Reverse so you get the shadowing first.
-                let v = scope.vars[scope.vars.len() - found - 1];
-                Some(v)
-            } else {
-                None
-            };
+            let found = find(self.compiler, s);
             if let Some(v) = found {
                 // TODO: the depth thing is a bit confusing. it was a bit less jaring before when it was just local on the resolver.
                 //       brifly needed -1 because scope 0 is now a marker and always empty i guess, but now thats done in push_scope instead.
                 //       its about which scopes count as function captures vs just normal blocks. should try to clean that up. -- Apr 23
-                if scope.depth < boundery && !self.captures.contains(&v) {
+                if !self.captures.contains(&v) {
                     // We got it from our parent function.
                     self.captures.push(v);
                 }
@@ -303,17 +312,20 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Res<'p, Var<'p>> {
         let s = *self.scope_stack.last().unwrap();
         // Note: you can't shadow a let with a const either but that already works because consts are done first.
-        if self.compiler[s].constants.contains_key(name) {
+        // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
+        //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
+        let mut wip = self.compiler[s].wip_local_scopes.last().unwrap().iter();
+        if wip.any(|v| v.0 == *name && v.3 == VarType::Const) {
             err!("Cannot shadow constant in the same scope: {}", self.compiler.pool.get(*name))
         }
 
         let var = Var(*name, self.compiler.program.next_var, s, kind);
         if kind == VarType::Const {
-            let empty = (var, FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
-            self.compiler[s].constants.insert(*name, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
-        } else {
-            self.compiler[s].vars.push(var);
+            let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
+            self.compiler[s].constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
         }
+        self.compiler[s].vars.push(var); // includes constants!
+        self.compiler[s].wip_local_scopes.last_mut().unwrap().push(var);
         self.compiler.program.next_var += 1;
         Ok(var)
     }
@@ -323,26 +335,25 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn push_scope(&mut self, track_captures: bool) {
-        let scope = self.get_scope();
-        self.scope_stack.push(self.compiler.new_scope(scope));
-        let function_scope = if track_captures {
-            self.scope_stack.len() - 1
-        } else {
-            *self.track_captures_before_scope.last().unwrap()
-        };
-        self.track_captures_before_scope.push(function_scope);
+        let mut scope = self.get_scope();
+        if track_captures {
+            scope = self.compiler.new_scope(scope);
+            self.scope_stack.push(scope);
+        }
+        self.compiler[scope].wip_local_scopes.push(vec![]);
     }
 
     #[must_use]
     fn pop_scope(&mut self) -> (Vec<Var<'p>>, Option<Vec<Var<'p>>>) {
-        let boundery = self.track_captures_before_scope.pop().unwrap();
-        let captures = if boundery == self.scope_stack.len() - 1 {
+        let s = self.get_scope();
+        let vars = self.compiler[s].wip_local_scopes.pop().unwrap();
+
+        let captures = if self.compiler[s].wip_local_scopes.is_empty() {
+            self.scope_stack.pop().unwrap();
             Some(mem::take(&mut self.captures))
         } else {
             None
         };
-        let s = self.scope_stack.pop().unwrap();
-        let vars = self.compiler[s].vars.clone();
         (vars, captures)
     }
 
