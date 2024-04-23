@@ -22,6 +22,9 @@ it assumes the capture was handled when it might be from an upper caller so shou
 newly specialized function. am i doing it from the inside going out instead of top down?
 bind_const_arg just extends capture list.
 
+Spent such a long time on something that should have been easy.
+Feel like I need to be more rigorous in making the compiler easy to reason about.
+
 ## scan ahead to resolve constants (Apr 22)
 
 (plan)  
@@ -469,7 +472,7 @@ Trying to ensure_compiled preemptivly instead of jitting so it can be more like 
 but that makes it pass ((a, b)) isntead of (a, b) to assert_eq. But really its just making
 inline calls actually happen for builtin wrappers which is what i was trying to do anyway.
 so we've just learned inlining passes arguments wrong somehow. doesn't unbox them.
-Fuck, it's on a function labeled `// TODO: this needs to be an error`.
+Fuck, it's on a function labeled `// TO-DO: this needs to be an error`.
 distressing that inlining changed behaviour tho.
 
 ## web

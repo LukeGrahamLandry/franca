@@ -17,7 +17,7 @@ use llvm_backend::{verify_module, BcToLlvm};
 use std::{
     arch::asm,
     env,
-    fs::{self, FileType},
+    fs::{self},
     io::Write,
     mem::transmute,
     path::PathBuf,

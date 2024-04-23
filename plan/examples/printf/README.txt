@@ -5,7 +5,7 @@
 // https://git.musl-libc.org/cgit/musl/tree/src/stdio/vfprintf.c
 // https://github.com/openjdk/jdk/blob/master/src/java.base/share/classes/java/lang/invoke/StringConcatFactory.java
 
-// TODO: @cache for functions like this and the bindings generator / parser where 
+// TO-DO: @cache for functions like this and the bindings generator / parser where 
 //       there's a comptime function whose output is syntax and you just put that in a file 
 //       and check the hash of the input. both cases where im interested in cheating are string -> string. 
 //       do i also need to check the hash of the function source code? 

@@ -538,9 +538,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!func.any_const_args());
         for capture in &func.capture_vars {
             assert!(capture.3 != VarType::Const);
-            if result.vars.get(capture).is_some() {
-                // Cool, we've handled that.
-            } else {
+            if result.vars.get(capture).is_none() {
+                // :ChainedCaptures // TODO
                 // now whatever function we're inlining _into_ needs to capture this variable.
                 // I think this always happens for things declared in a macro becuase it doesn't recalculate the capture chain, but it works out in the end somehow.
                 // but when it happens for a normal variable its a problem?

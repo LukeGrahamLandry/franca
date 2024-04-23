@@ -1,5 +1,5 @@
-// TODO: Is 'thirdparty' a better name than 'vendor' if im not putting the source here, just urls? 
-// TODO: my theory of putting hashes in your code where you add the dependency so auto lockfile 
+// TO-DO: Is 'thirdparty' a better name than 'vendor' if im not putting the source here, just urls? 
+// TO-DO: my theory of putting hashes in your code where you add the dependency so auto lockfile 
 //       doesnt work if I provide a list here. dont want updaign std version to just force grab new versions of common stuff. 
 
 The idea is to not have to write bindings, just parse the definitions from the library's code. 
