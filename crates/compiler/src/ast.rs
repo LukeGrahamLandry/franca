@@ -668,6 +668,7 @@ pub struct Func<'p> {
     pub jitted_code: Option<Vec<u32>>,
     pub any_reg_template: Option<FuncId>,
     pub llvm_ir: Option<Vec<Ident<'p>>>,
+    pub resolved_body: bool,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -726,6 +727,7 @@ impl<'p> Func<'p> {
             any_reg_template: None,
             llvm_ir: None,
             allow_rt_capture,
+            resolved_body: false,
         }
     }
 
@@ -1525,6 +1527,7 @@ impl<'p> Default for Func<'p> {
             any_reg_template: None,
             llvm_ir: None,
             allow_rt_capture: false,
+            resolved_body: false,
         }
     }
 }

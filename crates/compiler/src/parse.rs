@@ -471,7 +471,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         let mut annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
             // Require name, optional body.
-            Fn => self.fn_stmt(true)?,
+            Fn => {
+                let is_public = annotations.iter().any(|a| a.name == Flag::Pub.ident());
+                self.fn_stmt(!is_public)?
+            }
             Fun => {
                 annotations.push(Annotation {
                     name: Flag::Pub.ident(),

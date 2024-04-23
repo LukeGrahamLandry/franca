@@ -83,7 +83,9 @@ pub struct Compile<'a, 'p: 'a> {
 
 pub struct Scope<'p> {
     pub parent: ScopeId,
-    pub constants: HashMap<Ident<'p>, (FatExpr<'p>, LazyType<'p>)>,
+    pub constants: HashMap<Ident<'p>, (Var<'p>, FatExpr<'p>, LazyType<'p>)>,
+    pub vars: Vec<Var<'p>>,
+    pub depth: usize,
 }
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
@@ -119,7 +121,7 @@ pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
-        Self {
+        let mut c = Self {
             pool,
             debug_trace: vec![],
             anon_fn_counter: 0,
@@ -132,11 +134,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             save_bootstrap: vec![],
             tests: vec![],
             pending_ffi: vec![],
-            scopes: vec![Scope {
-                parent: ScopeId::from_index(0),
-                constants: Default::default(),
-            }],
-        }
+            scopes: vec![],
+        };
+        c.new_scope(ScopeId::from_index(0));
+        c
     }
 
     #[track_caller]
@@ -156,9 +157,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn new_scope(&mut self, parent: ScopeId) -> ScopeId {
+        let depth = if self.scopes.is_empty() { 0 } else { self[parent].depth + 1 }; // HACK
         self.scopes.push(Scope {
             parent,
             constants: Default::default(),
+            vars: Default::default(),
+            depth,
         });
         ScopeId::from_index(self.scopes.len() - 1)
     }
@@ -347,6 +351,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Any environment constants must already be in the function.
+    // It's fine to call this redundantly, the first one just takes the constants out of the list.
     fn eval_and_close_local_constants(&mut self, f: FuncId) -> Res<'p, ()> {
         debug_assert!(!self.program[f].evil_uninit);
         debug_assert!(!self.program[f].evil_uninit);
@@ -392,14 +397,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
+        assert!(func.resolved_body);
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
         assert!(!self.program[f].any_const_args());
-        logln!(
-            "BEFORE Closed local consts for {}:\n{}",
-            func.synth_name(self.pool),
-            self.program.log_consts(&func.closed_constants)
-        );
-
         let before = self.debug_trace.len();
         let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
         self.push_state(&state);
@@ -533,7 +533,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // We close them into f's Func, but we need to emit
         // into the caller's body.
-        self.eval_and_close_local_constants(f)?; // TODO: only if this is the first time calling 'f'
+        self.eval_and_close_local_constants(f)?;
         let func = &self.program.funcs[f.as_index()];
         assert!(!func.any_const_args());
         for capture in &func.capture_vars {
@@ -545,6 +545,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // but when it happens for a normal variable its a problem?
                 // println!("- Missing closure capture {}. result fn: {:?}", capture.log(self.pool), result.func);
             }
+        }
+
+        for capture in &func.capture_vars_const {
+            // TODO: when you add to closed_consts, remove from capture_vars_const.
+            // TODO: failing this check seems like a problem. but seems to be only with macros.
+            //       I think the problem is that you resolve into !quote so if you have an !unquote in a closure body there,
+            //       it thinks it captures stuff for the expr that makes the ast instead of the expr that gets produced.  -- Apr 23
+            let _found = result.constants.get(*capture).is_some() || func.closed_constants.get(*capture).is_some();
+            let _msg = capture.log(self.pool);
+            // assert!(found, "Missing const capture {} for {:?}. outer: {:?}", msg, f, result.func);
         }
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
@@ -1918,6 +1928,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
         //       so making it work in debug with debug_assert is probably the better outcome.
         assert!(!f.evil_uninit, "{}", self.pool.get(f.name));
+        assert!(f.resolved_body);
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType { arg, ret }));
         }
@@ -2065,6 +2076,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
         let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
         let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
+        fake_func.resolved_body = true;
         fake_func.closed_constants = constants.clone();
         fake_func.finished_arg = Some(TypeId::unit());
         fake_func.finished_ret = Some(ret_ty);

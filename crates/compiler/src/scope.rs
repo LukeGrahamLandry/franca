@@ -7,13 +7,12 @@ use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{Compile, Res},
     err,
-    logging::LogTag::Scope,
+    logging::{LogTag::Scope, PoolLog},
     outln,
     pool::Ident,
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {
-    scopes: Vec<Vec<Var<'p>>>,
     track_captures_before_scope: Vec<usize>,
     captures: Vec<Var<'p>>,
     local_constants: Vec<Vec<FatStmt<'p>>>,
@@ -29,7 +28,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
     pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
         let mut resolver = ResolveScope {
-            scopes: Default::default(),
             track_captures_before_scope: Default::default(),
             captures: Default::default(),
             local_constants: Default::default(),
@@ -41,7 +39,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             e.loc = e.loc.or(Some(resolver.last_loc));
             return Err(e);
         }
-        assert!(resolver.scopes.is_empty(), "ICE: unmatched scopes");
+        assert!(resolver.scope_stack.len() == 1, "ICE: unmatched scopes");
         Ok(())
     }
 
@@ -64,6 +62,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         self.walk_ty(&mut func.ret);
         self.push_scope(false);
+        func.resolved_body = true;
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)?;
         }
@@ -73,20 +72,26 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let (_args, captures) = self.pop_scope();
         let capures = captures.unwrap();
         // Now check which things we captured from *our* parent.
-        for c in &capures {
+        for c in capures {
             self.find_var(&c.0); // This adds it back to self.captures if needed
-        }
-
-        for v in capures {
-            if v.3 == VarType::Const {
-                func.capture_vars_const.push(v);
+            if c.3 == VarType::Const {
+                func.capture_vars_const.push(c);
             } else {
-                func.capture_vars.push(v);
+                func.capture_vars.push(c);
             }
         }
-        // if !func.allow_rt_capture {
-        //     assert!(func.capture_vars.is_empty(), "{}", func.log(self.compiler.pool));
-        // }
+
+        if !func.allow_rt_capture {
+            // TODO: show the captured var use site and declaration site.
+            self.last_loc = func.loc;
+            let n = self.compiler.pool.get(func.name);
+            assert!(
+                func.capture_vars.is_empty(),
+                "Closure '{}' cannot be public. captures: {:?}",
+                n,
+                func.capture_vars.iter().map(|v| v.log(self.compiler.pool)).collect::<Vec<_>>()
+            );
+        }
 
         debug_assert!(func.local_constants.is_empty());
         func.local_constants = self.local_constants.pop().unwrap();
@@ -246,7 +251,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 if let Some(var) = self.find_var(name) {
                     *expr.deref_mut() = Expr::GetVar(var);
                 }
-                // else it might be a global, like a function with overloading, or undeclared. We'll find out later.
+                // else it might be an ffi type or undeclared. We'll find out later.
+                // TODO: declare all ffi types with @builtin instead of catching undeclared.
+                // TODO: eventually want do breadth first so you always inject comptime added idents first and can say its an error in the else of the check above.
             }
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(e, _) => self.resolve_expr(e)?,
@@ -264,43 +271,50 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
     fn find_var(&mut self, name: &Ident<'p>) -> Option<Var<'p>> {
         let boundery = *self.track_captures_before_scope.last().unwrap();
-        for (i, scope) in self.scopes.iter().enumerate().rev() {
-            // Reverse so you get the shadowing first.
-            if let Some(found) = scope.iter().rev().position(|v| v.0 == *name) {
-                let v = scope[scope.len() - found - 1];
-                if i < boundery && !self.captures.contains(&v) {
+        let mut s = self.get_scope();
+        loop {
+            let scope = &self.compiler[s];
+            if scope.parent == s {
+                return None;
+            }
+            let found = if let Some((found, _, _)) = scope.constants.get(name) {
+                Some(*found)
+            } else if let Some(found) = scope.vars.iter().rev().position(|v| v.0 == *name) {
+                // Reverse so you get the shadowing first.
+                let v = scope.vars[scope.vars.len() - found - 1];
+                Some(v)
+            } else {
+                None
+            };
+            if let Some(v) = found {
+                // TODO: the depth thing is a bit confusing. it was a bit less jaring before when it was just local on the resolver.
+                //       brifly needed -1 because scope 0 is now a marker and always empty i guess, but now thats done in push_scope instead.
+                //       its about which scopes count as function captures vs just normal blocks. should try to clean that up. -- Apr 23
+                if scope.depth < boundery && !self.captures.contains(&v) {
                     // We got it from our parent function.
                     self.captures.push(v);
                 }
                 return Some(v);
             }
+            s = scope.parent;
         }
-        None
     }
 
     fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Res<'p, Var<'p>> {
-        let scope = if kind == VarType::Const {
-            let s = *self.scope_stack.last().unwrap();
-            if self.compiler[s]
-                .constants
-                .insert(*name, (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer))
-                .is_some()
-            {
-                // TODO: probably want the reverse too where you can't shadow a const with a let, etc.
-                // TODO: show other declaration site.
-                err!(
-                    "Constants (will be) order independent, so cannot shadow in the same scope: {}",
-                    self.compiler.pool.get(*name)
-                )
-            }
-            s
+        let s = *self.scope_stack.last().unwrap();
+        // Note: you can't shadow a let with a const either but that already works because consts are done first.
+        if self.compiler[s].constants.contains_key(name) {
+            err!("Cannot shadow constant in the same scope: {}", self.compiler.pool.get(*name))
+        }
+
+        let var = Var(*name, self.compiler.program.next_var, s, kind);
+        if kind == VarType::Const {
+            let empty = (var, FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
+            self.compiler[s].constants.insert(*name, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.
         } else {
-            ScopeId::from_index(0)
-        };
-        let var = Var(*name, self.compiler.program.next_var, scope, kind); // TODO:SCOPE
+            self.compiler[s].vars.push(var);
+        }
         self.compiler.program.next_var += 1;
-        let current = self.scopes.last_mut().unwrap();
-        current.push(var);
         Ok(var)
     }
 
@@ -312,24 +326,23 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let scope = self.get_scope();
         self.scope_stack.push(self.compiler.new_scope(scope));
         let function_scope = if track_captures {
-            self.scopes.len()
+            self.scope_stack.len() - 1
         } else {
             *self.track_captures_before_scope.last().unwrap()
         };
         self.track_captures_before_scope.push(function_scope);
-        self.scopes.push(Default::default());
     }
 
     #[must_use]
     fn pop_scope(&mut self) -> (Vec<Var<'p>>, Option<Vec<Var<'p>>>) {
-        self.scope_stack.pop().unwrap();
         let boundery = self.track_captures_before_scope.pop().unwrap();
-        let vars = self.scopes.pop().unwrap();
-        let captures = if boundery == self.scopes.len() {
+        let captures = if boundery == self.scope_stack.len() - 1 {
             Some(mem::take(&mut self.captures))
         } else {
             None
         };
+        let s = self.scope_stack.pop().unwrap();
+        let vars = self.compiler[s].vars.clone();
         (vars, captures)
     }
 
