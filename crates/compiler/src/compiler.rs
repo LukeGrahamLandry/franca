@@ -12,11 +12,10 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst,
-};
+use crate::ast::{Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst};
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
@@ -89,7 +88,7 @@ pub struct Scope<'p> {
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebugState<'p> {
     Compile(FuncId, Ident<'p>),
     EnsureCompiled(FuncId, Ident<'p>, ExecTime),
@@ -115,6 +114,8 @@ pub struct FnWip<'p> {
     pub constants: Constants<'p>,
     pub callees: Vec<(FuncId, ExecTime)>,
 }
+
+pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
@@ -167,9 +168,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.debug_trace.push(s.clone());
     }
 
-    pub(crate) fn pop_state(&mut self, _s: DebugState<'p>) {
-        let _found = self.debug_trace.pop(); //.expect("state stack");
-                                             // debug_assert_eq!(found, s);  // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
+    #[track_caller]
+    pub(crate) fn pop_state(&mut self, s: DebugState<'p>) {
+        let found = self.debug_trace.pop().expect("state stack");
+        debug_assert_eq!(found, s, "{}", self.log_trace()); // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
     pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
@@ -188,6 +190,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
+        let before = self.debug_trace.len();
         debug_assert!(!self.program[f].evil_uninit);
         let mut result = self.ensure_compiled(f, when);
         if result.is_ok() {
@@ -195,17 +198,22 @@ impl<'a, 'p> Compile<'a, 'p> {
             if let Some(wip) = func.wip.as_ref() {
                 let callees = wip.callees.clone();
                 for (id, when) in callees {
-                    self.compile(id, when)?;
+                    let res = self.compile(id, when);
+                    self.tag_err(res)?;
                 }
                 result = emit_bc(self, f);
             } else {
-                self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime)?;
+                result = self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime);
             }
         }
 
         let result = self.tag_err(result);
-        self.pop_state(state);
-        self.currently_compiling.retain(|check| *check != f);
+        let after = self.debug_trace.len();
+        if result.is_ok() {
+            debug_assert_eq!(before, after);
+            self.pop_state(state);
+            self.currently_compiling.retain(|check| *check != f);
+        }
         result
     }
 
@@ -256,7 +264,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.pending_ffi.pop().unwrap();
         let result = self.tag_err(result);
-        self.pop_state(state2);
+        if result.is_ok() {
+            self.pop_state(state2);
+        }
         result
     }
 
@@ -306,7 +316,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             todo!()
         };
         self.pending_ffi.pop().unwrap(); // TODO: should do this before short cirucuiting errpr
-        self.pop_state(state);
+        if res.is_ok() {
+            self.pop_state(state);
+        }
+
         res
     }
 
@@ -363,12 +376,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Ok((vec![], ()))
             });
 
-            self.pop_state(state);
-
             // Now this includes stuff inherited from the parent, plus any constants pulled up from the function body.
             Ok((result.constants, ()))
         });
 
+        self.pop_state(state);
         Ok(())
     }
 
@@ -386,6 +398,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program.log_consts(&func.closed_constants)
         );
 
+        let before = self.debug_trace.len();
         let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
         self.push_state(&state);
         self.eval_and_close_local_constants(f)?;
@@ -400,6 +413,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].wip = Some(result);
         }
         self.pop_state(state);
+        let after = self.debug_trace.len();
+        debug_assert_eq!(before, after);
         Ok(())
     }
 
@@ -423,7 +438,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Ok((func, ()))
         });
-
         if !has_body {
             let ret = mut_replace!(self.program[f], |mut func: Func<'p>| {
                 // Functions without a body are always builtins.
@@ -478,6 +492,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program[f];
         self.type_check_arg(ret_val.ty(), func.finished_ret.unwrap(), "bad return value")?;
         self.pop_state(state);
+
         Ok(ret_val)
     }
 
@@ -521,6 +536,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         result.constants.add_all(my_consts);
 
         let pattern = func.arg.clone();
+        for b in &pattern.bindings {
+            assert!(b.kind != VarType::Const);
+        }
         let locals = func.arg.collect_vars();
 
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
@@ -619,6 +637,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
+        func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
         self.program.next_var = func.renumber_vars(self.program.next_var);
 
         // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
@@ -652,7 +671,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         if !no_memo {
             let found = self.program.generics_memo.get(&key);
             if let Some(found) = found {
-                return Ok(found.clone());
+                let found = found.clone();
+                self.pop_state(state);
+                return Ok(found);
             }
         }
 
@@ -893,6 +914,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     } else {
                         let e = value.as_mut().unwrap();
                         assert!(e.expr.is_raw_unit(), "var no name not unit: {}", e.log(self.pool));
+                        stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         return Ok(());
                     }
                 }
@@ -955,6 +977,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // i just like that the debugger shows it's not an interesting frame
+    // what the actual fuck. this makes it segfault
+    // #[cfg_attr(debug_assertions, inline(always))]
     pub fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
         assert!(expr.ty.as_index() < self.program.types.len());
 
@@ -964,8 +989,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let mut res = self.compile_expr_inner(result, expr, requested)?;
         if !expr.ty.is_unknown() {
-            self.type_check_arg(expr.ty, res.ty(), format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak())?;
-            //"sanity ICE")?;
+            self.last_loc = Some(expr.loc);
+            //format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak())?;
+            self.type_check_arg(expr.ty, res.ty(), "sanity ICE")?;
         }
         if let Some(requested) = requested {
             // TODO: its possible to write code that gets here without being caught first.
@@ -1048,11 +1074,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ..
             } => {
                 debug_assert!(*resolved); // TODO: this will change
-                for stmt in body {
+                body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
+                for stmt in body.iter_mut() {
                     self.compile_stmt(result, stmt)?;
                 }
                 // TODO: insert drops for locals
-                self.compile_expr(result, value, requested)?
+                let res = self.compile_expr(result, value, requested)?;
+                if body.is_empty() {
+                    *expr = mem::take(value); // Not required but makes debugging easier cause there's less stuff.
+                }
+                res
             }
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples");
@@ -1218,9 +1249,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "assert_compile_error" => {
                         // TODO: this can still have side-effects on the compiler state tho :(
                         let saved_res = result.clone();
+                        let before = self.debug_trace.len();
+                        unsafe {
+                            EXPECT_ERR_DEPTH.fetch_add(1, Ordering::SeqCst);
+                        }
                         let res = self.compile_expr(result, arg, None);
+                        unsafe {
+                            EXPECT_ERR_DEPTH.fetch_sub(1, Ordering::SeqCst);
+                        }
                         assert!(res.is_err());
                         *result = saved_res;
+                        while self.debug_trace.len() > before {
+                            self.debug_trace.pop();
+                        }
 
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
@@ -1845,11 +1886,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType { arg, ret }));
         }
+        let before = self.debug_trace.len();
         let state = DebugState::ResolveFnType(func, f.name);
+        self.push_state(&state);
         let mut action = || {
             Ok(mut_replace!(self.program[func], |mut f: Func<'p>| {
                 self.last_loc = Some(f.loc);
-                self.push_state(&state);
                 if f.finished_arg.is_none() {
                     let types = self.infer_pattern(&f.closed_constants, &mut f.arg.bindings)?;
                     let arg = self.program.tuple_of(types);
@@ -1871,7 +1913,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             }))
         };
         let res = action();
-        self.pop_state(state);
+        if res.is_ok() {
+            self.pop_state(state);
+            let after = self.debug_trace.len();
+            debug_assert!(before == after);
+        }
 
         res
     }
@@ -2061,17 +2107,17 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_call_if(
         &mut self,
         result: &mut FnWip<'p>,
-        arg: &mut FatExpr<'p>,
+        if_macro_arg: &mut FatExpr<'p>,
         requested: Option<TypeId>, // TODO: allow giving return type to infer
     ) -> Res<'p, Structured> {
-        if !arg.ty.is_unknown() {
-            // We've been here before and already replaced closures with calls.
-            return Ok(Structured::RuntimeOnly(TypeId::unit()));
-        }
+        // if !arg.ty.is_unknown() {
+        //     // We've been here before and already replaced closures with calls.
+        //     return Ok(Structured::RuntimeOnly(arg.ty));
+        // }
         let unit = TypeId::unit();
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
-        let mut unit_expr = FatExpr::synthetic(Expr::unit(), arg.loc);
-        if let Expr::Tuple(parts) = arg.deref_mut() {
+        let mut unit_expr = FatExpr::synthetic(Expr::unit(), if_macro_arg.loc);
+        if let Expr::Tuple(parts) = if_macro_arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
 
@@ -2102,43 +2148,49 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
 
-            let true_ty = if let Some(if_true) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, requested)? {
+            let (true_ty, expect_fn) = if let Some(if_true) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, requested)? {
                 let if_true = if_true.single()?;
                 self.program[if_true].add_tag(Flag::Inline);
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
-                self.emit_call_on_unit(result, if_true, &mut parts[1], requested)?.ty()
-            } else {
+                (self.emit_call_on_unit(result, if_true, &mut parts[1], requested)?.ty(), true)
+            } else if parts[1].ty.is_unknown() {
                 ice!("if second arg must be func not {}", parts[1].log(self.pool));
-            };
-            if let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? {
-                let if_false = if_false.single()?;
-                self.program[if_false].add_tag(Flag::Inline);
-                let false_arg = self.infer_arg(if_false)?;
-                self.type_check_arg(false_arg, unit, sig)?;
-                let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2], requested)?.ty();
-                self.type_check_arg(true_ty, false_ty, sig)?;
             } else {
-                ice!("if third arg must be func not {:?}", parts[2]);
+                (parts[1].ty, false)
+            };
+            if expect_fn {
+                if let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? {
+                    let if_false = if_false.single()?;
+                    self.program[if_false].add_tag(Flag::Inline);
+                    let false_arg = self.infer_arg(if_false)?;
+                    self.type_check_arg(false_arg, unit, sig)?;
+                    let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2], requested)?.ty();
+                    self.type_check_arg(true_ty, false_ty, sig)?;
+                } else {
+                    ice!("if third arg must be func not {:?}", parts[2]);
+                }
+                self.finish_closure(&mut parts[1]);
+                self.finish_closure(&mut parts[2]);
+            } else {
+                assert!(!parts[2].ty.is_unknown());
+                self.type_check_arg(true_ty, parts[2].ty, sig)?;
             }
-            self.finish_closure(&mut parts[1]);
-            self.finish_closure(&mut parts[2]);
-            arg.ty = TypeId::unit();
             Ok(Structured::RuntimeOnly(true_ty))
         } else {
-            ice!("if args must be tuple not {:?}", arg);
+            ice!("if args must be tuple not {:?}", if_macro_arg);
         }
     }
 
-    fn emit_call_while(&mut self, result: &mut FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
-        if !arg.ty.is_unknown() {
+    fn emit_call_while(&mut self, result: &mut FnWip<'p>, while_macro_arg: &mut FatExpr<'p>) -> Res<'p, Structured> {
+        if !while_macro_arg.ty.is_unknown() {
             // We've been here before and already replaced closures with calls.
             return Ok(Structured::RuntimeOnly(TypeId::unit()));
         }
 
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
-        let mut unit_expr = FatExpr::synthetic(Expr::unit(), arg.loc);
-        if let Expr::Tuple(parts) = arg.deref_mut() {
+        let mut unit_expr = FatExpr::synthetic(Expr::unit(), while_macro_arg.loc);
+        if let Expr::Tuple(parts) = while_macro_arg.deref_mut() {
             if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
                 let cond_fn = cond_fn.single()?;
                 self.program[cond_fn].add_tag(Flag::Inline);
@@ -2163,9 +2215,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             self.finish_closure(&mut parts[0]);
             self.finish_closure(&mut parts[1]);
-            arg.ty = TypeId::unit();
+            while_macro_arg.ty = TypeId::unit();
         } else {
-            ice!("if args must be tuple not {:?}", arg);
+            ice!("if args must be tuple not {:?}", while_macro_arg);
         }
 
         Ok(Structured::RuntimeOnly(TypeId::unit()))
@@ -2455,6 +2507,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         mut fid: FuncId,
         requested: Option<TypeId>,
     ) -> Res<'p, (Structured, bool)> {
+        let loc = expr.loc;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         let func = &self.program[fid];
         let is_comptime = func.has_tag(Flag::Comptime);
@@ -2472,6 +2525,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if arg_val.is_empty() {
             arg_val = self.program.load_value(Value::Unit);
         }
+        self.last_loc = Some(loc);
         self.type_check_arg(arg_val.ty(), arg_ty, "fn arg")?;
 
         // TODO: you really want to compile as much of the body as possible before you start baking things.
@@ -2537,6 +2591,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 value: Value::GetFn(current_fn).into(),
             };
             f_expr.ty = ty;
+            self.pop_state(state);
             Ok(current_fn)
         } else {
             if let Structured::Const(ty, values) = arg_val {
@@ -2866,8 +2921,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(e) = value {
                     e.expr = val_expr;
                 } else {
+                    // this no longer happens since i temp removed modules. only @import got here.
                     // TODO: use stmt.loc
-                    *value = Some(FatExpr::synthetic(val_expr, garbage_loc()));
+                    //*value = Some(FatExpr::synthetic(val_expr, garbage_loc()));
+                    todo!();
                 }
                 let prev = result.constants.insert(name, (val, final_ty));
                 assert!(prev.is_none());

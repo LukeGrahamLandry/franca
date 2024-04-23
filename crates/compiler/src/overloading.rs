@@ -1,7 +1,6 @@
 use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var};
 use crate::bc::{FuncRef, Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
-use crate::logging::LogTag::ShowErr;
 use crate::logging::{LogTag, PoolLog};
 use crate::{assert_eq, err, outln, unwrap};
 use std::mem;
@@ -191,25 +190,28 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // TODO: cleanup include ct vs rt split
                 // TODO: put the message in the error so !assert_compile_error doesn't print it.
-                outln!(ShowErr, "not found {}", log_goal(self));
+                let mut msg = String::new();
+                use std::fmt::Write;
+                writeln!(msg, "not found {}", log_goal(self)).unwrap();
                 for f in original.ready {
                     let yes = accept(f.arg, f.ret);
-                    let msg = if yes { "[YES]" } else { "[ NO]" };
-                    outln!(
-                        ShowErr,
-                        "- {msg} found {:?} fn({:?}={}) {}={}; {:?}",
+                    let prefix = if yes { "[YES]" } else { "[ NO]" };
+                    writeln!(
+                        msg,
+                        "- {prefix} found {:?} fn({:?}={}) {}={}; {:?}",
                         f.func,
                         f.arg,
                         self.program.log_type(f.arg),
                         f.ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
                         f.ret.map(|ret| self.program.log_type(ret)).unwrap_or(String::new()),
                         self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
-                    );
+                    )
+                    .unwrap();
                     if yes {
                         // outln!(ShowErr, "   {}", self.program[f.func].log(self.pool));
                     }
                 }
-                outln!(ShowErr, "Maybe you forgot to instantiate a generic?");
+                writeln!(msg, "Maybe you forgot to instantiate a generic?").unwrap();
 
                 self.last_loc = Some(arg.loc);
                 err!("AmbiguousCall: {}", log_goal(self))
@@ -251,11 +253,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         func: *f,
                     });
                 }
-                e => {
+                _ => {
                     if let Some(arg) = self.program[*f].finished_arg {
                         self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: *f });
                     } else {
-                        println!("ERR: {e:?}")
+                        todo!()
                     }
                 }
             }

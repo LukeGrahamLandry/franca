@@ -602,7 +602,8 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
     let mut out = vec![];
     values_from_ints(compile, ty, &mut value.iter().copied(), &mut out).unwrap();
     let value: Values = out.into();
-    FatExpr::synthetic(Expr::Value { ty, value }, garbage_loc())
+    let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
+    FatExpr::synthetic(Expr::Value { ty, value }, loc)
 }
 
 fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> bool {

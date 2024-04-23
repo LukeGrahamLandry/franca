@@ -258,6 +258,13 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
 
     if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
         outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
+        outln!(FinalAst, "============= ABOVE IS JUST FOR RUNTIME ================");
+    }
+    outln!(FinalAst, "============= BELOW IS ALL INCLUDING COMPTIME================");
+    for f in &comp.program.funcs {
+        if !f.evil_uninit {
+            outln!(FinalAst, "{}", f.log(comp.pool));
+        }
     }
 
     println!("{}", get_logs(ShowPrint));

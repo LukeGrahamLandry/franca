@@ -1,4 +1,4 @@
-## remove current module system (Apr 22)
+## scan ahead to resolve constants (Apr 22)
 
 (plan)  
 I want to change how identifier resolution works so its breadth first instead of depth first so you can have out of order constants.
@@ -13,7 +13,8 @@ But I do the resolve pass doesn't backtrack so normal code can only refer to con
 So its the worst of both worlds.
 Also expressions that disappear because of constant folding and shouldn't even be compiled,
 still have thier constants hoisted to the function so you can't use that for platform specific stuff which is sad.
-I want `#[cfg(whatever)]` to just be a normal comptime `if`.
+I want `#[cfg(whatever)]` to just be a normal comptime `if`.  
+(end plan)
 
 - removed modules. easy. only a toy test relied on them.
 
@@ -30,6 +31,33 @@ doing scan ahead in scope: (end result will be can bind to later declarations bu
 - now a bunch of no stomp assertions are triggering in comptime functions cause I took out the rebinding hack. forgetting to renumber somewhere?
 - adding renumber to emit_comptime_call broke everything. had to add handling for functions. was forgetting to remap function names and closed vars.
   so it couldn't find like outer comptime args (or anything at all at one point).
+
+ahhhh such painful mistake (err below).
+When compiling an if, I require the args to be functions but I always inline the call, so its a problem if I try to compile twice, cause the second time it wont be a call.
+(interestingly that means if branches always have thier own constants lists so what i said before about not being able to do platform specific stuff was wrong).
+But I originally solved the problem by `arg.ty = Unit` and then if it was unit instead of unknown at the beginning, I'd know we'd done it already and just return.
+But because I'm dumb, i'd always return unit as the type of the if expr. Because I did that for while loops and it made sense because they don't return a value.
+and apparently only now with my ordering changes, you hit an error in a type infer somewhere and end up trying to compile and if that returns a value twice.
+so you get a sanity ICE because it says its a unit but last time you were hear it was some useful type.
+now my fix is check if its a function type and if not, just typecheck the branches are the same value.
+which fixes my current tests so yay, scan ahead works.
+HOWEVER ITS WRONG! now you can't have an if expr that returns a function. TODO: write a test for that and actually fix it!
+maybe just add an extra marker to the end of the macro args that its a value if not a function if. or change the macro to ifx.
+theres no real reason it has to be functions as arguments, I just think thats more consistant because one of them isnt going to be evaluated.
+could have the macro !if just be expressions and generally call the function if that takes lambdas once type inference is more reliable.
+now that macros are a more normal part of the language, its not that weird for an argument to not be evaluated.
+
+```
+sanity ICE. Type check expected Ty2 = Unit but found Ty465 = { Some: i64, None: Unit}!enum
+ --> main_file:84:71
+   │
+84 │         (self.is_some(), fn() O = then(self&.Some[]), fn() O = else())!if
+```
+
+So the point I'm at now is that you can resolve to constant names in the same scope but lower down.
+However, its not useful because I still evaluate them in order, without any clever dependency chain analysis.
+So you still mostly have to have your code strictly ordered.
+Even functions which would almost work because body isn't compiled until needed can't call out of order because the declaration needs to close over the overload set which might not exist yet.
 
 ## improving macros (Apr 21)
 

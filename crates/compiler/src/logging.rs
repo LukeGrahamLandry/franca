@@ -7,13 +7,26 @@ use std::fmt::{Debug, Formatter, Write};
 use std::ops::Deref;
 use std::{fs, mem};
 
+#[inline(never)]
+pub fn break_here(e: &CErr) {
+    if let CErr::TypeCheck(_, _, _) = &e {
+        let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
+        if depth == 0 {
+            println!("err")
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! err {
     ($payload:expr) => {{
+        let e = $payload;
+        $crate::logging::break_here(&e);
+
         return Err($crate::compiler::CompileError {
             internal_loc: if cfg!(feature="trace_errors") {Some(std::panic::Location::caller())} else {None},
             loc: None,
-            reason: $payload,
+            reason: e,
             trace: String::new(),
             value_stack: vec![],
             call_stack: String::new(),
@@ -198,7 +211,7 @@ macro_rules! logln {
     }};
 }
 
-use crate::ast::FatStmt;
+use crate::ast::{FatStmt, Pattern};
 use crate::bc::*;
 use crate::emit_bc::DebugInfo;
 use crate::pool::Ident;
@@ -214,6 +227,8 @@ pub trait PoolLog<'p> {
 }
 
 use crate::ast::safe_rec;
+use crate::compiler::EXPECT_ERR_DEPTH;
+
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
         safe_rec!(self, t, format!("{t:?}"), {
@@ -499,6 +514,17 @@ impl<'p> PoolLog<'p> for LazyType<'p> {
         }
     }
 }
+impl<'p> PoolLog<'p> for Pattern<'p> {
+    fn log(&self, pool: &StringPool<'p>) -> String {
+        // TODO: copy-paste. expr::StructLiteralP should
+        let body: String = self
+            .bindings
+            .iter()
+            .map(|b| format!("{}: ({}), ", b.name().map_or("_", |n| pool.get(n)), b.lazy().log(pool)))
+            .collect();
+        format!("({body})")
+    }
+}
 
 impl<'p> PoolLog<'p> for Expr<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
@@ -517,6 +543,15 @@ impl<'p> Expr<'p> {
                 let es: Vec<_> = body
                     .iter()
                     .filter(|s| !matches!(s.stmt, Stmt::Noop))
+                    .filter(|s| {
+                        // HACK to skip the useless args added by !if and !while.
+                        if let Stmt::DeclVarPattern { binding, value } = &s.stmt {
+                            if binding.bindings.len() == 1 && value.is_some() && value.as_ref().unwrap().is_raw_unit() {
+                                return false;
+                            }
+                        }
+                        true
+                    })
                     .map(|e| e.logd(pool, depth + 1))
                     .collect();
                 let es = es.join(";\n");
@@ -627,12 +662,12 @@ impl<'p> PoolLog<'p> for Func<'p> {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
-            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {:?}\n A:{:?}]\n{}\n{}llvm={}, aarch64={}\n",
+            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}\n{}llvm={}, aarch64={}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ret.log(pool),
             self.body.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
-            self.arg, // TODO: better formatting.
+            self.arg.log(pool), // TODO: better formatting.
             self.annotations.iter().map(|i| pool.get(i.name)),
             if self.capture_vars.is_empty() {
                 String::from("Raw function, no captures.")
@@ -772,7 +807,7 @@ impl<'p> Debug for CompileError<'p> {
 }
 
 impl<'p> DebugState<'p> {
-    pub fn log(&self, pool: &StringPool<'p>, program: &Program<'p>) -> String {
+    pub fn log(&self, pool: &StringPool<'p>, _: &Program<'p>) -> String {
         match self {
             DebugState::Msg(s) => s.clone(),
             DebugState::Compile(f, i) => format!("| Compile    | {:?} {}", *f, pool.get(*i)),

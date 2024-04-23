@@ -1,6 +1,6 @@
 use std::{mem, ops::DerefMut};
 
-use codemap::{Pos, Span};
+use codemap::Span;
 
 use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
