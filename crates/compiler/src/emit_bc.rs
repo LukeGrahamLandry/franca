@@ -75,7 +75,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             func: func.func,
             why: func.why.clone(),
             last_loc: func.last_loc,
-            constants: func.constants.clone(), // TODO: dont clone. can have a lighter thing live on to the interpreter.
             insts: vec![],
             debug: vec![],
             slot_types: vec![],
@@ -212,7 +211,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn compile_stmt(&mut self, result: &mut FnBody<'p>, stmt: &FatStmt<'p>) -> Res<'p, ()> {
-        debug_assert!(result.constants.is_valid);
         self.last_loc = Some(stmt.loc);
         match stmt.deref() {
             Stmt::Eval(expr) => {

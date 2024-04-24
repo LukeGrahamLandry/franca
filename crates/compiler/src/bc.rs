@@ -1,7 +1,6 @@
 //! Low level instructions that the interpreter can execute.
-use crate::ast::{TypeInfo, VarType};
+use crate::ast::TypeInfo;
 use crate::compiler::Compile;
-use crate::crc::CRc;
 use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
 use crate::{
@@ -101,7 +100,6 @@ pub struct FnBody<'p> {
     pub func: FuncId,
     pub why: String,
     pub last_loc: Span,
-    pub constants: Constants<'p>,
     pub to_drop: Vec<(StackRange, TypeId)>,
     /// true -> we might Drop but the put a value back. false -> it's an ssa intermediate only needed once.
     pub slot_is_var: BitSet,
@@ -293,60 +291,6 @@ pub struct ConstId(pub usize);
 impl std::fmt::Debug for ConstId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "C{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, Default, InterpSend)]
-pub struct Constants<'p> {
-    pub local: CRc<HashMap<Var<'p>, (Values, TypeId)>>,
-    pub is_valid: bool,
-}
-
-impl<'p> Constants<'p> {
-    #[track_caller]
-    pub fn close(&self, vars: &[Var<'p>]) -> Res<'p, Self> {
-        debug_assert!(self.is_valid);
-        let mut new = Self::empty();
-        for k in vars {
-            if let Some(val) = self.local.get(k) {
-                new.local.insert(*k, val.clone());
-            } else {
-                // TODO: !quote captures a bunch of stuff that it doesn't actually need?
-                //       this seems like a massive problem.
-                // err!(CErr::VarNotFound(*k))
-            }
-        }
-        Ok(new)
-    }
-
-    #[track_caller]
-    pub fn add_all(&mut self, other: &Self) {
-        debug_assert!(self.is_valid && other.is_valid);
-        for (k, v) in other.local.iter() {
-            let prev = self.insert(*k, v.clone());
-            // fixed by renumbering closures.
-            // TODO: still why do we add multiple times? i think im just not checking when adding closure captures?  -- Apr 23
-            debug_assert!(prev.is_none() || prev.as_ref().unwrap() == v, "{:?} = {:?} -> {:?}", k, prev.unwrap(), v);
-        }
-    }
-
-    pub fn get(&self, k: Var<'p>) -> Option<(Values, TypeId)> {
-        debug_assert!(self.is_valid);
-        self.local.get(&k).cloned()
-    }
-
-    #[track_caller]
-    pub fn insert(&mut self, k: Var<'p>, v: (Values, TypeId)) -> Option<(Values, TypeId)> {
-        debug_assert!(self.is_valid);
-        debug_assert!(k.3 == VarType::Const);
-        self.local.insert(k, v)
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            local: Default::default(),
-            is_valid: true,
-        }
     }
 }
 

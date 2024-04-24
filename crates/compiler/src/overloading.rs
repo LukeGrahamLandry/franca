@@ -82,7 +82,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
-        let value = if let Some((value, _)) = self.find_const(result, name) {
+        let value = if let Some((value, _)) = self.find_const(name) {
             if let Values::One(Value::GetFn(f)) = value {
                 self.named_args_to_tuple(result, arg, f)?;
                 self.pop_state(state);

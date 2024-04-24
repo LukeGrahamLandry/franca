@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, Constants, Structured, Value, Values},
+    bc::{Bc, Structured, Value, Values},
     compiler::{CErr, CompileError, FnWip, Res},
     err,
     export_ffi::RsResolvedSymbol,
@@ -638,7 +638,6 @@ pub struct Func<'p> {
     pub local_constants: Vec<FatStmt<'p>>,
     pub loc: Span,
     pub capture_vars_const: Vec<Var<'p>>,
-    pub closed_constants: Constants<'p>,
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
@@ -704,7 +703,6 @@ impl<'p> Func<'p> {
             loc,
             referencable_name,
             allow_rt_capture,
-            closed_constants: Constants::empty(),
             evil_uninit: false,
             ..Default::default()
         }
@@ -1495,7 +1493,6 @@ impl<'p> Default for Func<'p> {
             local_constants: vec![],
             loc: garbage_loc(),
             capture_vars_const: vec![],
-            closed_constants: Default::default(),
             finished_arg: None,
             finished_ret: None,
             referencable_name: false,

@@ -4,7 +4,6 @@ use core::fmt;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter, Write};
-use std::ops::Deref;
 use std::{fs, mem};
 
 #[inline(never)]
@@ -324,12 +323,6 @@ impl<'p> Program<'p> {
             if let Some(body) = &func.body {
                 collect_func_references(body, &mut pending, &mut const_reads);
                 log_one(&mut out, next, func);
-                for c in const_reads.drain() {
-                    if let Some((val, ty)) = func.closed_constants.get(c) {
-                        out += &format!("const {:?}: {} = {:?};\n", c.log(self.pool), self.log_type(ty), val);
-                        val.vec().iter().for_each(|v| collect_func_references_value(v, &mut pending));
-                    }
-                }
                 out += "=======================================\n\n\n\n";
             }
         }
@@ -483,17 +476,6 @@ impl<'p> PoolLog<'p> for Program<'p> {
     fn log(&self, _: &StringPool<'p>) -> String {
         let mut s = String::new();
         s += &self.log_cached_types();
-        s
-    }
-}
-
-impl<'p> Program<'p> {
-    pub fn log_consts(&self, c: &Constants<'p>) -> String {
-        let mut s = String::new();
-        for (name, (v, ty)) in c.local.deref() {
-            writeln!(s, "   - {} = {:?} is {}", name.log(self.pool), v, self.log_type(*ty));
-        }
-
         s
     }
 }
