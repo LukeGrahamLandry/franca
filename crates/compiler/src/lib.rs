@@ -77,6 +77,7 @@ pub struct Stats {
     pub serialize_one: usize,
     pub deserialize_one: usize,
     pub ast_expr_nodes: usize,
+    pub fn_body_resolve: usize,
 }
 
 pub static mut STATS: Stats = Stats {
@@ -85,6 +86,7 @@ pub static mut STATS: Stats = Stats {
     serialize_one: 0,
     deserialize_one: 0,
     ast_expr_nodes: 0,
+    fn_body_resolve: 0,
 };
 
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
@@ -161,6 +163,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 
     let mut global = make_toplevel(comp.pool, user_span, parsed.stmts);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
+    ResolveScope::resolve_all(&mut global, comp)?;
     let f = comp.compile_top_level(global)?;
     Ok((f, parsed.lines))
 }
@@ -270,22 +273,28 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
     let log_scope = |s: ScopeId| {
         let scope = &comp[s];
         let pad = format!("{}({}) ", "=".repeat(scope.depth), scope.depth);
-        if !scope.constants.is_empty() || scope.funcs.len() > 1 {
-            outln!(
-                Consts,
-                "{pad}fn '{}'; scope {} has parent {}; specializations: {:?};",
-                comp.pool.get(scope.name),
-                s.as_index(),
-                scope.parent.as_index(),
-                scope.funcs
-            );
+        outln!(
+            Consts,
+            "{pad}fn '{}'; scope {} has parent {} (b: {}); specializations: {:?};",
+            comp.pool.get(scope.name),
+            s.as_index(),
+            scope.parent.as_index(),
+            scope.block_in_parent,
+            scope.funcs
+        );
 
-            let mut consts = scope.constants.iter().collect::<Vec<_>>();
-            consts.sort_by(|(a, _), (b, _)| a.1.cmp(&b.1));
-            for (var, (e, ty)) in consts {
-                outln!(Consts, "{pad}- {}: {} = {};", var.log(comp.pool), ty.log(comp.pool), e.log(comp.pool),);
-            }
+        let mut s = pad.clone();
+        for (i, b) in scope.vars.iter().enumerate() {
+            s += &format!("({} -> {i}) ", b.parent);
         }
+        outln!(Consts, "{s};");
+
+        let mut consts = scope.constants.iter().collect::<Vec<_>>();
+        consts.sort_by(|(a, _), (b, _)| a.1.cmp(&b.1));
+        for (var, (e, ty)) in consts {
+            outln!(Consts, "{pad}- {}: {} = {};", var.log(comp.pool), ty.log(comp.pool), e.log(comp.pool),);
+        }
+
         // if !scope.vars.is_empty() {
         //     outln!(
         //         Consts,

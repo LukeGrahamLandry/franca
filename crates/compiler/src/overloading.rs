@@ -242,6 +242,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.name),);
         for f in &decls {
             debug_assert!(self.program.overload_sets[i].pending.is_empty());
+            self.ensure_resolved_sign(*f)?;
             match self.infer_types(*f) {
                 Ok(Some(f_ty)) => {
                     outln!(
@@ -258,11 +259,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         func: *f,
                     });
                 }
-                _ => {
+                e => {
                     if let Some(arg) = self.program[*f].finished_arg {
                         self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: *f });
                     } else {
-                        todo!()
+                        todo!("{e:?}")
                     }
                 }
             }

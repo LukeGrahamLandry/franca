@@ -635,7 +635,13 @@ impl<'p> PoolLog<'p> for FatExpr<'p> {
 impl<'p> PoolLog<'p> for Var<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
         let i = self.1;
-        format!("{}%{}", pool.get(self.0), i)
+        use crate::ast::VarType;
+        let kind = match self.3 {
+            VarType::Let => "L",
+            VarType::Var => "V",
+            VarType::Const => "C",
+        };
+        format!("{}%{}{}s{}b{}", pool.get(self.0), i, kind, self.2.as_index(), self.4)
     }
 }
 

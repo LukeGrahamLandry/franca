@@ -437,7 +437,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(stmt)
     }
 
-    fn fn_stmt(&mut self, may_capture: bool) -> Res<Stmt<'p>> {
+    fn fn_stmt(&mut self) -> Res<Stmt<'p>> {
         let loc = self.next_span();
         match self.pop().kind {
             Fn | Fun => {}
@@ -462,7 +462,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
         };
 
-        let func = Func::new(name.unwrap(), arg, ret, body, loc, true, may_capture);
+        let func = Func::new(name.unwrap(), arg, ret, body, loc, true, false);
         Ok(Stmt::DeclFunc(func))
     }
 
@@ -471,16 +471,13 @@ impl<'a, 'p> Parser<'a, 'p> {
         let mut annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
             // Require name, optional body.
-            Fn => {
-                let is_public = annotations.iter().any(|a| a.name == Flag::Pub.ident());
-                self.fn_stmt(false)?
-            }
+            Fn => self.fn_stmt()?,
             Fun => {
                 annotations.push(Annotation {
                     name: Flag::Pub.ident(),
                     args: None,
                 });
-                self.fn_stmt(false)?
+                self.fn_stmt()?
             }
             Qualifier(kind) => {
                 self.pop();

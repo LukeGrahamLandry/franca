@@ -92,7 +92,7 @@ pub struct Annotation<'p> {
 
 // TODO: this is getting a bit chonky if I want to store the kind here instead of globally. 32 bit indices would make it reasonable again
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
-pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType);
+pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType, pub usize);
 
 // TODO: should really get an arena going because boxes make me sad.
 #[derive(Clone, Debug, InterpSend)]
@@ -303,7 +303,7 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
 
 impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
-        let new = Var(name.0, self.vars, name.2, name.3); // TODO:SCOPE?
+        let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
         self.vars += 1;
         let stomp = self.mapping.insert(*name, new);
         debug_assert!(stomp.is_none());
@@ -1159,6 +1159,8 @@ impl<'p> Program<'p> {
     // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
+        debug_assert!(!func.evil_uninit);
+        debug_assert!(func.resolved_body && func.resolved_sign);
         let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id
@@ -1471,7 +1473,6 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
-            resolved_sign: true,
             annotations: vec![],
             name: Ident::null(),
             var_name: None,
@@ -1496,6 +1497,7 @@ impl<'p> Default for Func<'p> {
             any_reg_template: None,
             llvm_ir: None,
             allow_rt_capture: false,
+            resolved_sign: false,
             resolved_body: false,
             scope: None,
         }

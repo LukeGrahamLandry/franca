@@ -23,6 +23,7 @@ use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
+use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
@@ -86,11 +87,16 @@ pub struct Compile<'a, 'p: 'a> {
 pub struct Scope<'p> {
     pub parent: ScopeId,
     pub constants: HashMap<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
-    pub vars: Vec<Var<'p>>,
+    pub vars: Vec<BlockScope<'p>>,
     pub depth: usize,
-    pub wip_local_scopes: Vec<Vec<Var<'p>>>,
     pub funcs: Vec<FuncId>,
     pub name: Ident<'p>,
+    pub block_in_parent: usize,
+}
+
+pub struct BlockScope<'p> {
+    pub vars: Vec<Var<'p>>,
+    pub parent: usize,
 }
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
@@ -140,7 +146,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             pending_ffi: vec![],
             scopes: vec![],
         };
-        c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident());
+        c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
     }
 
@@ -160,16 +166,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         out
     }
 
-    pub fn new_scope(&mut self, parent: ScopeId, name: Ident<'p>) -> ScopeId {
+    pub fn new_scope(&mut self, parent: ScopeId, name: Ident<'p>, block_in_parent: usize) -> ScopeId {
         let depth = if self.scopes.is_empty() { 0 } else { self[parent].depth + 1 }; // HACK
         self.scopes.push(Scope {
             parent,
             constants: Default::default(),
             vars: Default::default(),
             depth,
-            wip_local_scopes: vec![],
             funcs: vec![],
             name,
+            block_in_parent,
         });
         ScopeId::from_index(self.scopes.len() - 1)
     }
@@ -185,8 +191,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert_eq!(found, s, "{}", self.log_trace()); // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
-    pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
+    pub fn compile_top_level(&mut self, mut ast: Func<'p>) -> Res<'p, FuncId> {
+        ResolveScope::resolve_all(&mut ast, self)?;
         let f = self.add_func(ast)?;
+
         if let Err(mut e) = self.ensure_compiled(f, ExecTime::Comptime) {
             e.loc = e.loc.or(self.last_loc);
             return Err(e);
@@ -520,6 +528,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // Replace a call expr with the body of the target function.
     // The idea is having zero cost (50 cycles) closures :)
     fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, Structured> {
+        self.ensure_resolved_body(f)?;
         let loc = expr_out.loc;
         debug_assert_ne!(f, result.func, "recusive inlining?");
         assert!(!self.program[f].evil_uninit);
@@ -583,6 +592,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // Curry a function from fn(a: A, @comptime b: B) to fn(a: A)
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
     fn bind_const_arg(&mut self, o_f: FuncId, mut arg_name: Var<'p>, arg: Structured, names: &mut HashMap<Var<'p>, Var<'p>>) -> Res<'p, FuncId> {
+        self.ensure_resolved_sign(o_f)?;
         let mut new_func = self.program[o_f].clone();
         let (next_var, mapping) = new_func.renumber_vars(self.program.next_var);
         self.program.next_var = next_var;
@@ -780,6 +790,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
+                ResolveScope::resolve_all(func, self)?;
                 debug_assert!(func.resolved_body);
                 let mut func = mem::take(func);
                 let var = func.var_name;
@@ -1012,14 +1023,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.find_const(var).map(|(_, ty)| ty)
     }
 
+    #[track_caller]
     pub fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
-        assert!(self.program[f].resolved_sign);
+        debug_assert!(self.program[f].resolved_sign);
         Ok(())
     }
 
+    #[track_caller]
     pub fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
         self.ensure_resolved_sign(f)?;
-        assert!(self.program[f].resolved_body);
+        debug_assert!(self.program[f].resolved_body);
         Ok(())
     }
 
@@ -1554,7 +1567,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     kind: VarType::Let,
                 });
             }
-            let var = Var(self.pool.intern("T"), self.program.next_var, ScopeId::from_index(0), VarType::Const); // TODO:SCOPE
+            let var = Var(self.pool.intern("T"), self.program.next_var, ScopeId::from_index(0), VarType::Const, 0); // TODO:SCOPE
             self.program.next_var += 1;
             pattern.bindings.push(Binding {
                 name: Name::Var(var),
@@ -1629,7 +1642,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let res = self.type_of_inner(result, expr)?;
         while self.debug_trace.len() > before {
             // HACK
-            self.debug_trace.pop();
+            let p = self.debug_trace.pop().unwrap();
+            //println!("======= {p:?}");
         }
         self.pop_state(s);
         Ok(res)
@@ -1925,6 +1939,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn infer_arg(&mut self, func: FuncId) -> Res<'p, TypeId> {
+        self.ensure_resolved_sign(func)?;
         // TODO: this looks redundant but if you just check the arg multiple times you don't want to bother attempting the return type multiple times.
         if let Some(ty) = self.program[func].finished_arg {
             Ok(ty)
@@ -1938,6 +1953,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // Resolve the lazy types for Arg and Ret
     // Ok(None) means return type needs to be infered
     pub(crate) fn infer_types(&mut self, func: FuncId) -> Res<'p, Option<FnType>> {
+        self.ensure_resolved_sign(func)?;
         let f = &self.program[func];
         // TODO: bad things are going on. it changes behavior if this is a debug_assert.
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
@@ -2092,6 +2108,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
         let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
         fake_func.resolved_body = true;
+        fake_func.resolved_sign = true;
         fake_func.finished_arg = Some(TypeId::unit());
         fake_func.finished_ret = Some(ret_ty);
         fake_func.scope = Some(ScopeId::from_index(0));
@@ -2122,7 +2139,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program.to_type(value)
     }
 
-    pub(crate) fn add_func(&mut self, func: Func<'p>) -> Res<'p, FuncId> {
+    pub(crate) fn add_func(&mut self, mut func: Func<'p>) -> Res<'p, FuncId> {
+        ResolveScope::resolve_all(&mut func, self)?;
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
             assert!(capture.3 != VarType::Const);
@@ -2632,6 +2650,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         arg_expr: &mut FatExpr<'p>,
         mut arg_val: Structured,
     ) -> Res<'p, FuncId> {
+        self.ensure_resolved_sign(original_f)?;
         let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
         self.push_state(&state);
         // Some part of the argument must be known at comptime.
@@ -2765,6 +2784,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - tuple of 32-bit int literals -> aarch64 asm ops
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
+        self.ensure_resolved_body(f)?;
         // TODO: assert f has an arch and a calling convention annotation (I'd rather make people be explicit just guess, even if you can always tell arch).
         let src = asm.log(self.pool);
         let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
