@@ -360,7 +360,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // It's fine to call this redundantly, the first one just takes the constants out of the list.
     fn eval_and_close_local_constants(&mut self, f: FuncId) -> Res<'p, ()> {
         debug_assert!(!self.program[f].evil_uninit);
-        debug_assert!(!self.program[f].evil_uninit);
+        self.ensure_resolved_body(f)?;
         if self.program[f].local_constants.is_empty() {
             // Maybe no consts, or maybe we've already compiled them.
             return Ok(());
@@ -588,7 +588,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program.next_var = next_var;
         arg_name = *mapping.get(&arg_name).unwrap();
         names.extend(mapping); // TODO: just need the args, not all
-        let scope = new_func.args_scope.unwrap();
+        let scope = new_func.scope.unwrap();
 
         new_func.referencable_name = false;
         let arg_ty = self.get_type_for_arg(&mut new_func.arg, arg_name)?;
@@ -713,7 +713,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // also the body constants for generics need this. much cleanup pls.
         // TODO: factor out from normal functions?
 
+        let scope = func.scope.unwrap();
         let f = self.program.add_func(func);
+        self[scope].funcs.push(f);
+
         let func = &self.program[f];
         let args = func.arg.flatten().into_iter();
         let mut arg_values = arg_value.vec().into_iter();
@@ -2091,9 +2094,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         fake_func.resolved_body = true;
         fake_func.finished_arg = Some(TypeId::unit());
         fake_func.finished_ret = Some(ret_ty);
-        fake_func.parent_scope = Some(ScopeId::from_index(0));
-        fake_func.args_scope = Some(ScopeId::from_index(0));
-        fake_func.body_scope = Some(ScopeId::from_index(0));
+        fake_func.scope = Some(ScopeId::from_index(0));
         self.anon_fn_counter += 1;
         if self.ready.sizes.slot_count(self.program, ret_ty) > 1 && self.program.comptime_arch == TargetArch::Aarch64 {
             // println!("imm_eval as flat_call for ret {}", self.program.log_type(ret_ty));
@@ -2126,7 +2127,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         for capture in &func.capture_vars {
             assert!(capture.3 != VarType::Const);
         }
-        let scope = func.args_scope.unwrap();
+        let scope = func.scope.unwrap();
         let id = self.program.add_func(func);
         self[scope].funcs.push(id);
         Ok(id)
@@ -2579,6 +2580,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok((Structured::Const(ty, ret_val), true));
         }
 
+        self.ensure_resolved_sign(fid)?;
         let arg_ty = self.infer_arg(fid)?;
         let mut arg_val = self.compile_expr(result, arg_expr, Some(arg_ty))?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.

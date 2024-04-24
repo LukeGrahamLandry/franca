@@ -275,11 +275,6 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
                 *name = *new;
             }
         }
-        for name in &mut func.capture_vars_const {
-            if let Some(new) = self.mapping.get(name) {
-                *name = *new;
-            }
-        }
     }
 
     fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {
@@ -637,7 +632,6 @@ pub struct Func<'p> {
     pub capture_vars: Vec<Var<'p>>,
     pub local_constants: Vec<FatStmt<'p>>,
     pub loc: Span,
-    pub capture_vars_const: Vec<Var<'p>>,
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
@@ -658,9 +652,8 @@ pub struct Func<'p> {
     pub llvm_ir: Option<Vec<Ident<'p>>>,
     pub resolved_body: bool,
     pub resolved_sign: bool,
-    pub parent_scope: Option<ScopeId>,
-    pub args_scope: Option<ScopeId>,
-    pub body_scope: Option<ScopeId>,
+    // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
+    pub scope: Option<ScopeId>,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -1492,7 +1485,6 @@ impl<'p> Default for Func<'p> {
             capture_vars: vec![],
             local_constants: vec![],
             loc: garbage_loc(),
-            capture_vars_const: vec![],
             finished_arg: None,
             finished_ret: None,
             referencable_name: false,
@@ -1505,9 +1497,7 @@ impl<'p> Default for Func<'p> {
             llvm_ir: None,
             allow_rt_capture: false,
             resolved_body: false,
-            parent_scope: None,
-            args_scope: None,
-            body_scope: None,
+            scope: None,
         }
     }
 }

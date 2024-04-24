@@ -561,10 +561,6 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
     walk.expr(&mut template);
     let placeholders = walk.placeholders;
     assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
-    // TODO: It feels like you should need this but its fine without it.
-    //       tho really its fine for the stuff inside that you're filling in from the macro's caller since they should only be used once.
-    //       you only need to worry about vars declared in the macro handler being copied out multiple times into the same scope.
-    //       -- Apr 21
     compile.program.next_var = template.renumber_vars(compile.program.next_var);
 
     compile.pending_ffi.push(Some(result));

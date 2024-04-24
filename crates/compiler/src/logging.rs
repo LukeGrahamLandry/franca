@@ -645,7 +645,7 @@ impl<'p> PoolLog<'p> for Func<'p> {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
-            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}\n{}llvm={}, aarch64={}\n",
+            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}llvm={}, aarch64={}\n",
             self.synth_name(pool),
             self.get_name(pool),
             self.ret.log(pool),
@@ -658,14 +658,6 @@ impl<'p> PoolLog<'p> for Func<'p> {
                 format!(
                     "Closure capturing: {:?}.",
                     self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
-                )
-            },
-            if self.capture_vars_const.is_empty() {
-                String::from("No const captures.")
-            } else {
-                format!(
-                    "Const capturing: {:?}.",
-                    self.capture_vars_const.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
                 )
             },
             self.llvm_ir.is_some(),
@@ -840,14 +832,6 @@ impl<'p> Func<'p> {
                 self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<String>>()
             );
         }
-        if !self.capture_vars_const.is_empty() {
-            writeln!(
-                s,
-                "- Const captures: {:?}",
-                self.capture_vars_const.iter().map(|v| v.log(pool)).collect::<Vec<String>>()
-            );
-        }
-
         writeln!(s, "====");
         s
     }

@@ -473,7 +473,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             // Require name, optional body.
             Fn => {
                 let is_public = annotations.iter().any(|a| a.name == Flag::Pub.ident());
-                self.fn_stmt(!is_public)?
+                self.fn_stmt(false)?
             }
             Fun => {
                 annotations.push(Annotation {

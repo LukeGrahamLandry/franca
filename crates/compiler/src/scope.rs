@@ -31,61 +31,68 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
     }
 
-    // TODO: will need to keep some state about this for macros that want to add vars?
-    // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn toplevel(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, scope: ScopeId) -> Res<'p, ()> {
-        let mut resolver = Self::new(compiler, scope, stmts.loc);
-        if let Err(mut e) = resolver.run(stmts) {
-            e.loc = e.loc.or(Some(resolver.last_loc));
+    pub fn run(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, scope: ScopeId) -> Res<'p, Vec<Var<'p>>> {
+        let mut r = ResolveScope::new(compiler, scope, func.loc);
+        if let Err(mut e) = r.resolve_func(func) {
+            e.loc = e.loc.or(Some(r.last_loc));
             return Err(e);
         }
-        debug_assert_eq!(resolver.scope, scope, "ICE: unmatched scopes");
-        Ok(())
-    }
-
-    fn run(&mut self, stmts: &mut Func<'p>) -> Res<'p, ()> {
-        self.push_scope(Some(stmts.name));
-        self.resolve_func(stmts)?;
-        let (globals, outer_captures) = self.pop_scope();
-        let outer_captures = outer_captures.expect("well formed blocks (ICE)");
-        debug_assert!(globals.is_empty() && outer_captures.is_empty(), "unreachable?");
-        Ok(())
-    }
-
-    pub fn inner(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, scope: ScopeId) -> Res<'p, Vec<Var<'p>>> {
-        let mut r = ResolveScope::new(compiler, scope, func.loc);
-        r.resolve_func(func)?;
         debug_assert!(r.local_constants.is_empty());
+        debug_assert_eq!(r.scope, scope, "ICE: unmatched scopes");
         Ok(r.captures)
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        self.local_constants.push(Default::default());
-        func.parent_scope = Some(self.scope);
+        let outer = self.scope;
         self.push_scope(Some(func.name));
-        func.args_scope = Some(self.scope);
+        func.scope = Some(self.scope);
+
+        if func.allow_rt_capture {
+            self.resolve_func_args(func)?;
+            self.resolve_func_body(func)?;
+            debug_assert_eq!(self.scope, outer);
+        } else {
+            let mut r = ResolveScope::new(self.compiler, func.scope.unwrap(), self.last_loc);
+            r.resolve_func_args(func)?;
+            debug_assert_eq!(r.scope, func.scope.unwrap());
+            let mut r = ResolveScope::new(self.compiler, func.scope.unwrap(), self.last_loc);
+            r.resolve_func_body(func)?;
+            self.scope = outer;
+        }
+        Ok(())
+    }
+
+    fn resolve_func_args(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
+        debug_assert_eq!(self.scope, func.scope.unwrap());
+        self.local_constants.push(Default::default());
         for b in &mut func.arg.bindings {
             self.resolve_binding(b, true, func.loc)?;
         }
         self.walk_ty(&mut func.ret);
+        let arg_block_const_decls = self.local_constants.pop().unwrap();
+        assert!(arg_block_const_decls.is_empty()); // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
+        debug_assert_eq!(self.scope, func.scope.unwrap());
+        Ok(())
+    }
+
+    fn resolve_func_body(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
+        debug_assert_eq!(self.scope, func.scope.unwrap());
+        self.local_constants.push(Default::default());
         self.push_scope(None);
-        func.body_scope = Some(self.scope);
         func.resolved_body = true;
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)?;
         }
-        let (outer_locals, cap) = self.pop_scope();
+        let cap = self.pop_scope(); // pop inner body scope.
+        debug_assert_eq!(self.scope, func.scope.unwrap());
         debug_assert!(cap.is_none());
-        debug_assert!(outer_locals.is_empty(), "function needs block");
 
-        let (_args, captures) = self.pop_scope();
+        let captures = self.pop_scope(); // pop func.scope.
         let capures = captures.unwrap();
         // Now check which things we captured from *our* parent.
         for c in capures {
             self.find_var(&c.0); // This adds it back to self.captures if needed
-            if c.3 == VarType::Const {
-                func.capture_vars_const.push(c);
-            } else {
+            if c.3 != VarType::Const {
                 func.capture_vars.push(c);
             }
         }
@@ -104,12 +111,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         debug_assert!(func.local_constants.is_empty());
         func.local_constants = self.local_constants.pop().unwrap();
-
         outln!(Scope, "{}", func.log_captures(self.compiler.pool));
         Ok(())
     }
 
-    fn resolve_stmt_if_constant(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
+    fn scan_const_decls(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         let loc = stmt.loc;
         match stmt.deref_mut() {
             Stmt::DeclNamed { name, ty, value, kind } => {
@@ -177,7 +183,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 func.annotations = aaa;
 
                 // Note: not Self::_ because of lifetimes. 'z needs to be different.
-                self.captures.extend(ResolveScope::inner(func, self.compiler, self.scope)?);
+                self.captures.extend(ResolveScope::run(func, self.compiler, self.scope)?);
 
                 self.local_constants
                     .last_mut()
@@ -235,13 +241,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Expr::Block { body, result, resolved } => {
                 self.push_scope(None);
                 for stmt in body.iter_mut() {
-                    self.resolve_stmt_if_constant(stmt)?;
+                    self.scan_const_decls(stmt)?;
                 }
                 for stmt in body.iter_mut() {
                     self.resolve_stmt(stmt)?;
                 }
                 self.resolve_expr(result)?;
-                let (_, cap) = self.pop_scope();
+                let cap = self.pop_scope();
                 debug_assert!(cap.is_none());
                 *resolved = true;
             }
@@ -350,17 +356,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     #[must_use]
-    fn pop_scope(&mut self) -> (Vec<Var<'p>>, Option<Vec<Var<'p>>>) {
+    fn pop_scope(&mut self) -> Option<Vec<Var<'p>>> {
         let s = self.get_scope();
-        let vars = self.compiler[s].wip_local_scopes.pop().unwrap();
-
-        let captures = if self.compiler[s].wip_local_scopes.is_empty() {
+        self.compiler[s].wip_local_scopes.pop().unwrap();
+        if self.compiler[s].wip_local_scopes.is_empty() {
             self.scope = self.compiler[s].parent;
             Some(mem::take(&mut self.captures))
         } else {
             None
-        };
-        (vars, captures)
+        }
     }
 
     fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) -> Res<'p, ()> {
