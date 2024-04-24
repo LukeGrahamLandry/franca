@@ -319,7 +319,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Block {
                 body,
                 result: value,
-                locals,
                 resolved,
             } => {
                 debug_assert!(*resolved);
@@ -329,14 +328,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     self.compile_stmt(result, stmt)?;
                 }
                 self.compile_expr(result, value, output)?;
-
-                for local in locals.as_ref().expect("resolve failed") {
-                    if let Some((_, _ty)) = result.vars.remove(local) {
-                    } else if result.constants.get(*local).is_none() {
-                        self.last_loc = Some(expr.loc);
-                        ice!("Missing local {}", local.log(self.program.pool))
-                    }
-                }
 
                 // TODO: check if you try to let an address to a variable escape from its scope.
                 // TODO: redundant with ^ but i dont trust
@@ -375,18 +366,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         });
                     } else {
                         result.push(Bc::CloneRange { from, to: output });
-                    }
-                } else if let Some((value, ty)) = result.constants.get(*var) {
-                    let value = value.vec();
-                    debug_assert_eq!(output.count, self.slot_count(ty));
-                    debug_assert_eq!(output.count, value.len(), "const: {} = {value:?}", self.program.log_type(ty));
-                    // TODO: sometimes you probably want to reference by pointer
-                    //       like this will load a string byte by byte
-                    for (i, value) in value.into_iter().enumerate() {
-                        result.push(Bc::LoadConstant {
-                            slot: output.offset(i),
-                            value,
-                        });
                     }
                 } else {
                     ice!("Missing resolved variable {:?}", var.log(self.program.pool),)
@@ -531,15 +510,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         of: stack_slot,
                         to: addr_slot.single(),
                     });
-                } else if let Some(value) = result.constants.get(*var) {
-                    // HACK: this is wrong but it makes constant structs work better.
-                    if let TypeInfo::Ptr(_) = self.program[value.1] {
-                        result.push(Bc::LoadConstant {
-                            slot: addr_slot.single(),
-                            value: value.0.single()?,
-                        });
-                    }
-                    err!("Took address of constant {}", var.log(self.program.pool))
                 } else {
                     ice!("Missing var {} (in !addr)", var.log(self.program.pool))
                 }

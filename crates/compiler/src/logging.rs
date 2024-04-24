@@ -120,7 +120,8 @@ pub enum LogTag {
     Jitted = 9,
     RtRust = 10,
     Perf = 11,
-    _Last = 12,
+    Consts = 12,
+    _Last = 13,
 }
 
 pub struct LogSettings {
@@ -849,7 +850,7 @@ impl<'p> FatStmt<'p> {
 impl<'p> Func<'p> {
     pub fn log_captures(&self, pool: &StringPool<'p>) -> String {
         let mut s = String::new();
-        writeln!(s, "Scope for fn {:?}", self.synth_name(pool));
+        writeln!(s, "fn {:?}", self.synth_name(pool));
         if !self.capture_vars.is_empty() {
             writeln!(
                 s,

@@ -848,7 +848,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             resolved: false,
             body,
             result: Box::new(result),
-            locals: None,
         }))
     }
 

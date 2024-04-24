@@ -19,6 +19,7 @@ use std::mem::{transmute, ManuallyDrop};
 use std::path::PathBuf;
 
 use ast::FuncId;
+use ast::ScopeId;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::{CErr, Res};
@@ -160,7 +161,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
     };
 
     let mut global = make_toplevel(comp.pool, user_span, parsed.stmts);
-    ResolveScope::of(&mut global, comp)?;
+    ResolveScope::toplevel(&mut global, comp, ScopeId::from_index(0))?;
     let f = comp.compile_top_level(global)?;
     Ok((f, parsed.lines))
 }
@@ -267,6 +268,43 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
         }
     }
 
+    let log_scope = |s: ScopeId| {
+        let scope = &comp[s];
+        let pad = format!("{}({}) ", "=".repeat(scope.depth), scope.depth);
+        if !scope.constants.is_empty() || scope.funcs.len() > 1 {
+            outln!(
+                Consts,
+                "{pad}fn '{}'; scope {} has parent {}; specializations: {:?};",
+                comp.pool.get(scope.name),
+                s.as_index(),
+                scope.parent.as_index(),
+                scope.funcs
+            );
+
+            let mut consts = scope.constants.iter().collect::<Vec<_>>();
+            consts.sort_by(|(a, _), (b, _)| a.1.cmp(&b.1));
+            for (var, (e, ty)) in consts {
+                outln!(Consts, "{pad}- {}: {} = {};", var.log(comp.pool), ty.log(comp.pool), e.log(comp.pool),);
+            }
+        }
+        // if !scope.vars.is_empty() {
+        //     outln!(
+        //         Consts,
+        //         "{pad}VARS: {:?}",
+        //         scope
+        //             .vars
+        //             .iter()
+        //             .filter(|v| v.3 != VarType::Const)
+        //             .map(|v| v.log(comp.pool))
+        //             .collect::<Vec<_>>()
+        //     );
+        // }
+    };
+
+    for s in 0..comp.scopes.len() {
+        log_scope(ScopeId::from_index(s));
+    }
+
     println!("{}", get_logs(ShowPrint));
     let err = get_logs(ShowErr);
     if !err.is_empty() {
@@ -338,7 +376,6 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
             resolved: false,
             body: stmts,
             result: Box::new(FatExpr::synthetic(Expr::unit(), user_span)),
-            locals: None,
         },
         user_span,
     ));

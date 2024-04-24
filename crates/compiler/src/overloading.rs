@@ -1,4 +1,4 @@
-use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var, VarType};
 use crate::bc::{FuncRef, Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::{LogTag, PoolLog};
@@ -17,10 +17,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
-                // TODO: only grab here if its a constant, might be a function pointer.
-                let id = self.resolve_function(result, i, arg, ret)?; // TODO: error here is probably fine, just return None
-                                                                      // println!("Choose {id:?} for {}", f.log(self.pool));
-                Some(id)
+                if i.3 == VarType::Const {
+                    let id = self.resolve_function(result, i, arg, ret)?; // TODO: error here is probably fine, just return None
+                    Some(id)
+                } else {
+                    None
+                }
             }
             &mut Expr::Value {
                 value: Values::One(Value::SplitFunc { ct, rt }),
@@ -80,7 +82,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
-        let value = if let Some((value, _)) = result.constants.get(name) {
+        let value = if let Some((value, _)) = self.find_const(result, name) {
             if let Values::One(Value::GetFn(f)) = value {
                 self.named_args_to_tuple(result, arg, f)?;
                 self.pop_state(state);
@@ -90,6 +92,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert_ne!(ct, rt);
                 self.pop_state(state);
                 return Ok(FuncRef::Split { ct, rt });
+            }
+            if let Values::One(Value::GetNativeFnPtr(_)) = value {
+                err!("TODO: const GetNativeFnPtr?",)
             }
             value
         } else {

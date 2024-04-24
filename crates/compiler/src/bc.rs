@@ -323,9 +323,10 @@ impl<'p> Constants<'p> {
     pub fn add_all(&mut self, other: &Self) {
         debug_assert!(self.is_valid && other.is_valid);
         for (k, v) in other.local.iter() {
-            let _prev = self.insert(*k, v.clone());
-            // TODO: this seems like a problem
-            // assert!(prev.is_none() || prev.as_ref().unwrap() == v, "{:?} = {:?} -> {:?}", k, prev.unwrap(), v);
+            let prev = self.insert(*k, v.clone());
+            // fixed by renumbering closures.
+            // TODO: still why do we add multiple times? i think im just not checking when adding closure captures?  -- Apr 23
+            debug_assert!(prev.is_none() || prev.as_ref().unwrap() == v, "{:?} = {:?} -> {:?}", k, prev.unwrap(), v);
         }
     }
 

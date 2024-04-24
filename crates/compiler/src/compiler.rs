@@ -15,7 +15,9 @@ use std::ops::DerefMut;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::{ops::Deref, panic::Location};
 
-use crate::ast::{Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst};
+use crate::ast::{
+    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst,
+};
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
@@ -78,7 +80,7 @@ pub struct Compile<'a, 'p: 'a> {
     pub aarch64: Jitted,
     pub ready: BcReady<'p>,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
-    scopes: Vec<Scope<'p>>,
+    pub scopes: Vec<Scope<'p>>,
 }
 
 pub struct Scope<'p> {
@@ -87,6 +89,8 @@ pub struct Scope<'p> {
     pub vars: Vec<Var<'p>>,
     pub depth: usize,
     pub wip_local_scopes: Vec<Vec<Var<'p>>>,
+    pub funcs: Vec<FuncId>,
+    pub name: Ident<'p>,
 }
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
@@ -116,6 +120,7 @@ pub struct FnWip<'p> {
     pub last_loc: Span,
     pub constants: Constants<'p>,
     pub callees: Vec<(FuncId, ExecTime)>,
+    pub body_scopes: Vec<ScopeId>,
 }
 
 pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
@@ -137,7 +142,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             pending_ffi: vec![],
             scopes: vec![],
         };
-        c.new_scope(ScopeId::from_index(0));
+        c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident());
         c
     }
 
@@ -157,7 +162,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         out
     }
 
-    pub fn new_scope(&mut self, parent: ScopeId) -> ScopeId {
+    pub fn new_scope(&mut self, parent: ScopeId, name: Ident<'p>) -> ScopeId {
         let depth = if self.scopes.is_empty() { 0 } else { self[parent].depth + 1 }; // HACK
         self.scopes.push(Scope {
             parent,
@@ -165,6 +170,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             vars: Default::default(),
             depth,
             wip_local_scopes: vec![],
+            funcs: vec![],
+            name,
         });
         ScopeId::from_index(self.scopes.len() - 1)
     }
@@ -339,7 +346,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span, parent: Option<Constants<'p>>) -> FnWip<'p> {
+    fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span, parent: Option<Constants<'p>>, scope: ScopeId) -> FnWip<'p> {
         FnWip {
             stack_slots: 0,
             vars: Default::default(),
@@ -349,6 +356,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             last_loc: loc,
             constants: parent.unwrap_or_else(|| self.program[func].closed_constants.clone()),
             callees: vec![],
+            body_scopes: vec![scope],
         }
     }
 
@@ -364,6 +372,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::EvalConstants(f, self.program[f].name);
         self.push_state(&state);
         let loc = self.program[f].loc;
+        let s = self.program[f].body_scope.unwrap();
 
         mut_replace!(self.program[f].closed_constants, |constants| {
             let mut result = self.empty_fn(
@@ -371,6 +380,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 FuncId::from_index(f.as_index() + 10000000), // TODO: do i even need to pass an index? probably just for debugging
                 loc,
                 Some(constants),
+                s,
             );
 
             mut_replace!(self.program[f].local_constants, |mut local_constants| {
@@ -399,7 +409,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         debug_assert!(!func.evil_uninit);
         debug_assert!(func.closed_constants.is_valid);
-        assert!(func.resolved_body);
+        self.ensure_resolved_body(f)?;
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
         assert!(!self.program[f].any_const_args());
         let before = self.debug_trace.len();
@@ -412,7 +422,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(template) = func.any_reg_template {
             self.ensure_compiled(template, ExecTime::Comptime)?;
         } else {
-            let mut result = self.empty_fn(when, f, func.loc, None);
+            let s = self.program[f].body_scope.unwrap();
+            let mut result = self.empty_fn(when, f, func.loc, None, s);
             self.emit_body(&mut result, f)?;
             self.program[f].wip = Some(result);
         }
@@ -533,6 +544,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
         self.currently_inlining.push(f);
 
+        let s = self.program[f].body_scope.unwrap();
+        add_unique(&mut result.body_scopes, s);
+
         // We close them into f's Func, but we need to emit
         // into the caller's body.
         self.eval_and_close_local_constants(f)?;
@@ -554,15 +568,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: failing this check seems like a problem. but seems to be only with macros.
             //       I think the problem is that you resolve into !quote so if you have an !unquote in a closure body there,
             //       it thinks it captures stuff for the expr that makes the ast instead of the expr that gets produced.  -- Apr 23
-            let _found = result.constants.get(*capture).is_some() || func.closed_constants.get(*capture).is_some();
-            let _msg = capture.log(self.pool);
+            // let _found = result.constants.get(*capture).is_some() || func.closed_constants.get(*capture).is_some();
+            // let _msg = capture.log(self.pool);
             // assert!(found, "Missing const capture {} for {:?}. outer: {:?}", msg, f, result.func);
         }
         let my_consts = &func.closed_constants;
         result.constants.add_all(my_consts);
 
         let pattern = func.arg.clone();
-        let locals = func.arg.collect_vars();
 
         // TODO: can I mem::take func.body? I guess not because you're allowed to call multiple times, but that's sad for the common case of !if/!while.
         // TODO: dont bother if its just unit args (which most are because of !if and !while).
@@ -579,7 +592,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 loc,
             }],
             result: Box::new(func.body.as_ref().unwrap().clone()),
-            locals: Some(locals), // Note: just the declarations in this block, not recursivly bubbled up.
         };
         self.program.next_var = expr_out.renumber_vars(self.program.next_var); // Note: not renumbering on the function. didn't need to clone it.
 
@@ -599,8 +611,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       The cloning is only better for runtime functions where we're trying to output a simpler ast that an optimiser can specialize.
     // Curry a function from fn(a: A, @comptime b: B) to fn(a: A)
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
-    fn bind_const_arg(&mut self, o_f: FuncId, arg_name: Var<'p>, arg: Structured) -> Res<'p, FuncId> {
+    fn bind_const_arg(&mut self, o_f: FuncId, mut arg_name: Var<'p>, arg: Structured, names: &mut HashMap<Var<'p>, Var<'p>>) -> Res<'p, FuncId> {
         let mut new_func = self.program[o_f].clone();
+        let (next_var, mapping) = new_func.renumber_vars(self.program.next_var);
+        self.program.next_var = next_var;
+        arg_name = *mapping.get(&arg_name).unwrap();
+        names.extend(mapping); // TODO: just need the args, not all
+        let scope = new_func.args_scope.unwrap();
+
         new_func.referencable_name = false;
         let arg_ty = self.get_type_for_arg(&new_func.closed_constants, &mut new_func.arg, arg_name)?;
         self.type_check_arg(arg.ty(), arg_ty, "bind arg")?;
@@ -624,19 +642,23 @@ impl<'a, 'p> Compile<'a, 'p> {
                 add_unique(&mut new_func.capture_vars, *v);
             }
 
+            // TODO: filter for only captures?  -- Apr 23
             new_func.closed_constants.add_all(&arg_func_obj.closed_constants);
             // :ChainedCaptures
             // TODO: HACK: captures aren't tracked properly.
             new_func.add_tag(Flag::Inline); // just this is enough to fix chained_captures
             self.program[*arg_func].add_tag(Flag::Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
         }
-        let prev = new_func.closed_constants.insert(arg_name, (arg_value, arg_ty));
+        let prev = new_func.closed_constants.insert(arg_name, (arg_value.clone(), arg_ty));
         debug_assert!(prev.is_none(), "stomp");
+
+        self.save_const_values(arg_name, arg_value, arg_ty)?;
         new_func.arg.remove_named(arg_name);
 
         let known_type = new_func.finished_arg.is_some();
         new_func.finished_arg = None;
         let f_id = self.program.add_func(new_func);
+        self[scope].funcs.push(f_id);
         outln!(
             LogTag::Generics,
             "  => {f_id:?} with captures {:?}",
@@ -683,8 +705,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
+        let s = func.body_scope.unwrap();
+        add_unique(&mut result.body_scopes, s);
         func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
-        self.program.next_var = func.renumber_vars(self.program.next_var);
+        self.program.next_var = func.renumber_vars(self.program.next_var).0;
 
         // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
         //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
@@ -742,8 +766,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert_eq!(kind, VarType::Const, "@comptime arg not const in {}", self.pool.get(self.program[f].name)); // not outside the check because of implicit Unit.
                 let prev = self.program[f].closed_constants.insert(var, (values.clone().into(), ty));
                 assert!(prev.is_none(), "overwrite arg?");
-                let prev = result.constants.insert(var, (values.into(), ty));
+                let prev = result.constants.insert(var, (values.clone().into(), ty));
                 assert!(prev.is_none(), "overwrite arg?");
+                self.save_const_values(var, values.into(), ty)?; // this is fine cause we renumbered at the top.
             }
         }
         assert!(arg_values.next().is_none(), "ICE: unused arguments");
@@ -795,6 +820,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
+                debug_assert!(func.resolved_body);
                 let mut func = mem::take(func);
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(Flag::Bs);
@@ -816,6 +842,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     func.finished_ret = Some(ty);
                     if let Some(name) = func.var_name {
                         result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
+                        self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
                     }
                     // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
                     //       with new commitment to doing it without idents for modules, the answer is yes.
@@ -846,6 +873,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     func.finished_ret = Some(ty);
                     if let Some(name) = func.var_name {
                         result.constants.local.insert(name, (Value::Type(ty).into(), TypeId::ty()));
+                        self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
                     }
                     // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
                     func.name = Flag::Init.ident();
@@ -895,7 +923,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if referencable_name && !is_enum && !is_struct {
                         // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
                         // TODO: distinguish between overload sets that you add to and those that you re-export
-                        if let Some(overloads) = result.constants.get(var) {
+                        if let Some(overloads) = self.find_const(result, var) {
                             let i = overloads.0.as_overload_set()?;
                             let os = &mut self.program.overload_sets[i];
                             assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
@@ -909,6 +937,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 public,
                             });
                             result.constants.insert(var, (Value::OverloadSet(index).into(), TypeId::overload_set()));
+                            self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set())?;
                         }
                     }
                 }
@@ -937,7 +966,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
-            Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations)?,
+            Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?,
             // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn.
             //       be able to expand this into multiple statements so backend never even sees a DeclVarPattern (and skip constants when doing so)
             // TODO: this is extremly similar to what bind_const_arg has to do. should be able to express args as this thing?
@@ -951,7 +980,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if arguments.len() == 1 {
                     let (name, ty, kind) = arguments.into_iter().next().unwrap();
                     if let Some(name) = name {
-                        self.decl_var(result, name, &mut LazyType::Finished(ty), value, kind, &stmt.annotations)?;
+                        self.decl_var(result, name, &mut LazyType::Finished(ty), value, kind, &stmt.annotations, stmt.loc)?;
                         if kind == VarType::Const {
                             debug_assert_eq!(binding.bindings.len(), 1);
                             binding.bindings.clear();
@@ -976,9 +1005,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 for ((name, ty, kind), expr) in arguments.iter().zip(exprs.iter_mut()) {
                     if let Some(name) = name {
+                        let loc = expr.loc;
                         // TODO: HACK. make value not optional. cant just flip because when missing decl_var wants to put something there for imports. makes it hard. need to have a marker expr for missing value??
                         let mut value = Some(mem::take(expr));
-                        self.decl_var(result, *name, &mut LazyType::Finished(*ty), &mut value, *kind, &stmt.annotations)?;
+                        self.decl_var(result, *name, &mut LazyType::Finished(*ty), &mut value, *kind, &stmt.annotations, loc)?;
                         *expr = value.unwrap();
                     } else {
                         assert!(expr.expr.is_raw_unit(), "var no name not unit");
@@ -1009,6 +1039,31 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub fn find_const(&mut self, result: &FnWip<'p>, var: Var<'p>) -> Option<(Values, TypeId)> {
+        if let Some(s) = self[var.2].constants.get(&var) {
+            if let Expr::Value { ty, value } = &s.0.expr {
+                return Some((value.clone(), *ty));
+            }
+        }
+        debug_assert!(result.constants.get(var).is_none(), "missing from scope: {}", var.log(self.pool),);
+        None
+    }
+
+    pub fn find_const_type(&mut self, result: &FnWip<'p>, var: Var<'p>) -> Option<TypeId> {
+        self.find_const(result, var).map(|(_, ty)| ty)
+    }
+
+    pub fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
+        assert!(self.program[f].resolved_sign);
+        Ok(())
+    }
+
+    pub fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
+        self.ensure_resolved_sign(f)?;
+        assert!(self.program[f].resolved_body);
         Ok(())
     }
 
@@ -1109,7 +1164,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     match f_id {
                         FuncRef::Exact(f_id) => return Ok(self.compile_call(result, expr, f_id, requested)?.0),
-                        FuncRef::Split { ct, rt } => return self.compile_split_call(result, expr, ct, rt, requested),
+                        FuncRef::Split { ct, rt } => return self.compile_split_call(result, expr, ct, rt),
                     }
                 }
                 ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
@@ -1143,7 +1198,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some(ty) = result.vars.get(var).cloned() {
                     Structured::RuntimeOnly(ty)
-                } else if let Some((value, ty)) = result.constants.get(*var) {
+                } else if let Some((value, ty)) = self.find_const(result, *var) {
+                    expr.expr = Expr::Value { ty, value: value.clone() };
+                    expr.ty = ty;
                     Structured::Const(ty, value)
                 } else {
                     outln!(ShowErr, "VARS: {:?}", result.vars);
@@ -1432,7 +1489,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ty: TypeId::i64(),
                     value: Values::One(Value::I64(i as i64)),
                 };
-                self.index_expr(result, ptr, i)?
+                self.index_expr(ptr, i)?
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => self.construct_struct(result, requested, pattern)?,
@@ -1583,7 +1640,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     let ptr_ty = self.program.ptr_type(value_ty);
                     Ok(Structured::RuntimeOnly(ptr_ty))
-                } else if let Some(value) = result.constants.get(*var) {
+                } else if let Some(value) = self.find_const(result, *var) {
                     // HACK: this is wrong but it makes constant structs work bette
                     if let TypeInfo::Ptr(_) = self.program[value.1] {
                         return Ok(value.into());
@@ -1667,18 +1724,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
-                    if let Some(ty) = result.vars.get(i) {
-                        if let TypeInfo::FnPtr(f_ty) = self.program[*ty] {
-                            return Ok(Some(f_ty.ret));
+                    if i.3 == VarType::Const {
+                        if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
+                            if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
+                                // Need to save this because resolving overloads eats named arguments
+                                f.expr = Expr::Value {
+                                    ty: self.program.func_type(fid.at_rt()),
+                                    value: fid.as_value().into(),
+                                };
+                                return Ok(Some(f_ty.ret));
+                            }
                         }
-                    }
-                    if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
-                        if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
-                            // Need to save this because resolving overloads eats named arguments
-                            f.expr = Expr::Value {
-                                ty: self.program.func_type(fid.at_rt()),
-                                value: fid.as_value().into(),
-                            };
+                    } else if let Some(ty) = result.vars.get(i) {
+                        if let TypeInfo::FnPtr(f_ty) = self.program[*ty] {
                             return Ok(Some(f_ty.ret));
                         }
                     }
@@ -1810,7 +1868,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some(ty) = result.vars.get(var).cloned() {
                     ty
-                } else if let Some((_, ty)) = result.constants.get(*var) {
+                } else if let Some(ty) = self.find_const_type(result, *var) {
                     ty
                 } else {
                     // ice!("type check missing var {:?}", var.log(self.pool))
@@ -2082,6 +2140,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         fake_func.closed_constants = constants.clone();
         fake_func.finished_arg = Some(TypeId::unit());
         fake_func.finished_ret = Some(ret_ty);
+        fake_func.parent_scope = Some(ScopeId::from_index(0));
+        fake_func.args_scope = Some(ScopeId::from_index(0));
+        fake_func.body_scope = Some(ScopeId::from_index(0));
         self.anon_fn_counter += 1;
         if self.ready.sizes.slot_count(self.program, ret_ty) > 1 && self.program.comptime_arch == TargetArch::Aarch64 {
             // println!("imm_eval as flat_call for ret {}", self.program.log_type(ret_ty));
@@ -2116,12 +2177,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
             assert!(capture.3 != VarType::Const);
-            // TODO is this only because i started putting things in consts instead of also somewhere else a long time ago? -- Apr 22
-            if let Some(val) = constants.get(*capture) {
-                func.closed_constants.insert(*capture, val);
-            }
         }
+        let scope = func.args_scope.unwrap();
         let id = self.program.add_func(func);
+        self[scope].funcs.push(id);
         Ok(id)
     }
 
@@ -2439,8 +2498,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // TODO: desugar field access into this.
-    fn index_expr(&mut self, _result: &mut FnWip<'p>, container_ptr: Structured, index: usize) -> Res<'p, Structured> {
+    fn index_expr(&mut self, container_ptr: Structured, index: usize) -> Res<'p, Structured> {
         let container_ptr_ty = self.program.raw_type(container_ptr.ty());
         let depth = self.program.ptr_depth(container_ptr_ty);
         assert_eq!(depth, 1, "index expr ptr must be one level of indirection");
@@ -2635,7 +2693,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let (name, _, kind) = pattern.into_iter().next().unwrap();
             debug_assert_eq!(kind, VarType::Const);
             let name = unwrap!(name, "arg needs name (unreachable?)");
-            let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
+            let current_fn = self.bind_const_arg(original_f, name, arg_val, &mut HashMap::new())?;
             arg_expr.expr = Expr::unit();
             arg_expr.ty = TypeId::unit();
 
@@ -2691,11 +2749,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut skipped_args = vec![];
                     let mut skipped_types = vec![];
                     let mut removed = 0;
+                    let mut mapping = HashMap::new();
                     for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
                         if kind == VarType::Const {
-                            let name = unwrap!(name, "arg needs name (unreachable?)");
+                            let mut name = unwrap!(name, "arg needs name (unreachable?)");
+                            while let Some(new) = mapping.get(&name) {
+                                name = *new;
+                            }
                             // bind_const_arg handles adding closure captures.
-                            current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
+                            // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
+                            current_fn = self.bind_const_arg(current_fn, name, arg_value, &mut mapping)?;
                             // TODO: this would be better if i was iterating backwards
                             arg_exprs.remove(i - removed);
                             removed += 1; // TODO: this sucks
@@ -2854,6 +2917,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn decl_var(
         &mut self,
         result: &mut FnWip<'p>,
@@ -2862,6 +2926,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         value: &mut Option<FatExpr<'p>>,
         kind: VarType,
         _annotations: &[Annotation<'p>],
+        loc: Span,
     ) -> Res<'p, ()> {
         let no_type = matches!(ty, LazyType::Infer);
         self.infer_types_progress(&result.constants, ty)?;
@@ -2973,16 +3038,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     value: val.clone(),
                 };
                 if let Some(e) = value {
-                    e.expr = val_expr;
+                    e.expr = val_expr.clone();
                 } else {
                     // this no longer happens since i temp removed modules. only @import got here.
-                    // TODO: use stmt.loc
-                    //*value = Some(FatExpr::synthetic(val_expr, garbage_loc()));
                     todo!();
                 }
                 let prev = result.constants.insert(name, (val, final_ty));
                 assert!(prev.is_none());
-                // println!("{}", self.program.log_consts(&result.constants));
+                self.save_const(name, val_expr, final_ty, loc)?;
             }
             VarType::Let | VarType::Var => {
                 let final_ty = match value {
@@ -3014,6 +3077,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program.intern_type(TypeInfo::Ptr(final_ty));
 
                 let _prev = result.vars.insert(name, final_ty);
+                // its not a constant so its probablby not a super huge deal? -- Apr 23
                 // TODO: closures break this
                 // assert!(prev.is_none(), "shadow is still new var {}", name.log(self.pool));
             }
@@ -3021,13 +3085,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
+    // Note: don't care about the requested type because functions are already resolved.
     fn compile_split_call(
         &mut self,
         result: &mut FnWip<'p>,
         expr: &mut FatExpr<'p>,
         mut ct: FuncId,
         mut rt: FuncId,
-        _requested: Option<TypeId>,
     ) -> Result<Structured, CompileError<'p>> {
         debug_assert_ne!(ct, rt);
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
@@ -3105,6 +3169,31 @@ impl<'a, 'p> Compile<'a, 'p> {
             unsafe { __clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
         }
     }
+
+    fn save_const(&mut self, name: Var<'p>, val_expr: Expr<'p>, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
+        if let Some((val, ty)) = self[name.2].constants.get_mut(&name) {
+            if matches!(ty, LazyType::Finished(_)) {
+                err!("ICE: tried to re-save constant {}", name.log(self.pool));
+            }
+            val.expr = val_expr;
+            val.ty = final_ty;
+            *ty = LazyType::Finished(final_ty);
+        } else {
+            // I think this just means we renumbered for a specialization.
+            let e = FatExpr {
+                loc,
+                expr: val_expr,
+                ty: final_ty,
+            };
+            let val = (e, LazyType::Finished(final_ty));
+            self[name.2].constants.insert(name, val);
+        }
+        Ok(())
+    }
+
+    fn save_const_values(&mut self, name: Var<'p>, value: Values, final_ty: TypeId) -> Res<'p, ()> {
+        self.save_const(name, Expr::Value { ty: final_ty, value }, final_ty, garbage_loc())
+    }
 }
 
 pub fn insert_multi<K: Hash + Eq, V: Eq>(set: &mut HashMap<K, Vec<V>>, key: K, value: V) {
@@ -3180,9 +3269,9 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
         if let Expr::SuffixMacro(name, arg) = &mut expr.expr {
             if *name == Flag::Unquote.ident() {
                 let expr_ty = FatExpr::get_type(self.compiler.program);
-                self.compiler
-                    .compile_expr(self.result, arg, Some(expr_ty))
-                    .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO
+                // self.compiler
+                //     .compile_expr(self.result, arg, Some(expr_ty))
+                //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO
                 let loc = arg.loc;
                 let placeholder = Expr::Value {
                     ty: TypeId::i64(),

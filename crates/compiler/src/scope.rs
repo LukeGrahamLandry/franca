@@ -17,56 +17,66 @@ pub struct ResolveScope<'z, 'a, 'p> {
     local_constants: Vec<Vec<FatStmt<'p>>>,
     compiler: &'z mut Compile<'a, 'p>,
     last_loc: Span,
-    scope_stack: Vec<ScopeId>,
+    scope: ScopeId,
 }
 
 impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
-    // TODO: we know when we're at the top level where order doesn't matter, so should prescan for decls?
-    //       then functions could be delt with here too.
-    // TODO: will need to keep some state about this for macros that want to add vars?
-    // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
-    pub fn of(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
-        let mut resolver = ResolveScope {
+    fn new(compiler: &'z mut Compile<'a, 'p>, scope: ScopeId, last_loc: Span) -> Self {
+        ResolveScope {
             captures: Default::default(),
             local_constants: Default::default(),
             compiler,
-            last_loc: stmts.loc,
-            scope_stack: vec![ScopeId::from_index(0)],
-        };
+            last_loc,
+            scope,
+        }
+    }
+
+    // TODO: will need to keep some state about this for macros that want to add vars?
+    // TODO: instead of doing this up front, should do this tree walk at the same time as the interp is doing it?
+    pub fn toplevel(stmts: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, scope: ScopeId) -> Res<'p, ()> {
+        let mut resolver = Self::new(compiler, scope, stmts.loc);
         if let Err(mut e) = resolver.run(stmts) {
             e.loc = e.loc.or(Some(resolver.last_loc));
             return Err(e);
         }
-        assert!(resolver.scope_stack.len() == 1, "ICE: unmatched scopes");
+        debug_assert_eq!(resolver.scope, scope, "ICE: unmatched scopes");
         Ok(())
     }
 
     fn run(&mut self, stmts: &mut Func<'p>) -> Res<'p, ()> {
-        self.push_scope(true);
-        self.push_scope(true);
+        self.push_scope(Some(stmts.name));
         self.resolve_func(stmts)?;
-        let (_globals, _captured_imports) = self.pop_scope();
-        let (_imports, outer_captures) = self.pop_scope();
+        let (globals, outer_captures) = self.pop_scope();
         let outer_captures = outer_captures.expect("well formed blocks (ICE)");
-        assert!(outer_captures.is_empty(), "unreachable? {:?}", outer_captures);
+        debug_assert!(globals.is_empty() && outer_captures.is_empty(), "unreachable?");
         Ok(())
+    }
+
+    pub fn inner(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>, scope: ScopeId) -> Res<'p, Vec<Var<'p>>> {
+        let mut r = ResolveScope::new(compiler, scope, func.loc);
+        r.resolve_func(func)?;
+        debug_assert!(r.local_constants.is_empty());
+        Ok(r.captures)
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
         self.local_constants.push(Default::default());
-        self.push_scope(true);
+        func.parent_scope = Some(self.scope);
+        self.push_scope(Some(func.name));
+        func.args_scope = Some(self.scope);
         for b in &mut func.arg.bindings {
             self.resolve_binding(b, true, func.loc)?;
         }
         self.walk_ty(&mut func.ret);
-        self.push_scope(false);
+        self.push_scope(None);
+        func.body_scope = Some(self.scope);
         func.resolved_body = true;
         if let Some(body) = &mut func.body {
             self.resolve_expr(body)?;
         }
         let (outer_locals, cap) = self.pop_scope();
-        assert!(cap.is_none());
-        assert!(outer_locals.is_empty(), "function needs block");
+        debug_assert!(cap.is_none());
+        debug_assert!(outer_locals.is_empty(), "function needs block");
 
         let (_args, captures) = self.pop_scope();
         let capures = captures.unwrap();
@@ -118,9 +128,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::DeclFunc(func) => {
                 assert!(func.referencable_name);
                 // Functions don't shadow, they just add to an overload group.
-                // TODO: what happens if you're shadowing a normal variable? just err maybe?
                 // TOOD: @pub vs @private
                 if let Some(v) = self.find_var(&func.name) {
+                    assert!(v.3 == VarType::Const);
                     func.var_name = Some(v);
                 } else {
                     let v = self.decl_var(&func.name, VarType::Const, func.loc)?;
@@ -148,7 +158,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         match stmt.deref_mut() {
             Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
-                assert!(*kind != VarType::Const);
+                debug_assert!(*kind != VarType::Const);
                 self.walk_ty(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
@@ -165,14 +175,17 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Stmt::DeclFunc(func) => {
                 func.annotations = aaa;
-                self.resolve_func(func)?;
+
+                // Note: not Self::_ because of lifetimes. 'z needs to be different.
+                self.captures.extend(ResolveScope::inner(func, self.compiler, self.scope)?);
+
                 self.local_constants
                     .last_mut()
                     .unwrap()
                     .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
             }
             Stmt::DeclVar { kind, ty, value, .. } => {
-                assert!(*kind == VarType::Const);
+                debug_assert!(*kind == VarType::Const);
                 self.walk_ty(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
@@ -219,14 +232,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.resolve_expr(arg)?;
                 self.resolve_expr(target)?;
             }
-            Expr::Block {
-                body,
-                result,
-                locals,
-                resolved,
-            } => {
-                assert!(locals.is_none());
-                self.push_scope(false);
+            Expr::Block { body, result, resolved } => {
+                self.push_scope(None);
                 for stmt in body.iter_mut() {
                     self.resolve_stmt_if_constant(stmt)?;
                 }
@@ -234,9 +241,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     self.resolve_stmt(stmt)?;
                 }
                 self.resolve_expr(result)?;
-                let (vars, cap) = self.pop_scope();
-                assert!(cap.is_none());
-                *locals = Some(vars);
+                let (_, cap) = self.pop_scope();
+                debug_assert!(cap.is_none());
                 *resolved = true;
             }
             Expr::Tuple(values) => {
@@ -258,7 +264,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Expr::GetVar(_) => unreachable!("added by this pass {expr:?}"),
             Expr::FieldAccess(e, _) => self.resolve_expr(e)?,
             Expr::StructLiteralP(p) => {
-                self.push_scope(false);
+                self.push_scope(None);
                 for b in &mut p.bindings {
                     self.resolve_binding(b, true, loc)?;
                 }
@@ -310,7 +316,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn decl_var(&mut self, name: &Ident<'p>, kind: VarType, loc: Span) -> Res<'p, Var<'p>> {
-        let s = *self.scope_stack.last().unwrap();
+        let s = self.scope;
         // Note: you can't shadow a let with a const either but that already works because consts are done first.
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
@@ -331,14 +337,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn get_scope(&self) -> ScopeId {
-        *self.scope_stack.last().unwrap()
+        self.scope
     }
 
-    fn push_scope(&mut self, track_captures: bool) {
+    fn push_scope(&mut self, name: Option<Ident<'p>>) {
         let mut scope = self.get_scope();
-        if track_captures {
-            scope = self.compiler.new_scope(scope);
-            self.scope_stack.push(scope);
+        if let Some(name) = name {
+            scope = self.compiler.new_scope(scope, name);
+            self.scope = scope;
         }
         self.compiler[scope].wip_local_scopes.push(vec![]);
     }
@@ -349,7 +355,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let vars = self.compiler[s].wip_local_scopes.pop().unwrap();
 
         let captures = if self.compiler[s].wip_local_scopes.is_empty() {
-            self.scope_stack.pop().unwrap();
+            self.scope = self.compiler[s].parent;
             Some(mem::take(&mut self.captures))
         } else {
             None

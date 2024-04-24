@@ -112,7 +112,6 @@ pub enum Expr<'p> {
         resolved: bool,
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
-        locals: Option<Vec<Var<'p>>>, // useful information for calling drop
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
@@ -290,16 +289,6 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
             }
         }
         true
-    }
-
-    fn post_walk_expr(&mut self, expr: &mut FatExpr<'p>) {
-        if let Expr::Block { locals: Some(locals), .. } = &mut expr.expr {
-            for var in locals {
-                if let Some(new) = self.mapping.get(var) {
-                    *var = *new
-                } // TODO: else seems like a problem
-            }
-        }
     }
 
     fn pre_walk_stmt(&mut self, stmt: &mut FatStmt<'p>) {
@@ -669,6 +658,10 @@ pub struct Func<'p> {
     pub any_reg_template: Option<FuncId>,
     pub llvm_ir: Option<Vec<Ident<'p>>>,
     pub resolved_body: bool,
+    pub resolved_sign: bool,
+    pub parent_scope: Option<ScopeId>,
+    pub args_scope: Option<ScopeId>,
+    pub body_scope: Option<ScopeId>,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -700,34 +693,20 @@ impl<'p> Func<'p> {
         ret: LazyType<'p>,
         body: Option<FatExpr<'p>>,
         loc: Span,
-        has_name: bool,
+        referencable_name: bool,
         allow_rt_capture: bool,
     ) -> Self {
         Func {
-            annotations: vec![],
             name,
             arg,
             ret,
             body,
-            arg_loc: vec![],
-            capture_vars: vec![],
-            local_constants: vec![],
             loc,
-            closed_constants: Constants::empty(),
-            capture_vars_const: vec![],
-            var_name: None,
-            finished_arg: None,
-            finished_ret: None,
-            referencable_name: has_name,
-            evil_uninit: false,
-            wip: None,
-            dynamic_import_symbol: None,
-            comptime_addr: None,
-            jitted_code: None,
-            any_reg_template: None,
-            llvm_ir: None,
+            referencable_name,
             allow_rt_capture,
-            resolved_body: false,
+            closed_constants: Constants::empty(),
+            evil_uninit: false,
+            ..Default::default()
         }
     }
 
@@ -788,7 +767,7 @@ impl<'p> Func<'p> {
         self.arg.bindings.iter().any(|b| b.kind == VarType::Const)
     }
 
-    pub(crate) fn renumber_vars(&mut self, vars: usize) -> usize {
+    pub(crate) fn renumber_vars(&mut self, vars: usize) -> (usize, HashMap<Var<'p>, Var<'p>>) {
         let mut mapping = HashMap::new();
         let mut ctx = RenumberVars { vars, mapping: &mut mapping };
         ctx.pattern(&mut self.arg);
@@ -799,7 +778,7 @@ impl<'p> Func<'p> {
         if let Some(body) = &mut self.body {
             ctx.expr(body);
         }
-        ctx.vars
+        (ctx.vars, mapping)
     }
 }
 
@@ -1501,6 +1480,7 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            resolved_sign: true,
             annotations: vec![],
             name: Ident::null(),
             var_name: None,
@@ -1528,6 +1508,9 @@ impl<'p> Default for Func<'p> {
             llvm_ir: None,
             allow_rt_capture: false,
             resolved_body: false,
+            parent_scope: None,
+            args_scope: None,
+            body_scope: None,
         }
     }
 }
