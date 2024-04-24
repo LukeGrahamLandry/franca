@@ -71,6 +71,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
+    // TODO: rename this, it means resolve overloads, not resovle variables which is ambigous now that they happen together sometimes.
     // TODO: better error messages
     pub fn resolve_function(
         &mut self,

@@ -1,3 +1,13 @@
+## dont resolve vars up front (Apr 24)
+
+did a bunch of refactoring the scope system yesterday.
+
+You get to a problem where you can't call a comptime function,
+because you can't resolve the overload, because you need to know the types,
+but ive paired resolving the argument names with the argument types because what about when you're allowed to refer to previous arguments.
+Can't go back to @comptime args not being const because you want to use them in types of declarations in the body, if anything i want to get rid of @comptime.
+Maybe start with the easy @impl case where you know the types without binding the args.
+
 ## stricter closure capture handling (Apr 22)
 
 :ChainedCaptures

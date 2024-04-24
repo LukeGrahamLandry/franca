@@ -163,7 +163,6 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
 
     let mut global = make_toplevel(comp.pool, user_span, parsed.stmts);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
-    ResolveScope::resolve_all(&mut global, comp)?;
     let f = comp.compile_top_level(global)?;
     Ok((f, parsed.lines))
 }

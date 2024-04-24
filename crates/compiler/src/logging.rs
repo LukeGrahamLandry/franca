@@ -410,9 +410,7 @@ fn collect_func_references_stmt<'p>(stmt: &Stmt<'p>, refs: &mut Vec<FuncId>, con
             collect_func_references(place, refs, const_reads);
             collect_func_references(value, refs, const_reads);
         }
-        Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => {
-            unreachable!("finished ast contained {stmt:?}")
-        }
+        Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => {} // this is fine now because of lazy scope resolve.
         Stmt::DeclVarPattern { value, .. } => {
             if let Some(v) = value {
                 collect_func_references(v, refs, const_reads);

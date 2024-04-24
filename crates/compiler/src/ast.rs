@@ -258,9 +258,9 @@ pub trait WalkAst<'p> {
 }
 
 // Used for inlining closures.
-struct RenumberVars<'a, 'p> {
-    vars: usize,
-    mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
+pub(crate) struct RenumberVars<'a, 'p> {
+    pub vars: usize,
+    pub mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
 }
 
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
@@ -304,6 +304,9 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
 impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
         let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
+        if name.3 == VarType::Const {
+            println!("rn make const {new:?}");
+        }
         self.vars += 1;
         let stomp = self.mapping.insert(*name, new);
         debug_assert!(stomp.is_none());
@@ -654,6 +657,9 @@ pub struct Func<'p> {
     pub resolved_sign: bool,
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
+
+    pub why_resolved_sign: Option<String>,
+    pub why_resolved_body: Option<String>,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -758,7 +764,9 @@ impl<'p> Func<'p> {
         self.arg.bindings.iter().any(|b| b.kind == VarType::Const)
     }
 
+    #[track_caller]
     pub(crate) fn renumber_vars(&mut self, vars: usize) -> (usize, HashMap<Var<'p>, Var<'p>>) {
+        debug_assert!(!self.evil_uninit && self.resolved_sign && self.resolved_body);
         let mut mapping = HashMap::new();
         let mut ctx = RenumberVars { vars, mapping: &mut mapping };
         ctx.pattern(&mut self.arg);
@@ -769,7 +777,15 @@ impl<'p> Func<'p> {
         if let Some(body) = &mut self.body {
             ctx.expr(body);
         }
+
         (ctx.vars, mapping)
+    }
+
+    #[track_caller]
+    pub(crate) fn assert_body_not_resolved(&self) -> Res<'p, ()> {
+        debug_assert!(!self.evil_uninit);
+        debug_assert!(!self.resolved_body, "resolved {}", self.why_resolved_body.as_ref().unwrap());
+        Ok(())
     }
 }
 
@@ -1160,7 +1176,6 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         debug_assert!(!func.evil_uninit);
-        debug_assert!(func.resolved_body && func.resolved_sign);
         let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id
@@ -1500,6 +1515,8 @@ impl<'p> Default for Func<'p> {
             resolved_sign: false,
             resolved_body: false,
             scope: None,
+            why_resolved_sign: None,
+            why_resolved_body: None,
         }
     }
 }

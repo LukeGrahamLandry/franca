@@ -192,7 +192,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile_top_level(&mut self, mut ast: Func<'p>) -> Res<'p, FuncId> {
-        ResolveScope::resolve_all(&mut ast, self)?;
         let f = self.add_func(ast)?;
 
         if let Err(mut e) = self.ensure_compiled(f, ExecTime::Comptime) {
@@ -434,6 +433,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let has_body = self.program[f].body.is_some();
         debug_assert!(!self.program[f].evil_uninit);
 
+        self.ensure_resolved_sign(f)?;
+        self.ensure_resolved_body(f)?;
         mut_replace!(self.program[f], |func: Func<'p>| {
             assert!(result.when == ExecTime::Comptime || !func.has_tag(Flag::Comptime));
             let arguments = func.arg.flatten();
@@ -591,13 +592,11 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       The cloning is only better for runtime functions where we're trying to output a simpler ast that an optimiser can specialize.
     // Curry a function from fn(a: A, @comptime b: B) to fn(a: A)
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
-    fn bind_const_arg(&mut self, o_f: FuncId, mut arg_name: Var<'p>, arg: Structured, names: &mut HashMap<Var<'p>, Var<'p>>) -> Res<'p, FuncId> {
-        self.ensure_resolved_sign(o_f)?;
-        let mut new_func = self.program[o_f].clone();
-        let (next_var, mapping) = new_func.renumber_vars(self.program.next_var);
-        self.program.next_var = next_var;
-        arg_name = *mapping.get(&arg_name).unwrap();
-        names.extend(mapping); // TODO: just need the args, not all
+    fn bind_const_arg(&mut self, o_f: FuncId, arg_name: Var<'p>, arg: Structured) -> Res<'p, FuncId> {
+        // I don't want to renumber, so make sure to do the clone before resolving.
+        // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
+        debug_assert!(self.program[o_f].resolved_body && self.program[o_f].resolved_sign);
+        let mut new_func = self.program[o_f].clone(); // TODO: redundant
         let scope = new_func.scope.unwrap();
 
         new_func.referencable_name = false;
@@ -673,6 +672,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: !!! maybe call this @generic instead of @comptime? cause other things can be comptime
     // Return type is allowed to use args.
     fn emit_comptime_call(&mut self, result: &mut FnWip<'p>, template_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, (Values, TypeId)> {
+        // Don't want to renumber, so only resolve on the clone. // TODO: this does redundant work on closed constants.
+        self.program[template_f].assert_body_not_resolved()?;
+
         let state = DebugState::ComptimeCall(template_f, self.program[template_f].name);
         self.push_state(&state);
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
@@ -681,8 +683,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
+        ResolveScope::resolve_sign(&mut func, self)?;
+        ResolveScope::resolve_body(&mut func, self)?;
         func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
-        self.program.next_var = func.renumber_vars(self.program.next_var).0;
 
         // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
         //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
@@ -790,8 +793,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
-                ResolveScope::resolve_all(func, self)?;
-                debug_assert!(func.resolved_body);
                 let mut func = mem::take(func);
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(Flag::Bs);
@@ -805,6 +806,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 assert!(!(is_struct && is_enum));
                 if is_struct {
+                    ResolveScope::resolve_sign(&mut func, self)?;
+                    ResolveScope::resolve_body(&mut func, self)?;
                     let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(&mut func.arg)?;
                     let ty = self.program.intern_type(ty);
@@ -835,6 +838,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(());
                 }
                 if is_enum {
+                    ResolveScope::resolve_sign(&mut func, self)?;
+                    ResolveScope::resolve_body(&mut func, self)?;
                     let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
                     let ty = self.struct_type(&mut func.arg)?;
                     let ty = self.program.to_enum(ty);
@@ -911,16 +916,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 let func = &self.program[id];
-                if func.has_tag(Flag::Impl) {
-                    for stmt in &func.local_constants {
-                        if let Stmt::DeclFunc(new) = &stmt.stmt {
-                            if new.referencable_name {
-                                // TODO: put 'id' in an impls list in the overload set of 'new' somehow
-                            }
-                        }
-                    }
-                }
-
                 // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
                 //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
                 //       then have @test(.aarch64, .llvm) instead of current special handling.
@@ -1025,14 +1020,30 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
-        debug_assert!(self.program[f].resolved_sign);
+        if self.program[f].resolved_sign {
+            return Ok(());
+        }
+        debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_sign of evil_uninit {}", self.log_trace());
+        self.program[f].why_resolved_sign = Some(Location::caller().to_string()); // self.log_trace()
+        mut_replace!(self.program[f], |mut func: Func<'p>| {
+            ResolveScope::resolve_sign(&mut func, self)?;
+            Ok((func, ()))
+        });
         Ok(())
     }
 
     #[track_caller]
     pub fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
+        if self.program[f].resolved_body {
+            return Ok(());
+        }
+        debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_body of evil_uninit {}", self.log_trace());
+        self.program[f].why_resolved_body = Some(Location::caller().to_string()); // self.log_trace()
         self.ensure_resolved_sign(f)?;
-        debug_assert!(self.program[f].resolved_body);
+        mut_replace!(self.program[f], |mut func: Func<'p>| {
+            ResolveScope::resolve_body(&mut func, self)?;
+            Ok((func, ()))
+        });
         Ok(())
     }
 
@@ -1641,9 +1652,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let before = self.debug_trace.len();
         let res = self.type_of_inner(result, expr)?;
         while self.debug_trace.len() > before {
-            // HACK
-            let p = self.debug_trace.pop().unwrap();
-            //println!("======= {p:?}");
+            // TODO: HACK
+            self.debug_trace.pop().unwrap();
         }
         self.pop_state(s);
         Ok(res)
@@ -1840,8 +1850,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else if let Some(ty) = self.find_const_type(*var) {
                     ty
                 } else {
-                    // ice!("type check missing var {:?}", var.log(self.pool))
-                    return Ok(None);
+                    ice!("type check missing var {:?}", var.log(self.pool))
+                    //return Ok(None);
                 }
             }
             Expr::String(_) => String::get_type(self.program),
@@ -1959,7 +1969,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
         //       so making it work in debug with debug_assert is probably the better outcome.
         assert!(!f.evil_uninit, "{}", self.pool.get(f.name));
-        assert!(f.resolved_body);
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType { arg, ret }));
         }
@@ -2139,8 +2148,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program.to_type(value)
     }
 
-    pub(crate) fn add_func(&mut self, mut func: Func<'p>) -> Res<'p, FuncId> {
-        ResolveScope::resolve_all(&mut func, self)?;
+    pub(crate) fn add_func(&mut self, func: Func<'p>) -> Res<'p, FuncId> {
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
             assert!(capture.3 != VarType::Const);
@@ -2154,11 +2162,17 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: calling this in infer is wrong because it might fail and lose the function
     pub fn promote_closure(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
+            let scope = func.scope.unwrap();
             let f = self.add_func(mem::take(func))?;
+            self[scope].funcs.push(f);
+            self.ensure_resolved_sign(f)?;
+
             if self.infer_types(f)?.is_none() {
                 // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
                 mut_replace!(self.program[f], |mut func: Func<'p>| {
                     if let Some(body) = &mut func.body {
+                        // closures aren't lazy currently.
+                        debug_assert!(func.resolved_body);
                         // TODO: this is very suspisious! what if it has captures
                         let res = self.type_of(result, body);
                         debug_assert!(res.is_ok()); // clearly its fine tho...
@@ -2645,16 +2659,20 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn curry_const_args(
         &mut self,
-        original_f: FuncId,
+        mut original_f: FuncId,
         f_expr: &mut FatExpr<'p>,
         arg_expr: &mut FatExpr<'p>,
         mut arg_val: Structured,
     ) -> Res<'p, FuncId> {
-        self.ensure_resolved_sign(original_f)?;
+        self.program[original_f].assert_body_not_resolved()?;
         let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
         self.push_state(&state);
         // Some part of the argument must be known at comptime.
         // You better hope compile_expr noticed and didn't put it in a stack slot.
+        let new_func = self.program[original_f].clone(); // TOOD: excesive cloning. not bind_const_arg shouldn't do it!
+        original_f = self.add_func(new_func)?;
+        self.ensure_resolved_sign(original_f)?;
+        self.ensure_resolved_body(original_f)?;
         let func = &self.program[original_f];
         let pattern = func.arg.flatten();
 
@@ -2662,7 +2680,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let (name, _, kind) = pattern.into_iter().next().unwrap();
             debug_assert_eq!(kind, VarType::Const);
             let name = unwrap!(name, "arg needs name (unreachable?)");
-            let current_fn = self.bind_const_arg(original_f, name, arg_val, &mut HashMap::new())?;
+            let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
             arg_expr.expr = Expr::unit();
             arg_expr.ty = TypeId::unit();
 
@@ -2718,16 +2736,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut skipped_args = vec![];
                     let mut skipped_types = vec![];
                     let mut removed = 0;
-                    let mut mapping = HashMap::new();
                     for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
                         if kind == VarType::Const {
-                            let mut name = unwrap!(name, "arg needs name (unreachable?)");
-                            while let Some(new) = mapping.get(&name) {
-                                name = *new;
-                            }
+                            let name = unwrap!(name, "arg needs name (unreachable?)");
                             // bind_const_arg handles adding closure captures.
                             // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
-                            current_fn = self.bind_const_arg(current_fn, name, arg_value, &mut mapping)?;
+                            current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
                             // TODO: this would be better if i was iterating backwards
                             arg_exprs.remove(i - removed);
                             removed += 1; // TODO: this sucks

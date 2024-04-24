@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err,
     logging::{LogTag::Scope, PoolLog},
@@ -61,7 +61,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             debug_assert_eq!(s, self.scope);
             debug_assert_eq!(b, self.block);
         } else {
-            ResolveScope::resolve_all(func, self.compiler)?;
+            // ResolveScope::resolve_all(func, self.compiler)?;
             self.pop_scope();
             debug_assert_ne!(self.scope, func.scope.unwrap());
         }
@@ -69,11 +69,17 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         Ok(())
     }
 
-    pub fn resolve_all(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
+    #[track_caller]
+    pub fn resolve_sign(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
         let scope = func.scope.unwrap();
         let mut r = ResolveScope::new(compiler, scope, func.loc);
         r.resolve_func_args(func)?;
         debug_assert_eq!(r.scope, scope);
+        Ok(())
+    }
+
+    pub fn resolve_body(func: &mut Func<'p>, compiler: &'z mut Compile<'a, 'p>) -> Res<'p, ()> {
+        let scope = func.scope.unwrap();
         let mut r = ResolveScope::new(compiler, scope, func.loc);
         r.resolve_func_body(func)?;
         Ok(())
@@ -89,8 +95,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         self.local_constants.push(Default::default());
         func.resolved_sign = true;
+        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
         for b in &mut func.arg.bindings {
-            self.resolve_binding(b, true, func.loc)?;
+            self.resolve_binding(b)?;
+            if generic {
+                self.declare_binding(b, func.loc)?;
+            }
         }
         self.walk_ty(&mut func.ret);
         let arg_block_const_decls = self.local_constants.pop().unwrap();
@@ -108,6 +118,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.scope = func.scope.unwrap();
         self.block = 0;
         self.local_constants.push(Default::default());
+
+        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
+        if !generic {
+            for b in &mut func.arg.bindings {
+                self.declare_binding(b, func.loc)?;
+            }
+        }
         self.push_scope(None);
         func.resolved_body = true;
         if let Some(body) = &mut func.body {
@@ -136,6 +153,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 n,
                 func.capture_vars.iter().map(|v| v.log(self.compiler.pool)).collect::<Vec<_>>()
             );
+        } else {
+            assert!(!func.any_const_args() && !func.has_tag(Flag::Comptime), "TODO: closures with const args");
         }
 
         debug_assert!(func.local_constants.is_empty());
@@ -244,7 +263,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     self.resolve_expr(value)?;
                 }
                 for b in &mut binding.bindings {
-                    self.resolve_binding(b, true, loc)?;
+                    self.resolve_binding(b)?;
+                    self.declare_binding(b, loc)?;
                 }
                 // TODO: add 'let (x, y) = whatever()' to the frontend.
                 todo!("this isnt actually tested because only the backend makes these. its probably fine tho other than needing special constant handling.");
@@ -310,7 +330,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Expr::StructLiteralP(p) => {
                 self.push_scope(None);
                 for b in &mut p.bindings {
-                    self.resolve_binding(b, true, loc)?;
+                    self.resolve_binding(b)?;
+                    self.declare_binding(b, loc)?;
                 }
                 self.pop_block();
             }
@@ -331,6 +352,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 if let Some(found) = vars.vars.iter().rev().position(|v| v.0 == *name) {
                     // Reverse so you get the shadowing first.
                     let v = vars.vars[vars.vars.len() - found - 1];
+                    if v.3 == VarType::Const {
+                        debug_assert!(scope.constants.contains_key(&v));
+                    }
                     return Some(v);
                 }
 
@@ -382,9 +406,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
         let mut wip = self.compiler[s].vars[self.block].vars.iter();
-        if wip.any(|v| v.0 == *name && v.3 == VarType::Const) {
-            err!("Cannot shadow constant in the same scope: {}", self.compiler.pool.get(*name))
-        }
+        // TODO:
+        // if wip.any(|v| v.0 == *name && v.3 == VarType::Const) {
+        //     err!("Cannot shadow constant in the same scope: {}", self.compiler.pool.get(*name))
+        // }
 
         let var = Var(*name, self.compiler.program.next_var, s, kind, self.block);
         if kind == VarType::Const {
@@ -425,28 +450,31 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.block = locals.parent;
     }
 
-    fn resolve_binding(&mut self, binding: &mut Binding<'p>, declaring: bool, loc: Span) -> Res<'p, ()> {
-        match binding.name {
-            Name::Ident(name) => {
-                self.walk_ty(&mut binding.ty);
-                if declaring {
-                    let var = self.decl_var(&name, binding.kind, loc)?;
-                    *binding = Binding {
-                        name: Name::Var(var),
-                        ty: mem::replace(&mut binding.ty, LazyType::Infer),
-                        default: mem::take(&mut binding.default),
-                        kind: binding.kind,
-                    };
-                }
-            }
-            Name::Var(_) => unreachable!(),
-            Name::None => self.walk_ty(&mut binding.ty),
-        }
+    fn resolve_binding(&mut self, binding: &mut Binding<'p>) -> Res<'p, ()> {
+        self.walk_ty(&mut binding.ty);
         if let Some(expr) = &mut binding.default {
             self.resolve_expr(expr)?;
         }
         Ok(())
     }
+
+    fn declare_binding(&mut self, binding: &mut Binding<'p>, loc: Span) -> Res<'p, ()> {
+        match binding.name {
+            Name::Ident(name) => {
+                let var = self.decl_var(&name, binding.kind, loc)?;
+                *binding = Binding {
+                    name: Name::Var(var),
+                    ty: mem::replace(&mut binding.ty, LazyType::Infer),
+                    default: mem::take(&mut binding.default),
+                    kind: binding.kind,
+                };
+            }
+            Name::Var(_) => unreachable!(),
+            Name::None => {}
+        }
+        Ok(())
+    }
+
     fn walk_ty(&mut self, ty: &mut LazyType<'p>) {
         match ty {
             LazyType::EvilUnit => panic!(),
