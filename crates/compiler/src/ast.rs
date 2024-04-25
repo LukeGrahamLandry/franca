@@ -303,10 +303,12 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
 
 impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
-        let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
         if name.3 == VarType::Const {
-            println!("rn make const {new:?}");
+            // TODO
+            println!("SKIP. rn const {name:?}");
+            return;
         }
+        let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
         self.vars += 1;
         let stomp = self.mapping.insert(*name, new);
         debug_assert!(stomp.is_none());
@@ -1469,7 +1471,15 @@ impl<'p> Expr<'p> {
         }
         None
     }
-    pub fn as_suffix_macro(&self, flag: Flag) -> Option<&FatExpr> {
+    pub fn as_suffix_macro(&self, flag: Flag) -> Option<&FatExpr<'p>> {
+        if let Expr::SuffixMacro(name, arg) = self {
+            if *name == flag.ident() {
+                return Some(arg);
+            }
+        }
+        None
+    }
+    pub fn as_suffix_macro_mut(&mut self, flag: Flag) -> Option<&mut FatExpr<'p>> {
         if let Expr::SuffixMacro(name, arg) = self {
             if *name == flag.ident() {
                 return Some(arg);

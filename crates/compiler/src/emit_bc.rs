@@ -366,7 +366,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::CloneRange { from, to: output });
                     }
                 } else {
-                    ice!("Missing resolved variable {:?}", var.log(self.program.pool),)
+                    ice!("(emit_bc) Missing resolved variable {:?}", var.log(self.program.pool),)
                 }
             }
             Expr::Value { value, .. } => {

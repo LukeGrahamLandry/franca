@@ -217,10 +217,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // outln!(ShowErr, "   {}", self.program[f.func].log(self.pool));
                     }
                 }
+                for f in original.pending {
+                    writeln!(
+                        msg,
+                        "- pending/failed {:?} {:?} uninit={}",
+                        f,
+                        self.program[f].arg.log(self.pool),
+                        self.program[f].evil_uninit
+                    )
+                    .unwrap()
+                }
                 writeln!(msg, "Maybe you forgot to instantiate a generic?").unwrap();
 
                 self.last_loc = Some(arg.loc);
-                err!("AmbiguousCall: {}", log_goal(self))
+                err!("AmbiguousCall: {}\n{}", log_goal(self), msg)
             }
             Ok(None) => {
                 self.last_loc = Some(arg.loc);
@@ -241,9 +251,15 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(());
         }
         outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.name),);
+        let mut failed = vec![];
         for f in &decls {
             debug_assert!(self.program.overload_sets[i].pending.is_empty());
-            self.ensure_resolved_sign(*f)?;
+            if self.program[*f].evil_uninit {
+                continue;
+            }
+            if self.ensure_resolved_sign(*f).is_err() {
+                failed.push(*f); // TODO: know when its a template and dont put that in the set -- Apr 24
+            }
             match self.infer_types(*f) {
                 Ok(Some(f_ty)) => {
                     outln!(
@@ -264,11 +280,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let Some(arg) = self.program[*f].finished_arg {
                         self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: *f });
                     } else {
-                        todo!("{e:?}")
+                        //println!("overload failed: {e:?}",)
+                        failed.push(*f); // TODO: know when its a template and dont put that in the set -- Apr 24
                     }
                 }
             }
         }
+        self.program.overload_sets[i].pending.extend(failed);
+        // println!("{:?}", self.program.overload_sets[i].ready);
 
         Ok(())
     }

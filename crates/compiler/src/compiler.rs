@@ -470,21 +470,18 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(ret);
         }
 
-        let ret_val = mut_replace!(self.program[f].body, |mut body: Option<FatExpr<'p>>| {
-            let body_expr = body.as_mut().unwrap();
+        let mut body_expr = self.program[f].body.clone().unwrap(); // TODO: no clone. make errors recoverable. no mut_replace -- Apr 24
 
-            if let Expr::SuffixMacro(name, arg) = body_expr.deref_mut() {
-                if *name == Flag::Asm.ident() {
-                    self.inline_asm_body(f, arg)?;
-                    let fn_ty = self.program[f].unwrap_ty();
-                    let ret_ty = fn_ty.ret;
-                    let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty)); // make sure emit_ can get the type without mutating the Program.
-                    return Ok((None, Structured::RuntimeOnly(ret_ty)));
-                }
-            }
-
+        let ret_val = if let Some(arg) = body_expr.as_suffix_macro_mut(Flag::Asm) {
+            self.inline_asm_body(f, arg)?;
+            let fn_ty = self.program[f].unwrap_ty();
+            let ret_ty = fn_ty.ret;
+            let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty)); // make sure emit_ can get the type without mutating the Program.
+            self.program[f].body = None;
+            Structured::RuntimeOnly(ret_ty)
+        } else {
             let hint = self.program[f].finished_ret;
-            let res = self.compile_expr(result, body_expr, hint)?;
+            let res = self.compile_expr(result, &mut body_expr, hint)?;
             if self.program[f].finished_ret.is_none() {
                 // If you got to the point of emitting the body, the only situation where you don't know the return type yet is if they didn't put a type anotation there.
                 // This isn't true if you have an @generic function that isn't @comptime trying to use its args in its return type.
@@ -497,9 +494,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[f].finished_ret = Some(res.ty());
                 self.program[f].ret = LazyType::Finished(res.ty());
             }
-            Ok((body, res))
-        });
-
+            self.program[f].body = Some(body_expr);
+            res
+        };
         let func = &self.program[f];
         self.type_check_arg(ret_val.ty(), func.finished_ret.unwrap(), "bad return value")?;
         self.pop_state(state);
@@ -672,6 +669,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: !!! maybe call this @generic instead of @comptime? cause other things can be comptime
     // Return type is allowed to use args.
     fn emit_comptime_call(&mut self, result: &mut FnWip<'p>, template_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, (Values, TypeId)> {
+        println!("comptime_call {:?} {}", template_f, arg_expr.log(self.pool));
         // Don't want to renumber, so only resolve on the clone. // TODO: this does redundant work on closed constants.
         self.program[template_f].assert_body_not_resolved()?;
 
@@ -793,6 +791,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
+                debug_assert!(!func.evil_uninit);
                 let mut func = mem::take(func);
                 let var = func.var_name;
                 let for_bootstrap = func.has_tag(Flag::Bs);
@@ -897,10 +896,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if referencable_name && !is_enum && !is_struct {
                         // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
                         // TODO: distinguish between overload sets that you add to and those that you re-export
+                        debug_assert!(!self.program[id].resolved_sign);
+                        debug_assert!(!self.program[id].resolved_body);
                         if let Some(overloads) = self.find_const(var) {
                             let i = overloads.0.as_overload_set()?;
                             let os = &mut self.program.overload_sets[i];
                             assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
+
                             os.pending.push(id);
                         } else {
                             let index = self.program.overload_sets.len();
@@ -916,6 +918,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 let func = &self.program[id];
+
+                if let Some(var) = var {
+                    println!("compile DeclFunc {id:?} {}", var.log(self.pool));
+                }
                 // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
                 //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
                 //       then have @test(.aarch64, .llvm) instead of current special handling.
@@ -1008,6 +1014,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn find_const(&mut self, var: Var<'p>) -> Option<(Values, TypeId)> {
         if let Some(s) = self[var.2].constants.get(&var) {
             if let Expr::Value { ty, value } = &s.0.expr {
+                debug_assert!(!ty.is_unknown());
                 return Some((value.clone(), *ty));
             }
         }
@@ -1026,7 +1033,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_sign of evil_uninit {}", self.log_trace());
         self.program[f].why_resolved_sign = Some(Location::caller().to_string()); // self.log_trace()
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            ResolveScope::resolve_sign(&mut func, self)?;
+            ResolveScope::resolve_sign(&mut func, self).unwrap(); // TODO
             Ok((func, ()))
         });
         Ok(())
@@ -1184,9 +1191,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Structured::Const(ty, value)
                 } else {
                     outln!(ShowErr, "VARS: {:?}", result.vars);
-                    // let current_func = &self.program.funcs[result.func.0];
-                    // outln!(ShowErr, "{}", current_func.log_captures(self.pool));
-                    ice!("Missing resolved variable {:?} '{}'", var, self.pool.get(var.0),)
+                    ice!("Missing resolved variable {}", var.log(self.pool),)
                 }
             }
             Expr::GetNamed(name) => {
@@ -1311,6 +1316,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Type(ty))
                     }
                     "const_eval" => {
+                        println!("const eval {}", arg.log(self.pool));
                         let res = self.compile_expr(result, arg, requested)?;
                         let ty = res.ty();
                         let value = if let Ok(val) = res.get() {
@@ -1845,14 +1851,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::GetVar(var) => {
-                if let Some(ty) = result.vars.get(var).cloned() {
-                    ty
-                } else if let Some(ty) = self.find_const_type(*var) {
-                    ty
+                let ty = if var.3 == VarType::Const {
+                    self.find_const_type(*var)
                 } else {
-                    ice!("type check missing var {:?}", var.log(self.pool))
-                    //return Ok(None);
-                }
+                    result.vars.get(var).cloned()
+                };
+                unwrap!(ty, "type check missing var {:?}", var.log(self.pool))
+                //TODO: else return Ok(None)?
             }
             Expr::String(_) => String::get_type(self.program),
         }))
@@ -1902,34 +1907,32 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn infer_types_progress(&mut self, ty: &mut LazyType<'p>) -> Res<'p, bool> {
-        Ok(mut_replace!(*ty, |mut ty| {
-            let done = match ty {
-                LazyType::EvilUnit => panic!(),
-                LazyType::Infer => false,
-                LazyType::PendingEval(e) => {
-                    let value = self.immediate_eval_expr(e.clone(), TypeId::ty())?;
-                    let res = self.to_type(value)?;
-                    ty = LazyType::Finished(res);
-                    true
+        let done = match ty {
+            LazyType::EvilUnit => panic!(),
+            LazyType::Infer => false,
+            LazyType::PendingEval(e) => {
+                let value = self.immediate_eval_expr(e.clone(), TypeId::ty())?;
+                let res = self.to_type(value)?;
+                *ty = LazyType::Finished(res);
+                true
+            }
+            LazyType::Finished(_) => true, // easy
+            LazyType::Different(parts) => {
+                let mut done = true;
+                for p in parts.iter_mut() {
+                    done &= self.infer_types_progress(p)?;
                 }
-                LazyType::Finished(_) => true, // easy
-                LazyType::Different(mut parts) => {
-                    let mut done = true;
-                    for p in parts.iter_mut() {
-                        done &= self.infer_types_progress(p)?;
-                    }
-                    if done {
-                        let types = parts.iter().map(|p| p.unwrap()).collect();
-                        let types = self.program.tuple_of(types);
-                        ty = LazyType::Finished(types);
-                    } else {
-                        ty = LazyType::Different(parts);
-                    }
-                    done
+                if done {
+                    let types = parts.iter().map(|p| p.unwrap()).collect();
+                    let types = self.program.tuple_of(types);
+                    *ty = LazyType::Finished(types);
+                } else {
+                    *ty = LazyType::Different(mem::take(parts));
                 }
-            };
-            Ok((ty, done))
-        }))
+                done
+            }
+        };
+        Ok(done)
     }
 
     fn infer_binding_progress(&mut self, binding: &mut Binding<'p>) -> Res<'p, bool> {
@@ -1974,38 +1977,33 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         let before = self.debug_trace.len();
         let state = DebugState::ResolveFnType(func, f.name);
+        self.last_loc = Some(f.loc);
         self.push_state(&state);
-        let mut action = || {
-            Ok(mut_replace!(self.program[func], |mut f: Func<'p>| {
-                self.last_loc = Some(f.loc);
-                if f.finished_arg.is_none() {
-                    let types = self.infer_pattern(&mut f.arg.bindings)?;
-                    let arg = self.program.tuple_of(types);
-                    f.finished_arg = Some(arg);
-                }
-                if f.finished_ret.is_none() {
-                    if !f.has_tag(Flag::Generic) && self.infer_types_progress(&mut f.ret)? {
-                        f.finished_ret = Some(f.ret.unwrap());
-
-                        let ty = f.unwrap_ty();
-                        Ok((f, Some(ty)))
-                    } else {
-                        Ok((f, None))
-                    }
-                } else {
-                    let ty = f.unwrap_ty();
-                    Ok((f, Some(ty)))
-                }
-            }))
-        };
-        let res = action();
-        if res.is_ok() {
-            self.pop_state(state);
-            let after = self.debug_trace.len();
-            debug_assert!(before == after);
+        if self.program[func].finished_arg.is_none() {
+            let mut arg = self.program[func].arg.bindings.clone();
+            let types = self.infer_pattern(&mut arg)?;
+            self.program[func].arg.bindings = arg;
+            let arg = self.program.tuple_of(types);
+            self.program[func].finished_arg = Some(arg);
         }
+        let ty = if self.program[func].finished_ret.is_none() {
+            let mut ret = self.program[func].ret.clone();
+            if !self.program[func].has_tag(Flag::Generic) && self.infer_types_progress(&mut ret)? {
+                self.program[func].ret = ret;
+                self.program[func].finished_ret = Some(self.program[func].ret.unwrap());
 
-        res
+                Some(self.program[func].unwrap_ty())
+            } else {
+                None
+            }
+        } else {
+            Some(self.program[func].unwrap_ty())
+        };
+        self.pop_state(state);
+        let after = self.debug_trace.len();
+        debug_assert!(before == after);
+
+        Ok(ty)
     }
 
     // If we have access to a 'result' context, might as well try compiling the expression first and see if its something trivial that doesn't need to spin up a whole new function.
@@ -2068,6 +2066,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some((value, _)) = self.find_const(*var) {
                     return Ok(Some(value));
+                } else {
+                    // TODO: -- Apr 24 I think this is always the problem. but what changed??
+                    println!("comptime eval const not ready {}", var.log(self.pool));
                 }
                 // fallthrough
             }

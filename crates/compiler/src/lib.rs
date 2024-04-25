@@ -30,7 +30,11 @@ macro_rules! mut_replace {
     ($value:expr, $f:expr) => {{
         let temp = mem::take(&mut $value);
         #[allow(clippy::redundant_closure_call)]
-        let (temp, out) = $f(temp)?;
+        let res = $f(temp);
+        if res.is_err() {
+            println!("WARNING: mut_replace hit err. something will be lost!! {}. {res:?}", Location::caller());
+        }
+        let (temp, out) = res?;
         $value = temp;
         out
     }};
