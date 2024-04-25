@@ -79,18 +79,18 @@ pub struct Stats {
     pub interp_box: usize,
     pub interp_box_values: usize,
     pub serialize_one: usize,
-    pub deserialize_one: usize,
     pub ast_expr_nodes: usize,
     pub fn_body_resolve: usize,
+    pub make_lit_fn: usize,
 }
 
 pub static mut STATS: Stats = Stats {
     interp_box: 0,
     interp_box_values: 0,
     serialize_one: 0,
-    deserialize_one: 0,
     ast_expr_nodes: 0,
     fn_body_resolve: 0,
+    make_lit_fn: 0,
 };
 
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
@@ -206,9 +206,9 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
                             let end = timestamp();
                             let seconds = end - start;
                             outln!(Perf, "===============");
-                            outln!(Perf,
-                                "Frontend (parse+comptime+bytecode) finished.\n   - {lines} (non comment) lines in {seconds:.5} seconds ({:.0} lines per second).",
-                                lines as f64 / seconds
+                            println!(
+                                //Perf,
+                                "Frontend (parse+comptime+bytecode) finished in {seconds:.3} seconds",
                             );
                             outln!(Perf, "===============");
                             let start = timestamp();
@@ -240,7 +240,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
                             let end = timestamp();
                             let seconds = end - start;
                             outln!(Perf, "===============");
-                            outln!(Perf, "Interpreter finished running main() in {seconds:.5} seconds.");
+                            outln!(Perf, "Finished running main() in {seconds:.5} seconds.");
                         }
                     }
                 }
@@ -262,10 +262,6 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
         outln!(Bytecode, "{}", b.log(comp.pool));
     }
 
-    if let Some(id) = comp.program.find_unique_func(Flag::Main.ident()) {
-        outln!(FinalAst, "{}", comp.program.log_finished_ast(id));
-        outln!(FinalAst, "============= ABOVE IS JUST FOR RUNTIME ================");
-    }
     outln!(FinalAst, "============= BELOW IS ALL INCLUDING COMPTIME================");
     for (i, f) in comp.program.funcs.iter().enumerate() {
         if !f.evil_uninit {

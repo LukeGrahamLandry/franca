@@ -289,57 +289,6 @@ impl<'p> Program<'p> {
         s
     }
 
-    pub fn log_finished_ast(&self, start: FuncId) -> String {
-        let mut done = HashSet::new();
-        let mut pending = vec![start];
-        let mut out = String::new();
-        let mut const_reads = HashSet::new();
-
-        let log_one = |out: &mut String, id: FuncId, func: &Func<'p>| {
-            *out += &format!(
-                "{id:?}: [fn {:?}=Name={:?} Arg={:?} -> Ret={:?}] = \nBODY: \n{}\nEND\n{}\nCONSTS:\n",
-                if func.referencable_name { func.synth_name(self.pool) } else { "@anon@" },
-                func.get_name(self.pool),
-                func.finished_arg.map(|arg| self.log_type(arg)),
-                func.finished_ret.map(|ret| self.log_type(ret)),
-                func.body.as_ref().map(|e| e.log(self.pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
-                if func.capture_vars.is_empty() {
-                    String::from("Raw function, no captures.")
-                } else {
-                    format!(
-                        "Closure capturing: {:?}.",
-                        func.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
-                    )
-                },
-            );
-        };
-
-        while let Some(next) = pending.pop() {
-            if !done.insert(next) {
-                continue;
-            }
-
-            let func = &self.funcs[next.as_index()];
-            if let Some(body) = &func.body {
-                collect_func_references(body, &mut pending, &mut const_reads);
-                log_one(&mut out, next, func);
-                out += "=======================================\n\n\n\n";
-            }
-        }
-
-        // out += "=======================================\n\n\n\n";
-        // out += "=======================================\n\n\n\n";
-        // for i in 0..self.funcs.len() {
-        //     out += "=======================================\n\n\n\n";
-        //     let func = &self.funcs[i];
-        //     if func.body.is_some() {
-        //         log_one(&mut out, FuncId(i), func);
-        //     }
-        // }
-
-        out
-    }
-
     pub fn find_ffi_type(&self, name: Ident<'p>) -> Option<TypeId> {
         let mut found = None;
         for ty in self.ffi_types.values() {
@@ -394,79 +343,6 @@ impl<'p> Program<'p> {
             }
         }
         out
-    }
-}
-
-fn collect_func_references_stmt<'p>(stmt: &Stmt<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
-    match stmt {
-        Stmt::DoneDeclFunc(_) | Stmt::Noop => {}
-        Stmt::Eval(e) => collect_func_references(e, refs, const_reads),
-        Stmt::DeclVar { value, .. } => {
-            if let Some(v) = value {
-                collect_func_references(v, refs, const_reads);
-            }
-        }
-        Stmt::Set { place, value } => {
-            collect_func_references(place, refs, const_reads);
-            collect_func_references(value, refs, const_reads);
-        }
-        Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => {} // this is fine now because of lazy scope resolve.
-        Stmt::DeclVarPattern { value, .. } => {
-            if let Some(v) = value {
-                collect_func_references(v, refs, const_reads);
-            }
-            // the bindings should just be types by now
-        }
-    }
-}
-
-fn collect_func_references_value(v: &Value, refs: &mut Vec<FuncId>) {
-    let mut vals = vec![v];
-    while let Some(v) = vals.pop() {
-        match v {
-            Value::GetFn(f) => refs.push(*f),
-            Value::Heap { value, .. } => {
-                let value = unsafe { &**value };
-                vals.extend(&value.values);
-            }
-            Value::OverloadSet(_) => {
-                // TODO // unreachable!("finished ast contained {v:?}")
-            }
-            _ => {}
-        }
-    }
-}
-
-// TODO: this could use walk_whatever()
-fn collect_func_references<'p>(expr: &Expr<'p>, refs: &mut Vec<FuncId>, const_reads: &mut HashSet<Var<'p>>) {
-    match expr {
-        Expr::Poison => unreachable!("ICE: POISON"),
-        Expr::Value { value, .. } => value.clone().vec().iter().for_each(|v| collect_func_references_value(v, refs)),
-        Expr::Raw { .. } => {} // TODO: check the type. there could be functions in there.
-        Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
-            collect_func_references(fst, refs, const_reads);
-            collect_func_references(snd, refs, const_reads);
-        }
-        Expr::Block { body, result, .. } => {
-            for s in body {
-                collect_func_references_stmt(s, refs, const_reads);
-            }
-            collect_func_references(result, refs, const_reads);
-        }
-        Expr::Tuple(exprs) => {
-            for e in exprs {
-                collect_func_references(e, refs, const_reads);
-            }
-        }
-
-        Expr::FieldAccess(e, _) | Expr::SuffixMacro(_, e) => {
-            collect_func_references(e, refs, const_reads);
-        }
-        Expr::GetVar(v) => {
-            const_reads.insert(*v);
-        }
-        Expr::StructLiteralP(_) => {}
-        Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::PrefixMacro { .. } | Expr::String(_) | Expr::Closure(_) => {} // TODO // unreachable!("finished ast contained {expr:?}"),
     }
 }
 

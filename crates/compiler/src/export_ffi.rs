@@ -70,8 +70,19 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ),
     ("fn munmap(addr: VoidPtr, len: i64) i64", libc::munmap as *const u8),
     ("fn mprotect(addr: VoidPtr, len: i64, prot: i64) i64", libc::mprotect as *const u8),
+    ("fn __clear_cache(beg: VoidPtr, beg: VoidPtr) Unit", __clear_cache as *const u8),
+    (
+        "fn clock_gettime(clock_id: i64, time_spec: VoidPtr) Unit",
+        libc::clock_gettime as *const u8,
+    ),
 ];
 
+// TODO: do this myself
+extern "C" {
+    pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
+}
+
+// pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Ptr(Inner: Type) Type", do_ptr_type as *const u8),
@@ -503,7 +514,7 @@ pub const COMPILER_MACROS: &[(&str, FlatCallFn)] = &[
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let res = compile.enum_constant_macro(unsafe { &mut *result }, arg, target);
+    let res = compile.enum_constant_macro(arg, target);
     compile.pending_ffi.push(Some(result));
     res.unwrap()
 }

@@ -7,7 +7,6 @@
 use codemap::Span;
 use codemap_diagnostic::Diagnostic;
 use interp_derive::InterpSend;
-use libc::printf;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -22,14 +21,14 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{do_flat_call, do_flat_call_values};
+use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, ffi, impl_index};
+use crate::{bc::*, ffi, impl_index, STATS};
 use crate::{
     logging::{LogTag, PoolLog},
     outln,
@@ -192,7 +191,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert_eq!(found, s, "{}", self.log_trace()); // TODO: fix the way i deal with errors. i dont always short circuit so this doesnt work
     }
 
-    pub fn compile_top_level(&mut self, mut ast: Func<'p>) -> Res<'p, FuncId> {
+    pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
         let f = self.add_func(ast)?;
 
         if let Err(mut e) = self.ensure_compiled(f, ExecTime::Comptime) {
@@ -206,11 +205,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         if self.currently_compiling.contains(&f) {
             return Ok(());
         }
-        // if !add_unique(&mut self.currently_compiling, f) {
-        //     // This makes recursion work.
-        //     return Ok(());
-        // }
-        //
         let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
         let before = self.debug_trace.len();
@@ -307,6 +301,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     ) -> Res<'p, Ret> {
         let state = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state);
+        self.compile(f, when)?;
         emit_aarch64(self, f, when)?;
         self.pending_ffi.push(result);
         let addr = if let Some(addr) = self.program[f].comptime_addr {
@@ -533,10 +528,20 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(func.capture_vars.is_empty());
         assert!(!force_inline);
         assert!(!func.any_const_args());
-        add_unique(&mut result.callees, (f, ExecTime::Both));
+        self.add_callee(result, f, ExecTime::Both);
         self.ensure_compiled(f, result.when)?;
         let ret_ty = unwrap!(self.program[f].finished_ret, "fn ret");
         Ok(Structured::RuntimeOnly(ret_ty))
+    }
+
+    // TODO: i think the main reason <callees> is on the result not the func is because I used to use mut_replace for emit_body.  -- Apr 25
+    fn add_callee(&mut self, result: &mut FnWip<'p>, f: FuncId, when: ExecTime) {
+        // this fixes mutual recursion
+        // TODO: now if other backends try to use callees they might not get everything they need.
+        //       not failing tests rn because im egarly compiling on this backend and llvm doesn't support everything yet os not all tests run there anyway.  -- Apr 25
+        if !self.currently_compiling.contains(&f) {
+            add_unique(&mut result.callees, (f, when));
+        }
     }
 
     // Replace a call expr with the body of the target function.
@@ -607,7 +612,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
         debug_assert!(self.program[o_f].resolved_body && self.program[o_f].resolved_sign);
-        let scope = self.program[o_f].scope.unwrap();
 
         let mut arg_x = self.program[o_f].arg.clone();
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
@@ -685,31 +689,42 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Don't want to renumber, so only resolve on the clone. // TODO: this does redundant work on closed constants.
         self.program[template_f].assert_body_not_resolved()?;
 
+        debug_assert!(self.program[template_f].resolved_sign);
+
         let state = DebugState::ComptimeCall(template_f, self.program[template_f].name);
         self.push_state(&state);
         // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
         // BUT... the *arguments* to the call need to be evaluated in the caller's scope.
 
+        let no_memo = self.program[template_f].has_tag(Flag::No_Memo); // Currently this is only used by 'fn Unique' because that doesn't want to go in the generics_memo cache.
+
+        let arg_ty = self.program[template_f].finished_arg.unwrap();
+        self.compile_expr(result, arg_expr, Some(arg_ty))?;
+        let arg_value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
+
+        // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
+        let mut key = (template_f, arg_value); // TODO: no clone
+        if !no_memo {
+            let found = self.program.generics_memo.get(&key);
+            if let Some(found) = found {
+                let found = found.clone();
+                self.pop_state(state);
+                return Ok(found);
+            }
+        }
+        let arg_value = key.1;
+
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
-        ResolveScope::resolve_sign(&mut func, self)?;
         ResolveScope::resolve_body(&mut func, self)?;
         func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
 
         // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
         //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
         //       or when impl new functions so can only happen once so they dont make redundant overloads.  -- Apr 20
-        let no_memo = func.has_tag(Flag::No_Memo); // Currently this is only used by 'fn Unique' because that doesn't want to go in the generics_memo cache.
         debug_assert!(!func.evil_uninit);
         func.referencable_name = false;
-
-        // I used to use func.closed_constants instead of result.constants. But it seems fine this way. --Apr 15.
-        let types = self.infer_pattern(&mut func.arg.bindings)?;
-        // TODO: update self.program[f]
-        let arg_ty = self.program.tuple_of(types);
-        self.compile_expr(result, arg_expr, Some(arg_ty))?;
-        let arg_value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
 
         // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
         // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
@@ -721,17 +736,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             value: arg_value.clone(),
         };
 
-        // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
-        let key = (template_f, arg_value.clone()); // TODO: no clone
-        if !no_memo {
-            let found = self.program.generics_memo.get(&key);
-            if let Some(found) = found {
-                let found = found.clone();
-                self.pop_state(state);
-                return Ok(found);
-            }
-        }
-
         // Bind the arg into my new constants so the ret calculation can use it.
         // also the body constants for generics need this. much cleanup pls.
         // TODO: factor out from normal functions?
@@ -742,6 +746,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let func = &self.program[f];
         let args = func.arg.flatten().into_iter();
+        key.1 = arg_value.clone();
         let mut arg_values = arg_value.vec().into_iter();
         for (name, ty, kind) in args {
             let size = self.ready.sizes.slot_count(self.program, ty); // TODO: better pattern matching
@@ -931,9 +936,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let func = &self.program[id];
 
-                if let Some(var) = var {
-                    // println!("compile DeclFunc {id:?} {}", var.log(self.pool));
-                }
                 // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
                 //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
                 //       then have @test(.aarch64, .llvm) instead of current special handling.
@@ -1425,8 +1427,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 // self.program[id].add_tag(Flag::C_Call);
                                 // assert!(!self.program[id].has_tag(Flag::Flat_Call), "TODO: cc in ptr ty");
                                 // assert!(!self.program[id].has_tag(Flag::Ct), "TODO: cc in ptr ty");
-                                add_unique(&mut result.callees, (id, ExecTime::Both));
-                                self.ensure_compiled(id, result.when)?;
+                                self.add_callee(result, id, ExecTime::Both);
+                                self.compile(id, result.when)?;
                                 // The backend still needs to do something with this, so just leave it
                                 let ty = self.program.func_type(id);
                                 let ty = self.program.fn_ty(ty).unwrap();
@@ -1576,7 +1578,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(target)
     }
 
-    pub fn enum_constant_macro(&mut self, result: &mut FnWip<'p>, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+    pub fn enum_constant_macro(&mut self, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         let loc = arg.loc;
         let ty: TypeId = self.immediate_eval_expr_known(arg.clone())?;
         if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
@@ -2066,15 +2068,44 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(Some(pls.into()));
             }
             Expr::Call(f, arg) => {
-                // this doesn't help as much as it could because it doesn't have access to the context so it can't try to compile the function if the caller hasn't already
-                if let Some(f) = f.as_fn() {
-                    // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
-                    if self.ready.ready.len() > f.as_index() && self.ready[f].is_some() {
-                        // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
-                        let ret_ty = self.program[f].finished_ret.unwrap();
-                        let arg = self.immediate_eval_expr(mem::take(arg), ret_ty)?;
-                        return Ok(Some(self.run(f, arg, ExecTime::Comptime, None)?));
+                // !slice and !addr can't be const evaled!
+                if !matches!(arg.expr, Expr::SuffixMacro(_, _)) {
+                    let f_id = if let Expr::GetVar(var) = f.expr {
+                        if let Some((val, ty)) = self.find_const(var) {
+                            match val {
+                                Values::One(Value::GetFn(f)) => Some(f),
+                                Values::One(Value::OverloadSet(f)) => {
+                                    let ol = &self.program.overload_sets[f];
+                                    if ol.pending.is_empty() && ol.ready.len() == 1 {
+                                        Some(ol.ready[0].func)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        f.as_fn()
+                    };
+
+                    if let Some(f) = f_id {
+                        debug_assert!(!self.program[f].evil_uninit);
+                        // TODO: try to compile it now.
+                        // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
+                        let is_ready = self.program[f].comptime_addr.is_some() || (self.ready.ready.len() > f.as_index() && self.ready[f].is_some());
+                        if is_ready && !self.program[f].any_const_args() {
+                            // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
+                            let ret_ty = self.program[f].finished_ret.unwrap();
+                            let arg = self.immediate_eval_expr(mem::take(arg), ret_ty)?;
+                            return Ok(Some(self.run(f, arg, ExecTime::Comptime, None)?));
+                        }
+                        // fallthrough
                     }
+                    // fallthrough
+                    // println!("{}", f.log(self.pool));
                 }
 
                 // fallthrough
@@ -2085,6 +2116,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
+        debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
+        unsafe { STATS.make_lit_fn += 1 };
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
         let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
         let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
@@ -2820,6 +2853,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: emit into the Jitted thing instead of this.
         //       maybe just keep the vec, defer dealing with it and have bc_to_asm do it?
         self.program[f].jitted_code = Some(ops.clone());
+
         Ok(())
     }
 
@@ -3098,10 +3132,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             value: Value::SplitFunc { ct, rt }.into(),
         };
 
-        add_unique(&mut result.callees, (ct, ExecTime::Comptime));
-        add_unique(&mut result.callees, (rt, ExecTime::Runtime));
-        self.ensure_compiled(ct, ExecTime::Comptime)?;
-        self.ensure_compiled(rt, ExecTime::Runtime)?;
+        self.add_callee(result, ct, ExecTime::Comptime);
+        self.add_callee(result, rt, ExecTime::Runtime);
+        self.compile(ct, ExecTime::Comptime)?;
+        self.compile(rt, ExecTime::Runtime)?;
 
         Ok(Structured::RuntimeOnly(ret_ty))
     }
@@ -3116,10 +3150,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
         // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
         // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
-        // TODO: do this myself
-        extern "C" {
-            pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
-        }
+
         let (beg, end) = self.aarch64.bump_dirty();
         if beg != end {
             unsafe { __clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }

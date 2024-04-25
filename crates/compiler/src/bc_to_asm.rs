@@ -120,7 +120,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
                 // TODO: this needs to be aware of the distinction between comptime and runtime target.
                 for op in insts {
-                    self.compile.aarch64.push(*op as i64);
+                    let op = *op as i64;
+                    self.compile.aarch64.push(op);
                 }
             } else {
                 self.bc_to_asm(f)?;
@@ -141,7 +142,16 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         // println!("{}", func.log(self.compile.program.pool));
         let a = self.compile.program[f].finished_arg.unwrap();
         let r = self.compile.program[f].finished_ret.unwrap();
-        if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.ready.sizes.slot_count(self.compile.program, r) >= 7 {
+        let ret_limit = match self.when {
+            ExecTime::Runtime => 7,
+            _ => 1,
+        };
+        if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7
+            || self.compile.ready.sizes.slot_count(self.compile.program, r) >= ret_limit
+        {
+            debug_assert!(!self.compile.program[f].has_tag(Flag::C_Call),);
+            debug_assert!(self.compile.program[f].comptime_addr.is_none());
+            // my cc can do 8 returns in the arg regs but my ffi with compiler can't
             // TODO: my c_Call can;t handle agragates
             self.compile.program[f].add_tag(Flag::Flat_Call);
             self.compile.program[f].add_tag(Flag::Ct);
@@ -628,9 +638,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
             assert!(!target.has_tag(Flag::C_Call), "multiple calling conventions doesn't make sense");
 
-            let addr = target
-                .comptime_addr
-                .unwrap_or_else(|| self.compile.aarch64.get_fn(f).unwrap().as_ptr() as u64);
+            let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v.as_ptr() as u64));
             let arg_offset = self.find_many(arg, false);
             let ret_offset = self.find_many(ret, true);
             let c = self.compile as *const Compile as u64;
@@ -773,7 +781,7 @@ pub mod jit {
         map_exec: Option<memmap2::Mmap>,
         /// This is redundant but is the pointer used for actually calling functions and there aren't that many bits in the instruction,
         /// so I don't want to spend one doubling to skip lengths.
-        dispatch: Vec<*const u8>,
+        pub dispatch: Vec<*const u8>,
         ranges: Vec<*const [u8]>,
         current_start: *const u8,
         next: *mut u8,
@@ -870,6 +878,9 @@ pub mod jit {
                 self.ranges[f.as_index()] = range as *const [u8];
                 self.ip_to_inst.clear();
                 debug_assert_eq!(self.current_start as usize % 4, 0);
+                // just a marker to make sure someone doesn't fall off the end of the function by forgetting to return.
+                // also you can see it in the debugger disassembly so you can tell if you emitted a trash instruction inside a function or you're off the end in uninit memory. -- Apr 25
+                self.push(brk(0xDEAD));
                 self.current_start = self.next;
             }
         }

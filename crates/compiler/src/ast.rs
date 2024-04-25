@@ -768,23 +768,6 @@ impl<'p> Func<'p> {
     }
 
     #[track_caller]
-    pub(crate) fn renumber_vars(&mut self, vars: usize) -> (usize, HashMap<Var<'p>, Var<'p>>) {
-        debug_assert!(!self.evil_uninit && self.resolved_sign && self.resolved_body);
-        let mut mapping = HashMap::new();
-        let mut ctx = RenumberVars { vars, mapping: &mut mapping };
-        ctx.pattern(&mut self.arg);
-        ctx.ty(&mut self.ret);
-        for s in &mut self.local_constants {
-            ctx.stmt(s)
-        }
-        if let Some(body) = &mut self.body {
-            ctx.expr(body);
-        }
-
-        (ctx.vars, mapping)
-    }
-
-    #[track_caller]
     pub(crate) fn assert_body_not_resolved(&self) -> Res<'p, ()> {
         debug_assert!(!self.evil_uninit);
         debug_assert!(!self.resolved_body, "resolved {}", self.why_resolved_body.as_ref().unwrap());

@@ -29,6 +29,7 @@ pub trait InterpSend<'p>: Sized {
         debug_assert_eq!(values.len(), Self::size());
         values.into()
     }
+
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
     fn serialize_to_ints(self, values: &mut Vec<i64>);
     fn serialize_to_ints_one(self) -> Vec<i64> {

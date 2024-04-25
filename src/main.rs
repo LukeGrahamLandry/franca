@@ -43,6 +43,9 @@ fn main() {
         exit(1);
     }
     if let Some(name) = env::args().nth(1) {
+        if name == "--" {
+            panic!("dont put double dash to seperate args");
+        }
         if name == "bootstrap" {
             let (rs, fr) = bootstrap();
             fs::write("target/bootstrap_gen.rs", rs).unwrap();

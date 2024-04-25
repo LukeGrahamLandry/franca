@@ -1,4 +1,19 @@
-## dont resolve vars up front (Apr 24)
+## fewer fn clones (Apr 25)
+
+- doing the comptome memo lookup before the clone makes Consts.log go 2200 lines -> 1800 lines. saves 200 States::fn_body_resolve
+- previously quici eval always failed if it was a comptime_addr in the compiler because the FnBody wouldn't be in ready. make_lit_fn 2423 -> 2346. meh.
+- UInt/SInt seems to be the main thing not in 'ready'? oh im dumb, its once per run: the first time they get called for a const, then after that they're ready and can just be a jit call. that's not so bad.
+- operator_star_prefix is often an overload set not a function.
+
+quick eval overload set with no pending and one ready: make_lit_fn goes 2346 -> 1465.
+can't do it when arg is macro !addr or !slice becuase then you're trying to const eval pointer onto the stack frame.
+the only place that shows up is my inline asm where i always pass the slice of insturctions to something that allocates it as a list to return.
+discovered by skipping (name == "lst" || name == "heap" || name == "fcmp_with_cond" || name == "hackheap") by trial and error.
+its kinda handy that any non-bootstrapped inline asm bug breaks tests/floats cause thats such a random one to not work.
+
+so thats ~40% less lit_fn and made debug mode --no-fork ~5% faster.
+
+## dont resolve vars up front (Apr 24/25)
 
 did a bunch of refactoring the scope system yesterday.
 
@@ -7,6 +22,18 @@ because you can't resolve the overload, because you need to know the types,
 but ive paired resolving the argument names with the argument types because what about when you're allowed to refer to previous arguments.
 Can't go back to @comptime args not being const because you want to use them in types of declarations in the body, if anything i want to get rid of @comptime.
 Maybe start with the easy @impl case where you know the types without binding the args.
+
+So answer is have resolve_sign not bind argument names, just resolve the type expressions, which works for anything that's not @generic
+because you can't read argument vars in thier types. Then had a very long problem of it trying to do an overload on the template
+version of functions in an @impl @comptime, so they would never be bound. but it also wasnt finding the specialized versions.
+needed to add an extra block around args because all the args and constants were going into the function's outer scope,
+so specializations would shadow which is an error so the resolve would fail and I think a mut_replace! somewhere in the
+overloading so it lost the function.
+
+then little problem of now generic args dont get renumbered.
+i'm declaring args during resolve_sign becuase I wanted to have later args depend on values of previous,
+but my tests don't use that and the whole type checking system isn't super setup for partial argument types where you need to
+know previous arg values for type of later ones. tests just use generic return types so probably fine to limit to that for now.
 
 ## stricter closure capture handling (Apr 22)
 
