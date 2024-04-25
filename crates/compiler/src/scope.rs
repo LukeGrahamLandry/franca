@@ -92,24 +92,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.scope = func.scope.unwrap();
         self.block = 0;
         debug_assert_eq!(self.scope, func.scope.unwrap());
-        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
-        if generic {
-            self.push_scope(None);
-            debug_assert!(func.args_block.is_none());
-            func.args_block = Some(self.block);
-        }
+        let generic = func.has_tag(Flag::Generic); // ret is allowed to depend on previous args.
 
         self.local_constants.push(Default::default());
         func.resolved_sign = true;
         for b in &mut func.arg.bindings {
             self.resolve_binding(b)?;
-            if generic {
-                self.declare_binding(b, func.loc)?;
-            }
         }
-        self.walk_ty(&mut func.ret);
-        if generic {
-            self.pop_block();
+        if !generic {
+            self.walk_ty(&mut func.ret);
         }
         self.pop_block();
         let arg_block_const_decls = self.local_constants.pop().unwrap();
@@ -126,18 +117,19 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         unsafe { STATS.fn_body_resolve += 1 };
         self.scope = func.scope.unwrap();
         let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
-        if !generic {
-            self.push_scope(None);
-            debug_assert!(func.args_block.is_none());
-            func.args_block = Some(self.block);
-        }
+
+        self.push_scope(None);
+        debug_assert!(func.args_block.is_none());
+        func.args_block = Some(self.block);
+
         self.block = func.args_block.unwrap();
         self.local_constants.push(Default::default());
 
-        if !generic {
-            for b in &mut func.arg.bindings {
-                self.declare_binding(b, func.loc)?;
-            }
+        for b in &mut func.arg.bindings {
+            self.declare_binding(b, func.loc)?;
+        }
+        if generic {
+            self.walk_ty(&mut func.ret);
         }
         self.push_scope(None);
         func.resolved_body = true;
@@ -147,9 +139,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.pop_block();
         debug_assert_eq!(self.scope, func.scope.unwrap());
         debug_assert_eq!(self.block, func.args_block.unwrap());
-        if !generic {
-            self.pop_block();
-        }
+        self.pop_block();
         self.pop_scope();
         let capures = mem::take(&mut self.captures);
         // Now check which things we captured from *our* parent.
