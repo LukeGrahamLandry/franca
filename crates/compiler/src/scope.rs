@@ -108,6 +108,9 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
         }
         self.walk_ty(&mut func.ret);
+        if generic {
+            self.pop_block();
+        }
         self.pop_block();
         let arg_block_const_decls = self.local_constants.pop().unwrap();
         assert!(arg_block_const_decls.is_empty()); // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
@@ -144,8 +147,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.pop_block();
         debug_assert_eq!(self.scope, func.scope.unwrap());
         debug_assert_eq!(self.block, func.args_block.unwrap());
-        if generic {
-            self.pop_scope();
+        if !generic {
+            self.pop_block();
         }
         self.pop_scope();
         let capures = mem::take(&mut self.captures);

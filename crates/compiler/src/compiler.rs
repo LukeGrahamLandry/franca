@@ -7,6 +7,7 @@
 use codemap::Span;
 use codemap_diagnostic::Diagnostic;
 use interp_derive::InterpSend;
+use libc::printf;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -202,10 +203,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        if !add_unique(&mut self.currently_compiling, f) {
-            // This makes recursion work.
+        if self.currently_compiling.contains(&f) {
             return Ok(());
         }
+        // if !add_unique(&mut self.currently_compiling, f) {
+        //     // This makes recursion work.
+        //     return Ok(());
+        // }
+        //
         let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
         let before = self.debug_trace.len();
@@ -216,12 +221,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             if let Some(wip) = func.wip.as_ref() {
                 let callees = wip.callees.clone();
                 for (id, when) in callees {
+                    if id == f {
+                        continue;
+                    }
                     let res = self.compile(id, when);
                     self.tag_err(res)?;
                 }
                 result = emit_bc(self, f);
             } else {
-                result = self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime);
+                // TODO
+                // result = self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime);
             }
         }
 
@@ -230,7 +239,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if result.is_ok() {
             debug_assert_eq!(before, after);
             self.pop_state(state);
-            self.currently_compiling.retain(|check| *check != f);
+            // self.currently_compiling.retain(|check| *check != f);
         }
         result
     }
@@ -402,6 +411,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         if func.wip.is_some() {
             return Ok(());
         }
+        if !add_unique(&mut self.currently_compiling, f) {
+            // This makes recursion work.
+            return Ok(());
+        }
         debug_assert!(!func.evil_uninit);
         self.ensure_resolved_body(f)?;
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
@@ -423,6 +436,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.pop_state(state);
         let after = self.debug_trace.len();
         debug_assert_eq!(before, after);
+
+        // TODO: error safety ^
+        self.currently_compiling.retain(|check| *check != f);
         Ok(())
     }
 
@@ -526,7 +542,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // Replace a call expr with the body of the target function.
     // The idea is having zero cost (50 cycles) closures :)
     fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, Structured> {
-        self.ensure_resolved_body(f)?;
+        self.ensure_resolved_body(f)?; // it might not be a closure. it might be an inlined thing.
         let loc = expr_out.loc;
         debug_assert_ne!(f, result.func, "recusive inlining?");
         assert!(!self.program[f].evil_uninit);
@@ -537,8 +553,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
         self.currently_inlining.push(f);
 
-        // We close them into f's Func, but we need to emit
-        // into the caller's body.
         self.eval_and_close_local_constants(f)?;
         let func = &self.program.funcs[f.as_index()];
         assert!(!func.any_const_args());
