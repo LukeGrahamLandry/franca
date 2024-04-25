@@ -30,7 +30,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             compiler,
             last_loc,
             scope,
-            block: 0,
+            block: 0, // TODO: new block for each specialization so they can't read eachother's arguments
         }
     }
 
@@ -92,10 +92,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.scope = func.scope.unwrap();
         self.block = 0;
         debug_assert_eq!(self.scope, func.scope.unwrap());
+        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
+        if generic {
+            self.push_scope(None);
+            debug_assert!(func.args_block.is_none());
+            func.args_block = Some(self.block);
+        }
 
         self.local_constants.push(Default::default());
         func.resolved_sign = true;
-        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
         for b in &mut func.arg.bindings {
             self.resolve_binding(b)?;
             if generic {
@@ -103,6 +108,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
         }
         self.walk_ty(&mut func.ret);
+        self.pop_block();
         let arg_block_const_decls = self.local_constants.pop().unwrap();
         assert!(arg_block_const_decls.is_empty()); // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
         debug_assert_eq!(self.scope, func.scope.unwrap());
@@ -116,10 +122,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         unsafe { STATS.fn_body_resolve += 1 };
         self.scope = func.scope.unwrap();
-        self.block = 0;
+        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
+        if !generic {
+            self.push_scope(None);
+            debug_assert!(func.args_block.is_none());
+            func.args_block = Some(self.block);
+        }
+        self.block = func.args_block.unwrap();
         self.local_constants.push(Default::default());
 
-        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
         if !generic {
             for b in &mut func.arg.bindings {
                 self.declare_binding(b, func.loc)?;
@@ -132,7 +143,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         self.pop_block();
         debug_assert_eq!(self.scope, func.scope.unwrap());
-        debug_assert_eq!(self.block, 0);
+        debug_assert_eq!(self.block, func.args_block.unwrap());
+        if generic {
+            self.pop_scope();
+        }
         self.pop_scope();
         let capures = mem::take(&mut self.captures);
         // Now check which things we captured from *our* parent.
@@ -405,11 +419,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // Note: you can't shadow a let with a const either but that already works because consts are done first.
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
-        let mut wip = self.compiler[s].vars[self.block].vars.iter();
-        // TODO:
-        // if wip.any(|v| v.0 == *name && v.3 == VarType::Const) {
-        //     err!("Cannot shadow constant in the same scope: {}", self.compiler.pool.get(*name))
-        // }
+        let wip = &self.compiler[s].vars[self.block].vars;
+        let shadow_const = |v: &Var<'_>| v.0 == *name && v.3 == VarType::Const;
+        if wip.iter().any(shadow_const) {
+            err!(
+                "Cannot shadow constant in the same scope: {}",
+                wip.iter().find(|v| shadow_const(v)).unwrap().log(self.compiler.pool)
+            )
+        }
 
         let var = Var(*name, self.compiler.program.next_var, s, kind, self.block);
         if kind == VarType::Const {

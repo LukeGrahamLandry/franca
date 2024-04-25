@@ -536,7 +536,7 @@ fn const_eval_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> 
 
 fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, expr: FatExpr<'p>) -> String {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let res: String = compile.immediate_eval_expr_in_known(unsafe { &mut *result }, expr).unwrap();
+    let res: String = compile.immediate_eval_expr_known(expr).unwrap();
     compile.pending_ffi.push(Some(result));
     res
 }

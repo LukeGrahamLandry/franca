@@ -589,15 +589,15 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       The cloning is only better for runtime functions where we're trying to output a simpler ast that an optimiser can specialize.
     // Curry a function from fn(a: A, @comptime b: B) to fn(a: A)
     // The argument type is evaluated in the function declaration's scope, the argument value is evaluated in the caller's scope.
-    fn bind_const_arg(&mut self, o_f: FuncId, arg_name: Var<'p>, arg: Structured) -> Res<'p, FuncId> {
+    fn bind_const_arg(&mut self, o_f: FuncId, arg_name: Var<'p>, arg: Structured) -> Res<'p, ()> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
         debug_assert!(self.program[o_f].resolved_body && self.program[o_f].resolved_sign);
-        let mut new_func = self.program[o_f].clone(); // TODO: redundant
-        let scope = new_func.scope.unwrap();
+        let scope = self.program[o_f].scope.unwrap();
 
-        new_func.referencable_name = false;
-        let arg_ty = self.get_type_for_arg(&mut new_func.arg, arg_name)?;
+        let mut arg_x = self.program[o_f].arg.clone();
+        let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
+        self.program[o_f].arg = arg_x;
         self.type_check_arg(arg.ty(), arg_ty, "bind arg")?;
         let arg_value = arg.get()?;
         outln!(LogTag::Generics, "bind_const_arg of {o_f:?}");
@@ -614,34 +614,32 @@ impl<'a, 'p> Compile<'a, 'p> {
                 "   {arg_func:?} with captures {:?}.",
                 arg_func_obj.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
             );
-            for v in &arg_func_obj.capture_vars {
+            for v in arg_func_obj.capture_vars.clone() {
                 // its fine if same this is there multiple times but this makes it less messy to debug logs.
-                add_unique(&mut new_func.capture_vars, *v);
+                add_unique(&mut self.program[o_f].capture_vars, v);
             }
 
             // :ChainedCaptures
             // TODO: HACK: captures aren't tracked properly.
-            new_func.add_tag(Flag::Inline); // just this is enough to fix chained_captures
+            self.program[o_f].add_tag(Flag::Inline); // just this is enough to fix chained_captures
             self.program[*arg_func].add_tag(Flag::Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
         }
         self.save_const_values(arg_name, arg_value, arg_ty)?;
-        new_func.arg.remove_named(arg_name);
+        self.program[o_f].arg.remove_named(arg_name);
 
-        let known_type = new_func.finished_arg.is_some();
-        new_func.finished_arg = None;
-        let f_id = self.program.add_func(new_func);
-        self[scope].funcs.push(f_id);
+        let known_type = self.program[o_f].finished_arg.is_some();
+        self.program[o_f].finished_arg = None;
         outln!(
             LogTag::Generics,
-            "  => {f_id:?} with captures {:?}",
-            self.program[f_id].capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
+            "  => {o_f:?} with captures {:?}",
+            self.program[o_f].capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
         );
         // If it was fully resolved before, we can't leave the wrong answer there.
         // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
         if known_type {
-            self.infer_types(f_id)?;
+            self.infer_types(o_f)?;
         }
-        Ok(f_id)
+        Ok(())
     }
 
     /// It's fine to call this if the type isn't fully resolved yet.
@@ -669,7 +667,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: !!! maybe call this @generic instead of @comptime? cause other things can be comptime
     // Return type is allowed to use args.
     fn emit_comptime_call(&mut self, result: &mut FnWip<'p>, template_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, (Values, TypeId)> {
-        println!("comptime_call {:?} {}", template_f, arg_expr.log(self.pool));
+        // println!("comptime_call {:?} {}", template_f, arg_expr.log(self.pool));
         // Don't want to renumber, so only resolve on the clone. // TODO: this does redundant work on closed constants.
         self.program[template_f].assert_body_not_resolved()?;
 
@@ -697,7 +695,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: update self.program[f]
         let arg_ty = self.program.tuple_of(types);
         self.compile_expr(result, arg_expr, Some(arg_ty))?;
-        let arg_value = self.immediate_eval_expr_in(result, arg_expr.clone(), arg_ty)?;
+        let arg_value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
 
         // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
         // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
@@ -920,7 +918,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let func = &self.program[id];
 
                 if let Some(var) = var {
-                    println!("compile DeclFunc {id:?} {}", var.log(self.pool));
+                    // println!("compile DeclFunc {id:?} {}", var.log(self.pool));
                 }
                 // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
                 //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
@@ -1316,21 +1314,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.load_value(Value::Type(ty))
                     }
                     "const_eval" => {
-                        println!("const eval {}", arg.log(self.pool));
                         let res = self.compile_expr(result, arg, requested)?;
                         let ty = res.ty();
                         let value = if let Ok(val) = res.get() {
                             val
                         } else {
                             // TODO: its a bit silly that i have to specifiy the type since the first thing it does is compile it
-                            self.immediate_eval_expr_in(result, mem::take(arg), ty)?
+                            self.immediate_eval_expr(mem::take(arg), ty)?
                         };
                         expr.expr = Expr::Value { ty, value: value.clone() };
                         expr.ty = ty;
                         Structured::Const(ty, value)
                     }
                     "size_of" => {
-                        let ty: TypeId = self.immediate_eval_expr_in_known(result, mem::take(arg))?;
+                        let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
                         let size = self.ready.sizes.slot_count(self.program, ty);
                         expr.expr = Expr::int(size as i64);
                         self.program.load_value(Value::I64(size as i64))
@@ -1469,7 +1466,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Index { ptr, index } => {
                 let ptr = self.compile_expr(result, ptr, None)?;
                 self.compile_expr(result, index, Some(TypeId::i64()))?;
-                let i: usize = self.immediate_eval_expr_in_known(result, *index.clone())?;
+                let i: usize = self.immediate_eval_expr_known(*index.clone())?;
                 index.expr = Expr::Value {
                     ty: TypeId::i64(),
                     value: Values::One(Value::I64(i as i64)),
@@ -1504,7 +1501,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
                 // TODO: OverloadSet: InterpSend so I can use known. cant say usize even tho thats kinda what i want cause its unique and anyway would be dumb to give up the typechecking -- Apr 21
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
-                let os = self.immediate_eval_expr_in(result, *handler.clone(), TypeId::overload_set())?;
+                let os = self.immediate_eval_expr(*handler.clone(), TypeId::overload_set())?;
                 let os = unwrap!(os.single()?.to_overloads(), "expected overload set. TODO: allow direct function");
                 self.compute_new_overloads(os)?;
 
@@ -1557,7 +1554,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
     pub fn as_cast_macro(&mut self, result: &mut FnWip<'p>, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         self.compile_expr(result, &mut arg, Some(TypeId::ty()))?;
-        let ty: TypeId = self.immediate_eval_expr_in_known(result, arg)?;
+        let ty: TypeId = self.immediate_eval_expr_known(arg)?;
         assert!(!ty.is_unknown());
         target.ty = ty;
         // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
@@ -1567,7 +1564,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn enum_constant_macro(&mut self, result: &mut FnWip<'p>, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         let loc = arg.loc;
-        let ty: TypeId = self.immediate_eval_expr_in_known(result, arg.clone())?;
+        let ty: TypeId = self.immediate_eval_expr_known(arg.clone())?;
         if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
             let mut the_type = Pattern::empty(loc);
             let unique_ty = self.program.unique_ty(ty);
@@ -1600,9 +1597,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             });
             let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
             let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
-            let the_type: TypeId = self.immediate_eval_expr_in_known(result, the_type)?;
+            let the_type: TypeId = self.immediate_eval_expr_known(the_type)?;
             let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), Box::new(target)), loc);
-            let value = self.immediate_eval_expr_in(result, construct_expr, the_type)?;
+            let value = self.immediate_eval_expr(construct_expr, the_type)?;
             let value = Value::new_box(value.vec(), true).into();
             let ty = self.program.ptr_type(the_type);
             let mut e = FatExpr::synthetic(Expr::Value { ty, value }, loc);
@@ -1773,7 +1770,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
                 if handler.as_ident() == Some(Flag::As.ident()) && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                     // HACK: sad that 'as' is special
-                    let ty: TypeId = self.immediate_eval_expr_in_known(result, *arg.clone())?;
+                    let ty: TypeId = self.immediate_eval_expr_known(*arg.clone())?;
                     return Ok(Some(ty));
                 }
 
@@ -1784,7 +1781,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
                         if self.program.overload_sets[os].name == Flag::As.ident() && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                             // HACK: sad that 'as' is special
-                            let ty: TypeId = self.immediate_eval_expr_in_known(result, *arg.clone())?;
+                            let ty: TypeId = self.immediate_eval_expr_known(*arg.clone())?;
                             return Ok(Some(ty));
                         }
                     }
@@ -2006,52 +2003,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ty)
     }
 
-    // If we have access to a 'result' context, might as well try compiling the expression first and see if its something trivial that doesn't need to spin up a whole new function.
-    // It shouldn't really waste any time because most of the work compiling will be saved and you'd have to do anyway for the shim function body.
-    // There's some subtle order of execution difference that means you can't use this for the type in @as which is a bit scary.
-    // TODO: maybe i need to renumber declared variables?
-    fn immediate_eval_expr_in(&mut self, result: &mut FnWip<'p>, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
-        let res = self.compile_expr(result, &mut e, Some(ret_ty))?;
-        match res {
-            Structured::Const(ty, val) => {
-                self.type_check_arg(ty, ret_ty, "immediate_eval_expr_in")?;
-                Ok(val)
-            }
-            _ => {
-                if let Some(values) = self.check_quick_eval(&mut e, ret_ty)? {
-                    return Ok(values);
-                }
-                let func_id = self.make_lit_function(e, ret_ty)?;
-                self.run(func_id, Value::Unit.into(), ExecTime::Comptime, Some(result as *mut FnWip))
-            }
-        }
-    }
-
-    // Since the rust code often statically knows the return type it wants, this version is more ergonomic to call. the caller doesn't have to bother with the deserialization themself.
-    pub fn immediate_eval_expr_in_known<Ret: InterpSend<'p>>(&mut self, result: &mut FnWip<'p>, mut e: FatExpr<'p>) -> Res<'p, Ret> {
-        let ret_ty = Ret::get_type(self.program);
-        let res = self.compile_expr(result, &mut e, Some(ret_ty))?;
-        match res {
-            Structured::Const(ty, val) => {
-                self.type_check_arg(ty, ret_ty, "immediate_eval_expr_in")?;
-                self.deserialize_values(val)
-            }
-            _ => {
-                if let Some(val) = self.check_quick_eval(&mut e, ret_ty)? {
-                    return self.deserialize_values(val);
-                }
-                let func_id = self.make_lit_function(e, ret_ty)?;
-                self.call_jitted(func_id, ExecTime::Comptime, None, ())
-            }
-        }
-    }
-
     fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
         let ints = self.aarch64.constants.store_to_ints(values.vec().iter());
         Ok(unwrap!(Ret::deserialize_from_ints(&mut ints.into_iter()), ""))
     }
 
-    fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
+    pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
         let ret_ty = Ret::get_type(self.program);
         if let Some(val) = self.check_quick_eval(&mut e, ret_ty)? {
             return self.deserialize_values(val);
@@ -2660,7 +2617,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn curry_const_args(
         &mut self,
-        mut original_f: FuncId,
+        original_f: FuncId,
         f_expr: &mut FatExpr<'p>,
         arg_expr: &mut FatExpr<'p>,
         mut arg_val: Structured,
@@ -2670,29 +2627,32 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         // Some part of the argument must be known at comptime.
         // You better hope compile_expr noticed and didn't put it in a stack slot.
-        let new_func = self.program[original_f].clone(); // TOOD: excesive cloning. not bind_const_arg shouldn't do it!
-        original_f = self.add_func(new_func)?;
-        self.ensure_resolved_sign(original_f)?;
-        self.ensure_resolved_body(original_f)?;
-        let func = &self.program[original_f];
+        let mut new_func = self.program[original_f].clone(); // TOOD: excesive cloning. not bind_const_arg shouldn't do it!
+        new_func.referencable_name = false;
+        let scope = new_func.scope.unwrap();
+        let new_fid = self.program.add_func(new_func);
+        self[scope].funcs.push(new_fid);
+        self.ensure_resolved_sign(new_fid)?;
+        self.ensure_resolved_body(new_fid)?;
+        let func = &self.program[new_fid];
         let pattern = func.arg.flatten();
 
         if pattern.len() == 1 {
             let (name, _, kind) = pattern.into_iter().next().unwrap();
             debug_assert_eq!(kind, VarType::Const);
             let name = unwrap!(name, "arg needs name (unreachable?)");
-            let current_fn = self.bind_const_arg(original_f, name, arg_val)?;
+            self.bind_const_arg(new_fid, name, arg_val)?;
             arg_expr.expr = Expr::unit();
             arg_expr.ty = TypeId::unit();
 
-            let ty = self.program.func_type(current_fn);
+            let ty = self.program.func_type(new_fid);
             f_expr.expr = Expr::Value {
                 ty,
-                value: Value::GetFn(current_fn).into(),
+                value: Value::GetFn(new_fid).into(),
             };
             f_expr.ty = ty;
             self.pop_state(state);
-            Ok(current_fn)
+            Ok(new_fid)
         } else {
             if let Structured::Const(ty, values) = arg_val {
                 assert_eq!(
@@ -2733,7 +2693,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         err!("TODO: pattern match on non-tuple",)
                     };
                     assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
-                    let mut current_fn = original_f;
                     let mut skipped_args = vec![];
                     let mut skipped_types = vec![];
                     let mut removed = 0;
@@ -2742,7 +2701,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let name = unwrap!(name, "arg needs name (unreachable?)");
                             // bind_const_arg handles adding closure captures.
                             // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
-                            current_fn = self.bind_const_arg(current_fn, name, arg_value)?;
+                            self.bind_const_arg(new_fid, name, arg_value)?;
                             // TODO: this would be better if i was iterating backwards
                             arg_exprs.remove(i - removed);
                             removed += 1; // TODO: this sucks
@@ -2752,7 +2711,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     let arg_ty = self.program.tuple_of(skipped_types);
-                    debug_assert_ne!(current_fn, original_f);
+                    debug_assert_ne!(new_fid, original_f);
                     if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
                         if v.is_empty() {
                             // Note: this started being required when I added fn while.
@@ -2765,17 +2724,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // Symptom of forgetting this was emit_bc passing extra uninit args.
                     arg_expr.ty = arg_ty;
 
-                    let ty = self.program.func_type(current_fn);
+                    let ty = self.program.func_type(new_fid);
                     f_expr.expr = Expr::Value {
                         ty,
-                        value: Value::GetFn(current_fn).into(),
+                        value: Value::GetFn(new_fid).into(),
                     };
                     f_expr.ty = ty;
                     let f_ty = self.program.fn_ty(ty).unwrap();
                     self.type_check_arg(arg_ty, f_ty.arg, "sanity: post bake arg")?;
                     self.pop_state(state);
                     // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
-                    Ok(current_fn)
+                    Ok(new_fid)
                 }
             }
         }
@@ -2951,7 +2910,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
                             // This makes addr_of const for @enum work
                             let res = self.compile_expr(result, value, ty.ty())?;
-                            self.immediate_eval_expr_in(result, value.clone(), res.ty())?
+                            self.immediate_eval_expr(value.clone(), res.ty())?
                         }
                     }
                     None => {

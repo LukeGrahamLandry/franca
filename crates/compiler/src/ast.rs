@@ -659,6 +659,7 @@ pub struct Func<'p> {
     pub resolved_sign: bool,
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
+    pub args_block: Option<usize>,
 
     pub why_resolved_sign: Option<String>,
     pub why_resolved_body: Option<String>,
@@ -1527,6 +1528,7 @@ impl<'p> Default for Func<'p> {
             scope: None,
             why_resolved_sign: None,
             why_resolved_body: None,
+            args_block: None,
         }
     }
 }
