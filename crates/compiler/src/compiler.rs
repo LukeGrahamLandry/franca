@@ -386,15 +386,62 @@ impl<'a, 'p> Compile<'a, 'p> {
             loc,
         );
 
-        mut_replace!(self.program[f].local_constants, |mut local_constants| {
-            for stmt in &mut local_constants {
-                let s: &mut FatStmt = stmt; // wtf bro. this is like my language. tyring to call .log broke type inference.
-                self.compile_stmt(&mut result, s)?;
+        let consts = mem::take(&mut self.program[f].local_constants);
+        for name in consts {
+            let (val, ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
+            debug_assert!(!matches!(ty, LazyType::EvilUnit));
+            if let Expr::AddToOverloadSet(funcs) = val.expr {
+                self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Poison;
+                self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
+                for func in funcs {
+                    debug_assert!(matches!(ty, LazyType::Infer));
+                    let mut stmt = FatStmt {
+                        stmt: Stmt::DeclFunc(func),
+                        annotations: vec![],
+                        loc,
+                    };
+                    self.compile_stmt(&mut result, &mut stmt).unwrap();
+                }
+                continue;
+            } else {
+                if let Expr::Value { ty, value } = &val.expr {
+                    if *ty == TypeId::overload_set() {
+                        let os = value.as_overload_set().unwrap();
+                        self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Value {
+                            ty: TypeId::overload_set(),
+                            value: Value::OverloadSet(os).into(),
+                        };
+                        self[name.2].constants.get_mut(&name).unwrap().0.ty = TypeId::overload_set();
+                        self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Finished(TypeId::overload_set());
+                        for func in mem::take(&mut self.program.overload_sets[os].just_resolved) {
+                            let mut stmt = FatStmt {
+                                stmt: Stmt::DeclFunc(func),
+                                annotations: vec![],
+                                loc,
+                            };
+                            debug_assert!(self.program.overload_sets[os].just_resolved.is_empty());
+                            self.compile_stmt(&mut result, &mut stmt).unwrap();
+                        }
+                        debug_assert!(self.program.overload_sets[os].just_resolved.is_empty());
+                        continue;
+                    }
+                }
+                self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Poison;
+                self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
+
+                let mut stmt = FatStmt {
+                    stmt: Stmt::DeclVar {
+                        name,
+                        ty,
+                        value: Some(val),
+                        kind: VarType::Const,
+                    },
+                    annotations: vec![],
+                    loc,
+                };
+                self.compile_stmt(&mut result, &mut stmt).unwrap();
             }
-            // Note: not putting local_constants back. We only need to evaluate them once (even if capturing_call runs many times)
-            //      and they get moved into result.constants, which becomes the closed_constants of 'f' (but as values instead of statements)
-            Ok((vec![], ()))
-        });
+        }
 
         self.pop_state(state);
         Ok(())
@@ -447,6 +494,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
         mut_replace!(self.program[f], |func: Func<'p>| {
+            debug_assert!(func.local_constants.is_empty());
             assert!(result.when == ExecTime::Comptime || !func.has_tag(Flag::Comptime));
             let arguments = func.arg.flatten();
             for (name, ty, kind) in arguments {
@@ -717,6 +765,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
+        debug_assert!(func.local_constants.is_empty());
         ResolveScope::resolve_body(&mut func, self)?;
         func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
 
@@ -798,7 +847,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_stmt(&mut self, result: &mut FnWip<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         self.last_loc = Some(stmt.loc);
         match &mut stmt.stmt {
-            Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
+            Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
                 self.compile_expr(result, expr, None)?;
             }
@@ -849,7 +898,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
                     }
                     let id = self.add_func(func)?;
-                    *stmt.deref_mut() = Stmt::DoneDeclFunc(id);
+                    *stmt.deref_mut() = Stmt::DoneDeclFunc(id, init_overloadset);
                     self.program.overload_sets[init_overloadset].pending.push(id);
                     return Ok(());
                 }
@@ -872,6 +921,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let init_pattern = func.arg.clone();
                         for mut b in init_pattern.bindings {
                             let mut new_func = func.clone();
+                            debug_assert!(new_func.local_constants.is_empty());
                             new_func.arg.bindings = vec![b.clone()];
                             let name = if let Name::Var(name) = b.name { name } else { todo!() };
                             b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
@@ -881,7 +931,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let id = self.add_func(new_func)?;
                             self.program.overload_sets[init_overloadset].pending.push(id);
                         }
-                    }
+                    } // TODO: new consts system -- apr 25
                     *stmt.deref_mut() = Stmt::Noop;
                     // TODO: unfortunate that I have to short circuit, not handle extra annotations, and leave the garbage function there because i split them
                     return Ok(());
@@ -901,7 +951,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let public = func.has_tag(Flag::Pub);
                 let id = self.add_func(func)?;
-                *stmt.deref_mut() = Stmt::DoneDeclFunc(id);
 
                 if for_bootstrap {
                     self.save_bootstrap.push(id);
@@ -916,11 +965,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         debug_assert!(!self.program[id].resolved_sign);
                         debug_assert!(!self.program[id].resolved_body);
                         if let Some(overloads) = self.find_const(var) {
-                            let i = overloads.0.as_overload_set()?;
+                            let i = overloads.0.as_overload_set().unwrap();
                             let os = &mut self.program.overload_sets[i];
                             assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
 
                             os.pending.push(id);
+                            *stmt.deref_mut() = Stmt::DoneDeclFunc(id, i);
                         } else {
                             let index = self.program.overload_sets.len();
                             self.program.overload_sets.push(OverloadSet {
@@ -928,8 +978,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 name: var.0,
                                 pending: vec![id],
                                 public,
+                                just_resolved: vec![],
                             });
                             self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set())?;
+                            *stmt.deref_mut() = Stmt::DoneDeclFunc(id, index);
                         }
                     }
                 }
@@ -1141,6 +1193,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
+            Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => err!("ICE: POISON",),
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, expr)?;
@@ -1697,6 +1750,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int)))); // but that breaks assert_Eq
         }
         Ok(Some(match expr.deref_mut() {
+            Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => err!("ICE: POISON",),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } | Expr::Raw { ty, .. } => *ty,
@@ -1919,6 +1973,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         })
     }
 
+    #[track_caller]
     fn infer_types_progress(&mut self, ty: &mut LazyType<'p>) -> Res<'p, bool> {
         let done = match ty {
             LazyType::EvilUnit => panic!(),
@@ -2071,7 +2126,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // !slice and !addr can't be const evaled!
                 if !matches!(arg.expr, Expr::SuffixMacro(_, _)) {
                     let f_id = if let Expr::GetVar(var) = f.expr {
-                        if let Some((val, ty)) = self.find_const(var) {
+                        if let Some((val, _)) = self.find_const(var) {
                             match val {
                                 Values::One(Value::GetFn(f)) => Some(f),
                                 Values::One(Value::OverloadSet(f)) => {
@@ -2121,6 +2176,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
         let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
         let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
+        debug_assert!(fake_func.local_constants.is_empty());
         fake_func.resolved_body = true;
         fake_func.resolved_sign = true;
         fake_func.finished_arg = Some(TypeId::unit());
@@ -2674,7 +2730,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         // Some part of the argument must be known at comptime.
         // You better hope compile_expr noticed and didn't put it in a stack slot.
-        let mut new_func = self.program[original_f].clone(); // TOOD: excesive cloning. not bind_const_arg shouldn't do it!
+        let mut new_func = self.program[original_f].clone();
+        debug_assert!(new_func.local_constants.is_empty());
         new_func.referencable_name = false;
         let scope = new_func.scope.unwrap();
         let new_fid = self.program.add_func(new_func);
@@ -3162,6 +3219,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             if matches!(ty, LazyType::Finished(_)) {
                 err!("ICE: tried to re-save constant {}", name.log(self.pool));
             }
+            if !matches!(val.expr, Expr::Poison) {
+                err!("ICE: tried to stomp constant {}", name.log(self.pool));
+            }
             val.expr = val_expr;
             val.ty = final_ty;
             *ty = LazyType::Finished(final_ty);
@@ -3200,7 +3260,7 @@ pub enum ExecTime {
     Both,
 }
 
-fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
+pub fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     if !vec.contains(&new) {
         vec.push(new);
         return true;

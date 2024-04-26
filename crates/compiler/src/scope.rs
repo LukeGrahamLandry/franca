@@ -4,8 +4,8 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
-    compiler::{BlockScope, Compile, Res},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, TypeId, Var, VarType},
+    compiler::{add_unique, BlockScope, Compile, Res},
     err,
     logging::{LogTag::Scope, PoolLog},
     outln,
@@ -15,7 +15,7 @@ use crate::{
 
 pub struct ResolveScope<'z, 'a, 'p> {
     captures: Vec<Var<'p>>,
-    local_constants: Vec<Vec<FatStmt<'p>>>,
+    local_constants: Vec<Vec<(Var<'p>, LazyType<'p>, FatExpr<'p>)>>,
     compiler: &'z mut Compile<'a, 'p>,
     last_loc: Span,
     scope: ScopeId,
@@ -165,7 +165,30 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
 
         debug_assert!(func.local_constants.is_empty());
-        func.local_constants = self.local_constants.pop().unwrap();
+
+        for (name, ty, mut val) in self.local_constants.pop().unwrap() {
+            let consts = &mut self.compiler[name.2].constants;
+            add_unique(&mut func.local_constants, name);
+            if let Some((prev_val, prev_ty)) = consts.get_mut(&name) {
+                if let Expr::AddToOverloadSet(new) = &mut val.expr {
+                    if let Expr::AddToOverloadSet(prev) = &mut prev_val.expr {
+                        prev.extend(mem::take(new));
+                        continue;
+                    } else if let Expr::Value { value, .. } = &mut prev_val.expr {
+                        debug_assert_eq!(prev_ty.ty(), Some(TypeId::overload_set()));
+                        let os = value.as_overload_set()?;
+                        self.compiler.program.overload_sets[os].just_resolved.extend(mem::take(new));
+                        continue;
+                    }
+                }
+
+                debug_assert!(matches!(prev_ty, LazyType::Infer));
+                *prev_ty = ty;
+                *prev_val = val;
+            } else {
+                err!("ICE: missing constant pre-decl {}", name.log(self.compiler.program.pool));
+            }
+        }
         outln!(Scope, "{}", func.log_captures(self.compiler.pool));
         Ok(())
     }
@@ -217,7 +240,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
-            Stmt::DoneDeclFunc(_) => unreachable!("compiled twice?"),
+            Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
                 debug_assert!(*kind != VarType::Const);
                 self.walk_ty(ty);
@@ -242,21 +265,28 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 // debug_assert!(cap.is_empty());
                 self.resolve_func(func)?;
 
+                let name = func.var_name.unwrap();
+                // TODO: now this is a bit weird. later has to distinguish between const _ = expr and fn _ = stmt by whether it can capture.
+                let expr = Expr::AddToOverloadSet(vec![mem::take(func)]);
                 self.local_constants
                     .last_mut()
                     .unwrap()
-                    .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
+                    .push((name, LazyType::Infer, FatExpr::synthetic(expr, loc)));
+                stmt.stmt = Stmt::Noop;
             }
-            Stmt::DeclVar { kind, ty, value, .. } => {
+            Stmt::DeclVar { kind, ty, value, name, .. } => {
                 debug_assert!(*kind == VarType::Const);
                 self.walk_ty(ty);
                 if let Some(value) = value {
                     self.resolve_expr(value)?;
                 }
-                self.local_constants
-                    .last_mut()
-                    .unwrap()
-                    .push(mem::replace(stmt, Stmt::Noop.fat_empty(loc)));
+
+                let ty = mem::take(ty);
+                let value = mem::take(value);
+                // TODO: take annotations too somehow.
+                let consts = self.local_constants.last_mut().unwrap();
+                consts.push((*name, ty, value.unwrap()));
+                stmt.stmt = Stmt::Noop;
             }
             Stmt::Set { place, value } => {
                 self.resolve_expr(place)?;
@@ -285,8 +315,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let loc = expr.loc;
         self.last_loc = loc;
         match expr.deref_mut() {
+            Expr::AddToOverloadSet(_) | Expr::WipFunc(_) => unreachable!(),
             Expr::Poison => err!("ICE: POISON",),
-            Expr::WipFunc(_) => unreachable!(),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.resolve_expr(fst)?;
                 self.resolve_expr(snd)?;

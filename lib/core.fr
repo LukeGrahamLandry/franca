@@ -22,7 +22,6 @@ fun init(_: Unit) Unit = ();
 
 #include_std("int_type");
 
-@pub const f32 = f64; // TODO
 
 fun UInt(bits: i64) Type = IntType(bits, false);
 fun SInt(bits: i64) Type = IntType(bits, true);
@@ -49,9 +48,31 @@ fun Tag(E: Type) Type = i64;  // Currently enum tags are untyped but that will l
 @pub const i32 = SInt(32);
 @pub const i33 = SInt(33);
 
+fun operator_star_prefix(T: Type) Type = Ptr(T);
+const FatExpr: Type = @builtin("FatExpr"); 
+
+#include_std("compiler");
+@pub const Fd = Unique(i32);
+
+#include_std("compiler_macros");
+#include_std("compiler_late");
+#include_std("libc");
+
 #include_std("codegen/aarch64/basic.gen.fr");
 #include_std("codegen/llvm/basic.fr");
-#include_std("compiler");
+#include_std("slice.fr");
+#include_std("mem.fr");
+#include_std("list.fr");
+#include_std("system.fr");
+#include_std("compiler_flat");
+#include_std("ast.fr");
+#include_std("macros.fr");
+#include_std("fmt.fr");
+#include_std("codegen/aarch64/unwind.fr");
+#include_std("codegen/aarch64/instructions.fr");
+#include_std("codegen/aarch64/basic.fr");
+#include_std("codegen/wasm/instructions.fr");
+#include_std("codegen/bf/instructions.fr");
 
 @pub @comptime @impl 
 fn if(const T: Type) Unit = {
@@ -79,7 +100,6 @@ fun abs(val: i64) i64 = (val.ge(0), fn = val, fn = val.neg())!if;
 fun int(val: bool) i64 = (val, fn = 1, fn = 0)!if;
 fun eq(a: bool, b: bool) bool = a.int().eq(b.int());
 
-
 // TODO: this gets a bit silly if I have to define this stuff all again but with different types. 
 //       it would be cool if it could be done with traits. like anything with an ordering could have a fn max (bad example for floats i guess)
 // TODO: !!! "Expected Ident but found Number(0)" my hacky dot parsing for floats is broken?
@@ -99,7 +119,6 @@ fun signed_truncate(x: i64, bit_count: i64) i64 = {
     }, fn() i64 = x)!if
 }
 
-@forward fun assert_eq() = ();  // TODO
 
 // TODO: this cant just be a no-op because the vm counts that my tests trigger all their assertions.
 /// Stupid question, but I guess it's wierd if I don't let you ask.
@@ -118,37 +137,11 @@ fun or(a: bool, const b: Fn(Unit, bool)) bool = a.if(fn = true, b);
 //       @inline instead of @comptime should work for that since !macros are intercepted in the compiler,
 //       but it doesn't bind the args correctly for some reason.
 // Measured in interpreter stack slots.
-fun size_of(const T: Type) i64 = T!size_of;
-// These don't care about the size of the type, they just measure in interp stack slots. 
+fun size_of(const T: Type) i64 = T!size_of;  // These don't care about the size of the type, they just measure in interp stack slots. 
 
-
-fun operator_star_prefix(T: Type) Type = Ptr(T);
-
-@pub const Fd = Unique(i32);
-const FatExpr: Type = @builtin("FatExpr"); 
-#include_std("compiler_macros");
-#include_std("libc");
-
-@forward @env fun println(msg: ""!type) Unit;
-// Halts the program and reports an error. The return value can typecheck as anything because it never returns. 
-@forward fun panic(msg: ""!type) Never;
 fun assert(cond: bool, msg: ""!type) Unit = (cond, fn() Unit=(), fn() Unit={
     panic(msg); // TODO: fix overload resolution so this doesn't need the semi colon to turn Never to Unit
 })!if;
-
-#include_std("slice.fr");
-#include_std("mem.fr");
-#include_std("list.fr");
-#include_std("system.fr");
-#include_std("compiler_flat");
-#include_std("ast.fr");
-#include_std("compiler_late");
-#include_std("macros.fr");
-
-#include_std("codegen/aarch64/instructions.fr");
-#include_std("codegen/aarch64/basic.fr");
-#include_std("codegen/wasm/instructions.fr");
-
 
 fun println(msg: Str) Unit = {
     let msg: ""!type = msg; // TODO: HACK
@@ -159,24 +152,3 @@ fun println(msg: bool) Unit = {
     let msg = (msg, fn="true", fn="false")!if;
     println(msg);
 }
-
-#include_std("codegen/aarch64/unwind.fr");
-#include_std("fmt.fr");
-#include_std("codegen/bf/instructions.fr");
-
-
-/* TODO
-@comptime @generic
-fn zeroed(const T: Type) Fn(Unit, T) = {
-    (fn() T = {
-        var t: T;
-        var bytes: VoidPtr = t&;
-        var bytes: *i64 = bytes;
-        var bytes: Slice(i64) = assume(bytes, size_of(T));
-        for(bytes, fn(ptr: *i64) = {
-            ptr[] = 0;
-        });
-        t
-    })
-}
-*/

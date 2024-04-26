@@ -251,7 +251,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Stmt::Noop => {}
             // Can't hit DoneDeclFunc because we don't re-eval constants.
-            Stmt::DoneDeclFunc(_) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
+            Stmt::DoneDeclFunc(_, _) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
         }
         Ok(())
     }
@@ -271,6 +271,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
+            Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => err!("ICE: POISON",),
             Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {

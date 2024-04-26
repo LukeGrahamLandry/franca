@@ -2,7 +2,6 @@
 #![allow(unused_must_use)]
 use core::fmt;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::fmt::{Debug, Formatter, Write};
 use std::{fs, mem};
 

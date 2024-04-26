@@ -244,7 +244,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                 }
             }
             Stmt::Set { .. } => todo!(),
-            Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_) => unreachable!(),
+            Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_, _) => unreachable!(),
         })
     }
 
@@ -258,6 +258,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
 
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
         Ok(match expr.deref() {
+            Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => err!("ICE: POISON",),
             Expr::Index { .. } => todo!(),
             Expr::WipFunc(_) => unreachable!(),

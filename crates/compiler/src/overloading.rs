@@ -140,8 +140,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        overloads.ready.retain(|f| !self.program[f.func].has_tag(Flag::Forward)); // HACK
-
         if overloads.ready.is_empty() {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
         }
@@ -246,6 +244,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn compute_new_overloads(&mut self, i: usize) -> Res<'p, ()> {
         let overloads = &mut self.program.overload_sets[i];
+        // debug_assert!(overloads.just_resolved.is_empty());
         let decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
         if decls.is_empty() {
             return Ok(());

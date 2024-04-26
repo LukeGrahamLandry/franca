@@ -115,6 +115,7 @@ pub enum Expr<'p> {
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
+    AddToOverloadSet(Vec<Func<'p>>),
     SuffixMacro(Ident<'p>, Box<FatExpr<'p>>),
     FieldAccess(Box<FatExpr<'p>>, Ident<'p>),
     StructLiteralP(Pattern<'p>),
@@ -149,6 +150,7 @@ pub trait WalkAst<'p> {
             return;
         }
         match &mut expr.expr {
+            Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.expr(fst);
@@ -190,9 +192,6 @@ pub trait WalkAst<'p> {
         self.pre_walk_func(func);
         self.pattern(&mut func.arg);
         self.ty(&mut func.ret);
-        for s in &mut func.local_constants {
-            self.stmt(s);
-        }
         if let Some(body) = &mut func.body {
             self.expr(body);
         }
@@ -212,7 +211,7 @@ pub trait WalkAst<'p> {
                 }
                 self.ty(ty);
             }
-            Stmt::Noop | Stmt::DoneDeclFunc(_) => {}
+            Stmt::Noop | Stmt::DoneDeclFunc(_, _) => {}
             Stmt::Eval(arg) => self.expr(arg),
             Stmt::DeclFunc(func) => self.func(func),
             Stmt::DeclVar { ty, value, .. } => {
@@ -304,9 +303,7 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
 impl<'a, 'p> RenumberVars<'a, 'p> {
     fn decl(&mut self, name: &mut Var<'p>) {
         if name.3 == VarType::Const {
-            // TODO
-            println!("SKIP. rn const {name:?}");
-            return;
+            todo!("rn const {name:?}");
         }
         let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
         self.vars += 1;
@@ -613,7 +610,7 @@ pub enum Stmt<'p> {
         place: FatExpr<'p>,
         value: FatExpr<'p>,
     },
-    DoneDeclFunc(FuncId),
+    DoneDeclFunc(FuncId, usize), // TODO: OverloadSetId
 }
 
 #[derive(Clone, Debug, InterpSend)]
@@ -635,7 +632,7 @@ pub struct Func<'p> {
     pub arg: Pattern<'p>,
     pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
-    pub local_constants: Vec<FatStmt<'p>>,
+    pub local_constants: Vec<Var<'p>>,
     pub loc: Span,
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
@@ -824,6 +821,7 @@ pub struct OverloadSet<'p> {
     pub name: Ident<'p>,
     pub pending: Vec<FuncId>,
     pub public: bool,
+    pub just_resolved: Vec<Func<'p>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1628,7 +1626,6 @@ pub enum Flag {
     Llvm,
     _Reserved_End_Arch_, // It's important which are above and below this point.
     Comptime,
-    Forward,
     Generic,
     As,
     Inline,

@@ -189,7 +189,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
             log_err(&comp, e, save);
             return false;
         }
-        Ok((_, lines)) => {
+        Ok((_, _)) => {
             match comp.program.find_unique_func(Flag::Main.ident()) {
                 None => {
                     outln!(ShowErr, "'fn main' NOT FOUND");
