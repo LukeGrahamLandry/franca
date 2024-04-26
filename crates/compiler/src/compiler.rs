@@ -14,7 +14,6 @@ use std::mem::{self, transmute};
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
@@ -1158,7 +1157,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
-            Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, expr)?;
@@ -1744,7 +1743,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(Some(self.program.intern_type(TypeInfo::Int(int))));
         }
         Ok(Some(match expr.deref_mut() {
-            Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } | Expr::Raw { ty, .. } => *ty,

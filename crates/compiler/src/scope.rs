@@ -240,7 +240,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
-            Stmt::ExpandParsedStmts(name) => todo!(),
+            Stmt::ExpandParsedStmts(_) => todo!(),
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
                 debug_assert!(*kind != VarType::Const);
@@ -316,6 +316,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let loc = expr.loc;
         self.last_loc = loc;
         match expr.deref_mut() {
+            Expr::GetParsed(index) => {
+                *expr = match self.compiler.parsing.wait_for_expr(*index) {
+                    Ok(expr) => expr,
+                    Err(e) => err!(CErr::Diagnostic(e.diagnostic)),
+                };
+                debug_assert!(!matches!(expr.expr, Expr::GetParsed(_)));
+                self.resolve_expr(expr)?;
+            }
             Expr::AddToOverloadSet(_) | Expr::WipFunc(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
@@ -337,7 +345,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     for stmt in mem::take(body) {
                         if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
                             dirty = true;
-                            match self.compiler.parsing.wait_for(name) {
+                            match self.compiler.parsing.wait_for_stmts(name) {
                                 Ok(stmts) => {
                                     for s in stmts {
                                         new_body.push(s);

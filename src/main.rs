@@ -225,7 +225,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
 }
 
 /// This is the thing we exec.
-fn actually_run_it(name: String, src: String, assertion_count: usize, arch: TargetArch) {
+fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
     // init_logs_flag(0xFFFFFFFF);
     // let save = format!("{name}_{arch:?}/");

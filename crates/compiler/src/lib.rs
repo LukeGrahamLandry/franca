@@ -153,7 +153,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
         .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
     let user_span = file.span;
     let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    let parsed = match Parser::parse(comp.parsing.clone(), lex, comp.pool) {
+    let parsed = match Parser::parse_stmts(comp.parsing.clone(), lex, comp.pool) {
         Ok(s) => s,
         Err(e) => {
             return Err(CompileError {

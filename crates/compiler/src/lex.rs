@@ -5,6 +5,7 @@
 use crate::ast::TypeId;
 use crate::ast::VarType;
 use crate::bc::Value;
+use crate::compiler::CErr;
 use crate::ffi::InterpSend;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
@@ -54,7 +55,6 @@ pub enum TokenType<'p> {
     Question,
     Dollar,
     DoubleSquare,
-    DoubleSquigle,
     PlusEq,
     MinusEq,
     DoubleColon,
@@ -82,7 +82,7 @@ pub enum LexErr {
 
 pub struct Lexer<'a, 'p> {
     pool: &'p StringPool<'p>,
-    root: Span,
+    pub root: Span,
     pub src: Arc<File>,
     start: usize,
     current: usize,
@@ -110,6 +110,32 @@ impl<'a, 'p> Lexer<'a, 'p> {
             comment_lines: 0,
             hack: None,
         }
+    }
+
+    pub(crate) fn skip_to_closing_squigle(&mut self) -> Span {
+        let mut t = self.next();
+        debug_assert_eq!(t.kind, LeftSquiggle);
+        let mut span = t.span;
+        let mut depth = 1;
+        let start = self.start;
+
+        while depth > 0 {
+            t = self.next();
+            span = span.merge(t.span);
+            match t.kind {
+                LeftSquiggle => depth += 1,
+                RightSquiggle => depth -= 1,
+                Eof | Error(_) => break,
+                _ => {}
+            }
+        }
+        debug_assert_eq!(t.kind, RightSquiggle);
+        self.eat_whitespace();
+        let end = self.current;
+        self.start = self.current;
+        let span = self.root.subspan(start as u64, end as u64);
+
+        span
     }
 
     // pop the first buffered token or generate a new one
@@ -152,7 +178,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             }
             '1'..='9' => self.lex_num(),
             'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(),
-            '{' => self.pair('}', LeftSquiggle, DoubleSquigle),
+            '{' => self.one(LeftSquiggle),
             '}' => self.one(RightSquiggle),
             '(' => self.one(LeftParen),
             ')' => self.one(RightParen),
@@ -232,9 +258,9 @@ impl<'a, 'p> Lexer<'a, 'p> {
                                 _ => count = 0,
                             }
                         }
-                        &self.src.source()[self.start + 3..self.current - 3]
+                        &self.src.source_slice(self.root)[self.start + 3..self.current - 3]
                     } else {
-                        &self.src.source()[self.start + 1..self.current - 1]
+                        &self.src.source_slice(self.root)[self.start + 1..self.current - 1]
                     };
                     return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
                 }
@@ -251,7 +277,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             match self.pop() {
                 '`' => {
                     // Payload doesn't include quotes.
-                    let text = &self.src.source()[self.start + 1..self.current - 1];
+                    let text = &self.src.source_slice(self.root)[self.start + 1..self.current - 1];
                     return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
                 }
                 '\0' => return self.err(LexErr::UnterminatedStr),
@@ -289,7 +315,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     fn end_num(&mut self, is_float: bool) -> Token<'p> {
-        let text = &self.src.source()[self.start..self.current];
+        let text = &self.src.source_slice(self.root)[self.start..self.current];
         if is_float {
             let n = match text.parse::<f64>() {
                 Ok(n) => n,
@@ -323,7 +349,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             self.pop();
             c = self.peek_c();
         }
-        let ty = match &self.src.source()[self.start..self.current] {
+        let ty = match &self.src.source_slice(self.root)[self.start..self.current] {
             "fn" => Fn,
             "fun" => Fun,
             "let" => Qualifier(VarType::Let),

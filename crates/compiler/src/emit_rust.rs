@@ -258,7 +258,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
 
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
         Ok(match expr.deref() {
-            Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Index { .. } => todo!(),
             Expr::WipFunc(_) => unreachable!(),

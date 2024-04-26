@@ -10,7 +10,7 @@ use crate::{
     reflect::{Reflect, RsType},
     STATS,
 };
-use codemap::{CodeMap, Span};
+use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
     cell::RefCell,
@@ -131,6 +131,7 @@ pub enum Expr<'p> {
         ptr: Box<FatExpr<'p>>,
         index: Box<FatExpr<'p>>,
     },
+    GetParsed(usize),
 }
 
 impl<'p> Expr<'p> {
@@ -163,7 +164,7 @@ pub trait WalkAst<'p> {
             return;
         }
         match &mut expr.expr {
-            Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.expr(fst);

@@ -271,7 +271,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
-            Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
