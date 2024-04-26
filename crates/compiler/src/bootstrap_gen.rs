@@ -62,19 +62,6 @@ a <= b
 }
 
 #[rustfmt::skip]
-fn neg(a: i64, ) -> i64 { 
-sub(0, a)
-}
-
-#[rustfmt::skip]
-fn signed_truncate(x: i64, bit_count: i64, ) -> i64 { 
-{ let mut mask = sub(shift_left(1, bit_count), 1);
- (if le(x, 0) { { 
- bit_and(add(bit_not(mul(x, neg(1))), 1), mask) } } else { { 
- x } }) }
-}
-
-#[rustfmt::skip]
 pub fn add_sr(sf: i64, dest: i64, a: i64, b: i64, shift: i64, amount: i64, ) -> i64 { 
 bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(sf, 31)), shift_left(11, 24)), shift_left(shift, 22)), shift_left(0, 21)), shift_left(a, 16)), shift_left(amount, 10)), shift_left(b, 5)), shift_left(dest, 0))
 }
@@ -217,6 +204,19 @@ bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(1, 31)), shift_left(sf, 
 #[rustfmt::skip]
 pub fn f_str_uo(sf: i64, src: i64, addr: i64, offset_scaled: i64, ) -> i64 { 
 bit_or(bit_or(bit_or(bit_or(bit_or(bit_or(0, shift_left(1, 31)), shift_left(sf, 30)), shift_left(244, 22)), shift_left(offset_scaled, 10)), shift_left(addr, 5)), shift_left(src, 0))
+}
+
+#[rustfmt::skip]
+fn neg(a: i64, ) -> i64 { 
+sub(0, a)
+}
+
+#[rustfmt::skip]
+fn signed_truncate(x: i64, bit_count: i64, ) -> i64 { 
+{ let mut mask = sub(shift_left(1, bit_count), 1);
+ (if le(x, 0) { { 
+ bit_and(add(bit_not(mul(x, neg(1))), 1), mask) } } else { { 
+ x } }) }
 }
 
 

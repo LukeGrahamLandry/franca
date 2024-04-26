@@ -583,7 +583,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
     let res = hope(|| {
         match &mut arg.expr {
             Expr::Call(_, _) => {
-                if let Ok((int, _)) = bit_literal(&arg, compile.pool) {
+                if let Some((int, _)) = bit_literal(&arg, compile.pool) {
                     return Ok(int);
                 }
             }

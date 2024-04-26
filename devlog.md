@@ -13,6 +13,9 @@ its kinda handy that any non-bootstrapped inline asm bug breaks tests/floats cau
 
 so thats ~40% less lit_fn and made debug mode --no-fork ~5% faster.
 
+// DID: just treat @builtin as a normal expression instead of a magic thing that const looks for so you can do 'const Type: @builtin("Type") = @builtin("Type");'
+// then you dont have to eat this check for every constant, you just get there when you get there.
+
 ## dont resolve vars up front (Apr 24/25)
 
 did a bunch of refactoring the scope system yesterday.

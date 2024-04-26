@@ -133,6 +133,19 @@ pub enum Expr<'p> {
     },
 }
 
+impl<'p> Expr<'p> {
+    pub fn as_overload_set(&self) -> Option<usize> {
+        if let Expr::Value { ty, value } = self {
+            if *ty == TypeId::overload_set() {
+                if let Values::One(Value::OverloadSet(i)) = value {
+                    return Some(*i);
+                }
+            }
+        }
+        None
+    }
+}
+
 pub trait WalkAst<'p> {
     // Return false to not go deeper down this branch.
     fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) -> bool {

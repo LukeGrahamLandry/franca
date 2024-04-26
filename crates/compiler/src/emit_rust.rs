@@ -8,7 +8,7 @@ use crate::bc_to_asm::emit_aarch64;
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::pool::StringPool;
-use crate::{bc::*, load_program};
+use crate::{bc::*, ice, load_program};
 use crate::{err, unwrap};
 
 pub fn bootstrap() -> (String, String) {
@@ -259,7 +259,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
     fn compile_expr(&mut self, expr: &FatExpr<'p>) -> Res<'p, String> {
         Ok(match expr.deref() {
             Expr::AddToOverloadSet(_) => unreachable!(),
-            Expr::Poison => err!("ICE: POISON",),
+            Expr::Poison => ice!("POISON",),
             Expr::Index { .. } => todo!(),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Raw { .. } => todo!(),

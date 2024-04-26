@@ -6,7 +6,7 @@ use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, TypeId, Var, VarType},
     compiler::{add_unique, BlockScope, Compile, Res},
-    err,
+    err, ice,
     logging::{LogTag::Scope, PoolLog},
     outln,
     pool::Ident,
@@ -186,7 +186,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 *prev_ty = ty;
                 *prev_val = val;
             } else {
-                err!("ICE: missing constant pre-decl {}", name.log(self.compiler.program.pool));
+                ice!("missing constant pre-decl {}", name.log(self.compiler.program.pool));
             }
         }
         outln!(Scope, "{}", func.log_captures(self.compiler.pool));
@@ -316,7 +316,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.last_loc = loc;
         match expr.deref_mut() {
             Expr::AddToOverloadSet(_) | Expr::WipFunc(_) => unreachable!(),
-            Expr::Poison => err!("ICE: POISON",),
+            Expr::Poison => ice!("POISON",),
             Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
                 self.resolve_expr(fst)?;
                 self.resolve_expr(snd)?;

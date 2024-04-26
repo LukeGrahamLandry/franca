@@ -58,16 +58,6 @@ fn main() {
             println!("{}", get_include_std("compiler_late").unwrap());
             return;
         }
-        if name == "lsp" {
-            #[cfg(feature = "lsp")]
-            {
-                lsp::run_lsp_blocking().unwrap();
-            }
-            if cfg!(not(feature = "lsp")) {
-                println!("lsp feature flag disabled.")
-            }
-            return;
-        }
 
         if name == "--no-fork" {
             run_tests_serial_for_profile();

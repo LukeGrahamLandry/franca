@@ -6,12 +6,11 @@ use std::fmt::{Debug, Formatter, Write};
 use std::{fs, mem};
 
 #[inline(never)]
-pub fn break_here(e: &CErr) {
-    if let CErr::TypeCheck(_, _, _) = &e {
-        let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
-        if depth == 0 {
-            println!("err")
-        }
+pub fn break_here(_e: &CErr) {
+    let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
+    if depth == 0 {
+        // TODO: make this never happen so dont have to worry about short circuiting -- Apr 25
+        // println!("err {e:?}")
     }
 }
 
@@ -32,7 +31,7 @@ macro_rules! err {
     }};
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        err!($crate::compiler::CErr::Msg(msg))
+        err!($crate::compiler::CErr::Fatal(msg))
     }};
 }
 
@@ -79,7 +78,7 @@ macro_rules! assert_eq {
 macro_rules! ice {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        $crate::err!($crate::compiler::CErr::IceFmt(msg))
+        $crate::err!($crate::compiler::CErr::Fatal(msg))
     }};
 }
 use codemap::Span;
@@ -688,8 +687,7 @@ impl<'p> CErr<'p> {
                 program.log_type(*expected),
                 program.log_type(*found)
             ),
-            CErr::IceFmt(s) | CErr::Msg(s) => s.clone(),
-            CErr::VarNotFound(var) => format!("Resolved var not found {:?}. (forgot to make something const? ice?)", var.log(pool)),
+            CErr::Fatal(s) => s.clone(),
             _ => format!("{:?}", self),
         }
     }

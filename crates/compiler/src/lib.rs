@@ -53,8 +53,6 @@ pub mod lex;
 #[cfg(feature = "llvm")]
 pub mod llvm;
 pub mod logging;
-#[cfg(feature = "lsp")]
-pub mod lsp;
 pub mod overloading;
 pub mod parse;
 pub mod pool;

@@ -50,18 +50,11 @@ pub struct CompileError<'p> {
 #[derive(Clone, Debug)]
 pub enum CErr<'p> {
     UndeclaredIdent(Ident<'p>),
-    ComptimeCallAtRuntime,
-    Ice(&'static str),
-    IceFmt(String),
-    LeakedValue,
-    StackDepthLimit,
-    AddrRvalue(FatExpr<'p>),
     TypeError(&'static str, Values),
     TypeCheck(TypeId, TypeId, &'static str),
-    Msg(String),
     AmbiguousCall,
-    VarNotFound(Var<'p>),
     Diagnostic(Vec<Diagnostic>),
+    Fatal(String),
 }
 
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
@@ -380,66 +373,30 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         let loc = self.program[f].loc;
 
-        let mut result = self.empty_fn(
-            ExecTime::Comptime,
-            FuncId::from_index(f.as_index() + 10000000), // TODO: do i even need to pass an index? probably just for debugging
-            loc,
-        );
-
         let consts = mem::take(&mut self.program[f].local_constants);
         for name in consts {
-            let (val, ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
+            let (mut val, mut ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
             debug_assert!(!matches!(ty, LazyType::EvilUnit));
             if let Expr::AddToOverloadSet(funcs) = val.expr {
-                self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Poison;
                 self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
-                for func in funcs {
-                    debug_assert!(matches!(ty, LazyType::Infer));
-                    let mut stmt = FatStmt {
-                        stmt: Stmt::DeclFunc(func),
-                        annotations: vec![],
-                        loc,
-                    };
-                    self.compile_stmt(&mut result, &mut stmt).unwrap();
+                for mut func in funcs {
+                    self.decl_func(&mut func)?;
                 }
-                continue;
+            } else if let Some(os) = val.expr.as_overload_set() {
+                self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Value {
+                    ty: TypeId::overload_set(),
+                    value: Value::OverloadSet(os).into(),
+                };
+                self[name.2].constants.get_mut(&name).unwrap().0.ty = TypeId::overload_set();
+                self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Finished(TypeId::overload_set());
+                for mut func in mem::take(&mut self.program.overload_sets[os].just_resolved) {
+                    self.decl_func(&mut func)?;
+                }
             } else {
-                if let Expr::Value { ty, value } = &val.expr {
-                    if *ty == TypeId::overload_set() {
-                        let os = value.as_overload_set().unwrap();
-                        self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Value {
-                            ty: TypeId::overload_set(),
-                            value: Value::OverloadSet(os).into(),
-                        };
-                        self[name.2].constants.get_mut(&name).unwrap().0.ty = TypeId::overload_set();
-                        self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Finished(TypeId::overload_set());
-                        for func in mem::take(&mut self.program.overload_sets[os].just_resolved) {
-                            let mut stmt = FatStmt {
-                                stmt: Stmt::DeclFunc(func),
-                                annotations: vec![],
-                                loc,
-                            };
-                            debug_assert!(self.program.overload_sets[os].just_resolved.is_empty());
-                            self.compile_stmt(&mut result, &mut stmt).unwrap();
-                        }
-                        debug_assert!(self.program.overload_sets[os].just_resolved.is_empty());
-                        continue;
-                    }
-                }
-                self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Poison;
                 self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
 
-                let mut stmt = FatStmt {
-                    stmt: Stmt::DeclVar {
-                        name,
-                        ty,
-                        value: Some(val),
-                        kind: VarType::Const,
-                    },
-                    annotations: vec![],
-                    loc,
-                };
-                self.compile_stmt(&mut result, &mut stmt).unwrap();
+                self.infer_types_progress(&mut ty)?;
+                self.decl_const(name, &mut ty, &mut val, loc)?;
             }
         }
 
@@ -723,7 +680,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Name::None => {}
             }
         }
-        err!(CErr::VarNotFound(arg_name))
+        ice!("missing argument {}", arg_name.log(self.pool))
     }
 
     // TODO: you only need to call this for generic functions that operate on thier own types.
@@ -857,148 +814,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
-                debug_assert!(!func.evil_uninit);
-                let mut func = mem::take(func);
-                let var = func.var_name;
-                let for_bootstrap = func.has_tag(Flag::Bs);
-                let any_reg_template = func.has_tag(Flag::Any_Reg);
-                let is_struct = func.has_tag(Flag::Struct);
-                let is_enum = func.has_tag(Flag::Enum);
-                if func.has_tag(Flag::Annotation) {
-                    assert!(!func.has_tag(Flag::Rt));
-                    func.add_tag(Flag::Ct);
-                    func.add_tag(Flag::Flat_Call);
-                }
-                assert!(!(is_struct && is_enum));
-                if is_struct {
-                    ResolveScope::resolve_sign(&mut func, self)?;
-                    ResolveScope::resolve_body(&mut func, self)?;
-                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
-                    let ty = self.struct_type(&mut func.arg)?;
-                    let ty = self.program.intern_type(ty);
-                    assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
-                    func.ret = LazyType::Finished(ty);
-                    func.finished_ret = Some(ty);
-                    if let Some(name) = func.var_name {
-                        self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
-                    }
-                    // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
-                    //       with new commitment to doing it without idents for modules, the answer is yes.
-                    func.name = Flag::Init.ident();
-                    if func.body.is_none() {
-                        let loc = func.loc;
-                        let mut init_pattern = func.arg.clone();
-                        for b in &mut init_pattern.bindings {
-                            let name = if let Name::Var(name) = b.name { name } else { todo!() };
-                            b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
-                        }
-
-                        let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
-                        let construct = Flag::Construct.ident();
-                        func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
-                    }
-                    let id = self.add_func(func)?;
-                    *stmt.deref_mut() = Stmt::DoneDeclFunc(id, init_overloadset);
-                    self.program.overload_sets[init_overloadset].pending.push(id);
-                    return Ok(());
-                }
-                if is_enum {
-                    ResolveScope::resolve_sign(&mut func, self)?;
-                    ResolveScope::resolve_body(&mut func, self)?;
-                    let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
-                    let ty = self.struct_type(&mut func.arg)?;
-                    let ty = self.program.to_enum(ty);
-                    assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
-                    func.ret = LazyType::Finished(ty);
-                    func.finished_ret = Some(ty);
-                    if let Some(name) = func.var_name {
-                        self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
-                    }
-                    // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
-                    func.name = Flag::Init.ident();
-                    if func.body.is_none() {
-                        let loc = func.loc;
-                        let init_pattern = func.arg.clone();
-                        for mut b in init_pattern.bindings {
-                            let mut new_func = func.clone();
-                            debug_assert!(new_func.local_constants.is_empty());
-                            new_func.arg.bindings = vec![b.clone()];
-                            let name = if let Name::Var(name) = b.name { name } else { todo!() };
-                            b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
-                            let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
-                            new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), init_expr), loc));
-                            new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
-                            let id = self.add_func(new_func)?;
-                            self.program.overload_sets[init_overloadset].pending.push(id);
-                        }
-                    } // TODO: new consts system -- apr 25
-                    *stmt.deref_mut() = Stmt::Noop;
-                    // TODO: unfortunate that I have to short circuit, not handle extra annotations, and leave the garbage function there because i split them
-                    return Ok(());
-                }
-                if for_bootstrap {
-                    func.add_tag(Flag::Aarch64); // TODO: could do for llvm too once i support eval body
-                    func.referencable_name = false;
-                }
-
-                let referencable_name = func.referencable_name;
-
-                if any_reg_template {
-                    let mut body = func.body.take().unwrap();
-                    self.compile_expr(result, &mut body, None)?;
-                    func.any_reg_template = Some(body.as_fn().unwrap());
-                }
-
-                let public = func.has_tag(Flag::Pub);
-                let id = self.add_func(func)?;
-
-                if for_bootstrap {
-                    self.save_bootstrap.push(id);
-                }
-
-                // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
-                // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
-                if let Some(var) = var {
-                    if referencable_name && !is_enum && !is_struct {
-                        // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
-                        // TODO: distinguish between overload sets that you add to and those that you re-export
-                        debug_assert!(!self.program[id].resolved_sign);
-                        debug_assert!(!self.program[id].resolved_body);
-                        if let Some(overloads) = self.find_const(var) {
-                            let i = overloads.0.as_overload_set().unwrap();
-                            let os = &mut self.program.overload_sets[i];
-                            assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
-
-                            os.pending.push(id);
-                            *stmt.deref_mut() = Stmt::DoneDeclFunc(id, i);
-                        } else {
-                            let index = self.program.overload_sets.len();
-                            self.program.overload_sets.push(OverloadSet {
-                                ready: vec![],
-                                name: var.0,
-                                pending: vec![id],
-                                public,
-                                just_resolved: vec![],
-                            });
-                            self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set())?;
-                            *stmt.deref_mut() = Stmt::DoneDeclFunc(id, index);
-                        }
-                    }
-                }
-
-                let func = &self.program[id];
-
-                // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
-                //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
-                //       then have @test(.aarch64, .llvm) instead of current special handling.
-                //       also add a new annotation for declaring macros with some other type as the argument where it const evals the expr before calling the macro.
-                //       that should be doable in the language once I allow user macros to modify functions like the builtin ones do.
-                //       -- Apr 19
-                if func.has_tag(Flag::Test) {
-                    // TODO: actually use this.
-                    // TODO: probably want referencable_name=false?
-                    self.tests.push(id);
-                }
+                self.decl_func(func)?;
             }
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
             Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?,
@@ -1075,6 +891,153 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         Ok(())
+    }
+
+    fn decl_func(&mut self, func: &mut Func<'p>) -> Res<'p, (Option<FuncId>, Option<usize>)> {
+        debug_assert!(!func.evil_uninit);
+        let mut func = mem::take(func);
+        let var = func.var_name;
+        let for_bootstrap = func.has_tag(Flag::Bs);
+        let any_reg_template = func.has_tag(Flag::Any_Reg);
+        let is_struct = func.has_tag(Flag::Struct);
+        let is_enum = func.has_tag(Flag::Enum);
+        if func.has_tag(Flag::Annotation) {
+            assert!(!func.has_tag(Flag::Rt));
+            func.add_tag(Flag::Ct);
+            func.add_tag(Flag::Flat_Call);
+        }
+        assert!(!(is_struct && is_enum));
+        if is_struct {
+            ResolveScope::resolve_sign(&mut func, self)?;
+            ResolveScope::resolve_body(&mut func, self)?;
+            let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
+            let ty = self.struct_type(&mut func.arg)?;
+            let ty = self.program.intern_type(ty);
+            assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
+            func.ret = LazyType::Finished(ty);
+            func.finished_ret = Some(ty);
+            if let Some(name) = func.var_name {
+                self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
+            }
+            // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
+            //       with new commitment to doing it without idents for modules, the answer is yes.
+            func.name = Flag::Init.ident();
+            if func.body.is_none() {
+                let loc = func.loc;
+                let mut init_pattern = func.arg.clone();
+                for b in &mut init_pattern.bindings {
+                    let name = if let Name::Var(name) = b.name { name } else { todo!() };
+                    b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
+                }
+
+                let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
+                let construct = Flag::Construct.ident();
+                func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
+            }
+            let id = self.add_func(func)?;
+            self.program.overload_sets[init_overloadset].pending.push(id);
+            return Ok((Some(id), Some(init_overloadset)));
+        }
+        if is_enum {
+            ResolveScope::resolve_sign(&mut func, self)?;
+            ResolveScope::resolve_body(&mut func, self)?;
+            let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
+            let ty = self.struct_type(&mut func.arg)?;
+            let ty = self.program.to_enum(ty);
+            assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
+            func.ret = LazyType::Finished(ty);
+            func.finished_ret = Some(ty);
+            if let Some(name) = func.var_name {
+                self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
+            }
+            // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
+            func.name = Flag::Init.ident();
+            if func.body.is_none() {
+                let loc = func.loc;
+                let init_pattern = func.arg.clone();
+                for mut b in init_pattern.bindings {
+                    let mut new_func = func.clone();
+                    debug_assert!(new_func.local_constants.is_empty());
+                    new_func.arg.bindings = vec![b.clone()];
+                    let name = if let Name::Var(name) = b.name { name } else { todo!() };
+                    b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
+                    let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
+                    new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), init_expr), loc));
+                    new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
+                    let id = self.add_func(new_func)?;
+                    self.program.overload_sets[init_overloadset].pending.push(id);
+                }
+            } // TODO: new consts system -- apr 25
+              // TODO: unfortunate that I have to short circuit, not handle extra annotations, and leave the garbage function there because i split them
+
+            return Ok((None, None));
+        }
+        if for_bootstrap {
+            func.add_tag(Flag::Aarch64); // TODO: could do for llvm too once i support eval body
+            func.referencable_name = false;
+        }
+
+        let referencable_name = func.referencable_name;
+
+        if any_reg_template {
+            todo!("apr 25 const rework");
+            // let mut body = func.body.take().unwrap();
+            // self.compile_expr(result, &mut body, None)?;
+            // func.any_reg_template = Some(body.as_fn().unwrap());
+        }
+
+        let public = func.has_tag(Flag::Pub);
+        let id = self.add_func(func)?;
+
+        if for_bootstrap {
+            self.save_bootstrap.push(id);
+        }
+
+        let mut out = (None, None);
+        // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
+        // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
+        if let Some(var) = var {
+            if referencable_name && !is_enum && !is_struct {
+                // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
+                // TODO: distinguish between overload sets that you add to and those that you re-export
+                debug_assert!(!self.program[id].resolved_sign);
+                debug_assert!(!self.program[id].resolved_body);
+                if let Some(overloads) = self.find_const(var) {
+                    let i = overloads.0.as_overload_set().unwrap();
+                    let os = &mut self.program.overload_sets[i];
+                    assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
+
+                    os.pending.push(id);
+                    out = (Some(id), Some(i));
+                } else {
+                    let index = self.program.overload_sets.len();
+                    self.program.overload_sets.push(OverloadSet {
+                        ready: vec![],
+                        name: var.0,
+                        pending: vec![id],
+                        public,
+                        just_resolved: vec![],
+                    });
+                    self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set())?;
+                    out = (Some(id), Some(index));
+                }
+            }
+        }
+
+        let func = &self.program[id];
+
+        // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
+        //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
+        //       then have @test(.aarch64, .llvm) instead of current special handling.
+        //       also add a new annotation for declaring macros with some other type as the argument where it const evals the expr before calling the macro.
+        //       that should be doable in the language once I allow user macros to modify functions like the builtin ones do.
+        //       -- Apr 19
+        if func.has_tag(Flag::Test) {
+            // TODO: actually use this.
+            // TODO: probably want referencable_name=false?
+            self.tests.push(id);
+        }
+        Ok(out)
     }
 
     pub fn find_const(&mut self, var: Var<'p>) -> Option<(Values, TypeId)> {
@@ -1194,7 +1157,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         Ok(match expr.deref_mut() {
             Expr::AddToOverloadSet(_) => unreachable!(),
-            Expr::Poison => err!("ICE: POISON",),
+            Expr::Poison => ice!("POISON",),
             Expr::Closure(_) => {
                 let id = self.promote_closure(result, expr)?;
                 Structured::Const(self.program.func_type(id), Value::GetFn(id).into())
@@ -1261,15 +1224,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("Missing resolved variable {}", var.log(self.pool),)
                 }
             }
-            Expr::GetNamed(name) => {
-                let name = self.pool.get(*name);
-                if let Some((val, ty)) = self.builtin_constant(name) {
-                    expr.expr = Expr::Value { ty, value: val.into() };
-                    Structured::Const(ty, val.into())
-                } else {
-                    ice!("Scope resolution failed {} (in Expr::GetNamed)", expr.log(self.pool));
-                }
-            }
+            Expr::GetNamed(name) => err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
             Expr::Raw { ty, value } => {
                 // TODO: the whole point is to not always have to deserialize it. allow Structured::ConstRaw
@@ -1507,7 +1462,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     "from_bit_literal" => {
-                        let int = bit_literal(expr, self.pool)?;
+                        let int = unwrap!(bit_literal(expr, self.pool), "not int");
                         let ty = self.program.intern_type(TypeInfo::Int(int.0));
                         let value = Value::I64(int.1);
                         expr.expr = Expr::Value { ty, value: value.into() };
@@ -1518,7 +1473,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(requested.is_some(), "!uninitialized expr must have known type");
                         return Ok(Structured::RuntimeOnly(requested.unwrap()));
                     }
-                    "unquote" | "placeholder" => err!("ICE: Unhandled macro {}", self.pool.get(*macro_name)),
+                    "unquote" | "placeholder" => ice!("Unhandled macro {}", self.pool.get(*macro_name)),
+                    "builtin" => {
+                        let name = if let Some(v) = arg.as_ident() {
+                            v
+                        } else {
+                            panic!("@builtin requires argument",);
+                        };
+                        let name_str = self.pool.get(name);
+                        let (value, ty) = unwrap!(self.builtin_constant(name_str), "non-blessed const marked @builtin: {:?}", name_str);
+                        expr.expr = Expr::Value { ty, value: value.into() };
+                        return Ok(Structured::Const(ty, value.into()));
+                    }
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
                     }
@@ -1713,7 +1679,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: this is a bit weird but it makes place expressions work.
             Expr::FieldAccess(_, _) => self.compile_expr(result, arg, None),
             &mut Expr::GetNamed(i) => err!(CErr::UndeclaredIdent(i)),
-            _ => err!(CErr::AddrRvalue(arg.clone())),
+            _ => err!("took address of r-value {}", arg.log(self.pool)),
         }
     }
 
@@ -1745,13 +1711,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         // TODO: this is unfortunate
-        if let Ok((int, _)) = bit_literal(expr, self.pool) {
-            // return Ok(Some(TypeId::i64()));
-            return Ok(Some(self.program.intern_type(TypeInfo::Int(int)))); // but that breaks assert_Eq
+        if let Some((int, _)) = bit_literal(expr, self.pool) {
+            return Ok(Some(self.program.intern_type(TypeInfo::Int(int))));
         }
         Ok(Some(match expr.deref_mut() {
             Expr::AddToOverloadSet(_) => unreachable!(),
-            Expr::Poison => err!("ICE: POISON",),
+            Expr::Poison => ice!("POISON",),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Value { ty, .. } | Expr::Raw { ty, .. } => *ty,
             Expr::Call(f, arg) => {
@@ -1759,18 +1724,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(self.program.funcs[id.as_index()].finished_ret);
                 }
 
-                if let Expr::Value { value, .. } = f.deref_mut().deref_mut() {
-                    if let Ok(i) = value.as_overload_set() {
-                        // println!("type_of overload {i}");
-                        if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
-                            if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
-                                // Need to save this because resolving overloads eats named arguments
-                                f.expr = Expr::Value {
-                                    ty: self.program.func_type(fid.at_rt()),
-                                    value: fid.as_value().into(),
-                                };
-                                return Ok(Some(f_ty.ret));
-                            }
+                if let Some(i) = f.expr.as_overload_set() {
+                    if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
+                        if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
+                            // Need to save this because resolving overloads eats named arguments
+                            f.expr = Expr::Value {
+                                ty: self.program.func_type(fid.at_rt()),
+                                value: fid.as_value().into(),
+                            };
+                            return Ok(Some(f_ty.ret));
                         }
                     }
                 }
@@ -1864,15 +1826,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Err(e) => ice!("TODO: PrefixMacro inference failed. need to make it non-destructive?\n{e:?}",),
                 }
             }
-            &mut Expr::GetNamed(name) => {
-                let name = self.pool.get(name);
-                if let Some((val, ty)) = self.builtin_constant(name) {
-                    expr.expr = Expr::Value { ty, value: val.into() };
-                    ty
-                } else {
-                    return Ok(None);
-                }
-            }
+            &mut Expr::GetNamed(_) => return Ok(None),
             Expr::StructLiteralP(_) => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = self.pool.get(*macro_name);
@@ -1887,7 +1841,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             logln!("UNDECLARED IDENT: {} (in SuffixMacro::addr)", self.pool.get(i));
                             err!(CErr::UndeclaredIdent(i))
                         }
-                        _ => err!(CErr::AddrRvalue(*arg.clone())),
+                        _ => err!("took address of r-value {}", arg.log(self.pool)),
                     },
                     "struct" | "enum" | "type" => self.program.intern_type(TypeInfo::Type),
                     "deref" => {
@@ -1931,13 +1885,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: this kinda sucks. it should go in a builtin generated file like libc and use the normal name resolution rules
-    fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
+    pub fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
         use TypeInfo::*;
         let ty = match name {
             "i64" => Some(TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true })),
             "f64" => Some(F64),
             "Type" => Some(Type),
             "bool" => Some(Bool),
+            "UnknownType" => Some(TypeInfo::Unknown),
             "Never" => Some(TypeInfo::Never),
             "VoidPtr" => Some(VoidPtr),
             "OverloadSet" => Some(TypeInfo::OverloadSet),
@@ -2878,24 +2833,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program.inline_llvm_ir.push(f);
                 return Ok(());
             }
-            let asm_bytes: Res<'p, Vec<u32>> = parts
+            let asm_bytes: Option<Vec<u32>> = parts
                 .iter()
-                .map(|op| {
-                    if let Ok((ty, val)) = bit_literal(op, self.pool) {
-                        assert_eq!(ty.bit_count, 32);
-                        Ok(val as u32)
-                    } else {
-                        err!("not int",)
-                    }
-                })
+                .map(|op| bit_literal(op, self.pool).and_then(|(ty, val)| if ty.bit_count == 32 { Some(val as u32) } else { None }))
                 .collect();
 
-            if let Ok(ops) = asm_bytes {
+            if let Some(ops) = asm_bytes {
                 ops
             } else {
                 // TODO: support dynamic eval to string for llvm ir.
-                let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
-                ops
+                self.immediate_eval_expr_known(asm.clone())?
             }
         } else {
             let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
@@ -2980,155 +2927,115 @@ impl<'a, 'p> Compile<'a, 'p> {
         let no_type = matches!(ty, LazyType::Infer);
         self.infer_types_progress(ty)?;
 
-        match kind {
-            VarType::Const => {
-                let mut val = match value {
-                    Some(value) => {
-                        // TODO: doing the check here every time is sad.
-                        if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-                            let name = self.pool.get(name.0);
-                            err!("const bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
-                        }
-
-                        // TODO: just treat @builtin as a normal expression instead of a magic thing that const looks for so you can do 'const Type: @builtin("Type") = @builtin("Type");'
-                        //       then you dont have to eat this check for every constant, you just get there when you get there.
-                        if let Some((arg, _)) = value.expr.as_prefix_macro(Flag::Builtin) {
-                            let name_str = self.pool.get(name.0);
-                            let expected = if let Expr::String(v) = arg.expr {
-                                v
-                            } else {
-                                err!("@builtin requires string argument: {name_str}",);
-                            };
-                            assert_eq!(name.0, expected, "builtin name mismatch: {:?}", name_str);
-                            if no_type {
-                                if name_str == "Type" {
-                                    *ty = LazyType::Finished(TypeId::ty());
-                                } else {
-                                    err!("@builtin const requires type hint {}", name.log(self.pool));
-                                }
-                            }
-                            unwrap!(self.builtin_constant(name_str), "non-blessed const marked @builtin: {:?}", name_str)
-                                .0
-                                .into()
-                        } else {
-                            // You don't need to precompile, immediate_eval_expr will do it for you.
-                            // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
-                            // This makes addr_of const for @enum work
-                            let res = self.compile_expr(result, value, ty.ty())?;
-                            self.immediate_eval_expr(value.clone(), res.ty())?
-                        }
-                    }
-                    None => {
-                        let name = self.pool.get(name.0);
-                        err!("const binding '{name}' must have a value",)
-                    }
-                };
-
-                // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.
-                // TODO: more efficient way of handling overload sets
-                // TODO: better syntax for inserting a function into an imported overload set.
-                if let Values::One(Value::OverloadSet(i)) = val {
-                    if let Some(ty) = ty.ty() {
-                        if ty != TypeId::overload_set() {
-                            // TODO: fn name instead of var name in messages?
-                            let f_ty = unwrap!(
-                                self.program.fn_ty(ty),
-                                "const {} OverloadSet must have function type not {:?}",
-                                name.log(self.pool),
-                                ty
-                            );
-
-                            self.compute_new_overloads(i)?;
-                            // TODO: just filter the iterator.
-                            let mut overloads = self.program.overload_sets[i].clone(); // sad
-
-                            overloads
-                                .ready
-                                .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
-                            // TODO: You can't just filter here anymore because what if its a Split FuncRef.
-                            let found = match overloads.ready.len() {
-                                0 => err!("Missing overload",),
-                                1 => overloads.ready[0].func,
-                                _ => err!("Ambigous overload \n{:?}", overloads.ready),
-                            };
-                            val = Values::One(Value::GetFn(found));
-                        }
-                    } else {
-                        // TODO: make sure its not a problem that usage in an expression can end up as different types each time
-                        *ty = LazyType::Finished(TypeId::overload_set())
-                    }
-                }
-
-                let found_ty = self.program.type_of_raw(&val);
-                let final_ty = if let Some(expected_ty) = ty.ty() {
-                    if self.program[expected_ty] == TypeInfo::Type {
-                        // HACK. todo: general overloads for cast()
-                        val = Value::Type(self.to_type(val)?).into()
-                    } else {
-                        // TODO: you want the type check but doing it against type_of_raw is kinda worthless
-                        self.type_check_arg(found_ty, expected_ty, "const decl")?;
-                    }
-
-                    expected_ty
-                } else {
-                    let found = if let Some(value) = value {
-                        assert!(!(value.ty.is_unknown() || value.ty.is_any()));
-                        // HACK This makes addr_of const for @enum work
-                        value.ty
-                    } else {
-                        found_ty
-                    };
-                    *ty = LazyType::Finished(found);
-                    found
-                };
-
-                let val_expr = Expr::Value {
-                    ty: final_ty,
-                    value: val.clone(),
-                };
-                if let Some(e) = value {
-                    e.expr = val_expr.clone();
-                } else {
-                    // this no longer happens since i temp removed modules. only @import got here.
-                    todo!();
-                }
-                self.save_const(name, val_expr, final_ty, loc)?;
+        let value = match value {
+            Some(value) => value,
+            None => {
+                err!(
+                    "binding {} requires a value (use unsafe '()!uninitilized' if thats what you really want)",
+                    name.log(self.pool)
+                );
             }
+        };
+
+        match kind {
+            VarType::Const => self.decl_const(name, ty, value, loc)?,
             VarType::Let | VarType::Var => {
-                let final_ty = match value {
-                    None => {
-                        if no_type {
-                            err!(
-                                "binding {} requires a value (use unsafe '()!uninitilized' if thats what you really want)",
-                                name.log(self.pool)
-                            );
-                        }
-                        ty.unwrap()
-                    }
-                    Some(value) => {
-                        if kind == VarType::Let && value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-                            let name = self.pool.get(name.0);
-                            err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
-                        }
-                        let value = self.compile_expr(result, value, ty.ty())?;
-                        if no_type {
-                            *ty = LazyType::Finished(value.ty());
-                            value.ty()
-                        } else {
-                            self.type_check_arg(value.ty(), ty.unwrap(), "var decl")?;
-                            ty.unwrap()
-                        }
-                    }
+                if kind == VarType::Let && value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
+                    let name = self.pool.get(name.0);
+                    err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
+                }
+                let value = self.compile_expr(result, value, ty.ty())?;
+                let final_ty = if no_type {
+                    *ty = LazyType::Finished(value.ty());
+                    value.ty()
+                } else {
+                    self.type_check_arg(value.ty(), ty.unwrap(), "var decl")?;
+                    ty.unwrap()
                 };
+
                 // TODO: this is so emit_ir which can't mutate program can find it.
                 self.program.intern_type(TypeInfo::Ptr(final_ty));
 
-                let _prev = result.vars.insert(name, final_ty);
-                // its not a constant so its probablby not a super huge deal? -- Apr 23
-                // TODO: closures break this
-                // assert!(prev.is_none(), "shadow is still new var {}", name.log(self.pool));
+                let prev = result.vars.insert(name, final_ty);
+                assert!(prev.is_none() || prev.unwrap() == final_ty);
+                // TODO: should always be none?? but its not a constant and seems to always be the same so its probablby not a super huge deal? -- Apr 23
+                //       maybe its just cause im not zeroing the stmt and end up compiling multiple times. -- Apr 25
             }
         }
+        Ok(())
+    }
+
+    fn decl_const(&mut self, name: Var<'p>, ty: &mut LazyType<'p>, value: &mut FatExpr<'p>, loc: Span) -> Res<'p, ()> {
+        // TODO: doing the check here every time is sad.
+        if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
+            let name = self.pool.get(name.0);
+            err!("const bindings cannot be reassigned so '{name}' cannot be '()!uninitialized'",)
+        }
+        // You don't need to precompile, immediate_eval_expr will do it for you.
+        // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
+        // This makes addr_of const for @enum work
+        //
+        let mut r = self.empty_fn(ExecTime::Comptime, FuncId::from_index(99999999), loc);
+        let res = self.compile_expr(&mut r, value, ty.ty())?;
+        let mut val = self.immediate_eval_expr(value.clone(), res.ty())?;
+        // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.
+        // TODO: more efficient way of handling overload sets
+        // TODO: better syntax for inserting a function into an imported overload set.
+        if let Values::One(Value::OverloadSet(i)) = val {
+            if let Some(ty) = ty.ty() {
+                if ty != TypeId::overload_set() {
+                    // TODO: fn name instead of var name in messages?
+                    let f_ty = unwrap!(
+                        self.program.fn_ty(ty),
+                        "const {} OverloadSet must have function type not {:?}",
+                        name.log(self.pool),
+                        ty
+                    );
+
+                    self.compute_new_overloads(i)?;
+                    // TODO: just filter the iterator.
+                    let mut overloads = self.program.overload_sets[i].clone(); // sad
+
+                    overloads
+                        .ready
+                        .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
+                    // TODO: You can't just filter here anymore because what if its a Split FuncRef.
+                    let found = match overloads.ready.len() {
+                        0 => err!("Missing overload",),
+                        1 => overloads.ready[0].func,
+                        _ => err!("Ambigous overload \n{:?}", overloads.ready),
+                    };
+                    val = Values::One(Value::GetFn(found));
+                }
+            } else {
+                // TODO: make sure its not a problem that usage in an expression can end up as different types each time
+                *ty = LazyType::Finished(TypeId::overload_set())
+            }
+        }
+
+        let found_ty = self.program.type_of_raw(&val);
+        let final_ty = if let Some(expected_ty) = ty.ty() {
+            if self.program[expected_ty] == TypeInfo::Type {
+                // HACK. todo: general overloads for cast()
+                val = Value::Type(self.to_type(val)?).into()
+            } else {
+                // TODO: you want the type check but doing it against type_of_raw is kinda worthless
+                self.type_check_arg(found_ty, expected_ty, "const decl")?;
+            }
+
+            expected_ty
+        } else {
+            assert!(!(value.ty.is_unknown() || value.ty.is_any()));
+            let found = value.ty;
+            *ty = LazyType::Finished(found);
+            found
+        };
+
+        let val_expr = Expr::Value {
+            ty: final_ty,
+            value: val.clone(),
+        };
+        self.save_const(name, val_expr, final_ty, loc)?;
         Ok(())
     }
 
@@ -3217,10 +3124,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn save_const(&mut self, name: Var<'p>, val_expr: Expr<'p>, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
         if let Some((val, ty)) = self[name.2].constants.get_mut(&name) {
             if matches!(ty, LazyType::Finished(_)) {
-                err!("ICE: tried to re-save constant {}", name.log(self.pool));
+                ice!("tried to re-save constant {}", name.log(self.pool));
             }
             if !matches!(val.expr, Expr::Poison) {
-                err!("ICE: tried to stomp constant {}", name.log(self.pool));
+                ice!("tried to stomp constant {}", name.log(self.pool));
             }
             val.expr = val_expr;
             val.ty = final_ty;
@@ -3268,7 +3175,7 @@ pub fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
     false
 }
 
-pub fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (IntTypeInfo, i64)> {
+pub fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Option<(IntTypeInfo, i64)> {
     if let Expr::SuffixMacro(name, arg) = &expr.expr {
         if *name == Flag::From_Bit_Literal.ident() {
             if let Expr::Tuple(parts) = arg.deref().deref() {
@@ -3282,13 +3189,13 @@ pub fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Res<'p, (I
                         ..
                     } = parts[1].deref()
                     {
-                        return Ok((IntTypeInfo { bit_count, signed: false }, val));
+                        return Some((IntTypeInfo { bit_count, signed: false }, val));
                     }
                 }
             }
         }
     }
-    err!("not int",)
+    None
 }
 
 // i like when my code is rocks not rice

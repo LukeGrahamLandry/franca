@@ -22,6 +22,8 @@ fun display(self: Str, writer: *List$i64) Unit = writer.write(self);
 // TODO: double '%%' to actually put a literal '%' 
 @annotation 
 fun fmt(arg: AstExpr) AstExpr = {
+    var arg = compile_ast(arg);
+    arg&.ty[] = UnknownType;  // need to compile so @println can use a macro that expands to a tuple but dont want to remember the type since it will change when our macro gets expanded. -- Apr 25
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
     let writer: *AstExpr = args.index(0);  // TODO: assert no side effects or use variable so it doesn't run many times. 
     var writer = compile_ast(writer[]);
@@ -39,8 +41,9 @@ fun fmt(arg: AstExpr) AstExpr = {
     
     var display_fn = @literal(OverloadSet) display;
     
+    // TODO: reserve space for known length args. 
     const emit = fn(msg: AstExpr) Unit = {
-        let action: FatExpr = '<display_fn>(<msg>, <writer>)';
+        var action: FatExpr = '<display_fn>(<msg>, <writer>)';
         actions&.push(action);
     };
     
@@ -86,9 +89,29 @@ fun concat(arg: AstExpr) AstExpr = {
             arg&.expr.Tuple[] = actions;
             arg
         }>;
-        <items_fn>(join_list&)
+        <items_fn>(join_list&)  // TODO: this leaks the list. 
     }'
 }
+
+@annotation 
+fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
+    var target = compile_ast(target);
+    target&.ty[] = UnknownType;
+    var original: Slice$AstExpr = target&.expr.Tuple[];
+    var tuple: List$AstExpr = list(original&.len[].add(1));
+    tuple&.push(arg);
+    tuple&.push_all(original);
+    target&.expr.Tuple[] = (tuple&.maybe_uninit.ptr[], tuple&.len[]); // TODO
+    target
+}
+
+@annotation 
+fun println(arg: AstExpr) AstExpr = '{
+    var out: List$i64 = list(0);
+    (@fmt(@prepend_tuple(out&) <arg>));
+    println(out&.items());
+    out&.drop();
+}';
 
 // TODO: HACK. Compiler doesn't know about Slice(_) so string literals are the wrong type. 
 fun display(self: ""!type, writer: *List$i64) Unit = {

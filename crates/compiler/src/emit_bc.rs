@@ -272,7 +272,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         match expr.deref() {
             Expr::AddToOverloadSet(_) => unreachable!(),
-            Expr::Poison => err!("ICE: POISON",),
+            Expr::Poison => ice!("POISON",),
             Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::Closure(_) => unreachable!(),
             Expr::Call(f, arg) => {
                 assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.program.pool));
@@ -521,7 +521,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // TODO: this is a bit weird but it makes place expressions work.
             Expr::Index { .. } => self.compile_expr(result, arg, addr_slot)?,
             &Expr::GetNamed(i) => err!(CErr::UndeclaredIdent(i)),
-            _ => err!(CErr::AddrRvalue(arg.clone())),
+            _ => err!("took address of r-value",),
         }
         Ok(())
     }
