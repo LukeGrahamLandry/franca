@@ -113,29 +113,46 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     pub(crate) fn skip_to_closing_squigle(&mut self) -> Span {
-        let mut t = self.next();
+        let t = self.next();
         debug_assert_eq!(t.kind, LeftSquiggle);
-        let mut span = t.span;
         let mut depth = 1;
         let start = self.start;
+        debug_assert!(self.peeked.is_empty());
 
         while depth > 0 {
-            t = self.next();
-            span = span.merge(t.span);
-            match t.kind {
-                LeftSquiggle => depth += 1,
-                RightSquiggle => depth -= 1,
-                Eof | Error(_) => break,
-                _ => {}
+            self.eat_whitespace();
+            self.start = self.current;
+            match self.peek_c() {
+                '\0' => break,
+                '#' => self.skip_ident(),
+                '"' | '“' | '”' => {
+                    self.skip_quoted();
+                }
+                '`' => {
+                    self.skip_quoted_multiline();
+                }
+                '0' => {
+                    self.next();
+                }
+                '1'..='9' => self.skip_num(),
+                'a'..='z' | 'A'..='Z' | '_' => self.skip_ident(),
+                '{' => {
+                    depth += 1;
+                    self.pop();
+                }
+                '}' => {
+                    depth -= 1;
+                    self.pop();
+                }
+                _ => {
+                    self.pop();
+                }
             }
         }
-        debug_assert_eq!(t.kind, RightSquiggle);
         self.eat_whitespace();
         let end = self.current;
         self.start = self.current;
-        let span = self.root.subspan(start as u64, end as u64);
-
-        span
+        self.root.subspan(start as u64, end as u64)
     }
 
     // pop the first buffered token or generate a new one
@@ -244,45 +261,61 @@ impl<'a, 'p> Lexer<'a, 'p> {
 
     // TODO: support escape characters
     fn lex_quoted(&mut self) -> Token<'p> {
+        if let Some((start, end)) = self.skip_quoted() {
+            let text = &self.src.source_slice(self.root)[start..end];
+            self.token(Quoted(self.pool.intern(text)), self.start, self.current)
+        } else {
+            self.err(LexErr::UnterminatedStr)
+        }
+    }
+
+    fn skip_quoted(&mut self) -> Option<(usize, usize)> {
         self.pop();
         loop {
             match self.pop() {
                 '"' | '“' | '”' => {
                     // Payload doesn't include quotes.
-                    let text = if self.start + 2 == self.current && self.peek_c() == '"' {
+                    return if self.start + 2 == self.current && self.peek_c() == '"' {
                         let mut count = 0;
                         while count < 3 {
                             match self.pop() {
                                 '"' => count += 1,
-                                '\0' => return self.err(LexErr::UnterminatedStr),
+                                '\0' => return None,
                                 _ => count = 0,
                             }
                         }
-                        &self.src.source_slice(self.root)[self.start + 3..self.current - 3]
+                        Some((self.start + 3, self.current - 3))
                     } else {
-                        &self.src.source_slice(self.root)[self.start + 1..self.current - 1]
+                        Some((self.start + 1, self.current - 1))
                     };
-                    return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
                 }
                 // I could let you have multi-line, but I don't like it because you end up with garbage indentation.
-                '\n' | '\0' => return self.err(LexErr::UnterminatedStr),
+                '\n' | '\0' => return None,
+                _ => {}
+            }
+        }
+    }
+
+    fn skip_quoted_multiline(&mut self) -> Option<(usize, usize)> {
+        self.pop();
+        loop {
+            match self.pop() {
+                '`' => {
+                    // Payload doesn't include quotes.
+                    return Some((self.start + 1, self.current - 1));
+                }
+                '\0' => return None,
                 _ => {}
             }
         }
     }
 
     fn lex_quoted_multiline(&mut self) -> Token<'p> {
-        self.pop();
-        loop {
-            match self.pop() {
-                '`' => {
-                    // Payload doesn't include quotes.
-                    let text = &self.src.source_slice(self.root)[self.start + 1..self.current - 1];
-                    return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
-                }
-                '\0' => return self.err(LexErr::UnterminatedStr),
-                _ => {}
-            }
+        if let Some((start, end)) = self.skip_quoted_multiline() {
+            let text = &self.src.source_slice(self.root)[start..end];
+            return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
+        } else {
+            self.err(LexErr::UnterminatedStr)
         }
     }
 
@@ -314,6 +347,30 @@ impl<'a, 'p> Lexer<'a, 'p> {
         }
     }
 
+    fn skip_num(&mut self) {
+        let mut is_float = false;
+        loop {
+            match self.peek_c() {
+                '.' => {
+                    if is_float {
+                        return;
+                    }
+                    // TODO: this would be easier if i could just peek a char.
+
+                    self.pop();
+                    if self.peek_c().is_numeric() {
+                        is_float = true;
+                    } else {
+                        self.start = self.current;
+                    }
+                }
+                '0'..='9' => {}
+                _ => return,
+            }
+            self.pop();
+        }
+    }
+
     fn end_num(&mut self, is_float: bool) -> Token<'p> {
         let text = &self.src.source_slice(self.root)[self.start..self.current];
         if is_float {
@@ -328,6 +385,23 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 Err(_) => return self.err(LexErr::NumParseErr),
             };
             return self.token(Number(n), self.start, self.current);
+        }
+    }
+
+    fn skip_ident(&mut self) {
+        let mut c = self.peek_c();
+        let is_directive = c == '#';
+        self.pop();
+        c = self.peek_c();
+        if is_directive && c == '!' {
+            while self.peek_c() != '\n' {
+                self.pop();
+            }
+            return;
+        }
+        while c.is_ascii_alphanumeric() || c == '_' || c == '#' {
+            self.pop();
+            c = self.peek_c();
         }
     }
 
