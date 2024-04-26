@@ -56,7 +56,7 @@ pub fn bootstrap() -> (String, String) {
     (rs, fr)
 }
 
-pub struct EmitRs<'z, 'p: 'z> {
+pub struct EmitRs<'z, 'p: 'static> {
     comp: Compile<'z, 'p>,
     last_loc: Option<Span>,
     ready: Vec<Option<String>>,
@@ -244,7 +244,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                 }
             }
             Stmt::Set { .. } => todo!(),
-            Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_, _) => unreachable!(),
+            Stmt::ExpandParsedStmts(_) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_, _) => unreachable!(),
         })
     }
 

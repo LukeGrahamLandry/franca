@@ -31,7 +31,6 @@ pub struct StringPool<'pool> {
     values: RwLock<Vec<Ptr<str>>>,
 }
 
-// There is one thread i do not care.
 unsafe impl Send for StringPool<'_> {}
 unsafe impl Sync for StringPool<'_> {}
 

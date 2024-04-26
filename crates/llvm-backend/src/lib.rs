@@ -244,7 +244,7 @@ fn null_terminated(s: String) -> CString {
     CString::from_vec_with_nul(s).unwrap()
 }
 
-pub struct BcToLlvm<'z, 'p, 'a> {
+pub struct BcToLlvm<'z, 'p: 'static, 'a> {
     pub compile: &'z mut Compile<'a, 'p>,
     pub llvm: JittedLlvm,
     f: FuncId,

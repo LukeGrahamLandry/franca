@@ -13,6 +13,8 @@ use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
@@ -23,6 +25,7 @@ use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
+use crate::parse::ParseTasks;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -60,7 +63,7 @@ pub enum CErr<'p> {
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
 #[repr(C)]
-pub struct Compile<'a, 'p: 'a> {
+pub struct Compile<'a, 'p: 'static> {
     pub program: &'a mut Program<'p>, // SAFETY: this must be the first field (repr(C))
     pub pool: &'p StringPool<'p>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
@@ -75,6 +78,7 @@ pub struct Compile<'a, 'p: 'a> {
     pub ready: BcReady<'p>,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
     pub scopes: Vec<Scope<'p>>,
+    pub parsing: Arc<ParseTasks<'p>>,
 }
 
 pub struct Scope<'p> {
@@ -122,8 +126,9 @@ pub struct FnWip<'p> {
 
 pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
-impl<'a, 'p> Compile<'a, 'p> {
+impl<'a, 'p: 'static> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
+        let parsing = ParseTasks::new(pool);
         let mut c = Self {
             pool,
             debug_trace: vec![],
@@ -138,11 +143,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             tests: vec![],
             pending_ffi: vec![],
             scopes: vec![],
+            parsing,
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
     }
-
+}
+impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
     pub fn log_trace(&self) -> String {
         let mut out = String::new();
@@ -804,6 +811,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_stmt(&mut self, result: &mut FnWip<'p>, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
         self.last_loc = Some(stmt.loc);
         match &mut stmt.stmt {
+            Stmt::ExpandParsedStmts(_) => unreachable!(),
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
                 self.compile_expr(result, expr, None)?;
@@ -1227,14 +1235,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Structured::Const(*ty, Values::from(out))
             }
             Expr::SuffixMacro(macro_name, arg) => {
-                let name = self.pool.get(*macro_name);
+                let name = Flag::try_from(*macro_name)?;
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    "if" => self.emit_call_if(result, arg, requested)?,
-                    "while" => self.emit_call_while(result, arg)?,
-                    "addr" => self.addr_macro(result, arg)?,
-                    "quote" => {
+                    Flag::If => self.emit_call_if(result, arg, requested)?,
+                    Flag::While => self.emit_call_while(result, arg)?,
+                    Flag::Addr => self.addr_macro(result, arg)?,
+                    Flag::Quote => {
                         let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
                         let loc = arg.loc;
 
@@ -1276,7 +1284,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.compile_expr(result, expr, requested)?
                         }
                     }
-                    "slice" => {
+                    Flag::Slice => {
                         // println!("{:?}", arg.log(self.pool));
                         let container = self.compile_expr(result, arg, None)?;
                         let ty = self.program.tuple_types(container.ty());
@@ -1292,8 +1300,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ptr_ty = self.program.slice_type(expect);
                         Structured::RuntimeOnly(ptr_ty)
                     }
-                    "c_call" => err!("!c_call has been removed. calling convention is part of the type now.",),
-                    "deref" => {
+                    Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
+                    Flag::Deref => {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr.ty()), "deref not ptr: {}", self.program.log_type(ptr.ty()));
@@ -1319,19 +1327,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                             Structured::RuntimeOnly(ty)
                         }
                     }
-                    "reflect_print" => {
-                        self.compile_expr(result, arg, None)?;
-                        // TODO: replace expr with fn call
-                        Structured::RuntimeOnly(TypeId::unit())
-                    }
-                    "type" => {
+                    Flag::Type => {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects. especially if it does const stuff.
                         let ty = self.compile_expr(result, arg, None)?.ty();
                         expr.expr = Expr::ty(ty);
                         self.program.load_value(Value::Type(ty))
                     }
-                    "const_eval" => {
+                    Flag::Const_Eval => {
                         let res = self.compile_expr(result, arg, requested)?;
                         let ty = res.ty();
                         let value = if let Ok(val) = res.get() {
@@ -1344,13 +1347,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.ty = ty;
                         Structured::Const(ty, value)
                     }
-                    "size_of" => {
+                    Flag::Size_Of => {
                         let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
                         let size = self.ready.sizes.slot_count(self.program, ty);
                         expr.expr = Expr::int(size as i64);
                         self.program.load_value(Value::I64(size as i64))
                     }
-                    "assert_compile_error" => {
+                    Flag::Assert_Compile_Error => {
                         // TODO: this can still have side-effects on the compiler state tho :(
                         let saved_res = result.clone();
                         let before = self.debug_trace.len();
@@ -1370,7 +1373,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.expr = Expr::unit();
                         self.program.load_value(Value::Unit)
                     }
-                    "struct" => {
+                    Flag::Struct => {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(pattern)?;
                             let ty = self.program.intern_type(ty);
@@ -1380,7 +1383,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("expected map literal: .{{ name: Type, ... }} but found {:?}", arg);
                         }
                     }
-                    "enum" => {
+                    Flag::Enum => {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(pattern)?;
                             let ty = self.program.to_enum(ty);
@@ -1390,7 +1393,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("expected map literal: .{{ name: Type, ... }} but found {:?}", arg);
                         }
                     }
-                    "tag" => {
+                    Flag::Tag => {
                         // TODO: auto deref and typecheking
                         let container_ptr = self.compile_expr(result, arg, None)?;
                         let container_ptr_ty = self.program.raw_type(container_ptr.ty());
@@ -1399,7 +1402,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ty = self.program.intern_type(TypeInfo::Ptr(TypeId::i64()));
                         Structured::RuntimeOnly(ty)
                     }
-                    "symbol" => {
+                    Flag::Symbol => {
                         // TODO: use match
                         let value = if let Expr::GetNamed(i) = arg.deref_mut().deref_mut() {
                             Value::Symbol(i.0)
@@ -1416,7 +1419,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         };
                         self.program.load_value(value)
                     }
-                    "fn_ptr" => {
+                    Flag::Fn_Ptr => {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
                         //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
                         let fn_val = self.compile_expr(result, arg, None)?.get()?;
@@ -1446,7 +1449,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             _ => err!("!fn_ptr expected const fn not {fn_val:?}",),
                         }
                     }
-                    "construct" => {
+                    Flag::Construct => {
                         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
                             let out = self.construct_struct(result, requested, pattern)?;
                             arg.ty = requested.unwrap();
@@ -1455,32 +1458,30 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("!construct expected map literal.",)
                         }
                     }
-                    "from_bit_literal" => {
+                    Flag::From_Bit_Literal => {
                         let int = unwrap!(bit_literal(expr, self.pool), "not int");
                         let ty = self.program.intern_type(TypeInfo::Int(int.0));
                         let value = Value::I64(int.1);
                         expr.expr = Expr::Value { ty, value: value.into() };
                         Structured::Const(ty, value.into())
                     }
-                    "uninitialized" => {
+                    Flag::Uninitialized => {
                         assert!(arg.is_raw_unit());
                         assert!(requested.is_some(), "!uninitialized expr must have known type");
                         return Ok(Structured::RuntimeOnly(requested.unwrap()));
                     }
-                    "unquote" | "placeholder" => ice!("Unhandled macro {}", self.pool.get(*macro_name)),
-                    "builtin" => {
+                    Flag::Unquote | Flag::Placeholder => ice!("Unhandled macro {}", self.pool.get(*macro_name)),
+                    Flag::Builtin => {
                         let name = if let Some(v) = arg.as_ident() {
                             v
                         } else {
                             panic!("@builtin requires argument",);
                         };
-                        let name_str = self.pool.get(name);
-                        let (value, ty) = unwrap!(self.builtin_constant(name_str), "non-blessed const marked @builtin: {:?}", name_str);
+                        let (value, ty) = unwrap!(self.builtin_constant(name), "unknown @builtin: {:?}", self.pool.get(name));
                         expr.expr = Expr::Value { ty, value: value.into() };
                         return Ok(Structured::Const(ty, value.into()));
                     }
-
-                    "contextual_field" => {
+                    Flag::Contextual_Field => {
                         let ty = unwrap!(requested, "!contextual_field (leading dot) requires name");
                         if let Some(name) = arg.as_ident() {
                             let fields = unwrap!(
@@ -1857,10 +1858,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             &mut Expr::GetNamed(_) => return Ok(None),
             Expr::StructLiteralP(_) => return Ok(None),
             Expr::SuffixMacro(macro_name, arg) => {
-                let name = self.pool.get(*macro_name);
+                let name = Flag::try_from(*macro_name)?;
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
-                    "addr" => match arg.deref_mut().deref_mut() {
+                    Flag::Addr => match arg.deref_mut().deref_mut() {
                         Expr::GetVar(var) => {
                             let value_ty = *result.vars.get(var).expect("Missing resolved var (TODO: addr of const?)");
                             self.program.intern_type(TypeInfo::Ptr(value_ty))
@@ -1871,17 +1872,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         _ => err!("took address of r-value {}", arg.log(self.pool)),
                     },
-                    "struct" | "enum" | "type" => self.program.intern_type(TypeInfo::Type),
-                    "deref" => {
+                    Flag::Struct | Flag::Enum | Flag::Type => self.program.intern_type(TypeInfo::Type),
+                    Flag::Deref => {
                         let ptr_ty = self.type_of(result, arg)?;
                         if let Some(ptr_ty) = ptr_ty {
                             return Ok(self.program.unptr_ty(ptr_ty));
                         }
                         return Ok(None);
                     }
-                    "symbol" => Ident::get_type(self.program),
-                    "tag" => self.program.ptr_type(TypeId::i64()),
-                    "fn_ptr" => {
+                    Flag::Symbol => Ident::get_type(self.program),
+                    Flag::Tag => self.program.ptr_type(TypeId::i64()),
+                    Flag::Fn_Ptr => {
                         if let Some(f_ty) = self.type_of(result, arg)? {
                             if let Some(f_ty) = self.program.fn_ty(f_ty) {
                                 return Ok(Some(self.program.intern_type(TypeInfo::FnPtr(f_ty))));
@@ -1889,10 +1890,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(None);
                     }
-                    "quote" => FatExpr::get_type(self.program),
-                    "while" => TypeId::unit(),
+                    Flag::Quote => FatExpr::get_type(self.program),
+                    Flag::While => TypeId::unit(),
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
-                    "if" => return Ok(None),
+                    Flag::If => return Ok(None),
                     _ => match self.compile_expr(result, expr, None) {
                         Ok(res) => res.ty(),
                         Err(e) => ice!("TODO: SuffixMacro inference failed. need to make it non-destructive?\n{e:?}",),
@@ -1913,7 +1914,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: this kinda sucks. it should go in a builtin generated file like libc and use the normal name resolution rules
-    pub fn builtin_constant(&mut self, name: &str) -> Option<(Value, TypeId)> {
+    pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(Value, TypeId)> {
+        let name = self.pool.get(name);
         use TypeInfo::*;
         let ty = match name {
             "i64" => Some(TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true })),
@@ -2148,6 +2150,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // fallthrough
             }
+            // TODO: @enum field access
             _ => {} // fallthrough
         }
         Ok(None)
@@ -2469,8 +2472,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::SuffixMacro(macro_name, arg) => {
                 // TODO: type checking
                 // TODO: general place expressions.
-                let macro_name = self.pool.get(*macro_name);
-                if macro_name == "deref" {
+                if let Ok(Flag::Deref) = Flag::try_from(*macro_name) {
                     let ptr = self.compile_expr(result, arg, None)?;
                     let expected_ty = unwrap!(self.program.unptr_ty(ptr.ty()), "not ptr");
                     let value = self.compile_expr(result, value, Some(expected_ty))?;
@@ -3239,7 +3241,7 @@ impl ToBytes for i64 {
     }
 }
 
-pub struct Unquote<'z, 'a, 'p> {
+pub struct Unquote<'z, 'a, 'p: 'static> {
     pub compiler: &'z mut Compile<'a, 'p>,
     pub placeholders: Vec<Option<FatExpr<'p>>>,
     pub result: &'z mut FnWip<'p>,

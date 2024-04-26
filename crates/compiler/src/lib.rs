@@ -24,6 +24,7 @@ use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::{CErr, Res};
 use export_ffi::STDLIB_PATH;
+use lex::Lexer;
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -142,14 +143,17 @@ pub fn find_std_lib() -> bool {
     false
 }
 
-pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncId, usize)> {
+pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId> {
     // TODO: this will get less dumb when I have first class modules.
     let file = comp
-        .program
+        .parsing
         .codemap
-        .add_file("main_file".to_string(), format!("#include_std(\"prelude.fr\");\n{src}"));
+        .write()
+        .unwrap()
+        .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
     let user_span = file.span;
-    let parsed = match Parser::parse(&mut comp.program.codemap, file.clone(), comp.pool) {
+    let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
+    let parsed = match Parser::parse(comp.parsing.clone(), lex, comp.pool) {
         Ok(s) => s,
         Err(e) => {
             return Err(CompileError {
@@ -163,16 +167,17 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, (FuncI
         }
     };
 
-    let mut global = make_toplevel(comp.pool, user_span, parsed.stmts);
+    comp.parsing.work_requested.notify_all();
+    let mut global = make_toplevel(comp.pool, user_span, parsed);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
     let f = comp.compile_top_level(global)?;
-    Ok((f, parsed.lines))
+    Ok(f)
 }
 
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
-pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
+pub fn run_main<'a: 'p, 'p: 'static>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
     init_logs_flag(0xFFFFFFFFF);
     log_tag_info();
     let start = timestamp();
@@ -187,7 +192,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
             log_err(&comp, e, save);
             return false;
         }
-        Ok((_, _)) => {
+        Ok(_) => {
             match comp.program.find_unique_func(Flag::Main.ident()) {
                 None => {
                     outln!(ShowErr, "'fn main' NOT FOUND");
@@ -201,20 +206,20 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
                             return false;
                         }
                         Ok(_) => {
+                            if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
+                                log_err(&comp, e, save);
+                                return false;
+                            }
                             let end = timestamp();
                             let seconds = end - start;
                             outln!(Perf, "===============");
                             println!(
                                 //Perf,
-                                "Frontend (parse+comptime+bytecode) finished in {seconds:.3} seconds",
+                                "Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds",
                             );
                             outln!(Perf, "===============");
                             let start = timestamp();
 
-                            if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
-                                log_err(&comp, e, save);
-                                return false;
-                            }
                             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
                             comp.aarch64.make_exec();
                             comp.flush_cpu_instruction_cache();
@@ -332,7 +337,7 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&
         outln!(ShowErr, "Internal: {}", e.internal_loc.unwrap());
     }
     if let CErr::Diagnostic(diagnostic) = &e.reason {
-        emit_diagnostic(&interp.program.codemap, diagnostic);
+        emit_diagnostic(&interp.parsing.codemap.read().unwrap(), diagnostic);
     } else if let Some(loc) = e.loc {
         let diagnostic = vec![Diagnostic {
             level: Level::Error,
@@ -344,7 +349,7 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&
                 style: SpanStyle::Primary,
             }],
         }];
-        emit_diagnostic(&interp.program.codemap, &diagnostic);
+        emit_diagnostic(&interp.parsing.codemap.read().unwrap(), &diagnostic);
     } else {
         outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
     }

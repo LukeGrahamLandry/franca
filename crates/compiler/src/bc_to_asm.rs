@@ -17,7 +17,7 @@ use std::mem::transmute;
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct SpOffset(usize);
 
-struct BcToAsm<'z, 'p, 'a> {
+struct BcToAsm<'z, 'p: 'static, 'a> {
     compile: &'z mut Compile<'a, 'p>,
     slots: Vec<Option<SpOffset>>,
     open_slots: Vec<(SpOffset, usize)>,

@@ -218,6 +218,7 @@ pub trait WalkAst<'p> {
             }
         }
         match &mut stmt.stmt {
+            Stmt::ExpandParsedStmts(_) => todo!(),
             Stmt::DeclNamed { ty, value, .. } => {
                 if let Some(value) = value {
                     self.expr(value);
@@ -624,6 +625,7 @@ pub enum Stmt<'p> {
         value: FatExpr<'p>,
     },
     DoneDeclFunc(FuncId, usize), // TODO: OverloadSetId
+    ExpandParsedStmts(usize),
 }
 
 #[derive(Clone, Debug, InterpSend)]
@@ -822,7 +824,6 @@ pub struct Program<'p> {
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
-    pub codemap: CodeMap,
     pub contextual_fields: Vec<Option<HashMap<Ident<'p>, (Values, TypeId)>>>,
 }
 
@@ -939,7 +940,6 @@ impl<'p> Program<'p> {
             comptime_arch,
             inline_llvm_ir: vec![],
             type_lookup: HashMap::new(),
-            codemap: CodeMap::new(),
             contextual_fields: vec![],
         };
 
@@ -1693,6 +1693,10 @@ pub enum Flag {
     Uninitialized,
     Const_Eval,
     Contextual_Field,
+    Type,
+    Size_Of,
+    Assert_Compile_Error,
+    Symbol,
     _Reserved_Count_,
 }
 
@@ -1710,6 +1714,7 @@ macro_rules! flag_subset {
                 if value.0 > $before as u32 && value.0 < $after as u32 {
                     Ok(unsafe { transmute(value.0 as u8) })
                 } else {
+                    // TODO: just return an option?
                     // TODO: make sure getting Caller::locatiom isn't slow
                     err!(CErr::UndeclaredIdent(value))
                 }

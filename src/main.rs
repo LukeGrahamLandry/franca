@@ -14,16 +14,7 @@ use compiler::{
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
-use std::{
-    arch::asm,
-    env,
-    fs::{self},
-    io::Write,
-    mem::transmute,
-    path::PathBuf,
-    process::exit,
-    str::pattern::Pattern,
-};
+use std::{arch::asm, env, fs, io::Write, mem::transmute, path::PathBuf, process::exit, str::pattern::Pattern};
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
 //       Make sure theres some prefix that lets you run/compile the next arg as a file path for shabang line.
@@ -68,6 +59,7 @@ fn main() {
         let path = PathBuf::from(format!("tests/{name}.fr"));
         if path.exists() {
             init_logs_flag(0xFFFFFFFFF);
+
             run_main(pool, fs::read_to_string(format!("tests/{name}.fr")).unwrap(), Some(&name), true);
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
@@ -233,7 +225,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
 }
 
 /// This is the thing we exec.
-fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: TargetArch) {
+fn actually_run_it(name: String, src: String, assertion_count: usize, arch: TargetArch) {
     init_logs(&[LogTag::ShowPrint, LogTag::ShowErr]);
     // init_logs_flag(0xFFFFFFFF);
     // let save = format!("{name}_{arch:?}/");
@@ -319,8 +311,10 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     debug_assert_eq!(result, arg);
 
     // log_dbg(&comp, save);
-    assert_eq!(program.assertion_count, assertion_count, "vm missed assertions?");
+    assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
     // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
+    *(comp.parsing.die.write().unwrap()) = true;
+    comp.parsing.work_requested.notify_all();
 }
 
 #[test]

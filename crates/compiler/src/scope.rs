@@ -5,7 +5,7 @@ use codemap::Span;
 use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, TypeId, Var, VarType},
-    compiler::{add_unique, BlockScope, Compile, Res},
+    compiler::{add_unique, BlockScope, CErr, Compile, Res},
     err, ice,
     logging::{LogTag::Scope, PoolLog},
     outln,
@@ -13,7 +13,7 @@ use crate::{
     STATS,
 };
 
-pub struct ResolveScope<'z, 'a, 'p> {
+pub struct ResolveScope<'z, 'a, 'p: 'static> {
     captures: Vec<Var<'p>>,
     local_constants: Vec<Vec<(Var<'p>, LazyType<'p>, FatExpr<'p>)>>,
     compiler: &'z mut Compile<'a, 'p>,
@@ -240,6 +240,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
+            Stmt::ExpandParsedStmts(name) => todo!(),
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
                 debug_assert!(*kind != VarType::Const);
@@ -328,6 +329,29 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Expr::Block { body, result, resolved } => {
                 self.push_scope(None);
+
+                let mut new_body = vec![];
+                let mut dirty = true;
+                while dirty {
+                    dirty = false;
+                    for stmt in mem::take(body) {
+                        if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
+                            dirty = true;
+                            match self.compiler.parsing.wait_for(name) {
+                                Ok(stmts) => {
+                                    for s in stmts {
+                                        new_body.push(s);
+                                    }
+                                }
+                                Err(e) => err!(CErr::Diagnostic(e.diagnostic)),
+                            }
+                        } else {
+                            new_body.push(stmt);
+                        }
+                    }
+                    *body = mem::take(&mut new_body);
+                }
+
                 for stmt in body.iter_mut() {
                     self.scan_const_decls(stmt)?;
                 }

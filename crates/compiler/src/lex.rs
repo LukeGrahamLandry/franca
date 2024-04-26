@@ -96,7 +96,8 @@ pub struct Lexer<'a, 'p> {
 impl<'a, 'p> Lexer<'a, 'p> {
     pub fn new(src: Arc<File>, pool: &'p StringPool<'p>, root: Span) -> Self {
         // Safety: its in an arc which is dropped at the same time as the iterator.
-        let hack = unsafe { &*(src.source() as *const str) };
+        let code = src.source_slice(root);
+        let hack = unsafe { &*(code as *const str) };
         Self {
             src,
             start: 0,

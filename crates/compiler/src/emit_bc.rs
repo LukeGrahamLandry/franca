@@ -251,7 +251,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Stmt::Noop => {}
             // Can't hit DoneDeclFunc because we don't re-eval constants.
-            Stmt::DoneDeclFunc(_, _) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
+            Stmt::ExpandParsedStmts(_) | Stmt::DoneDeclFunc(_, _) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
         }
         Ok(())
     }
@@ -613,8 +613,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::SuffixMacro(macro_name, arg) => {
                 // TODO: type checking
                 // TODO: general place expressions.
-                let macro_name = self.program.pool.get(*macro_name);
-                if macro_name == "deref" {
+                if let Ok(Flag::Deref) = Flag::try_from(*macro_name) {
                     // TODO: this is why you want the output to be an enum Place { StackRange | Deref(StackSlot, len) }
                     let ptr = result.reserve_slots(self, arg.ty)?;
                     let value_slot = result.reserve_slots(self, value.ty)?;

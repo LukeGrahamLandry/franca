@@ -587,48 +587,6 @@ fn interp_send() {
 
     assert_eq!(HelloWorld::get_type(&mut p), HelloWorld::get_type(&mut p));
     assert_ne!(HelloWorld::get_type(&mut p), Nested::get_type(&mut p));
-
-    // assert!(HelloWorld::deserialize_one(seven.serialize_one()).is_none());
-    // assert!(Nested::deserialize_one(one.serialize_one()).is_none());
-
-    // let ty = HelloWorld::get_type(&mut p);
-    // panic!("{}", p.log_type(ty));
-}
-
-// TODO: test ints instead
-// #[test]
-// fn interp_send_empty_ast() {
-//     use crate::ast::{garbage_loc, FatStmt};
-//     let empty = FatStmt::null(garbage_loc());
-//     let prev = format!("{empty:?}");
-//     let value = empty.serialize_one();
-//     let empty2: FatStmt = value.deserialize().unwrap();
-//     assert_eq!(prev, format!("{empty2:?}"));
-// }
-
-#[test]
-fn interp_send_libs_ast() {
-    use crate::pool::StringPool;
-    use crate::{ast::FatStmt, parse::Parser};
-    use crate::{bc_to_asm::ConstBytes, find_std_lib};
-    use codemap::CodeMap;
-
-    assert!(find_std_lib());
-    let mut bytes = ConstBytes::default();
-    let pool = Box::leak(Box::<StringPool>::default());
-    let mut codemap = CodeMap::new();
-
-    let file = codemap.add_file("bootstrap".to_string(), "#include_std(\"prelude.fr\");".to_string());
-
-    let stmts = Parser::parse(&mut codemap, file.clone(), pool).unwrap().stmts;
-    for s in stmts {
-        let prev = format!("{s:?}");
-        let value = s.serialize_one();
-        let value_b = bytes.store_to_ints(value.vec().iter());
-        let after_b = FatStmt::deserialize_from_ints(&mut value_b.iter().copied()).unwrap();
-        // Note: this relies on you not printing out addresses in there.
-        assert_eq!(prev, format!("{after_b:?}"));
-    }
 }
 
 pub mod c {
