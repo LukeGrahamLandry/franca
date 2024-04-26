@@ -241,7 +241,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                     target,
                 }))
             }
-            Dot => Err(self.error_next(String::from("leading '.' is reserved for inferred type enum constants."))),
+            Dot => {
+                self.start_subexpr();
+                self.start_subexpr();
+                self.eat(Dot)?;
+                let name = self.ident()?;
+                let e = self.expr(Expr::GetNamed(name));
+                Ok(self.expr(Expr::SuffixMacro(Flag::Contextual_Field.ident(), Box::new(e))))
+            }
             LeftAngle => {
                 self.start_subexpr();
                 self.eat(LeftAngle)?;

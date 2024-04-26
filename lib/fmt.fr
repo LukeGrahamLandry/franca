@@ -39,11 +39,9 @@ fun fmt(arg: AstExpr) AstExpr = {
     let count = parts.len().add(params.len());
     var actions: List(AstExpr) = list(count);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
     
-    var display_fn = @literal(OverloadSet) display;
-    
     // TODO: reserve space for known length args. 
     const emit = fn(msg: AstExpr) Unit = {
-        var action: FatExpr = '<display_fn>(<msg>, <writer>)';
+        var action: FatExpr = 'display(<msg>, <writer>)';
         actions&.push(action);
     };
     
@@ -67,21 +65,12 @@ fun concat(arg: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg&.expr.Tuple[];
     var actions: List(AstExpr) = list(args.len());
     
-    // TODO: this is really trash. need a better way to express this. the problem is that you don't re-run closure captures after expanding the macro. 
-    let list_fn = @literal(OverloadSet) List;
-    let init_fn = @literal(OverloadSet) list;
-    let push_fn = @literal(OverloadSet) push_all;
-    let str_t = @literal(Type) Str;
-    let items_fn = @literal(OverloadSet) items;
-    let i64_t = @literal(Type) i64;
-    let fn_as = @literal(as);
-    
     '{
-        var join_list: <list_fn>(<i64_t>) = <init_fn>();
+        var join_list: List$i64 = list();
         <{
             args.enumerate(fn(i: i64, param: *AstExpr) Unit = {  // TODO: zip iterators 
                 // TODO: having () in the cast instead of lit(Unit) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
-                let action: FatExpr = '@(<fn_as>)(<@literal(Unit)>) <push_fn>(join_list&, @(<fn_as>)(<str_t>) <param[]>)';
+                let action: FatExpr = '@as(Unit) push_all(join_list&, @as(Str) <param[]>)';
                 actions&.push(action);
             });
             
@@ -89,7 +78,7 @@ fun concat(arg: AstExpr) AstExpr = {
             arg&.expr.Tuple[] = actions;
             arg
         }>;
-        <items_fn>(join_list&)  // TODO: this leaks the list. 
+        join_list&.items()  // TODO: this leaks the list. 
     }'
 }
 

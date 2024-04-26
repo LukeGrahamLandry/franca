@@ -5,35 +5,18 @@
 //       so have to pass by void ptr but currently can't just make lvalue refernce like rust. 
 //       can't decide if this macro is good enough or want ^ as more general solution. 
 @annotation 
-fun literal(arg: AstExpr, target: AstExpr) AstExpr = {
-    var lit_fn: OverloadSet = literal_ast; 
-    let lit_fn: VoidPtr = lit_fn&;
-    let lit_fn = literal_ast(OverloadSet, lit_fn);
-    var void_ast = VoidPtr;
-    let void_ast: VoidPtr = void_ast&;
-    let void_ast = literal_ast(Type, void_ast);
-    var as_fn = as;
-    let as_fn: VoidPtr = as_fn&;
-    let as_fn = literal_ast(OverloadSet, as_fn);
-    
-    '{
-        var value: <arg> = <target>;
-        <lit_fn>(<arg>, @(<as_fn>)(<void_ast>) value&)
-    }'
-}
+fun literal(arg: AstExpr, target: AstExpr) AstExpr = '{
+    var value: <arg> = <target>;
+    literal_ast(<arg>, @as(VoidPtr) value&)
+}';
 
 // Same as the two argument version but infers the type. 
-@annotation 
-fun literal(arg: AstExpr) AstExpr = {
     // TODO: assert that arg isn't 'Unit' because then its ambigous with the two argument version. -- Apr 21
-    const lit_fn = @literal(OverloadSet) literal_ast; 
-    const void_ast = @literal(Type) VoidPtr; 
-    const as_fn = @literal(OverloadSet) as;
-    '{
-        var value = <arg>;
-        <lit_fn>(value!type, @(<as_fn>)(<void_ast>) value&)
-    }'
-}
+@annotation 
+fun literal(arg: AstExpr) AstExpr = '{
+    var value = <arg>;
+    literal_ast(value!type, @as(VoidPtr) value&)
+}';
 
 /// Ast<?> -> Ast<T>
 fun as(T: Type, expr: FatExpr) FatExpr = '@(<@literal(as)>)(<@literal(T)>) <expr>';
@@ -50,7 +33,7 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
     
     // TODO: compile error to not handle all and not have a default branch
     // TODO: why can't i call 'as'? ffi unique? 
-    var body: FatExpr = '<@literal(panic)>("unhandled match case")';
+    var body: FatExpr = 'panic("unhandled match case")';
     
     // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. (1)
     // TODO: when unptr_ty wasn't getting raw type, the error message was at the return value instead of here. (2)
@@ -71,9 +54,8 @@ fun match(arg: FatExpr, target: FatExpr) FatExpr = {
                     var name = handler_body&.expr.Closure[].name[]; // (2)
                     var case_access = 'arg_var&.___';
                     case_access&.expr.FieldAccess[1][] = name;  // (3)
-                    let tag = '<@literal(tag_value)>(<@literal(Type) enum_type>, <@literal(name)>)';
-                    let cond = '<@literal(eq)>(tag_val, <tag>)';
-                    body = '(<cond>, fn = <handler_body>(<case_access>[]), fn = <body>)!if';
+                    let tag = 'tag_value(<@literal(Type) enum_type>, <@literal(name)>)';
+                    body = '(eq(tag_val, <tag>), fn = <handler_body>(<case_access>[]), fn = <body>)!if';
                 };
             };
             body
@@ -89,7 +71,7 @@ fun switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
     let handlers: Slice(FatStmt) = handlers&.expr.Block.body[];
     arg = compile_ast(arg);
     let inspected_ty: Type = arg&.ty[]; // TODO: if you dont have the type hint you get confusing error message trying to call fn as(Type, Ast) becuase its the unique ffi TypeId type. -- Apr 21 
-    var body = '<@literal(panic)>("unhandled switch case")';
+    var body = 'panic("unhandled switch case")';
     var first = true;
     var i = handlers.len().sub(1);
     
@@ -115,7 +97,7 @@ fun switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
                     if(name.int().eq(case!symbol.int()), fn = {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
-                        let cond = '<@literal(eq)>(arg_var, <as(inspected_ty, arg[])>)';
+                        let cond = 'eq(arg_var, <as(inspected_ty, arg[])>)';
                         body = '(<cond>, fn=<action>(), fn=<body>)!if';
                     }, fn=if(name.int().eq(default!symbol.int()), fn = {
                         if(first) {|
@@ -146,7 +128,7 @@ fun switch(arg: FatExpr, handlers: FatExpr) FatExpr = {
 fun bits(arg: AstExpr) AstExpr = {
     var zero = 0;
     var parts: Slice$AstExpr = arg&.expr.Tuple[];
-    var expr = @literal(0);
+    var expr = '0';
     var shift = 32;
     for(parts, fn(part: *AstExpr) Unit = {
         var int = get_type_int(part[]);
@@ -159,11 +141,11 @@ fun bits(arg: AstExpr) AstExpr = {
         assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
         let part_ast = as(i64, part[]);
         let next = (int&.signed[], 
-            fn = '<@literal(signed_truncate)>(<part_ast>, <@literal(i64) int&.bit_count[]>)',
+            fn = 'signed_truncate(<part_ast>, <@literal(i64) int&.bit_count[]>)',
             fn = part_ast
         )!if;
-        let next = '<@literal(shift_left)>(<next>, <@literal(shift)>)';
-        expr = '<@literal(bit_or)>(<expr>, <next>)';
+        let next = 'shift_left(<next>, <@literal(shift)>)';
+        expr = 'bit_or(<expr>, <next>)';
     });
     
     // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
@@ -175,7 +157,6 @@ fun bits(arg: AstExpr) AstExpr = {
     
     as(i64, expr)
 }
-
 
 // Seems like a fairly crippling design problem the range at which adding new code can mess you up. 
 // But that should get better with a stricter module system that lets you import into a namespace. 

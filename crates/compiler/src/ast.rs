@@ -823,6 +823,7 @@ pub struct Program<'p> {
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
     pub codemap: CodeMap,
+    pub contextual_fields: Vec<Option<HashMap<Ident<'p>, (Values, TypeId)>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -939,6 +940,7 @@ impl<'p> Program<'p> {
             inline_llvm_ir: vec![],
             type_lookup: HashMap::new(),
             codemap: CodeMap::new(),
+            contextual_fields: vec![],
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1164,6 +1166,7 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
+            self.contextual_fields.push(None);
             self.type_lookup.insert(ty, TypeId::from_index(id));
             TypeId::from_index(id)
         })
@@ -1689,6 +1692,7 @@ pub enum Flag {
     No_Memo,
     Uninitialized,
     Const_Eval,
+    Contextual_Field,
     _Reserved_Count_,
 }
 

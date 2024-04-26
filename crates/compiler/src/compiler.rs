@@ -28,7 +28,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, ffi, impl_index, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, STATS};
 use crate::{
     logging::{LogTag, PoolLog},
     outln,
@@ -1026,12 +1026,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let func = &self.program[id];
 
-        // TODO: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
-        //       to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
-        //       then have @test(.aarch64, .llvm) instead of current special handling.
-        //       also add a new annotation for declaring macros with some other type as the argument where it const evals the expr before calling the macro.
-        //       that should be doable in the language once I allow user macros to modify functions like the builtin ones do.
-        //       -- Apr 19
         if func.has_tag(Flag::Test) {
             // TODO: actually use this.
             // TODO: probably want referencable_name=false?
@@ -1485,12 +1479,42 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.expr = Expr::Value { ty, value: value.into() };
                         return Ok(Structured::Const(ty, value.into()));
                     }
+
+                    "contextual_field" => {
+                        let ty = unwrap!(requested, "!contextual_field (leading dot) requires name");
+                        if let Some(name) = arg.as_ident() {
+                            let fields = unwrap!(
+                                self.program.contextual_fields[ty.as_index()].as_ref(),
+                                "no contextual fields for type {ty:?}"
+                            );
+                            let (value, ty) = unwrap!(fields.get(&name), "contextual field not found {} for {ty:?}", self.pool.get(name));
+                            expr.ty = *ty;
+                            expr.expr = Expr::Value {
+                                ty: *ty,
+                                value: value.clone(),
+                            };
+                            return Ok(Structured::Const(*ty, value.clone()));
+                        } else {
+                            err!("!contextual_field (leading dot) requires name",)
+                        }
+                    }
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
                     }
                 }
             }
             Expr::FieldAccess(e, name) => {
+                let container = self.compile_expr(result, e, None)?;
+
+                if let Structured::Const(_, Values::One(Value::Type(ty))) = &container {
+                    if let Some(fields) = &self.program.contextual_fields[ty.as_index()] {
+                        let (val, ty) = unwrap!(fields.get(name).cloned(), "missing contextual field {} for {ty:?}", self.pool.get(*name));
+                        expr.expr = Expr::Value { ty, value: val.clone() };
+                        expr.ty = ty;
+                        return Ok(Structured::Const(ty, val));
+                    }
+                }
+
                 let index = self.field_access_expr(result, e, *name)?;
                 expr.expr = Expr::Index {
                     ptr: mem::take(e),
@@ -1603,11 +1627,24 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
             let mut the_type = Pattern::empty(loc);
             let unique_ty = self.program.unique_ty(ty);
+            let mut ctx_fields = HashMap::new();
             // Note: we expand target to an anonamus struct literal, not a type.
             for b in &mut pattern.bindings {
                 assert!(b.default.is_some());
                 assert!(matches!(b.lazy(), LazyType::Infer));
-                b.ty = LazyType::PendingEval(unwrap!(b.default.take(), ""));
+
+                let expr = unwrap!(b.default.take(), "");
+                let val = self.immediate_eval_expr(expr, unique_ty)?;
+
+                b.ty = LazyType::PendingEval(FatExpr::synthetic(
+                    Expr::Value {
+                        ty: unique_ty,
+                        value: val.clone(),
+                    },
+                    loc,
+                ));
+                let name = unwrap!(b.name(), "@enum field missing name??");
+                ctx_fields.insert(name, (val, unique_ty));
                 the_type.bindings.push(Binding {
                     name: b.name,
                     // ty: LazyType::Finished(unique_ty),
@@ -1616,29 +1653,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                     kind: VarType::Let,
                 });
             }
-            let var = Var(self.pool.intern("T"), self.program.next_var, ScopeId::from_index(0), VarType::Const, 0); // TODO:SCOPE
-            self.program.next_var += 1;
-            pattern.bindings.push(Binding {
-                name: Name::Var(var),
-                ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(unique_ty), loc)),
-                default: None,
-                kind: VarType::Let,
-            });
-            the_type.bindings.push(Binding {
-                name: Name::Var(var),
-                ty: LazyType::PendingEval(FatExpr::synthetic(Expr::ty(TypeId::ty()), loc)),
-                default: None,
-                kind: VarType::Let,
-            });
-            let the_type = Box::new(FatExpr::synthetic(Expr::StructLiteralP(the_type), loc));
-            let the_type = FatExpr::synthetic(Expr::SuffixMacro(Flag::Struct.ident(), the_type), loc);
-            let the_type: TypeId = self.immediate_eval_expr_known(the_type)?;
-            let construct_expr = FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), Box::new(target)), loc);
-            let value = self.immediate_eval_expr(construct_expr, the_type)?;
-            let value = Value::new_box(value.vec(), true).into();
-            let ty = self.program.ptr_type(the_type);
-            let mut e = FatExpr::synthetic(Expr::Value { ty, value }, loc);
-            e.ty = ty;
+            let i = unique_ty.as_index();
+            extend_options(&mut self.program.contextual_fields, i);
+            let old = self.program.contextual_fields[i].replace(ctx_fields);
+            debug_assert!(old.is_none());
+
+            let mut e = FatExpr::synthetic(
+                Expr::Value {
+                    ty: TypeId::ty(),
+                    value: Values::One(Value::Type(unique_ty)),
+                },
+                loc,
+            );
+            e.ty = TypeId::ty();
+
             return Ok(e);
         }
         err!("Expected struct literal found {target:?}",);
@@ -2108,8 +2136,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let is_ready = self.program[f].comptime_addr.is_some() || (self.ready.ready.len() > f.as_index() && self.ready[f].is_some());
                         if is_ready && !self.program[f].any_const_args() {
                             // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
-                            let ret_ty = self.program[f].finished_ret.unwrap();
-                            let arg = self.immediate_eval_expr(mem::take(arg), ret_ty)?;
+                            let arg_ty = self.program[f].finished_arg.unwrap();
+                            let arg = self.immediate_eval_expr(mem::take(arg), arg_ty)?;
                             return Ok(Some(self.run(f, arg, ExecTime::Comptime, None)?));
                         }
                         // fallthrough

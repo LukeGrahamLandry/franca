@@ -16,6 +16,13 @@ so thats ~40% less lit_fn and made debug mode --no-fork ~5% faster.
 // DID: just treat @builtin as a normal expression instead of a magic thing that const looks for so you can do 'const Type: @builtin("Type") = @builtin("Type");'
 // then you dont have to eat this check for every constant, you just get there when you get there.
 
+// DID: allow macros do add to a HashMap<TypeId, HashMap<Ident, Values>>,
+// to give generic support for 'let x: E.T[] = T.Value[] === let x: T.T[] = .Value' like Zig/Swift.
+// then have @test(.aarch64, .llvm) instead of current special handling.
+// also add a new annotation for declaring macros with some other type as the argument where it const evals the expr before calling the macro.
+// that should be doable in the language once I allow user macros to modify functions like the builtin ones do.
+// -- Apr 19
+
 ## dont resolve vars up front (Apr 24/25)
 
 did a bunch of refactoring the scope system yesterday.
