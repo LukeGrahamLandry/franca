@@ -1698,6 +1698,7 @@ pub enum Flag {
     Size_Of,
     Assert_Compile_Error,
     Symbol,
+    Outputs,
     _Reserved_Count_,
 }
 

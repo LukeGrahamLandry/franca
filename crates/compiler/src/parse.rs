@@ -1,5 +1,4 @@
 //! Convert a stream of tokens into ASTs.
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread::{sleep, spawn};
@@ -618,6 +617,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
 
         let body = match self.peek() {
             Semicolon => {
+                // TODO: return Err(self.expected("function body")), and have @import for the compiler ffi things
                 self.eat(Semicolon)?;
                 None
             }
@@ -735,12 +735,25 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                     return Err(self.expected("quoted path"));
                 }
             }
-            Symbol(_name) => {
-                if matches!(self.lexer.nth(1).kind, TokenType::Colon | TokenType::DoubleColon) {
-                    return Err(self.error_next("reserved for name := value and name :: value".to_string()));
+            Symbol(name) => {
+                if self.lexer.nth(1).kind == DoubleColon {
+                    self.pop();
+                    self.pop();
+                    let value = self.parse_expr()?;
+                    self.eat(Semicolon)?;
+                    Stmt::DeclNamed {
+                        name,
+                        ty: LazyType::Infer,
+                        value: Some(value),
+                        kind: VarType::Const,
+                    }
+                } else {
+                    if matches!(self.lexer.nth(1).kind, TokenType::Colon) {
+                        return Err(self.error_next("reserved for name := value and name :: value".to_string()));
+                    }
+                    let e = self.parse_expr()?;
+                    self.after_expr_stmt(e)?
                 }
-                let e = self.parse_expr()?;
-                self.after_expr_stmt(e)?
             }
             _ => {
                 let e = self.parse_expr()?;
@@ -812,7 +825,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
             self.pop();
             kind
         } else {
-            VarType::Var // TODO: default to let?
+            VarType::Let // TODO: default to let?
         };
         let name = self.ident()?;
         let types = if Colon == self.peek() {

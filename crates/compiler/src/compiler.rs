@@ -377,11 +377,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         let state = DebugState::EvalConstants(f, self.program[f].name);
         self.push_state(&state);
-        let loc = self.program[f].loc;
 
         let consts = mem::take(&mut self.program[f].local_constants);
         for name in consts {
-            let (mut val, mut ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
+            let (val, ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
             debug_assert!(!matches!(ty, LazyType::EvilUnit));
             if let Expr::AddToOverloadSet(funcs) = val.expr {
                 self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
@@ -1006,7 +1005,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: distinguish between overload sets that you add to and those that you re-export
                 debug_assert!(!self.program[id].resolved_sign);
                 debug_assert!(!self.program[id].resolved_body);
-                if let Some(overloads) = self.find_const(var) {
+                if let Some(overloads) = self.find_const(var)? {
                     let i = overloads.0.as_overload_set().unwrap();
                     let os = &mut self.program.overload_sets[i];
                     assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
@@ -1038,35 +1037,34 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(out)
     }
 
-    pub fn find_const(&mut self, name: Var<'p>) -> Option<(Values, TypeId)> {
+    pub fn find_const(&mut self, name: Var<'p>) -> Res<'p, Option<(Values, TypeId)>> {
         if let Some(s) = self[name.2].constants.get(&name) {
             if let Some(known) = s.1.ty() {
                 if let Expr::Value { ty, value } = &s.0.expr {
                     debug_assert!(!ty.is_unknown());
-                    debug_assert_eq!(*ty, known, "{}", name.log(self.pool));
-                    // println!("find {} = {:?}", name.log(self.pool), value);
-                    return Some((value.clone(), *ty));
+                    debug_assert_eq!(*ty, known);
+                    return Ok(Some((value.clone(), *ty)));
                 }
+                ice!("constant with known type but unknown value.")
             }
             if matches!(s.0.expr, Expr::Poison) {
                 // creating an overload set gets here I think -- Apr 27
-                return None;
+                return Ok(None);
             }
 
             let (mut val, mut ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
             // println!("- {} {} {}", name.log(self.pool), ty.log(self.pool), val.log(self.pool));
             self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
-            self.infer_types_progress(&mut ty).unwrap();
+            self.infer_types_progress(&mut ty)?;
             let loc = val.loc;
-            self.decl_const(name, &mut ty, &mut val, loc).unwrap();
-            debug_assert!(matches!(self[name.2].constants.get(&name).unwrap().0.expr, Expr::Value { .. }));
+            self.decl_const(name, &mut ty, &mut val, loc)?;
             return self.find_const(name);
         }
-        None
+        Ok(None)
     }
 
-    pub fn find_const_type(&mut self, var: Var<'p>) -> Option<TypeId> {
-        self.find_const(var).map(|(_, ty)| ty)
+    pub fn find_const_type(&mut self, var: Var<'p>) -> Res<'p, Option<TypeId>> {
+        Ok(self.find_const(var)?.map(|(_, ty)| ty))
     }
 
     #[track_caller]
@@ -1230,7 +1228,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some(ty) = result.vars.get(var).cloned() {
                     Structured::RuntimeOnly(ty)
-                } else if let Some((value, ty)) = self.find_const(*var) {
+                } else if let Some((value, ty)) = self.find_const(*var)? {
                     expr.expr = Expr::Value { ty, value: value.clone() };
                     expr.ty = ty;
                     Structured::Const(ty, value)
@@ -1594,6 +1592,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         assert!(self.program[f].has_tag(Flag::Annotation));
                         self.infer_types(f)?;
                         self.compile(f, ExecTime::Comptime)?;
+                        self.typecheck_macro_outputs(f, requested)?;
                         let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, Some(result as *mut FnWip), arg)?;
                         *expr = new_expr;
                         return self.compile_expr(result, expr, requested);
@@ -1611,6 +1610,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.infer_types(f)?;
                 self.compile(f, ExecTime::Comptime)?;
 
+                self.typecheck_macro_outputs(f, requested)?;
                 let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, Some(result as *mut FnWip), (arg, target))?;
                 *expr = new_expr;
                 outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
@@ -1619,6 +1619,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return self.compile_expr(result, expr, requested);
             }
         })
+    }
+
+    // This is a redundant check but it means you can move the error message to before the macro expansion which might make it more clear.
+    // Only works for simple cases where its possible to give a static output type for all invocations of the macro.
+    fn typecheck_macro_outputs(&mut self, macro_f: FuncId, requested: Option<TypeId>) -> Res<'p, ()> {
+        if let Some(requested) = requested {
+            if let Some(outputs) = &self.program[macro_f].annotations.iter().find(|a| a.name == Flag::Outputs.ident()) {
+                let ty = unwrap!(outputs.args.clone(), "annotation @outputs(T) requires arg T");
+                let ty: TypeId = self.immediate_eval_expr_known(ty)?;
+                self.type_check_arg(requested, ty, "macro @outputs")?;
+            }
+        }
+        Ok(())
     }
 
     // TODO: I think this can just be (arg, target) = '{ let v: <arg> = <target>; v }'
@@ -1699,7 +1712,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     let ptr_ty = self.program.ptr_type(value_ty);
                     Ok(Structured::RuntimeOnly(ptr_ty))
-                } else if let Some(value) = self.find_const(*var) {
+                } else if let Some(value) = self.find_const(*var)? {
                     // HACK: this is wrong but it makes constant structs work bette
                     if let TypeInfo::Ptr(_) = self.program[value.1] {
                         return Ok(value.into());
@@ -1841,6 +1854,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::PrefixMacro { handler, arg, .. } => {
+                // TODO: short-circuit on @outputs
                 // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
                 if handler.as_ident() == Some(Flag::As.ident()) && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                     // HACK: sad that 'as' is special
@@ -1915,7 +1929,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::GetVar(var) => {
                 let ty = if var.3 == VarType::Const {
-                    self.find_const_type(*var)
+                    self.find_const_type(*var)?
                 } else {
                     result.vars.get(var).cloned()
                 };
@@ -2090,7 +2104,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         match e.deref_mut() {
             Expr::Value { value, .. } => return Ok(Some(value.clone())),
             Expr::GetVar(var) => {
-                if let Some((value, _)) = self.find_const(*var) {
+                if let Some((value, _)) = self.find_const(*var)? {
                     return Ok(Some(value));
                 } else {
                     // TODO: -- Apr 24 I think this is always the problem. but what changed??
@@ -2124,7 +2138,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // !slice and !addr can't be const evaled!
                 if !matches!(arg.expr, Expr::SuffixMacro(_, _)) {
                     let f_id = if let Expr::GetVar(var) = f.expr {
-                        if let Some((val, _)) = self.find_const(var) {
+                        if let Some((val, _)) = self.find_const(var)? {
                             match val {
                                 Values::One(Value::GetFn(f)) => Some(f),
                                 Values::One(Value::OverloadSet(f)) => {
@@ -2195,7 +2209,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
-    fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+    pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
         if let Some(values) = self.check_quick_eval(&mut e, ret_ty)? {
             return Ok(values);
         }
@@ -2861,8 +2875,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         self.ensure_resolved_body(f)?;
+
         // TODO: assert f has an arch and a calling convention annotation (I'd rather make people be explicit just guess, even if you can always tell arch).
-        let src = asm.log(self.pool);
+
         let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
             // TODO: allow quick const eval for single expression of correct type instead of just tuples.
             // TODO: annotations to say which target you're expecting.
@@ -2892,11 +2907,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             ops
         };
         self.program[f].add_tag(Flag::Aarch64);
-        outln!(LogTag::Jitted, "=======\ninline asm\n~~~{src}~~~");
-        for op in &ops {
-            outln!(LogTag::Jitted, "{op:#05x}");
-        }
-        outln!(LogTag::Jitted, "\n=======");
         // TODO: emit into the Jitted thing instead of this.
         //       maybe just keep the vec, defer dealing with it and have bc_to_asm do it?
         self.program[f].jitted_code = Some(ops.clone());

@@ -16,7 +16,7 @@ use std::mem::transmute;
 use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::Mutex;
-use std::{fs, io, slice};
+use std::{fs, io};
 
 // This lets rust _declare_ a flat_call like its normal
 // Ideally you could do this with a generic but you can't be generic over a function value whose type depends on other generic parameters.
@@ -93,7 +93,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
     ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
-    ("fn print_int(v: i64) Unit", print_int as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
@@ -116,9 +115,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
     ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
-];
-
-pub const COMPILER_LATE: &[(&str, *const u8)] = &[
     // TODO: this return a packed string, with the length divided by 8
     //       so its truncated to amultiple of 8 chars but with an unknown amount of memory hanging off the end that you can't free.
     //       WORTHLESS  --Apr, 10
@@ -132,6 +128,7 @@ pub const COMPILER_LATE: &[(&str, *const u8)] = &[
         resolve_backtrace_symbol as *const u8,
     ),
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
+    ("fn IntType(bits: i64, signed: bool) Type;", make_int_type as *const u8),
 ];
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -144,7 +141,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             writeln!(out, "{}", msg).unwrap();
             writeln!(
                 out,
-                "@pub const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
+                "const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
                 libc::O_RDONLY,
                 libc::O_WRONLY,
                 libc::O_RDWR
@@ -154,7 +151,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             //       distinguish between flags whose value is shifting (i.e. 0/1/2 vs 1/2/4)
             writeln!(
                 out,
-                "@pub const MapProt = @enum(i64) (Exec = {}, Read = {}, Write = {}, None = {});",
+                "const MapProt = @enum(i64) (Exec = {}, Read = {}, Write = {}, None = {});",
                 libc::PROT_EXEC,
                 libc::PROT_READ,
                 libc::PROT_WRITE,
@@ -163,12 +160,12 @@ pub fn get_include_std(name: &str) -> Option<String> {
             .unwrap();
             writeln!(
                 out,
-                "@pub const MapFlag = @enum(i64) (Private = {}, Anonymous = {});",
+                "const MapFlag = @enum(i64) (Private = {}, Anonymous = {});",
                 libc::MAP_PRIVATE,
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "@pub const DlHandle = VoidPtr; @pub const CStr = Unique$Ptr(i64);").unwrap();
+            writeln!(out, "const DlHandle = VoidPtr; const CStr = Unique$Ptr(i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
             }
@@ -180,42 +177,9 @@ pub fn get_include_std(name: &str) -> Option<String> {
             for (sig, ptr) in COMPILER {
                 writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
             }
-            Some(out)
-        }
-        "compiler_late" => {
-            let mut out = String::new();
-            writeln!(out, "{}", msg).unwrap();
-            for (sig, ptr) in COMPILER_LATE {
-                writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
-            }
-            Some(out)
-        }
-
-        "compiler_flat" => {
-            let mut out = String::new();
-            writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER_FLAT {
                 writeln!(out, "@pub @comptime_addr({}) @ct @flat_call {sig};", *ptr as usize).unwrap();
             }
-            Some(out)
-        }
-        "compiler_macros" => {
-            let mut out = String::new();
-            writeln!(out, "{}", msg).unwrap();
-            for (sig, ptr) in COMPILER_MACROS {
-                writeln!(out, "@pub @comptime_addr({}) @annotation @ct @flat_call {sig};", *ptr as usize).unwrap();
-            }
-            Some(out)
-        }
-        "int_type" => {
-            let mut out = String::new();
-            writeln!(out, "{}", msg).unwrap();
-            writeln!(
-                out,
-                "@pub @comptime_addr({}) @ct @c_call fn IntType(bits: i64, signed: bool) Type;",
-                make_int_type as *const u8 as usize
-            )
-            .unwrap();
             Some(out)
         }
         _ => {
@@ -363,18 +327,12 @@ extern "C-unwind" fn resolve_backtrace_symbol(_: &mut &mut Program, addr: *mut c
     success
 }
 
-// TODO: fix alloc overload selection on asm
-extern "C-unwind" fn print_int(_: &mut &mut Program, a: i64) {
-    println!("{a}");
-}
-
 extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
     println!("{}", p.log_type(a));
 }
 
-extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) -> i64 {
+extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) {
     println!("{}", a.log(p.program.pool));
-    0 // HACK
 }
 
 extern "C-unwind" fn number_of_functions(program: &mut &mut Program) -> i64 {
@@ -452,6 +410,8 @@ fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
     a * b + c
 }
 
+type Unit = ();
+
 // TODO: this needs to be less painful. want to have it just parse rust signetures and expose them.
 // TODO: documenet which ones can only be used in macros because they need the 'result: &mut FnWip'
 pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
@@ -464,14 +424,9 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ("fn intern_type(ty: TypeInfo) Type;", bounce_flat_call!(TypeInfo, TypeId, intern_type)),
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
-    // TODO: need to be able to have generics like  fn const_eval_ast(T) Fn(AstExpr, T);
     (
-        "fn const_eval_type(value: FatExpr) Type;",
-        bounce_flat_call!(FatExpr, TypeId, const_eval_type),
-    ),
-    (
-        "fn const_eval_string(value: FatExpr) Str;",
-        bounce_flat_call!(FatExpr, String, const_eval_string),
+        "fn const_eval(expr: FatExpr, ty: Type, result: VoidPtr) Unit;",
+        bounce_flat_call!(((FatExpr, TypeId), usize), Unit, const_eval_any),
     ),
     // Calls Compiler::compile_expr
     // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
@@ -479,8 +434,7 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn compile_ast(value: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, compile_ast),
     ),
-    // TODO: InterpSend for Unit
-    ("fn debug_log_ast(expr: FatExpr) i64;", bounce_flat_call!(FatExpr, i64, log_ast)),
+    ("fn debug_log_ast(expr: FatExpr) Unit;", bounce_flat_call!(FatExpr, Unit, log_ast)),
     (
         "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
         bounce_flat_call!(Vec<FatExpr>, FatExpr, unquote_macro_apply_placeholders),
@@ -499,15 +453,12 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn can_assign_types(found: Type, expected: Type) bool;",
         bounce_flat_call!((TypeId, TypeId), bool, type_check_arg),
     ),
-];
-
-pub const COMPILER_MACROS: &[(&str, FlatCallFn)] = &[
     (
-        "fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+        "@annotation @outputs(Type) fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
     ),
     (
-        "fun as(T: FatExpr, value: FatExpr) FatExpr;",
+        "@annotation fun as(T: FatExpr, value: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
     ),
 ];
@@ -537,19 +488,22 @@ fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
 // TODO: at least use hope(|| ...) instead of unwrapping so much.
 //       need to think of better error handling story.
 
-fn const_eval_type<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> TypeId {
+fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((FatExpr<'p>, TypeId), usize)) {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let res = compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(TypeId::ty())).unwrap();
-    assert_eq!(res.ty(), TypeId::ty());
-    compile.pending_ffi.push(Some(result));
-    compile.program.to_type(res.get().unwrap()).unwrap()
-}
+    // TODO: immediate_eval_expr doesn't do a type check. -- Apr 27
+    compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(ty)).unwrap();
 
-fn const_eval_string<'p>(compile: &mut Compile<'_, 'p>, expr: FatExpr<'p>) -> String {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let res: String = compile.immediate_eval_expr_known(expr).unwrap();
+    match compile.immediate_eval_expr(expr, ty) {
+        Ok(val) => {
+            let slots = compile.ready.sizes.slot_count(compile.program, ty);
+            let val = compile.aarch64.constants.store_to_ints(val.vec().iter());
+            debug_assert_eq!(val.len(), slots);
+            let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut i64, val.len()) };
+            out.copy_from_slice(&val);
+        }
+        Err(e) => panic!("{e:?}"),
+    }
     compile.pending_ffi.push(Some(result));
-    res
 }
 
 fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
@@ -615,16 +569,4 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
 
 fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> bool {
     compile.type_check_arg(found, expected, "").is_ok()
-}
-
-#[cfg(target_arch = "aarch64")]
-pub fn copy_to_mmap_exec(code: Vec<u32>) -> (Box<memmap2::Mmap>, *const u8) {
-    // TODO: emit into this thing so don't have to copy.
-    let mut map = memmap2::MmapOptions::new().len(code.len() * 4).map_anon().unwrap();
-    let bytes = code.as_ptr() as *const u8;
-    let bytes = unsafe { slice::from_raw_parts(bytes, code.len() * 4) };
-    map.copy_from_slice(bytes);
-    let map = map.make_exec().unwrap();
-    let ptr = map.as_ptr();
-    (Box::new(map), ptr)
 }

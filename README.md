@@ -10,6 +10,7 @@
 - manual memory management (like zig)
 - direct asm backend for quick debug builds, llvm backend for optimised release builds (like zig/jai)
 - no blessed methods, call any function with dot syntax (like d/nim)
+- lazy analysis, functions/constants that are not reachable may contain invalid code (like zig)
 
 ## Future Goals
 
@@ -32,6 +33,7 @@ there must be proportional terrible things or I'm probably just lying.
 - Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { let a: *i64 = 123.int_to_ptr(); println(a[]);` will compile, run, and (probably) crash.
 - (TEMP?) there are no arithmetic operators, if you want to add, just call the function add.
 - (TEMP!) every stack slot and struct field takes 8 bytes.
+- (TEMP!) no early return/break/continue/try.
 - (TEMP) completely incomprehensible error messages.
 - (TEMP) MacOS Aarch64 only.
 - (TEMP) no caching. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).

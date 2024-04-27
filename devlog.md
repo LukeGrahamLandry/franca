@@ -18,6 +18,13 @@ damn that was like not at all painful. i guess i did most of the work before whe
 that's so pleasing, can finally just do shit. can put all my imports at the bottom :)
 Would be nice if I fixed the template instantiation order stuff because now that feels really out of place.
 
+That's also another 50% less make_lit_fn because those are for evaling expressions and now a bunch of constants get skipped.
+
+The tangible benifit of all this would be if panic could print a stack trace but i think that will need fixing the calleees tracking for larger mutually recursive graphs.
+
+made sure inline asm expansion on resolve_body not when added to the overload set. if you don't call it, it shoudn't bother.
+it was. so not every program needs to jit the float functions every time. it happens in emit_body which makes sense.
+
 ## lazy parsing (Apr 26)
 
 - was using .source to get a str to slice so it was taking the whole file not just my little span. which was fine before when i always did the whole file at once.
