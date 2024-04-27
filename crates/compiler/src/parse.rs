@@ -1,4 +1,5 @@
 //! Convert a stream of tokens into ASTs.
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread::{sleep, spawn};
@@ -77,7 +78,7 @@ fn handle(parse: Arc<ParseTasks<'static>>) {
             let task = parse.next.fetch_add(1, Ordering::AcqRel);
             let file = match parse.tasks.write().unwrap().get_mut(task) {
                 Some(f) => mem::replace(f, ParseFile::Wip),
-                None => todo!(),
+                None => break,
             };
             match file {
                 ParseFile::PendingStmts(file, span) => {
@@ -131,6 +132,7 @@ impl<'p: 'static> ParseTasks<'p> {
 
     pub fn wait_for_stmts(&self, name: usize) -> Res<Vec<FatStmt<'p>>> {
         loop {
+            unsafe { STATS.parser_check += 1 };
             let next = self.next.load(Ordering::Acquire);
             if next > name + 1 {
                 let e = &mut self.tasks.write().unwrap()[name];
@@ -145,12 +147,14 @@ impl<'p: 'static> ParseTasks<'p> {
             }
 
             self.work_requested.notify_one();
-            sleep(Duration::from_micros(1000));
+            unsafe { STATS.parser_wait += 1 };
+            sleep(Duration::from_micros(800));
         }
     }
 
     pub fn wait_for_expr(&self, name: usize) -> Res<FatExpr<'p>> {
         loop {
+            unsafe { STATS.parser_check += 1 };
             let next = self.next.load(Ordering::Acquire);
             if next > name + 1 {
                 let e = &mut self.tasks.write().unwrap()[name];
@@ -165,7 +169,8 @@ impl<'p: 'static> ParseTasks<'p> {
             }
 
             self.work_requested.notify_one();
-            sleep(Duration::from_micros(1000));
+            unsafe { STATS.parser_wait += 1 };
+            sleep(Duration::from_micros(800));
         }
     }
 
@@ -177,6 +182,12 @@ impl<'p: 'static> ParseTasks<'p> {
             tasks.push(ParseFile::PendingStmts(file, span));
         }
         tasks.len() - 1
+    }
+
+    pub fn stop(&self) {
+        *(self.die.write().unwrap()) = true;
+        self.next.store(self.tasks.read().unwrap().len() + 100, Ordering::Release);
+        self.work_requested.notify_all();
     }
 }
 
@@ -200,7 +211,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
         Ok(stmts)
     }
 
-    pub fn parse_expr_outer(ctx: Arc<ParseTasks<'p>>, mut lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<FatExpr<'p>> {
+    pub fn parse_expr_outer(ctx: Arc<ParseTasks<'p>>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<FatExpr<'p>> {
         let mut p = Parser {
             pool,
             lexer,

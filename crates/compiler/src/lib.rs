@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-#![feature(const_refs_to_cell)]
 #![feature(ptr_metadata)]
 #![feature(iter_array_chunks)]
 #![feature(vec_into_raw_parts)]
@@ -8,8 +6,6 @@
 #![feature(closure_track_caller)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
-#![feature(pointer_is_aligned)]
-#![feature(backtrace_frames)]
 extern crate core;
 
 use std::arch::asm;
@@ -81,6 +77,8 @@ pub struct Stats {
     pub ast_expr_nodes: usize,
     pub fn_body_resolve: usize,
     pub make_lit_fn: usize,
+    pub parser_wait: usize,
+    pub parser_check: usize,
 }
 
 pub static mut STATS: Stats = Stats {
@@ -90,6 +88,8 @@ pub static mut STATS: Stats = Stats {
     ast_expr_nodes: 0,
     fn_body_resolve: 0,
     make_lit_fn: 0,
+    parser_wait: 0,
+    parser_check: 0,
 };
 
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
@@ -296,19 +296,6 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
         for (var, (e, ty)) in consts {
             outln!(Consts, "{pad}- {}: {} = {};", var.log(comp.pool), ty.log(comp.pool), e.log(comp.pool),);
         }
-
-        // if !scope.vars.is_empty() {
-        //     outln!(
-        //         Consts,
-        //         "{pad}VARS: {:?}",
-        //         scope
-        //             .vars
-        //             .iter()
-        //             .filter(|v| v.3 != VarType::Const)
-        //             .map(|v| v.log(comp.pool))
-        //             .collect::<Vec<_>>()
-        //     );
-        // }
     };
 
     for s in 0..comp.scopes.len() {

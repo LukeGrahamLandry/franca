@@ -399,10 +399,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.decl_func(&mut func)?;
                 }
             } else {
-                self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
-
-                self.infer_types_progress(&mut ty)?;
-                self.decl_const(name, &mut ty, &mut val, loc)?;
+                self[name.2].constants.insert(name, (val, ty)); // TODO: dont take
             }
         }
 
@@ -1041,12 +1038,29 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(out)
     }
 
-    pub fn find_const(&mut self, var: Var<'p>) -> Option<(Values, TypeId)> {
-        if let Some(s) = self[var.2].constants.get(&var) {
-            if let Expr::Value { ty, value } = &s.0.expr {
-                debug_assert!(!ty.is_unknown());
-                return Some((value.clone(), *ty));
+    pub fn find_const(&mut self, name: Var<'p>) -> Option<(Values, TypeId)> {
+        if let Some(s) = self[name.2].constants.get(&name) {
+            if let Some(known) = s.1.ty() {
+                if let Expr::Value { ty, value } = &s.0.expr {
+                    debug_assert!(!ty.is_unknown());
+                    debug_assert_eq!(*ty, known, "{}", name.log(self.pool));
+                    // println!("find {} = {:?}", name.log(self.pool), value);
+                    return Some((value.clone(), *ty));
+                }
             }
+            if matches!(s.0.expr, Expr::Poison) {
+                // creating an overload set gets here I think -- Apr 27
+                return None;
+            }
+
+            let (mut val, mut ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
+            // println!("- {} {} {}", name.log(self.pool), ty.log(self.pool), val.log(self.pool));
+            self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
+            self.infer_types_progress(&mut ty).unwrap();
+            let loc = val.loc;
+            self.decl_const(name, &mut ty, &mut val, loc).unwrap();
+            debug_assert!(matches!(self[name.2].constants.get(&name).unwrap().0.expr, Expr::Value { .. }));
+            return self.find_const(name);
         }
         None
     }

@@ -5,7 +5,6 @@
 use crate::ast::TypeId;
 use crate::ast::VarType;
 use crate::bc::Value;
-use crate::compiler::CErr;
 use crate::ffi::InterpSend;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
@@ -77,6 +76,7 @@ pub enum LexErr {
     NumParseErr,
     /// C has it mean octal which I don't really like but I don't want to accept the same syntax and mean something different.
     DenyLeadingZero,
+    ThatsNotANormalQuoteDidYouCopyPasteFromAPdf,
     TooManyBits,
 }
 
@@ -125,17 +125,12 @@ impl<'a, 'p> Lexer<'a, 'p> {
             match self.peek_c() {
                 '\0' => break,
                 '#' => self.skip_ident(),
-                '"' | '“' | '”' => {
+                '"' => {
                     self.skip_quoted();
                 }
                 '`' => {
                     self.skip_quoted_multiline();
                 }
-                '0' => {
-                    self.next();
-                }
-                '1'..='9' => self.skip_num(),
-                'a'..='z' | 'A'..='Z' | '_' => self.skip_ident(),
                 '{' => {
                     depth += 1;
                     self.pop();
@@ -149,7 +144,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
             }
         }
-        self.eat_whitespace();
         let end = self.current;
         self.start = self.current;
         self.root.subspan(start as u64, end as u64)
@@ -175,7 +169,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         match self.peek_c() {
             '\0' => self.one(TokenType::Eof),
             '#' => self.lex_ident(),
-            '"' | '“' | '”' => self.lex_quoted(),
+            '"' => self.lex_quoted(),
             '`' => self.lex_quoted_multiline(),
             '0' => {
                 self.pop();
@@ -220,6 +214,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '<' => self.pair('-', LeftAngle, LeftArrow),
             '>' => self.pair('-', RightAngle, RightArrow),
             '\'' => self.one(Quote),
+            '“' | '”' => self.err(LexErr::ThatsNotANormalQuoteDidYouCopyPasteFromAPdf),
             c => self.err(LexErr::Unexpected(c)),
         }
     }
@@ -273,7 +268,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         self.pop();
         loop {
             match self.pop() {
-                '"' | '“' | '”' => {
+                '"' => {
                     // Payload doesn't include quotes.
                     return if self.start + 2 == self.current && self.peek_c() == '"' {
                         let mut count = 0;
@@ -342,30 +337,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
                 '0'..='9' => {}
                 _ => return self.end_num(is_float),
-            }
-            self.pop();
-        }
-    }
-
-    fn skip_num(&mut self) {
-        let mut is_float = false;
-        loop {
-            match self.peek_c() {
-                '.' => {
-                    if is_float {
-                        return;
-                    }
-                    // TODO: this would be easier if i could just peek a char.
-
-                    self.pop();
-                    if self.peek_c().is_numeric() {
-                        is_float = true;
-                    } else {
-                        self.start = self.current;
-                    }
-                }
-                '0'..='9' => {}
-                _ => return,
             }
             self.pop();
         }

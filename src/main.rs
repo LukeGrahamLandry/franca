@@ -250,6 +250,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
         log_err(&comp, e, save);
         exit(1);
     }
+    comp.parsing.stop();
 
     assert_eq!(comp.program[f].finished_ret, Some(TypeId::i64()));
     assert_eq!(comp.program[f].finished_arg, Some(TypeId::i64()));
@@ -313,8 +314,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     // log_dbg(&comp, save);
     assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
     // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
-    *(comp.parsing.die.write().unwrap()) = true;
-    comp.parsing.work_requested.notify_all();
+    comp.parsing.stop();
 }
 
 #[test]

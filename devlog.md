@@ -1,7 +1,37 @@
+## out of order constants (Apr 27)
+
+Currently constants can bind names out of order but they still get evaluated in lexical order.
+So functions can reference each other becuase evaling that statement just means putting it in the overload set and bodies are done later, but normal constants can't.
+Want to not do 'eval_and_close_local_constants' at the beginning, just do it when you try to read a constant for the first time.
+I've already got the constants stored globally, so don't have to worry about needing to clone them with the functions.
+
+- now treating 'Unit' as type unit even tho has type annotation? but it didn't even try to eval that const? im printing. its getting in consts map before somehow.
+  oh parse puts empty tuple out as 'unit' so since i dont eval the const early, it doesn't get cast by the type annotation, and since there's a value there not an expression, it doesn't think it needs to bother declaring it.
+  using '()!type' for that value fixes half the tests.
+- checking for saved type being finished instead of just that the expr is Values fixes all but 1.
+  I should make my handing of casting values more consistant maybe. Anything with unique types and overloadsets vs Fns is a bit fishy.
+- the last failure is parse_asm `self.program.overload_sets[i].pending.is_empty()` but it works if you turn off that debug check.
+  but still, why'd it change? i guess that makes sence, evaling the types of a function might cause a data dependency on some constant that causes a new instantiation when evaluated, that's probably fine.'
+  just extend and keep looping until they're all done. it happens only for 'fn init' currently which is like pretty popular so that's fair.
+
+damn that was like not at all painful. i guess i did most of the work before when i moved local_constants to hold names instead of expressions.
+that's so pleasing, can finally just do shit. can put all my imports at the bottom :)
+Would be nice if I fixed the template instantiation order stuff because now that feels really out of place.
+
+## lazy parsing (Apr 26)
+
+- was using .source to get a str to slice so it was taking the whole file not just my little span. which was fine before when i always did the whole file at once.
+
+I was thinking i'd be reparsing for every resolve when they're nested because the same source text will get multiple numbers.
+because when you clone the ast for resolve, it would stop at the nested function bodies and they'd get different index numbers.
+actually i think it cant happen because even if a clone just clones the number, when it looks up the index, it wont recursively do work.
+cause only the parser adds things to the list of tasks, the resolver doesn't trigger work, it just waits for existing work to be done.
+So no matter how much you clone the numbers, you can't trigger two paths parsing the same thing.
+
 ## fewer fn clones (Apr 25)
 
 - doing the comptome memo lookup before the clone makes Consts.log go 2200 lines -> 1800 lines. saves 200 States::fn_body_resolve
-- previously quici eval always failed if it was a comptime_addr in the compiler because the FnBody wouldn't be in ready. make_lit_fn 2423 -> 2346. meh.
+- previously quick eval always failed if it was a comptime_addr in the compiler because the FnBody wouldn't be in ready. make_lit_fn 2423 -> 2346. meh.
 - UInt/SInt seems to be the main thing not in 'ready'? oh im dumb, its once per run: the first time they get called for a const, then after that they're ready and can just be a jit call. that's not so bad.
 - operator_star_prefix is often an overload set not a function.
 

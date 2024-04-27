@@ -245,20 +245,21 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn compute_new_overloads(&mut self, i: usize) -> Res<'p, ()> {
         let overloads = &mut self.program.overload_sets[i];
         // debug_assert!(overloads.just_resolved.is_empty());
-        let decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
+        let mut decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
         if decls.is_empty() {
             return Ok(());
         }
         outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.name),);
-        for f in &decls {
-            debug_assert!(self.program.overload_sets[i].pending.is_empty());
-            if self.program[*f].evil_uninit {
+        while let Some(f) = decls.pop() {
+            decls.extend(mem::take(&mut self.program.overload_sets[i].pending));
+
+            if self.program[f].evil_uninit {
                 continue;
             }
-            if self.ensure_resolved_sign(*f).is_err() {
+            if self.ensure_resolved_sign(f).is_err() {
                 todo!();
             }
-            match self.infer_types(*f) {
+            match self.infer_types(f) {
                 Ok(Some(f_ty)) => {
                     outln!(
                         LogTag::Generics,
@@ -271,16 +272,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.program.overload_sets[i].ready.push(OverloadOption {
                         arg: f_ty.arg,
                         ret: Some(f_ty.ret),
-                        func: *f,
+                        func: f,
                     });
                 }
-                _ => {
-                    if let Some(arg) = self.program[*f].finished_arg {
-                        self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: *f });
+                Ok(None) => {
+                    if let Some(arg) = self.program[f].finished_arg {
+                        self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: f });
                     } else {
-                        todo!();
+                        todo!()
                     }
                 }
+                Err(e) => return Err(e),
             }
         }
 
