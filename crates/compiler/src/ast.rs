@@ -738,6 +738,10 @@ impl<'p> Func<'p> {
         self.annotations.iter().any(|a| a.name == flag.ident())
     }
 
+    pub fn get_tag_mut(&mut self, flag: Flag) -> Option<&mut Annotation<'p>> {
+        self.annotations.iter_mut().find(|a| a.name == flag.ident())
+    }
+
     pub fn add_tag(&mut self, name: Flag) {
         if !self.has_tag(name) {
             self.annotations.push(Annotation {
@@ -1699,6 +1703,8 @@ pub enum Flag {
     Assert_Compile_Error,
     Symbol,
     Outputs,
+    When,
+    __Get_Assertions_Passed,
     _Reserved_Count_,
 }
 

@@ -291,7 +291,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // very similar to the above but nicer api without going though Values for flat_call.
-    fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(
+    pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(
         &mut self,
         f: FuncId,
         when: ExecTime,
@@ -384,8 +384,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(!matches!(ty, LazyType::EvilUnit));
             if let Expr::AddToOverloadSet(funcs) = val.expr {
                 self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
-                for mut func in funcs {
-                    self.decl_func(&mut func)?;
+                for func in funcs {
+                    self.decl_func(func)?;
                 }
             } else if let Some(os) = val.expr.as_overload_set() {
                 self[name.2].constants.get_mut(&name).unwrap().0.expr = Expr::Value {
@@ -394,8 +394,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 };
                 self[name.2].constants.get_mut(&name).unwrap().0.ty = TypeId::overload_set();
                 self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Finished(TypeId::overload_set());
-                for mut func in mem::take(&mut self.program.overload_sets[os].just_resolved) {
-                    self.decl_func(&mut func)?;
+                for func in mem::take(&mut self.program.overload_sets[os].just_resolved) {
+                    self.decl_func(func)?;
                 }
             } else {
                 self[name.2].constants.insert(name, (val, ty)); // TODO: dont take
@@ -817,7 +817,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::Noop => {}
             Stmt::DeclFunc(func) => {
-                self.decl_func(func)?;
+                if let (Some(id), Some(os)) = self.decl_func(mem::take(func))? {
+                    stmt.stmt = Stmt::DoneDeclFunc(id, os);
+                } else {
+                    stmt.stmt = Stmt::Noop;
+                }
             }
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
             Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?,
@@ -896,9 +900,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    fn decl_func(&mut self, func: &mut Func<'p>) -> Res<'p, (Option<FuncId>, Option<usize>)> {
+    fn decl_func(&mut self, mut func: Func<'p>) -> Res<'p, (Option<FuncId>, Option<usize>)> {
         debug_assert!(!func.evil_uninit);
-        let mut func = mem::take(func);
+        // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
+        if let Some(when) = func.get_tag_mut(Flag::When) {
+            let cond = unwrap!(when.args.as_mut(), "@when(cond: bool) requires argument");
+            let cond: bool = self.immediate_eval_expr_known(cond.clone())?;
+            if !cond {
+                return Ok((None, None));
+            }
+        }
+
         let var = func.var_name;
         let for_bootstrap = func.has_tag(Flag::Bs);
         let any_reg_template = func.has_tag(Flag::Any_Reg);
@@ -909,6 +921,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             func.add_tag(Flag::Ct);
             func.add_tag(Flag::Flat_Call);
         }
+
         assert!(!(is_struct && is_enum));
         if is_struct {
             ResolveScope::resolve_sign(&mut func, self)?;
@@ -3066,14 +3079,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        let found_ty = self.program.type_of_raw(&val);
+        // let found_ty = self.program.type_of_raw(&val);
         let final_ty = if let Some(expected_ty) = ty.ty() {
             if self.program[expected_ty] == TypeInfo::Type {
                 // HACK. todo: general overloads for cast()
                 val = Value::Type(self.to_type(val)?).into()
             } else {
                 // TODO: you want the type check but doing it against type_of_raw is kinda worthless
-                self.type_check_arg(found_ty, expected_ty, "const decl")?;
+                // like const a: *i64 = @as(VoidPtr) malloc(8); should be fine? but i have to serialize that as an int and then type_of_raw is wrong.
+                // but i do need to think about how memory makes its way into your exe.
+                // self.type_check_arg(found_ty, expected_ty, "const decl")?;
             }
 
             expected_ty

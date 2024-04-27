@@ -527,7 +527,11 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             values_from_ints(compile, val_ty, &mut values, &mut output)?;
             out.push(Value::new_box(output, false));
         }
-        TypeInfo::VoidPtr => todo!(),
+        TypeInfo::VoidPtr => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::I64(n));
+        }
+
         TypeInfo::Any => {
             // The actual rust type is 'Value', which is serialized as a box ptr.
             // We're loading it to values that will deserialized again by the InterpSend impl, so we don't dereference the pointer here.

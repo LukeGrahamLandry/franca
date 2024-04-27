@@ -2,15 +2,15 @@
 #![feature(pattern)]
 
 use compiler::{
-    ast::{Program, TargetArch, TypeId},
+    ast::{Flag, Program, TargetArch, TypeId},
     bc_to_asm::emit_aarch64,
-    compiler::{Compile, ExecTime},
+    compiler::{Compile, ExecTime, Res},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, STATS,
+    run_main, timestamp, unwrap, STATS,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
@@ -311,9 +311,13 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let _seconds = end - start;
     debug_assert_eq!(result, arg);
 
-    // log_dbg(&comp, save);
-    assert_eq!(comp.program.assertion_count, assertion_count, "vm missed assertions?");
-    // println!("[PASSED: {} {:?}] {} ms.", name, arch, (seconds * 1000.0) as i64);
+    // TODO: have a call_jitted that takes name and resolves on Arg/Ret generics.
+    if let Some(f) = comp.program.find_unique_func(Flag::__Get_Assertions_Passed.ident()) {
+        let actual: usize = comp.call_jitted(f, ExecTime::Comptime, None, ()).unwrap();
+        assert_eq!(actual, assertion_count, "vm missed assertions?");
+    } else {
+        println!("__Get_Assertions_Passed not found. COUNT_ASSERT :: false?");
+    }
     comp.parsing.stop();
 }
 

@@ -89,15 +89,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("@no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
     ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
-    ("fn assert_eq(_: i64, __: i64) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: Type, __: Type) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: bool, __: bool) Unit", assert_eq as *const u8),
-    ("fn assert_eq(_: Symbol, __: Symbol) Unit", assert_eq as *const u8), // TODO: subtyping
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
     ("fn index_to_func_id(func_index: i64) FuncId", index_to_func_id as *const u8),
-    ("fn assert_eq(_: f64, __: f64) Unit", assert_eqf64 as *const u8),
     // TODO: all these type ones could use ffi TypeInfo if i gave it `@ct fn intern_type`
     //       but to do that here instead of current macro message, I'd need to do ffi of enums in a less insane way.
     //       (these functions don't use InterpSend, they just rely on C ABI).
@@ -256,18 +251,6 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
         Ok(program.intern_type(TypeInfo::FnPtr(FnType { arg, ret })))
     })
-}
-
-// Supports bool, i64, and Type which all have the same repr.
-// TODO: track call site
-extern "C-unwind" fn assert_eq(program: &mut &mut Program, a: i64, b: i64) {
-    hope(|| Ok(assert_eq!(a, b)));
-    program.assertion_count += 1;
-}
-
-extern "C-unwind" fn assert_eqf64(program: &mut &mut Program, a: f64, b: f64) {
-    hope(|| Ok(assert_eq!(a, b)));
-    program.assertion_count += 1;
 }
 
 // TODO: test abi
