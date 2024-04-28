@@ -315,12 +315,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 unreachable!("{}", f.log(self.program.pool))
             }
-            Expr::Block {
-                body,
-                result: value,
-                resolved,
-            } => {
-                debug_assert!(*resolved);
+            Expr::Block { body, result: value, .. } => {
                 self.locals.push(vec![]);
                 self.locals_drop.push(vec![]);
                 for stmt in body {
@@ -789,6 +784,7 @@ impl SizeCache {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(program, *t)).sum(),
             TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(program, f.ty)).sum(),
             TypeInfo::Enum { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(program, *ty)).max().expect("no empty enum"),
+            TypeInfo::Scope => 2,
             TypeInfo::Int(_)
             | TypeInfo::Any
             | TypeInfo::Never

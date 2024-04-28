@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{values_from_ints, Values};
+use crate::bc::{values_from_ints, Value, Values};
 use crate::compiler::{bit_literal, Compile, Res, Unquote};
 use crate::err;
 use crate::ffi::InterpSend;
@@ -430,6 +430,10 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "#macro fun as(T: FatExpr, value: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
     ),
+    (
+        "#macro fun namespace(block: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, namespace_macro),
+    ),
 ];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
@@ -538,4 +542,28 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
 
 fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> bool {
     compile.type_check_arg(found, expected, "").is_ok()
+}
+
+// TODO: what if struct const fields were lazy like normal values and then could use that instead of this.
+fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let loc = block.loc;
+    // give any other macros a chance to expand.
+    compile.compile_expr(unsafe { &mut *result }, &mut block, Some(TypeId::unit())).unwrap();
+
+    let (s, block) = if let Expr::Block {
+        resolved: Some((s, b)),
+        result,
+        ..
+    } = block.expr
+    {
+        debug_assert!(result.is_raw_unit());
+        (s, b)
+    } else {
+        panic!("expected block for @namespace not {}", block.log(compile.pool))
+    };
+
+    compile.pending_ffi.push(Some(result));
+
+    FatExpr::value(Values::Many(vec![Value::I64(s.as_raw()), Value::I64(block as i64)]), TypeId::scope(), loc)
 }

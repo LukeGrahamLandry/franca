@@ -271,6 +271,7 @@ impl<'p> Program<'p> {
                 TypeInfo::Int(int) => {
                     format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
                 }
+                TypeInfo::Scope => "ScopeId".to_owned(),
             }
             // format!("{t:?}={s}")
         })

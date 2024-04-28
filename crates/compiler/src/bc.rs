@@ -334,6 +334,19 @@ impl Values {
             }
         }
     }
+
+    pub(crate) fn as_int_pair(&self) -> Res<'static, (i64, i64)> {
+        match self {
+            Values::One(_) => err!("expected (i64, i64)",),
+            Values::Many(vals) => {
+                if vals.len() == 2 {
+                    Ok((vals[0].as_int()?, vals[1].as_int()?))
+                } else {
+                    err!("expected (i64, i64)",)
+                }
+            }
+        }
+    }
 }
 
 impl Value {
@@ -360,6 +373,15 @@ impl Value {
             Some(f)
         } else {
             None
+        }
+    }
+
+    // TODO: remove
+    fn as_int(&self) -> Res<'static, i64> {
+        if let &Value::I64(f) = self {
+            Ok(f)
+        } else {
+            err!("want int",)
         }
     }
 }
@@ -462,6 +484,12 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         TypeInfo::Type => {
             let n = unwrap!(ints.next(), "");
             out.push(Value::Type(TypeId::from_raw(n)));
+        }
+        TypeInfo::Scope => {
+            let a = unwrap!(ints.next(), "");
+            let b = unwrap!(ints.next(), "");
+            out.push(Value::I64(a));
+            out.push(Value::I64(b));
         }
         TypeInfo::OverloadSet => {
             let n = unwrap!(ints.next(), "");

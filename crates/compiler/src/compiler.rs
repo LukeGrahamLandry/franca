@@ -586,7 +586,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
         // TODO: need to move the const args to the top before eval_and_close_local_constants
         expr_out.expr = Expr::Block {
-            resolved: true,
+            resolved: None,
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
                     binding: pattern,
@@ -1209,13 +1209,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
             }
-            Expr::Block {
-                body,
-                result: value,
-                resolved,
-                ..
-            } => {
-                debug_assert!(*resolved); // TODO: this will change
+            Expr::Block { body, result: value, .. } => {
                 body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
                 for stmt in body.iter_mut() {
                     self.compile_stmt(result, stmt)?;
@@ -1519,13 +1513,35 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::FieldAccess(e, name) => {
                 let container = self.compile_expr(result, e, None)?;
 
-                if let Structured::Const(_, Values::One(Value::Type(ty))) = &container {
-                    if let Some(fields) = &self.program.contextual_fields[ty.as_index()] {
-                        let (val, ty) = unwrap!(fields.get(name).cloned(), "missing contextual field {} for {ty:?}", self.pool.get(*name));
-                        expr.expr = Expr::Value { ty, value: val.clone() };
-                        expr.ty = ty;
-                        return Ok(Structured::Const(ty, val));
+                if let Structured::Const(ty, val) = &container {
+                    if let Values::One(Value::Type(ty)) = val {
+                        if let Some(fields) = &self.program.contextual_fields[ty.as_index()] {
+                            let (val, ty) = unwrap!(fields.get(name).cloned(), "missing contextual field {} for {ty:?}", self.pool.get(*name));
+                            expr.expr = Expr::Value { ty, value: val.clone() };
+                            expr.ty = ty;
+                            return Ok(Structured::Const(ty, val));
+                        }
                     }
+
+                    if *ty == TypeId::scope() {
+                        let (s, b) = val.as_int_pair()?;
+
+                        if let Some(&var) = self[ScopeId::from_raw(s)].vars[b as usize].vars.iter().find(|v| v.0 == *name) {
+                            debug_assert!(var.3 == VarType::Const);
+                            if let Some((val, ty)) = self.find_const(var)? {
+                                expr.expr = Expr::Value { ty, value: val.clone() };
+                                return Ok(Structured::Const(ty, val));
+                            } else {
+                                err!("missing constant {}", var.log(self.pool))
+                            }
+                        } else {
+                            err!(CErr::UndeclaredIdent(*name))
+                        }
+                    }
+                }
+
+                if container.ty() == TypeId::scope() {
+                    err!("dot syntax on module must be const",)
                 }
 
                 let index = self.field_access_expr(result, e, *name)?;
@@ -1565,8 +1581,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     target.log(self.pool)
                 );
                 let expr_ty = FatExpr::get_type(self.program);
-                let arg = mem::take(arg.deref_mut());
-                let target = mem::take(target.deref_mut());
+                let mut arg = mem::take(arg.deref_mut());
+                let mut target = mem::take(target.deref_mut());
                 let want = FatExpr::get_type(self.program);
                 let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
 
@@ -1582,6 +1598,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .iter()
                     .filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
                 let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
+
+                // This allows @a E; instead of @a(E);
+                if arg.is_raw_unit() && !target.is_raw_unit() {
+                    mem::swap(&mut arg, &mut target);
+                }
 
                 // If they did '@m(e)' instead of '@m(e) s', prefer a handler that only expects one argument.
                 // TODO: should probably distinguish '@m(e) unit' just incase
@@ -1954,6 +1975,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "Never" => Some(TypeInfo::Never),
             "VoidPtr" => Some(VoidPtr),
             "OverloadSet" => Some(TypeInfo::OverloadSet),
+            "ScopedBlock" => Some(TypeInfo::Scope),
             _ => None,
         };
         if let Some(ty) = ty {

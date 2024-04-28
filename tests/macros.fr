@@ -22,7 +22,7 @@ assert_eq(5, @(second_expr)(2) 5);  // this one is redundant
 assert_eq(5, @(get_second_expr())(2) 5);  // this one does a comptime call to decide which macro to call. 
 
 #macro
-fn last_thing(_: FatExpr, var target: FatExpr) FatExpr = {
+fn last_thing(var target: FatExpr) FatExpr = {
     let parts: Slice(FatExpr) = target&.expr.Tuple[];
     let i = parts.len().sub(1);
     get(parts, i)
@@ -34,13 +34,14 @@ let x = @last_thing() (a, b, c, d, 18);
 assert_eq(x, 18);
 
 #macro
-fn is_declared(var unit: FatExpr, var target: FatExpr) FatExpr = {
+fn is_declared(var target: FatExpr) FatExpr = {
+    loc := target&.loc[];
     (eq(target&.expr!tag[], tag_value(Expr, GetVar!symbol)), fn= {
         target = 'true';
     }, fn= 
         (eq(target&.expr!tag[], tag_value(Expr, GetNamed!symbol)), fn= {
             target = 'false';
-            target&.loc[] = unit&.loc[]; // report errors at the caller not here. 
+            target&.loc[] = loc; // report errors at the caller not here. 
         }, fn= {
             debug_log_ast(target);
             panic("@is_declared expected identifier");
@@ -53,7 +54,7 @@ assert_eq(true, @is_declared() x);
 assert_eq(false, @is_declared() not_an_ident);
 assert_eq(false, @is_declared() hello);
 let hello = 4;
-assert_eq(true, @is_declared() hello);
+assert_eq(true, @is_declared hello); // brackets are optional
 // Since this is a panic, it no longer works in assert_compile_error now that comptime happens in asm. 
 // { let _ = @is_declared() 12; }!assert_compile_error;  
 
@@ -253,5 +254,41 @@ fn test_it() = {
 }
 test_it();
 
+
+//////
+/// @namespace 
+
+// Note: not the same as a c++ namespace, the thing is a value and we just happen to bind it to a name. 
+my_module :: @namespace {
+    seven :: 7;
+    nine  :: 9;
+    
+    fn add_things() i64 = seven.add(nine);
+    
+    unit; // TODO: its too clever, it removes the block if its only decl stmts inside. 
+};
+
+assert_eq(my_module.seven, 7);
+assert_eq(my_module.nine, 9);
+f :: my_module.add_things;  // TODO: alas you can't just call it because dot calls take precidence. 
+assert_eq(f(), 16);
+
+at_rt := my_module;  // its a first class value, not just a magic static constant thing, you just can't do anything with it now...
+
+
+lies :: @namespace {
+    seven :: my_module.nine;
+    nine  :: my_module.seven;
+    unit;
+};
+
+:: if(ScopedBlock!builtin);  // instantiate template for 'fn if' on a new type. 
+
+crazy_town :: true;
+// TODO: there's no check that both export the same fields. it's just a compile error if the name isn't declared when you try to use it. maybe that should be opt out?  
+m :: if(crazy_town, fn = lies, fn = my_module);
+assert_eq(m.seven, 9);
+
 canary
 }
+

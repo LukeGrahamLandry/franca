@@ -367,8 +367,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     self.resolve_stmt(stmt)?;
                 }
                 self.resolve_expr(result)?;
+                *resolved = Some((self.scope, self.block));
                 self.pop_block();
-                *resolved = true; // TODO: remove
             }
             Expr::Tuple(values) => {
                 for value in values {

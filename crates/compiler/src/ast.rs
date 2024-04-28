@@ -75,6 +75,7 @@ pub enum TypeInfo<'p> {
     Unit, // TODO: same as empty tuple but easier to type
     VoidPtr,
     OverloadSet,
+    Scope,
 }
 
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
@@ -109,7 +110,7 @@ pub enum Expr<'p> {
     WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
-        resolved: bool,
+        resolved: Option<(ScopeId, usize)>, // TODO: this is like only used by @namespace. maybe that should take a function somehow instead.
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
     },
@@ -356,6 +357,14 @@ impl<'p> FatExpr<'p> {
             return Some(v);
         }
         None
+    }
+
+    pub fn value(value: Values, ty: TypeId, loc: Span) -> Self {
+        FatExpr {
+            expr: Expr::Value { ty, value },
+            loc,
+            ty,
+        }
     }
 }
 
@@ -929,9 +938,11 @@ impl<'p> Program<'p> {
                 TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
+                // TODO: this is flawed now that its a hashmap -- Apr 28 also if you remove it remember to fix later indices!
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
                 TypeInfo::F64,
                 TypeInfo::OverloadSet,
+                TypeInfo::Scope,
             ],
             funcs: Default::default(),
             generics_memo: Default::default(),
@@ -1137,7 +1148,7 @@ impl<'p> Program<'p> {
             TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
-            TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Enum { .. } => todo!(),
+            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Enum { .. } => todo!(),
             &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
         }
     }
@@ -1260,6 +1271,10 @@ impl<'p> Program<'p> {
             TypeInfo::Tuple(types) => Some(types),
             &TypeInfo::Struct { as_tuple, .. } => self.tuple_types(as_tuple),
             &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
+            TypeInfo::Scope => {
+                const S: [TypeId; 2] = [TypeId::i64(), TypeId::i64()]; // TOOD: this is kinda hacky. should make it an ffi struct
+                Some(&S)
+            }
             _ => None,
         }
     }
@@ -1594,7 +1609,7 @@ impl TypeId {
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn i64() -> TypeId {
+    pub const fn i64() -> TypeId {
         TypeId::from_index(4)
     }
 
@@ -1619,6 +1634,9 @@ impl TypeId {
 
     pub fn overload_set() -> TypeId {
         TypeId::from_index(9)
+    }
+    pub fn scope() -> TypeId {
+        TypeId::from_index(10)
     }
 }
 
@@ -1749,7 +1767,7 @@ macro_rules! tagged_index {
                 debug_assert!(s.is_valid());
                 s
             }
-            pub fn from_index(value: usize) -> Self {
+            pub const fn from_index(value: usize) -> Self {
                 debug_assert!((value as u64) < Self::MASK);
                 Self(value as u64 | Self::MASK)
             }

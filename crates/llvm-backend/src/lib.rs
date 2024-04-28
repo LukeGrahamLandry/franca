@@ -208,6 +208,7 @@ impl JittedLlvm {
                     LLVMStructType(fields.as_mut_ptr(), fields.len() as c_uint, LLVMBool::from(false))
                 }
                 TypeInfo::Enum { cases } => todo!(),
+                TypeInfo::Scope => todo!(),
                 &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.get_type(program, ty), // TOOD: carry forward struct names?
                 // They want to get rid of non-opaque pointers anyway: https://llvm.org/docs/OpaquePointers.html
                 TypeInfo::Ptr(_) | TypeInfo::VoidPtr => self.ptr_ty,
@@ -424,6 +425,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
                             Value::OverloadSet(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
                             Value::Type(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),
+
                             Value::GetFn(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),
                             Value::Symbol(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
                             Value::GetNativeFnPtr(ff) => {

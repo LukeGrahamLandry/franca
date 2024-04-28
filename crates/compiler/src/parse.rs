@@ -379,11 +379,16 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                     }
                     _ => return Err(self.expected("ident or '(' for macro expr (arbitrary expr must be wrapped in parens)")),
                 };
-                if self.peek() != TokenType::LeftParen {
-                    return Err(self.expected("'(' for macro arg. (TODO: treat that as single arg?)"));
-                }
 
-                let arg = Box::new(self.parse_tuple()?);
+                let arg = if self.peek() == TokenType::LeftParen {
+                    Box::new(self.parse_tuple()?)
+                } else {
+                    // TODO: its a bit fragile with the threads stuff now?
+                    //        hangs if you forget this so unwrap and that thread crashes.
+                    //        cause its not waiting on a mutex, just the counter never goes up. -- Apr 28
+                    self.start_subexpr();
+                    Box::new(self.expr(Expr::unit()))
+                };
 
                 let target = match self.peek() {
                     Semicolon | Comma | RightParen | RightSquiggle | Dot | RightAngle => {
@@ -1046,7 +1051,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
             self.expr(Expr::unit())
         };
         Ok(self.expr(Expr::Block {
-            resolved: false,
+            resolved: None,
             body,
             result: Box::new(result),
         }))
