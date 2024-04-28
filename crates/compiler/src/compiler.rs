@@ -904,7 +904,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!func.evil_uninit);
         // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
         if let Some(when) = func.get_tag_mut(Flag::When) {
-            let cond = unwrap!(when.args.as_mut(), "@when(cond: bool) requires argument");
+            let cond = unwrap!(when.args.as_mut(), "#when(cond: bool) requires argument");
             let cond: bool = self.immediate_eval_expr_known(cond.clone())?;
             if !cond {
                 return Ok((None, None));
@@ -1639,9 +1639,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn typecheck_macro_outputs(&mut self, macro_f: FuncId, requested: Option<TypeId>) -> Res<'p, ()> {
         if let Some(requested) = requested {
             if let Some(outputs) = &self.program[macro_f].annotations.iter().find(|a| a.name == Flag::Outputs.ident()) {
-                let ty = unwrap!(outputs.args.clone(), "annotation @outputs(T) requires arg T");
+                let ty = unwrap!(outputs.args.clone(), "annotation #outputs(T) requires arg T");
                 let ty: TypeId = self.immediate_eval_expr_known(ty)?;
-                self.type_check_arg(requested, ty, "macro @outputs")?;
+                self.type_check_arg(requested, ty, "macro #outputs")?;
             }
         }
         Ok(())
@@ -1867,7 +1867,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::PrefixMacro { handler, arg, .. } => {
-                // TODO: short-circuit on @outputs
+                // TODO: short-circuit on #outputs
                 // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
                 if handler.as_ident() == Some(Flag::As.ident()) && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                     // HACK: sad that 'as' is special

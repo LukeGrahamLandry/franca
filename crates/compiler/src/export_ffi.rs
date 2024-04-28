@@ -50,22 +50,22 @@ macro_rules! bounce_flat_call {
 
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
-    ("@env fn write(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
-    ("@env fn getchar() i32", libc::getchar as *const u8),
-    ("@env fn putchar(c: i64) i32", libc::putchar as *const u8),  // TODO: c: i32
-    ("@env fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
+    ("fn write(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
+    ("fn getchar() i32", libc::getchar as *const u8),
+    ("fn putchar(c: i64) i32", libc::putchar as *const u8),  // TODO: c: i32
+    ("fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
     ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
     ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
-    ("@env fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
-    ("@env fn open(null_terminated_path: Ptr(u8), flags: i32) Fd", libc::open as *const u8),
-    ("@env fn close(fd: Fd) i32", libc::close as *const u8),
-    ("@env fn rand() i32", libc::rand as *const u8),
-    ("@env fn get_errno() i32", get_errno as *const u8),
-    ("@env fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
-    ("@env fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
-    ("@env fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
+    ("fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
+    ("fn open(null_terminated_path: Ptr(u8), flags: i32) Fd", libc::open as *const u8),
+    ("fn close(fd: Fd) i32", libc::close as *const u8),
+    ("fn rand() i32", libc::rand as *const u8),
+    ("fn get_errno() i32", get_errno as *const u8),
+    ("fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
+    ("fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
+    ("fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
     (
-        "@env fn mmap(addr: VoidPtr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) VoidPtr",
+        "fn mmap(addr: VoidPtr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) VoidPtr",
         libc::mmap as *const u8,
     ),
     ("fn munmap(addr: VoidPtr, len: i64) i64", libc::munmap as *const u8),
@@ -86,14 +86,14 @@ extern "C" {
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Ptr(Inner: Type) Type", do_ptr_type as *const u8),
-    ("@no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
+    ("#no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
     ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
     ("fn index_to_func_id(func_index: i64) FuncId", index_to_func_id as *const u8),
-    // TODO: all these type ones could use ffi TypeInfo if i gave it `@ct fn intern_type`
+    // TODO: all these type ones could use ffi TypeInfo if i gave it `#ct fn intern_type`
     //       but to do that here instead of current macro message, I'd need to do ffi of enums in a less insane way.
     //       (these functions don't use InterpSend, they just rely on C ABI).
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
@@ -129,7 +129,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub fn get_include_std(name: &str) -> Option<String> {
-    let msg = "//! IMPORTANT: don't try to save @comptime_addr('ASLR junk'), it won't go well. \n";
+    let msg = "//! IMPORTANT: don't try to save #comptime_addr('ASLR junk'), it won't go well. \n";
     match name {
         "libc" => {
             let mut out = String::new();
@@ -162,7 +162,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             .unwrap();
             writeln!(out, "const DlHandle = VoidPtr; const CStr = Unique$Ptr(i64);").unwrap();
             for (sig, ptr) in LIBC {
-                writeln!(out, "@pub @comptime_addr({}) @dyn_link @c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#pub #comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -170,10 +170,10 @@ pub fn get_include_std(name: &str) -> Option<String> {
             let mut out = String::new();
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER {
-                writeln!(out, "@pub @comptime_addr({}) @ct @c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#pub #comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
             }
             for (sig, ptr) in COMPILER_FLAT {
-                writeln!(out, "@pub @comptime_addr({}) @ct @flat_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#pub #comptime_addr({}) #ct #flat_call {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -196,20 +196,6 @@ pub fn get_include_std(name: &str) -> Option<String> {
         }
     }
 }
-
-// macro_rules! _result_ffi {
-//     ($out:ident, $all:ident, $T:ty, $t_name:expr) => {{
-//         extern fn is_ok(r: &mut Res<'_, $T>) -> bool {
-//             r.is_ok()
-//         }
-//         extern fn unwrap<'a>(r: &'a mut Res<'_, $T>) -> &'a mut $T {
-//             r.as_mut().unwrap()
-//         }
-//         writeln!($all, "{} = Opaque({}, {}),", $t_name, size_of::<$T>(), align_of::<$T>()).unwrap();
-//         writeln!($out, "@comptime_addr({}) @c_call fn is_ok(r: Ptr(CRes.{}[])) bool;", is_ok as *const u8 as usize, $t_name).unwrap();
-//         writeln!($out, "@comptime_addr({0}) @c_call fn unwrap(r: Ptr(CRes.{1}[])) Ptr({1});", unwrap as *const u8 as usize, $t_name).unwrap();
-//     }};
-// }
 
 // TODO: can do some nicer reporting here? maybe this goes away once i can actually do error handling in my language.
 fn hope<'p, T>(res: impl FnOnce() -> Res<'p, T>) -> T {
@@ -437,11 +423,11 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         bounce_flat_call!((TypeId, TypeId), bool, type_check_arg),
     ),
     (
-        "@annotation @outputs(Type) fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+        "#annotation #outputs(Type) fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
     ),
     (
-        "@annotation fun as(T: FatExpr, value: FatExpr) FatExpr;",
+        "#annotation fun as(T: FatExpr, value: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
     ),
 ];

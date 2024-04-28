@@ -1,5 +1,5 @@
 //! TODO: i know this is remarkably bad codegen.
-//! @c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
+//! #c_call means https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
 
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
@@ -207,9 +207,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             assert!(func.arg_range.count <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
             assert!(
                 !ff.has_tag(Flag::Ct),
-                "compiler context is implicitly passed as first argument for @ct builtins."
+                "compiler context is implicitly passed as first argument for #ct builtins."
             );
-            self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as @flat_call later
+            self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
                                                                    // TODO: not skipping unit fixes allow_create debug check for enum init when payload is unit.
                                                                    //       in general need to just handle unit better so im not special casing everywhere.
             cc_reg!(self, arg_range, false, 0, |ints, slot| self.set_slot(ints, slot), |floats, slot| self
@@ -652,7 +652,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.release_many(arg); // Note: release after to make sure they don't alias ret which might not be what the callee is expecting (even tho it would be fine for current uses).
         } else {
             self.dyn_c_call(arg, ret, target.unwrap_ty(), comp_ctx, |s| s.branch_with_link(f));
-            self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as @flat_call later
+            self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
         }
         Ok(())
     }

@@ -62,10 +62,10 @@ pub enum TokenType<'p> {
     BinaryNum { bit_count: u8, value: u64 },
     LeftArrow,
     RightArrow,
-    IncludeStd,
     Quote,
     LeftAngle,
     RightAngle,
+    Hash,
     Error(LexErr),
 }
 
@@ -124,7 +124,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
             self.start = self.current;
             match self.peek_c() {
                 '\0' => break,
-                '#' => self.skip_ident(),
                 '"' => {
                     self.skip_quoted();
                 }
@@ -168,7 +167,18 @@ impl<'a, 'p> Lexer<'a, 'p> {
         self.start = self.current;
         match self.peek_c() {
             '\0' => self.one(TokenType::Eof),
-            '#' => self.lex_ident(),
+            '#' => {
+                self.pop();
+                match self.peek_c() {
+                    '!' => {
+                        while self.pop() != '\n' {
+                            // spin
+                        }
+                        self.do_next()
+                    }
+                    _ => self.token(Hash, self.start, self.current),
+                }
+            }
             '"' => self.lex_quoted(),
             '`' => self.lex_quoted_multiline(),
             '0' => {
@@ -377,20 +387,10 @@ impl<'a, 'p> Lexer<'a, 'p> {
     }
 
     fn lex_ident(&mut self) -> Token<'p> {
-        let mut c = self.peek_c();
-        let is_directive = c == '#';
         self.pop();
-        c = self.peek_c();
-        if is_directive && c == '!' {
-            // https://en.wikipedia.org/wiki/Shebang_(Unix)
-            while self.peek_c() != '\n' {
-                self.pop();
-            }
-            // Just something random that's allowed at the start of the file
-            return self.token(Semicolon, self.start, self.current);
-        }
+        let mut c = self.peek_c();
         // TODO: only sometimes allow #
-        while c.is_ascii_alphanumeric() || c == '_' || c == '#' {
+        while c.is_ascii_alphanumeric() || c == '_' {
             self.pop();
             c = self.peek_c();
         }
@@ -400,14 +400,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             "let" => Qualifier(VarType::Let),
             "var" => Qualifier(VarType::Var),
             "const" => Qualifier(VarType::Const),
-            "#include_std" => IncludeStd,
-            text => {
-                if is_directive {
-                    return self.err(LexErr::Unexpected('#'));
-                } else {
-                    Symbol(self.pool.intern(text))
-                }
-            }
+            text => Symbol(self.pool.intern(text)),
         };
         self.token(ty, self.start, self.current)
     }

@@ -360,7 +360,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
             // TODO: should i allow the payload to be statement too?
             // TODO: could make arg optional but then there's wierd stuff like `@no_arg (expected, target)` being seen as one thing.
             //       i dont want to make parsing depend on how the macro was declared so you could opt out of the arg and allow that.
-            // TODO: annotations on anon function exprs. Currently you can't make one @c_call because stmt and expr macros are parsed differently.
+            // TODO: annotations on anon function exprs. Currently you can't make one #c_call because stmt and expr macros are parsed differently.
             At => {
                 self.start_subexpr();
                 self.eat(At)?;
@@ -716,23 +716,29 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                 Stmt::Noop
             }
 
-            IncludeStd => {
-                self.eat(IncludeStd)?;
-                self.eat(LeftParen)?;
-                if let TokenType::Quoted(name) = self.peek() {
-                    self.pop();
-                    self.eat(RightParen)?;
-                    self.eat(Semicolon)?;
-                    let name = self.pool.get(name);
-                    if let Some(src) = get_include_std(name) {
-                        let file = self.ctx.codemap.write().unwrap().add_file(name.to_string(), src);
-                        let s = file.span;
-                        Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
+            Hash => {
+                self.eat(Hash)?;
+                let name = self.ident()?;
+
+                if name == Flag::Include_Std.ident() {
+                    self.eat(LeftParen)?;
+                    if let TokenType::Quoted(name) = self.peek() {
+                        self.pop();
+                        self.eat(RightParen)?;
+                        self.eat(Semicolon)?;
+                        let name = self.pool.get(name);
+                        if let Some(src) = get_include_std(name) {
+                            let file = self.ctx.codemap.write().unwrap().add_file(name.to_string(), src);
+                            let s = file.span;
+                            Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
+                        } else {
+                            return Err(self.expected("known path for #include_std"));
+                        }
                     } else {
-                        return Err(self.expected("known path for #include_std"));
+                        return Err(self.expected("quoted path"));
                     }
                 } else {
-                    return Err(self.expected("quoted path"));
+                    return Err(self.error_next("reserved for stmt directives".to_string()));
                 }
             }
             Symbol(name) => {
@@ -780,8 +786,14 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
     // | @name(args) |
     fn parse_annotations(&mut self) -> Res<Vec<Annotation<'p>>> {
         let mut annotations = vec![];
-        while let At = self.peek() {
-            self.eat(At)?;
+        while let Hash = self.peek() {
+            if let Symbol(name) = self.lexer.nth(1).kind {
+                // HACK
+                if name == Flag::Include_Std.ident() {
+                    break;
+                }
+            }
+            self.eat(Hash)?;
             let name = self.ident()?;
             let args = if LeftParen == self.peek() { Some(self.parse_tuple()?) } else { None };
             annotations.push(Annotation { name, args });

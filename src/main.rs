@@ -158,7 +158,7 @@ fn run_tests_serial_for_profile() {
         }
         let name = name.strip_suffix(".fr").unwrap();
         let src = fs::read_to_string(case.path()).unwrap();
-        let start = src.find("@test(").expect("@test in test file") + 6;
+        let start = src.find("#test(").expect("@test in test file") + 6;
         let s = &src[start..];
         let end = s.find(')').unwrap();
         let assertion_count = src.split("assert_eq(").count() - 1;
@@ -194,7 +194,7 @@ fn unset_colour() {
 }
 
 fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32)>) {
-    let start = src.find("@test(").expect("@test in test file") + 6;
+    let start = src.find("#test(").expect("@test in test file") + 6;
     let s = &src[start..];
     let end = s.find(')').unwrap();
     let assertion_count = src.split("assert_eq(").count() - 1;
