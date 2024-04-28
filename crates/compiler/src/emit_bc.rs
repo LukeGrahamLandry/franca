@@ -453,13 +453,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         });
                     }
                     Flag::Fn_Ptr => unreachable!(),
-                    Flag::Construct => {
-                        if let Expr::StructLiteralP(pattern) = &arg.expr {
-                            self.construct_struct(result, pattern, arg.ty, output)?
-                        } else {
-                            unreachable!()
-                        }
-                    }
                     Flag::Unreachable => {
                         result.push(Bc::Unreachable);
                         // Don't care about setting output to anything.

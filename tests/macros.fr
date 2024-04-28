@@ -5,10 +5,10 @@ fn main(canary: i64) i64 = {
 /// Trivial Macros ///
 //////////////////////
 
-#annotation
+#macro
 fn first_expr(arg: FatExpr, target: FatExpr) FatExpr = arg;
 
-#annotation
+#macro
 fn second_expr(arg: FatExpr, target: FatExpr) FatExpr = target;
 
 assert_eq(177, @first_expr(177) 277);
@@ -21,7 +21,7 @@ assert_eq(5, @(second_expr)(2) 5);  // this one is redundant
 #comptime fn get_second_expr() OverloadSet = second_expr; 
 assert_eq(5, @(get_second_expr())(2) 5);  // this one does a comptime call to decide which macro to call. 
 
-#annotation
+#macro
 fn last_thing(_: FatExpr, var target: FatExpr) FatExpr = {
     let parts: Slice(FatExpr) = target&.expr.Tuple[];
     let i = parts.len().sub(1);
@@ -33,7 +33,7 @@ fn last_thing(_: FatExpr, var target: FatExpr) FatExpr = {
 let x = @last_thing() (a, b, c, d, 18);
 assert_eq(x, 18);
 
-#annotation
+#macro
 fn is_declared(var unit: FatExpr, var target: FatExpr) FatExpr = {
     (eq(target&.expr!tag[], tag_value(Expr, GetVar!symbol)), fn= {
         target = 'true';
@@ -70,7 +70,7 @@ assert_eq(true, @is_declared() i64);
 // The body here is equivalent to rust's `quote!{ #func(5, #number) }`.
 // Ask the compiler to give us the ast for the expression "<something>(5, <something>)",
 // but then take the values of <number> and <func> from our scope and slot them in to fill the holes.
-#annotation
+#macro
 fn apply_func_with_five(number: FatExpr, func: FatExpr) FatExpr = '<func>(5, <number>)';
 
 let seven = @apply_func_with_five(2) add;
@@ -143,18 +143,14 @@ const MyBool = @enum(i64) (True = 42, False = 999);
 
 // TODO: subtyping
 fn to_bool(b: MyBool) bool = {
-    (eq(@as(i64) b,
-        @as(i64) MyBool.True),
-        fn() bool = true,
-        fn() bool = (eq(@as(i64) b,
-            @as(i64) MyBool.False),
-            fn() bool = false,
+    if(eq(b, MyBool.True), fn = true) {|
+        if(eq(b, MyBool.False), fn = false, 
             fn() bool = panic("Unrechable: Invalid Enum Value")
-        )!if
-    )!if
+        )
+    }
 }
 
-fn to_bool(b: i64) bool = (eq(b, 0), fn= false, fn= true)!if;
+fn to_bool(b: i64) bool = (eq(b, 0), fn = false, fn = true)!if;
 
 assert_eq(to_bool(MyBool.True), true);
 assert_eq(to_bool(MyBool.False), false);
@@ -171,26 +167,27 @@ assert_eq(to_bool(21904701), true);
 
 // let x: MyBool = 999;  // TODO: this needs to be a compile error (especially if invalid value). 
 
-fn to_bool_again(b: MyBool) bool = {
-    let b: i64 = @as(i64) b; // TODO: shouldn't be requrired because I use @as, but it can't find the eq overload. 
-    (@switch(b) {
-        (@case(MyBool.True) fn= true);
-        (@case(MyBool.False) fn= false);
-    })
+// This is for @switch to use. TODO: subtyping. 
+fun eq(a: MyBool, b: MyBool) bool = eq(@as(i64) a, @as(i64) b);
+
+fn to_bool_again(b: MyBool) bool = @switch(b) {
+    @case(.True) fn = true;
+    @case(.False) fn = false;
 }
+
 assert_eq(true, to_bool_again(MyBool.True));
 assert_eq(false, to_bool_again(MyBool.False));
 
 const Up3 = @enum(i64) (a = 1, b = 2, c = 3);
 
 // This is for @switch to use. TODO: subtyping. 
-fun eq(a: Up3, b: Up3) bool = 
-    eq(@as(i64) a, @as(i64) b);
+fun eq(a: Up3, b: Up3) bool = eq(@as(i64) a, @as(i64) b);
 
-fn is_a(b: Up3) bool = (@switch(b) {
-    (@case(Up3.a) fn= true);
-    (@default() fn(_: Up3) = false);
-});
+fn is_a(b: Up3) bool = @switch(b) {
+    @case(.a) fn = true;
+    @default() fn(_: Up3) = false;
+};
+
 assert_eq(true, is_a(Up3.a));
 assert_eq(false, is_a(Up3.b));
 assert_eq(false, is_a(Up3.c));
@@ -200,15 +197,20 @@ assert_eq(hello.to_bool(), true);
 hello = .False;
 assert_eq(hello.to_bool(), false);
 
+let i = 1234;
+var v = MyBool.True;
+// v = i;  // TODO: this needs to be a compile error. 
+
+
 /* 
 // TODO: this would be very nice for writing the lexer
 
-fn use_range(b: i64) i64 = (@switch(b) {
-    (@case(123) fn= 1);
-    (@range(200, 300) fn= 2);
-    (@range(300, 400) fn= 3);
-    (@default() fn(_: i64)= 4);
-});
+fn use_range(b: i64) i64 = @switch(b) {
+    @case(123) fn = 1;
+    @range(200, 300) fn = 2;
+    @range(300, 400) fn = 3;
+    @default() fn(_: i64) = 4;
+};
 assert_ eq(1, use_range(123));
 assert_ eq(2, use_range(200));
 assert_ eq(2, use_range(150));
@@ -226,14 +228,16 @@ assert_ eq(4, use_range(50));
 //////
 /// Hygiene 
 
-#annotation
+#macro
 fn decl_something(arg: AstExpr) AstExpr = {
     // the caller declared their own 'my_value', but we can't see it here. this is just a normal function.  
     //assert(not(@is_declared() my_value), "");  // TODO: fix this getting seen as a capture because now it resolves the whole outside first? -- Apr 25
     // TODO: we also wouldn't see it in the quoted expression (before the new declaration),
     //       but I can't pass @is_declared into it in an @literal because you can't invoke an expression as a macro. 
+    //       apr 28: now could pass it in but capturing tracking would get confused like above. 
     '{
         let my_value = 123;
+        assert(eq(my_value, 123), "stomp!");
         <arg>
     }'
 }

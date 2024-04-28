@@ -1401,11 +1401,6 @@ impl<'p> FatStmt<'p> {
         }
     }
 
-    pub(crate) fn _has_tag(&self, pool: &StringPool<'_>, name: &str) -> bool {
-        let name = pool.intern(name);
-        self.annotations.iter().any(|a| a.name == name)
-    }
-
     pub fn get_tag_arg(&self, name: Flag) -> Option<&FatExpr<'p>> {
         self.annotations.iter().find(|a| a.name == name.ident()).and_then(|a| a.args.as_ref())
     }
@@ -1655,11 +1650,10 @@ pub enum Flag {
     Enum,
     Asm,
     C_Call,
-    Annotation,
+    Macro,
     Placeholder,
     Comptime_Addr,
     Init,
-    Construct,
     Slice,
     Unquote_Macro_Apply_Placeholders,
     From_Bit_Literal,
@@ -1667,7 +1661,6 @@ pub enum Flag {
     Unquote,
     Deref,
     Patch,
-    Backpass,
     Ct,
     Bs,
     Rs,

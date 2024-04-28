@@ -699,7 +699,9 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                         self.start_subexpr();
                         let callback = self.parse_block_until_squiggle()?;
                         // Note: we leave the closing squiggle because the outer code is expecting to be inside a block.
-                        let name = Flag::Backpass.ident();
+                        let mut name = callback.expr.log(self.pool);
+                        name.truncate(25);
+                        let name = self.pool.intern(&name);
                         let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false, true);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 

@@ -916,7 +916,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let any_reg_template = func.has_tag(Flag::Any_Reg);
         let is_struct = func.has_tag(Flag::Struct);
         let is_enum = func.has_tag(Flag::Enum);
-        if func.has_tag(Flag::Annotation) {
+        if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
             func.add_tag(Flag::Ct);
             func.add_tag(Flag::Flat_Call);
@@ -946,9 +946,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
                 }
 
-                let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
-                let construct = Flag::Construct.ident();
-                func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(construct, init_expr), loc));
+                func.body = Some(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
             }
             let id = self.add_func(func)?;
             self.program.overload_sets[init_overloadset].pending.push(id);
@@ -977,8 +975,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     new_func.arg.bindings = vec![b.clone()];
                     let name = if let Name::Var(name) = b.name { name } else { todo!() };
                     b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
-                    let init_expr = Box::new(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
-                    new_func.body = Some(FatExpr::synthetic(Expr::SuffixMacro(Flag::Construct.ident(), init_expr), loc));
+                    new_func.body = Some(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
                     new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
                     let id = self.add_func(new_func)?;
                     self.program.overload_sets[init_overloadset].pending.push(id);
@@ -1473,15 +1470,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                             _ => err!("!fn_ptr expected const fn not {fn_val:?}",),
                         }
                     }
-                    Flag::Construct => {
-                        if let Expr::StructLiteralP(pattern) = &mut arg.expr {
-                            let out = self.construct_struct(result, requested, pattern)?;
-                            arg.ty = requested.unwrap();
-                            out
-                        } else {
-                            err!("!construct expected map literal.",)
-                        }
-                    }
                     Flag::From_Bit_Literal => {
                         let int = unwrap!(bit_literal(expr, self.pool), "not int");
                         let ty = self.program.intern_type(TypeInfo::Int(int.0));
@@ -1602,7 +1590,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let Some(f) = os1.next() {
                         assert!(os1.next().is_none(), "ambigous macro overload");
                         let f = f.func;
-                        assert!(self.program[f].has_tag(Flag::Annotation));
+                        assert!(self.program[f].has_tag(Flag::Macro));
                         self.infer_types(f)?;
                         self.compile(f, ExecTime::Comptime)?;
                         self.typecheck_macro_outputs(f, requested)?;
@@ -1619,7 +1607,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let f = unwrap!(os2.next(), "missing macro overload").func;
                 assert!(os2.next().is_none(), "ambigous macro overload");
-                assert!(self.program[f].has_tag(Flag::Annotation));
+                assert!(self.program[f].has_tag(Flag::Macro));
                 self.infer_types(f)?;
                 self.compile(f, ExecTime::Comptime)?;
 

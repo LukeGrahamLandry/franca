@@ -423,11 +423,11 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         bounce_flat_call!((TypeId, TypeId), bool, type_check_arg),
     ),
     (
-        "#annotation #outputs(Type) fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+        "#macro #outputs(Type) fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
     ),
     (
-        "#annotation fun as(T: FatExpr, value: FatExpr) FatExpr;",
+        "#macro fun as(T: FatExpr, value: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
     ),
 ];

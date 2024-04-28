@@ -4,13 +4,13 @@
 use compiler::{
     ast::{Flag, Program, TargetArch, TypeId},
     bc_to_asm::emit_aarch64,
-    compiler::{Compile, ExecTime, Res},
+    compiler::{Compile, ExecTime},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, unwrap, STATS,
+    run_main, timestamp, STATS,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};

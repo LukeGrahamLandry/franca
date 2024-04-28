@@ -122,6 +122,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         while depth > 0 {
             self.eat_whitespace();
             self.start = self.current;
+            // TODO: skip #! ...... \n but it only matters if you had unnested stuff there which you shouldn't -- Apr 28
             match self.peek_c() {
                 '\0' => break,
                 '"' => {
@@ -366,23 +367,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 Err(_) => return self.err(LexErr::NumParseErr),
             };
             return self.token(Number(n), self.start, self.current);
-        }
-    }
-
-    fn skip_ident(&mut self) {
-        let mut c = self.peek_c();
-        let is_directive = c == '#';
-        self.pop();
-        c = self.peek_c();
-        if is_directive && c == '!' {
-            while self.peek_c() != '\n' {
-                self.pop();
-            }
-            return;
-        }
-        while c.is_ascii_alphanumeric() || c == '_' || c == '#' {
-            self.pop();
-            c = self.peek_c();
         }
     }
 
