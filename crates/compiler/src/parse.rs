@@ -741,8 +741,9 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                     return Err(self.error_next("reserved for stmt directives".to_string()));
                 }
             }
-            Symbol(name) => {
-                if self.lexer.nth(1).kind == DoubleColon {
+            Symbol(name) => match self.lexer.nth(1).kind {
+                // TODO: it would be nicer here if DoubleColon was two tokens but i use it for const eval operator as well.
+                DoubleColon => {
                     self.pop();
                     self.pop();
                     let value = self.parse_expr()?;
@@ -753,14 +754,36 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                         value: Some(value),
                         kind: VarType::Const,
                     }
-                } else {
-                    if matches!(self.lexer.nth(1).kind, TokenType::Colon) {
-                        return Err(self.error_next("reserved for name := value and name :: value".to_string()));
+                }
+                Colon => {
+                    self.pop();
+                    self.pop();
+                    let ty = match self.peek() {
+                        Colon | Equals => LazyType::Infer,
+                        _ => LazyType::PendingEval(self.parse_expr()?),
+                    };
+
+                    let kind = match self.peek() {
+                        Colon => VarType::Const,
+                        Equals => VarType::Let,
+                        _ => return Err(self.expected("':' for const or '=' for let after variable declaration")),
+                    };
+                    self.pop();
+
+                    let value = self.parse_expr()?;
+                    self.eat(Semicolon)?;
+                    Stmt::DeclNamed {
+                        name,
+                        ty,
+                        value: Some(value),
+                        kind,
                     }
+                }
+                _ => {
                     let e = self.parse_expr()?;
                     self.after_expr_stmt(e)?
                 }
-            }
+            },
             _ => {
                 let e = self.parse_expr()?;
                 self.after_expr_stmt(e)?
