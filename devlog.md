@@ -1,3 +1,14 @@
+## lox (Apr 28)
+
+Feel like i need to do some project in my language to see what the biggest pain points are to decide what to work on.
+Gonna go through crafting interpreters again and keep a list of problems I have.
+
+Did:
+
+- more pointer math helper functions.
+- print negative numbers.
+- round float to int asm and print that. TODO: llvm
+
 ## out of order constants (Apr 27)
 
 Currently constants can bind names out of order but they still get evaluated in lexical order.

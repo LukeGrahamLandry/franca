@@ -1,9 +1,144 @@
 Vm :: @struct(
-    chunk: *Chunk;
+    chunk: *Chunk,
+    ip: *u8,
+    stack: List$Value, // TODO: inline fixed size array
+    stack_top: *Value,
 );
 
-fun init() Vm = (chunk: ()!uninitialized); // TODO: no uninit
+fun init() Vm = {
+    var self: Vm = ()!uninitialized; // TODO: no uninit
+    self&.stack[] = list(stack_max);  // EXTRA: grow stack
+    self&.reset_stack();
+    self
+}
 
 fun drop(self: *Vm) Unit = {
-    self.chunk.drop();
+    self.chunk[].drop();
+    self.stack.drop();
 }
+
+InterpretResult :: @enum(i64) (Ok = 0, CompileError = 1, RuntimeError = 2);
+
+fun interpret(self: *Vm, chunk: *Chunk) InterpretResult = {
+    self.chunk[] = chunk;
+    self.ip[] = chunk.code.as_ptr();
+    self.run()
+}
+
+fn run(self: *Vm) InterpretResult = {
+    var out = InterpretResult.RuntimeError;
+    var debug: List$i64 = list();
+    
+    // TODO: this is awkward without early returns
+    dowhile {|
+        if(::debug_trace_execution){|
+            debug&.clear();
+            @fmt(debug&, "         ");
+            for(self.stack.as_ptr(), self.stack_top[]) {(slot: *Value)|
+                @fmt(debug&, "[ % ]", slot);
+            };
+            println(debug&.items());
+        
+            p := self.chunk[].code.as_ptr();
+            i := p.ptr_diff(self.ip[]);
+            println(i);  // TODO: do these into the buffer as well 
+            self.chunk[].dis_inst(i);
+        };
+        
+        instruction := self.read_byte();
+        
+        // TODO: switch over incomplete enum like is is awkward because you can't use contextual field. 
+        @as(bool) @switch(instruction) {
+            @case(OpCode.Constant) fn = {
+                constant := self.read_constant();
+                self.push(constant);
+                true
+            };
+            @case(OpCode.Return) fn = {
+                value := self.pop();
+                @println("RET: %", value);
+                out = .Ok;
+                false
+            };
+            @case(OpCode.Negate) fn = {
+                self.push(self.pop().neg());
+                true
+            };
+            // TODO: without the ret type annotation you get err walkwip, but only when it couldn't find the function to call? so just need better error message. 
+            @case(OpCode.Add) fn = self.binary_op(add); 
+            @case(OpCode.Subtract) fn = self.binary_op(sub); 
+            @case(OpCode.Multiply) fn = self.binary_op(mul); 
+            @case(OpCode.Divide) fn = self.binary_op(div);  
+            @default() fn(_: u8) = {
+                out = .RuntimeError;
+                false
+            };
+        }
+    };
+        
+    out
+}
+
+// TODO: closures with const arguments. I'd rather just have this in the main loop function. but they rely on resolving working in different ways currently. 
+#inline fn binary_op(self: *Vm, const op: OverloadSet) bool = {
+    // TODO: you can't put this in the argument type because it wont find the overload because it thinks the arg is a OverloadSet. 
+    // TODO: you cant name this var and the arg the same thing. shadowing doesn't work. 
+    // TODO: you can't do this because it doesn't filter arch? but not a big deal because you can just call the overload set directly. 
+    // f : Fn(Ty(f64, f64), f64) : op;  
+    rhs := self.pop();
+    lhs := self.pop();
+    self.push(op(lhs, rhs));
+    true
+}
+
+// TODO: I could expose the dereference and increment instruction but presumably if you want it to be fast you'd just use llvm anyway. 
+#inline fn read_byte(self: *Vm) u8 = {
+    let b = self.ip[][];
+    self.ip[] = self.ip[].offset(1);
+    b
+}
+
+#inline fn read_constant(self: *Vm) Value = {
+    // TODO: you can't put the type annotation that does the cast on the var or the call because then it changes the overload resolution. 
+    let index = self.read_byte();
+    self.chunk[].constants.get(@as(i64) index)
+}
+
+fun push(self: *Vm, value: Value) Unit = {
+    self.stack_top[][] = value;
+    self.stack_top[] = self.stack_top[].offset(1);
+}
+
+fun pop(self: *Vm) Value = {
+    self.stack_top[] = self.stack_top[].offset(1.neg());
+    self.stack_top[][]
+}
+
+fn reset_stack(self: *Vm) Unit = {
+    self.stack_top[] = self.stack.as_ptr();
+}
+
+/////////////////////////////////////
+
+fun ptr_diff(start: VoidPtr, end: VoidPtr) i64 = end.ptr_to_int().sub(start.ptr_to_int());
+fun ptr_diff_bytes() Unit; // TODO: useless because u8 is not a real type, its still 8 bytes. 
+fun offset() Unit;
+
+// TODO: put this in fn Ptr so you always get them? 
+#comptime
+fun ptr_utils(const T: Type) Unit = {
+    fun ptr_diff_bytes(start: *T, end: *T) i64 = ptr_diff(@as(VoidPtr) start, @as(VoidPtr) end);
+    fun offset(ptr: *T, element_count: i64) *T = @as(VoidPtr) raw_slice(@as(VoidPtr) ptr, element_count.mul(T.size_of()), 0); // TODO: remove last param, it doesn't do anything anymore since I removed my interp. 
+    fun ptr_diff(start: *T, end: *T) i64 = ptr_diff_bytes(start, end).div(T.size_of());
+    fn ptr_to_int(ptr: *T) i64 = ptr_to_int(@as(VoidPtr) ptr);
+    
+    fun for(var first: *T, past_last: *T, const body: Fn(*T, Unit)) Unit = {
+        while(fn = first.ptr_to_int().ne(past_last.ptr_to_int())) {|
+            body(first);
+            first = first.offset(1);
+        }
+    }
+}
+
+::ptr_utils(u8);
+::ptr_utils(Value);

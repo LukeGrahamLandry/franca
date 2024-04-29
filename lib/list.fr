@@ -10,6 +10,7 @@ fun pop_last() Unit;
 fun reserve() Unit;
 fun repeated() Unit;
 fun clear() Unit;
+fun as_ptr() Unit;
 
 #comptime
 fun List(const T: Type) Type = {
@@ -36,6 +37,10 @@ fun List(const T: Type) Type = {
     fun items(self: *Self) Slice$T = {
         self.maybe_uninit[].slice(0, self.len[])
     }
+    
+    // A pointer to the first element of the list. 
+    // SAFETY: dont use the pointer if the list is empty. invalidated by resize. 
+    fun as_ptr(self: *Self) *T = self.maybe_uninit.ptr[];
     
     fun index(self: *Self, i: i64) *T = {
         assert(i.lt(self.len[]), "OOB");
@@ -171,19 +176,40 @@ fun splitlines(s: Str) List(Str) = {
 
 fun str() Unit = { unit };  // TODO: scope.rs support recursion. 
 
+// It's such a pain to google an ascii table every time.  
+// This takes a constant argument to ensure the length check happens during compilation.
+// So this function can take the place of a char literal in other languages without new syntax. 
+fun char(const s: ""!type) i64 = char(:: s.str());
+fun char(const s: Str) i64 = {
+    :: {
+        var s = s;
+        // TODO: can't get field of const cause cant take pointer. 
+        // TODO: @assert that takes a format string so its less painful to print the arg as well. 
+        assert(s&.len[].eq(1), "char str expected length 1"); 
+        s.get(0)
+    }
+}
+
+
 // TODO: this needs to return List$i64 since it allocates. 
 //       really you want to have a nice Writer abstraction so you can seperate the formating and the allocation. 
 //        I need List$i64.deref() -> Str because currently its really annoying to use functions that return owned strings, 
 //       since many string functions just need to borrow thier arguments so you can't chain things nicely. 
 fun str(i: i64) Str = {
     var s: List(i64) = list(1);
-    if(and(ge(i, 0), lt(i, 10)), 
-        fn = push(s&, add(48, i)),
-        fn = {
-            push_all(s&, str(div(i, 10))); // TODO: push to list
-            push(s&, add(48, mod(i, 10)));
-        }
-    );
+    if(i.lt(0)) {|
+        push(s&, "-".char());
+        push_all(s&, i.neg().str());
+    } {|
+    
+        if(and(ge(i, 0), lt(i, 10)), 
+            fn = push(s&, add(48, i)),
+            fn = {
+                push_all(s&, str(div(i, 10))); // TODO: push to list
+                push(s&, add(48, mod(i, 10)));
+            }
+        );
+    };
     
     items(s&)
 }

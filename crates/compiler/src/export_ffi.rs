@@ -522,7 +522,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
             }
             Expr::Value { .. } => err!("todo",),
             _ => {
-                let ty = unwrap!(compile.type_of(unsafe { &mut *result }, &mut arg)?, "");
+                let ty = unwrap!(compile.type_of(unsafe { &mut *result }, &mut arg)?, "{}", arg.log(compile.pool));
                 let ty = compile.program.raw_type(ty);
                 if let TypeInfo::Int(int) = compile.program[ty] {
                     return Ok(int);

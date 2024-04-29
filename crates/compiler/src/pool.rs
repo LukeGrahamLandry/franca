@@ -1,14 +1,11 @@
 use std::{
-    cell::{SyncUnsafeCell, UnsafeCell},
+    cell::SyncUnsafeCell,
     collections::HashMap,
     fmt::Debug,
     hash::Hash,
     marker::PhantomData,
     mem,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        RwLock,
-    },
+    sync::atomic::{AtomicBool, Ordering},
     thread::yield_now,
 };
 
