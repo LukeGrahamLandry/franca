@@ -141,6 +141,11 @@ pub fn find_std_lib() -> bool {
         }
     }
 
+    let p = PathBuf::from("/Users/luke/Documents/mods/infered");
+    if check(p) {
+        return true;
+    }
+
     false
 }
 

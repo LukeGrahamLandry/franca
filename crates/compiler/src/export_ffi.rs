@@ -188,6 +188,12 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 if let Ok(src) = fs::read_to_string(&path) {
                     return Some(src);
                 }
+
+                // TODO: have a different macro for this (cwd)
+                if let Ok(src) = fs::read_to_string(name) {
+                    return Some(src);
+                }
+
                 println!("Missing path {path:?}");
             } else {
                 println!("STDLIB_PATH not set.");

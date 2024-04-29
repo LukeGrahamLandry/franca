@@ -66,19 +66,23 @@ pub fn locked<T>(lock: &AtomicBool, f: impl FnOnce() -> T) -> T {
 
 impl<'pool> StringPool<'pool> {
     pub fn get(&self, i: Ident) -> &'pool str {
-        let v = unsafe { &*self.values.get() };
-        // # Safety
-        // Strings are not removed from the pool until its dropped.
-        unsafe { &*(v.get(i.0 as usize).expect("Valid Ident").0) }
+        locked(&self.lock, || {
+            let v = unsafe { &*self.values.get() };
+            // # Safety
+            // Strings are not removed from the pool until its dropped.
+            unsafe { &*(v.get(i.0 as usize).expect("Valid Ident").0) }
+        })
     }
 
     pub fn upcast(&self, i: u32) -> Option<Ident<'pool>> {
-        let values = unsafe { &*self.values.get() };
-        if i > 0 && (i as usize) < values.len() {
-            Some(Ident(i, PhantomData))
-        } else {
-            None
-        }
+        locked(&self.lock, || {
+            let values = unsafe { &*self.values.get() };
+            if i > 0 && (i as usize) < values.len() {
+                Some(Ident(i, PhantomData))
+            } else {
+                None
+            }
+        })
     }
 
     pub fn intern(&self, s: &str) -> Ident<'pool> {
@@ -86,8 +90,6 @@ impl<'pool> StringPool<'pool> {
             let temp: *const str = s;
             let temp = temp as *mut str;
 
-            // Tempting to just take read() here as a fast path but its important for thread satefy that someone else
-            // doesn't get through that check while we're allocating the box below.
             let lookup = unsafe { &mut *self.lookup.get() };
             if let Some(i) = lookup.get(&Ptr(temp)) {
                 return *i;
@@ -115,32 +117,25 @@ impl<'pool> StringPool<'pool> {
             s.as_ptr()
         } else {
             unreachable!()
-            // let mut alloc = s.to_owned().into_bytes();
-            // alloc.push(0); // might as well make it a c string since have to reallocate anyway
-
-            // let alloc: Box<[u8]> = alloc.into_boxed_slice();
-            // let alloc = Box::into_raw(alloc);
-            // let alloc = Ptr(unsafe { &mut (*alloc)[..alloc.len() - 1] } as *mut [u8] as *mut str);
-            // self.values.write().unwrap()[i.0 as usize] = alloc;
-            // alloc.0.to_raw_parts().0 as *const u8
         }
     }
 }
 
 impl Drop for StringPool<'_> {
     fn drop(&mut self) {
-        // now i borrow TODO: tracked owned ones seperatly
-        // let mut v = self.values.write().unwrap();
-        // for s in v.drain(0..) {
-        //     // # Safety
-        //     // Drop can only be called once.
-        //     unsafe {
-        //         let s = s.0 as *mut [u8];
-        //         let s = core::ptr::slice_from_raw_parts_mut(s.as_mut_ptr(), s.len() + 1); // it was a c string
+        locked(&self.lock, || {
+            let v = unsafe { &mut *self.values.get() };
+            for s in v.drain(0..) {
+                // # Safety
+                // Drop can only be called once.
+                unsafe {
+                    let s = s.0 as *mut [u8];
+                    let s = core::ptr::slice_from_raw_parts_mut(s.as_mut_ptr(), s.len() + 1); // it was a c string
 
-        //         drop(Box::from_raw(s));
-        //     }
-        // }
+                    drop(Box::from_raw(s));
+                }
+            }
+        })
     }
 }
 

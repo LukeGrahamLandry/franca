@@ -53,9 +53,10 @@ pub enum ParseFile<'p> {
 }
 
 /// # Safety
-/// The main thread only reads before 'tasks[next]+1' and the parse thread only writes to 'tasks[next]-1' or push to end.
+/// The main thread only reads before 'tasks[next]' and the parse thread only writes to 'tasks[next]' or push to end.
 /// Because of resizing the vec, the lock allows only one of A) main thread reading B) parse thread pushing.
 /// 'fn handle' doesn't worry about resize because there's only one parser thread.
+/// (i know its not faster than std locks, i just find it entertaining)
 pub struct ParseTasks<'p: 'static> {
     pub pool: &'p StringPool<'p>,
     pub codemap: RwLock<CodeMap>,
@@ -81,14 +82,13 @@ fn handle(parse: Arc<ParseTasks<'static>>) {
         }
 
         loop {
-            let task = parse.next.fetch_add(1, Ordering::AcqRel);
+            let task = parse.next.load(Ordering::Acquire);
 
             let file = unsafe { &mut *parse.tasks.get() }.get_mut(task).map(|f| mem::replace(f, ParseFile::Wip));
 
             let file = match file {
                 Some(f) => f,
                 None => {
-                    parse.next.fetch_sub(1, Ordering::AcqRel);
                     break;
                 }
             };
@@ -120,6 +120,8 @@ fn handle(parse: Arc<ParseTasks<'static>>) {
                 }
                 e => todo!("{task}: {e:?}"),
             }
+
+            parse.next.fetch_add(1, Ordering::AcqRel);
         }
     }
 }
@@ -147,7 +149,7 @@ impl<'p: 'static> ParseTasks<'p> {
         loop {
             unsafe { STATS.parser_check += 1 };
             let next = self.next.load(Ordering::Acquire);
-            if name + 1 < next {
+            if next > name {
                 return locked(&self.lock_resize, || {
                     let e = &mut unsafe { &mut *self.tasks.get() }[name];
                     match e {
@@ -168,7 +170,7 @@ impl<'p: 'static> ParseTasks<'p> {
         loop {
             unsafe { STATS.parser_check += 1 };
             let next = self.next.load(Ordering::Acquire);
-            if next > name + 1 {
+            if next > name {
                 return locked(&self.lock_resize, || {
                     let e = &mut unsafe { &mut *self.tasks.get() }[name];
                     match e {

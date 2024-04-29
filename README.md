@@ -41,7 +41,7 @@ there must be proportional terrible things or I'm probably just lying.
 ## Progress
 
 - `crates/compiler` contains the frontend and the jit used for comptime execution.
-- The programs in `tests` and `lib` actually work with the existing jit compiler.
+- The programs in `tests`, `lib`, and `examples` actually work with the existing jit compiler.
 - The programs in `plan` are just trying out how potential language features feel.
 
 ### Backends

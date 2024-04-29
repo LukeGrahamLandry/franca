@@ -1,0 +1,85 @@
+
+fun is_none() Unit = unit;
+fun is_some() Unit = unit;
+fun unwrap() Unit = unit;
+fun if_opt() Unit = unit;
+fun as_ref() Unit = unit;
+fun none() Unit = unit;
+fun some() Unit = unit;
+
+
+#comptime
+fn Option(const T: Type) Type = {
+    const Self: Type = (Some: T, None: Unit)!enum;
+    
+    fun none() Self = (None: ());
+    fun some(t: T) Self = (Some: t);
+    
+    // TODO: this is probably neater so leave it. but the old match version broke when I started resolving const arg patterns as const?? like it sometimes couldn't see captures. -- Apr 22
+    fun if(var self: Self, const then: Fn(T, Unit)) Unit = (self.is_some(), fn = then(self&.Some[]), fn=())!if;
+    /*
+    @match(self) {
+        (fn Some(t: T) Unit = then(t));
+        (fn None(t: Unit) Unit = ());
+    };*/
+    
+    
+    ::if_opt(T, bool);
+    ::if_opt(T, T);
+    
+    fun or(self: Self, const else: Fn(Unit, T)) T =
+        self.if(fn(t: T) T = t, fn = else()); // todo: should be able to just pass in else. might already work? 
+    
+    fun unwrap(self: Self) T =
+        self.if(fn(t: T) T = t, fn = @as(T) panic("Unwrapped missing value."));
+        
+    fun is_some(var self: Self) bool = self&!tag[].eq(tag_value(Self, Some!symbol));
+    fun is_none(var self: Self) bool = self&!tag[].eq(tag_value(Self, None!symbol));
+
+    // TODO: derive
+    fun eq(self: Self, other: Self) bool = 
+        self.if(fn(a: T) bool = {
+            other.if(fn(b: T) bool = {
+                a.eq(b)
+            }, fn = false)
+        }, fn = other.is_none());
+    
+    fun while(const next: Fn(Unit, Self), const body: Fn(T, Unit)) Unit = {
+        // Note: this is formated a bit awkwardly because you don't want to expand next and body in multiple places. 
+        // TODO: should add an optional warning if you care about binary size for expanding the same const closure multiple times. 
+        dowhile {() bool |
+            var v = next();
+            v.if(body);
+            v.is_some()
+        };
+    }
+    
+    Self
+}
+
+#comptime
+fun operator_question_prefix(const T: Type) Type = Option(T);
+
+// TODO: it should close over T without the extra argument when put in the #generic fn Option
+#comptime
+fun if_opt(const I: Type, const O: Type) Unit = {
+    // TODO: the old one with @match should work. need to fix chained_captures better -- Apr 23. 
+    fun if(var self: ?I, const then: Fn(I, O), const else: Fn(Unit, O)) O = 
+        (self.is_some(), fn = then(self&.Some[]), fn=else())!if;
+    /*
+    @match(self) {
+        (fn Some(t: I) O = then$t);
+        (fn None(t: Unit) O = else()); // TODO: allow no arg name in match macro. 
+    };
+    */
+}
+
+// TODO: this sucks cause you can't @match through a pointer 
+//       and like now do i have to write pointer versions of all of them so you dont have to manually call as_ref every time? 
+fun as_ref(self: *?i64) ?*i64 = {
+    let cond = self!tag[].eq(tag_value(?i64, Some!symbol));
+    ::if(?*i64); // TODO: it tries to resolve the overload before it evals the closure's return type -- Apr 25
+    if(cond, fn() ?*i64 = {
+        some$self.Some
+    },  fn() ?*i64 = none())
+}

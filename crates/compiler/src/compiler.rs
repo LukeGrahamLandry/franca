@@ -1241,7 +1241,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ice!("Missing resolved variable {}", var.log(self.pool),)
                 }
             }
-            Expr::GetNamed(name) => err!(CErr::UndeclaredIdent(*name)),
+            Expr::GetNamed(name) => err!("Undeclared Ident {}", self.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
             Expr::Raw { ty, value } => {
                 // TODO: the whole point is to not always have to deserialize it. allow Structured::ConstRaw
