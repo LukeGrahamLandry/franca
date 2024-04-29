@@ -1715,6 +1715,7 @@ pub enum Flag {
     Symbol,
     Outputs,
     When,
+    One_Ret_Pic,
     __Get_Assertions_Passed,
     _Reserved_Count_,
 }

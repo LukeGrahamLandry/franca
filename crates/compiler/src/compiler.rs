@@ -2892,6 +2892,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.compile_expr(result, expr_out, requested)
     }
 
+    // TODO: debug warning for misuse of #inline and #one_ret_pic
     /// The first two can be used for early bootstrapping since they just look at the ast without comptime eval.
     /// - tuple of string literals -> llvm-ir
     /// - tuple of 32-bit int literals -> aarch64 asm ops

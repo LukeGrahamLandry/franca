@@ -78,8 +78,8 @@ fn main() {
 /// My way has higher overhead per test but it feels worth it.
 fn run_tests() {
     if !PathBuf::from("tests").exists() {
-        eprint!("Directory 'tests' does not exist in cwd");
-        eprint!("run 'franca <path>' to run a specific file instead.");
+        eprintln!("Directory 'tests' does not exist in cwd");
+        eprintln!("run 'franca <path>' to run a specific file instead.");
         exit(1);
     }
     let start = timestamp();

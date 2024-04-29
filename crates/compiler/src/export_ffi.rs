@@ -75,7 +75,16 @@ pub const LIBC: &[(&str, *const u8)] = &[
         "fn clock_gettime(clock_id: i64, time_spec: VoidPtr) Unit",
         libc::clock_gettime as *const u8,
     ),
+    ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
+    ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
 ];
+
+// thank you rust very cool. TODO: non-macos
+extern "C" {
+    // These functions are in crt_externs.h.
+    fn _NSGetArgc() -> *mut libc::c_int;
+    fn _NSGetArgv() -> *mut *mut *mut libc::c_char;
+}
 
 // TODO: do this myself
 extern "C" {
@@ -160,7 +169,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "const DlHandle = VoidPtr; const CStr = Unique$Ptr(i64);").unwrap();
+            writeln!(out, "const DlHandle = VoidPtr; const CStr = Unique$Ptr(u8);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#pub #comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }

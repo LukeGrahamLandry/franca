@@ -614,25 +614,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let target_c_call = target.has_tag(Flag::C_Call);
         let comp_ctx = target.has_tag(Flag::Ct);
         if let Some(template) = target.any_reg_template {
-            // TODO: this is just a POC
-            let registers = vec![0, 1, 0];
-            let ops = self.emit_any_reg(template, registers);
-            for i in 0..arg.count {
-                if self.slot_type(StackOffset(arg.first.0 + i)).is_unit() {
-                    continue;
-                }
-                self.get_slot(i as i64, StackOffset(arg.first.0 + i));
-            }
-            self.release_many(arg);
-            assert_eq!(ret.count, 1);
-            for op in ops {
-                // println!("{op:#05x}, ");
-                self.compile.aarch64.push(op);
-            }
-
-            if !self.slot_type(ret.single()).is_unit() {
-                self.set_slot(x0, ret.single());
-            }
+            todo!("any_reg_template")
         } else if target.has_tag(Flag::Flat_Call) {
             // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
             assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
@@ -657,7 +639,27 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         Ok(())
     }
 
+    const DO_BASIC_ASM_INLINE: bool = true;
+
     fn branch_with_link(&mut self, f: FuncId) {
+        if Self::DO_BASIC_ASM_INLINE {
+            // TODO: save result on the function so dont have to recheck every time?
+            if let Some(code) = &self.compile.program[f].jitted_code {
+                if self.compile.program[f].has_tag(Flag::One_Ret_Pic) {
+                    // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
+                    if code.len() == 2 && code[0] as i64 == ret(()) && code[1] as i64 == ret(()) {
+                        return;
+                    }
+                    for op in &code[0..code.len() - 1] {
+                        debug_assert_ne!(*op as i64, ret(()));
+                        self.compile.aarch64.push(*op as i64);
+                    }
+                    debug_assert_eq!(*code.last().unwrap() as i64, ret(()));
+                    return;
+                }
+            }
+        }
+
         // If we already emitted the target function, can just branch there directly.
         // This covers the majority of cases because I try to handle callees first.
         // Note: checking this before comptime_addr means we handle inline asm as a normal function.
