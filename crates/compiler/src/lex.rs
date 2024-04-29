@@ -269,6 +269,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
     fn lex_quoted(&mut self) -> Token<'p> {
         if let Some((start, end)) = self.skip_quoted() {
             let text = &self.src.source_slice(self.root)[start..end];
+            // TODO: probably dont want to always hash string constants like this.
             self.token(Quoted(self.pool.intern(text)), self.start, self.current)
         } else {
             self.err(LexErr::UnterminatedStr)

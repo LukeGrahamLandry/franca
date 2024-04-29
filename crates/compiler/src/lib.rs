@@ -4,6 +4,7 @@
 #![feature(slice_ptr_len)]
 #![feature(slice_ptr_get)]
 #![feature(closure_track_caller)]
+#![feature(sync_unsafe_cell)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 extern crate core;

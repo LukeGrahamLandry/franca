@@ -38,7 +38,7 @@ pub fn bootstrap() -> (String, String) {
             .filter(|a| a.name != Flag::Bs.ident())
             .map(|a| {
                 assert!(a.args.is_none(), "TODO: args");
-                format!("@{} ", pool.get(a.name))
+                format!("#{} ", pool.get(a.name))
             })
             .collect();
 

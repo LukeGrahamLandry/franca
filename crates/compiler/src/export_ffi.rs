@@ -255,8 +255,8 @@ extern "C-unwind" fn symbol_to_cstr(program: &mut &mut Program, symbol: i64) -> 
     let symbol = symbol as u32;
     hope(|| {
         let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
-        let s = program.pool.get(symbol);
-        Ok(s.as_ptr())
+        let s = program.pool.get_c_str(symbol);
+        Ok(s)
     })
 }
 
