@@ -2,11 +2,12 @@
 #![feature(pattern)]
 
 use compiler::{
-    ast::{Flag, Program, TargetArch, TypeId},
+    ast::{FatStmt, Flag, Program, TargetArch, TypeId},
     bc_to_asm::emit_aarch64,
     compiler::{Compile, ExecTime},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
+    ffi::InterpSend,
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
@@ -46,7 +47,10 @@ fn main() {
         if name == "log_export_ffi" {
             println!("{}", get_include_std("compiler").unwrap());
             println!("{}", get_include_std("libc").unwrap());
-            println!("{}", get_include_std("compiler_late").unwrap());
+
+            let pool = Box::leak(Box::<StringPool>::default());
+            let program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+            println!("{}", program.ffi_definitions);
             return;
         }
 

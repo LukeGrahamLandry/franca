@@ -37,14 +37,14 @@ pub struct FnType {
     pub arg: TypeId,
     pub ret: TypeId,
 }
-
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
     Var,
     Const,
 }
-
+#[repr(C)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     #[default]
@@ -77,14 +77,14 @@ pub enum TypeInfo<'p> {
     OverloadSet,
     Scope,
 }
-
+#[repr(C)]
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
     pub ffi_byte_offset: Option<usize>,
 }
-
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
@@ -92,10 +92,12 @@ pub struct Annotation<'p> {
 }
 
 // TODO: this is getting a bit chonky if I want to store the kind here instead of globally. 32 bit indices would make it reasonable again
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType, pub usize);
 
 // TODO: should really get an arena going because boxes make me sad.
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Poison,
@@ -340,6 +342,7 @@ impl<'p> FatExpr<'p> {
 
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
@@ -373,7 +376,7 @@ impl Default for FatExpr<'_> {
         FatExpr::null(garbage_loc())
     }
 }
-
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Pattern<'p> {
     pub bindings: Vec<Binding<'p>>,
@@ -388,7 +391,7 @@ impl<'p> Default for Pattern<'p> {
         }
     }
 }
-
+#[repr(C)]
 #[derive(Copy, Clone, Debug, InterpSend, PartialEq, Eq)]
 pub enum Name<'p> {
     Ident(Ident<'p>),
@@ -397,6 +400,7 @@ pub enum Name<'p> {
 }
 
 // arguments of a function and left of variable declaration.
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Binding<'p> {
     pub name: Name<'p>,
@@ -597,7 +601,7 @@ impl<'p> FatExpr<'p> {
         }
     }
 }
-
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Stmt<'p> {
     Noop,
@@ -637,7 +641,7 @@ pub enum Stmt<'p> {
     DoneDeclFunc(FuncId, usize), // TODO: OverloadSetId
     ExpandParsedStmts(usize),
 }
-
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatStmt<'p> {
     pub stmt: Stmt<'p>,
@@ -689,6 +693,7 @@ pub struct Func<'p> {
 }
 
 // TODO: use this instead of having a billion fields.
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
@@ -801,7 +806,7 @@ impl<'p> Func<'p> {
         Ok(())
     }
 }
-
+#[repr(C)]
 #[derive(Clone, Debug, Default, InterpSend)]
 pub enum LazyType<'p> {
     #[default]
@@ -811,10 +816,10 @@ pub enum LazyType<'p> {
     Finished(TypeId),
     Different(Vec<Self>),
 }
-
+#[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(u64);
-
+#[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct VarInfo {
     pub kind: VarType,
@@ -840,6 +845,7 @@ pub struct Program<'p> {
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
     pub contextual_fields: Vec<Option<HashMap<Ident<'p>, (Values, TypeId)>>>,
+    pub ffi_definitions: String,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -958,6 +964,7 @@ impl<'p> Program<'p> {
             inline_llvm_ir: vec![],
             type_lookup: HashMap::new(),
             contextual_fields: vec![],
+            ffi_definitions: String::new(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -973,9 +980,20 @@ impl<'p> Program<'p> {
         program
     }
 
+    pub fn add_ffi_definition<T: InterpSend<'p>>(&mut self) {
+        let def = T::definition();
+        if !def.is_empty() {
+            self.ffi_definitions.push_str(&T::name());
+            self.ffi_definitions.push_str(" :: ");
+            self.ffi_definitions.push_str(&def);
+            self.ffi_definitions.push_str(";\n");
+        }
+    }
+
     /// This allows ffi types to be unique.
     pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
+            self.add_ffi_definition::<T>();
             let n = TypeId::unknown();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
@@ -1785,6 +1803,6 @@ macro_rules! tagged_index {
 tagged_index!(FuncId, 30);
 tagged_index!(TypeId, 31);
 tagged_index!(ScopeId, 29);
-
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub struct ScopeId(pub u64);

@@ -40,6 +40,16 @@ pub trait InterpSend<'p>: Sized {
     }
 
     fn size() -> usize;
+
+    fn definition() -> String {
+        String::new()
+    }
+
+    fn name() -> String {
+        String::new()
+    }
+
+    fn add_child_ffi_definitions(program: Program<'p>) {}
 }
 
 macro_rules! init_interp_send {
@@ -84,6 +94,10 @@ macro_rules! send_num {
             fn size() -> usize {
                 1
             }
+
+            fn name() -> String {
+                stringify!($ty).to_string()
+            }
         }
     };
     ($ty:tt, $($arg:tt)*) => {
@@ -118,6 +132,10 @@ impl<'p> InterpSend<'p> for bool {
     fn size() -> usize {
         1
     }
+
+    fn name() -> String {
+        "bool".to_string()
+    }
 }
 
 impl<'p> InterpSend<'p> for () {
@@ -144,6 +162,10 @@ impl<'p> InterpSend<'p> for () {
     fn size() -> usize {
         1
     }
+
+    fn name() -> String {
+        "Unit".to_string()
+    }
 }
 
 impl<'p> InterpSend<'p> for char {
@@ -168,6 +190,10 @@ impl<'p> InterpSend<'p> for char {
 
     fn size() -> usize {
         1
+    }
+
+    fn name() -> String {
+        "u32".to_string()
     }
 }
 
@@ -194,6 +220,10 @@ impl<'p> InterpSend<'p> for f64 {
     fn size() -> usize {
         1
     }
+
+    fn name() -> String {
+        "f64".to_string()
+    }
 }
 
 impl<'p> InterpSend<'p> for TypeId {
@@ -218,6 +248,10 @@ impl<'p> InterpSend<'p> for TypeId {
 
     fn size() -> usize {
         1
+    }
+
+    fn name() -> String {
+        "Type".to_string()
     }
 }
 
@@ -249,6 +283,10 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
 
     fn size() -> usize {
         A::size() + B::size()
+    }
+
+    fn name() -> String {
+        format!("Ty({}, {})", A::name(), B::name())
     }
 }
 
@@ -304,6 +342,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn size() -> usize {
         2
     }
+
+    fn name() -> String {
+        format!("List({})", T::name())
+    }
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
@@ -344,6 +386,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     fn size() -> usize {
         1
     }
+
+    fn name() -> String {
+        format!("*{}", T::name())
+    }
 }
 
 impl<'p> InterpSend<'p> for Value {
@@ -373,6 +419,10 @@ impl<'p> InterpSend<'p> for Value {
         let addr = i64::deserialize_from_ints(values)? as usize as *const Self;
         // TODO: leak
         Some(unsafe { *addr })
+    }
+
+    fn name() -> String {
+        "VoidPtr".to_string()
     }
 }
 
@@ -433,6 +483,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
     fn size() -> usize {
         1 + T::size()
     }
+
+    fn name() -> String {
+        format!("?{}", T::name())
+    }
 }
 
 impl<'p> InterpSend<'p> for Span {
@@ -465,6 +519,14 @@ impl<'p> InterpSend<'p> for Span {
     fn size() -> usize {
         <(u32, u32)>::size()
     }
+
+    fn definition() -> String {
+        "(u32, u32)".to_string()
+    }
+
+    fn name() -> String {
+        "Span".to_string()
+    }
 }
 
 impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for HashMap<K, V> {
@@ -491,6 +553,10 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     fn size() -> usize {
         Vec::<(K, V)>::size()
     }
+
+    fn name() -> String {
+        format!("HashMap({}, {})", K::name(), V::name())
+    }
 }
 
 impl<'p> InterpSend<'p> for String {
@@ -516,6 +582,10 @@ impl<'p> InterpSend<'p> for String {
 
     fn size() -> usize {
         Vec::<u8>::size()
+    }
+
+    fn name() -> String {
+        Vec::<u8>::name()
     }
 }
 

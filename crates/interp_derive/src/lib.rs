@@ -1,5 +1,5 @@
 use proc_macro2::{Ident, TokenStream};
-use quote::{quote, quote_spanned};
+use quote::{quote, quote_spanned, ToTokens};
 use syn::{parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed, FieldsUnnamed, GenericParam, Generics, TypeParamBound};
 
 #[proc_macro_derive(InterpSend)]
@@ -22,6 +22,8 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let serialize_to_ints = serialize(&input.ident, &input.data, false);
     let serialize = serialize(&input.ident, &input.data, true);
     let size = size_for(&input.ident, &input.data);
+
+    let definition = get_definition(&input.data);
 
     let expanded = quote! {
         // The generated impl.
@@ -46,10 +48,18 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
                 #deserialize_from_ints
             }
 
-
             fn size() -> usize {
                 use crate::ffi::InterpSend;
                 #size
+            }
+
+
+            fn definition() -> String {
+                #definition.to_string()
+            }
+
+            fn name() -> String {
+                stringify!(#name).to_string()
             }
         }
     };
@@ -58,6 +68,64 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     proc_macro::TokenStream::from(expanded)
 }
 
+fn get_definition(data: &Data) -> TokenStream {
+    match data {
+        syn::Data::Struct(data) => get_definition_fields(&data.fields, false),
+        syn::Data::Enum(data) => {
+            let s = format!("@enum(\n{})", "    {}: {},\n".repeat(data.variants.len()));
+            let name_field = data.variants.iter().map(|f| {
+                let name = &f.ident;
+                let fields = get_definition_fields(&f.fields, true);
+                quote! {
+                    stringify!(#name), #fields,
+                }
+            });
+            quote! {
+                format!(#s, #(#name_field)*)
+            }
+        }
+        syn::Data::Union(_) => todo!(),
+    }
+}
+
+fn get_definition_fields(fields: &syn::Fields, in_enum: bool) -> TokenStream {
+    match fields {
+        syn::Fields::Named(ref fields) => {
+            let s = if in_enum {
+                format!("@struct({})", "{}: {}, ".repeat(fields.named.len()))
+            } else {
+                format!("@struct(\n{})", "    {}: {}, \n".repeat(fields.named.len()))
+            };
+            let name_field = fields.named.iter().map(|f| {
+                let ty = &f.ty;
+                let name_str = f.ident.as_ref().unwrap().to_string();
+                quote! {
+                    #name_str, <#ty as crate::ffi::InterpSend>::name(),
+                }
+            });
+            quote! {
+                format!(#s, #(#name_field)*)
+            }
+        }
+        syn::Fields::Unnamed(ref fields) => {
+            let s = format!("({})", "{}, ".repeat(fields.unnamed.len()));
+            let name_field = fields.unnamed.iter().map(|f| {
+                let ty = &f.ty;
+                quote! {
+                    <#ty as crate::ffi::InterpSend>::name(),
+                }
+            });
+            quote! {
+                format!(#s, #(#name_field)*)
+            }
+        }
+        syn::Fields::Unit => {
+            quote! {
+                String::from("Unit")
+            }
+        }
+    }
+}
 fn get_type(name: &Ident, data: &Data) -> TokenStream {
     match data {
         syn::Data::Struct(data) => get_type_fields(name, &data.fields),

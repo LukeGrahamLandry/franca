@@ -111,7 +111,7 @@ pub enum DebugState<'p> {
     ResolveFnRef(Var<'p>),
     TypeOf,
 }
-
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FnWip<'p> {
     pub stack_slots: usize,

@@ -144,7 +144,7 @@ pub enum Value {
         rt: FuncId,
     },
 }
-
+#[repr(C)]
 #[derive(Debug, InterpSend, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum FuncRef {
     Exact(FuncId),
@@ -186,7 +186,7 @@ impl From<FuncId> for FuncRef {
         FuncRef::Exact(value)
     }
 }
-
+#[repr(C)]
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
 pub enum Values {
     One(Value),
@@ -247,10 +247,10 @@ impl From<(Values, TypeId)> for Structured {
         Structured::Const(ty, value)
     }
 }
-
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackOffset(pub usize);
-
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackRange {
     pub first: StackOffset,

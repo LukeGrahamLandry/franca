@@ -317,4 +317,8 @@ impl<'p> InterpSend<'p> for Ident<'p> {
 
         Some(Ident(i as u32, PhantomData))
     }
+
+    fn name() -> String {
+        "Symbol".to_string()
+    }
 }
