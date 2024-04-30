@@ -99,7 +99,6 @@ pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType, pub u32);
 pub enum Expr<'p> {
     Poison,
     Value {
-        ty: TypeId,
         value: Values,
     },
     WipFunc(FuncId),
@@ -130,12 +129,12 @@ pub enum Expr<'p> {
     GetParsed(usize),
 }
 
-impl<'p> Expr<'p> {
+impl<'p> FatExpr<'p> {
     pub fn as_overload_set(&self) -> Option<usize> {
-        if let Expr::Value { ty, value } = self {
-            if *ty == TypeId::overload_set() {
-                if let Values::One(Value::OverloadSet(i)) = value {
-                    return Some(*i);
+        if let Expr::Value { value } = &self.expr {
+            if self.ty == TypeId::overload_set() {
+                if let &Values::One(Value::OverloadSet(i)) = value {
+                    return Some(i);
                 }
             }
         }
@@ -344,6 +343,12 @@ pub struct FatExpr<'p> {
 }
 
 impl<'p> FatExpr<'p> {
+    pub fn set(&mut self, value: Values, ty: TypeId) {
+        debug_assert!(!ty.is_unknown());
+        self.expr = Expr::Value { value };
+        self.ty = ty;
+    }
+
     pub fn as_int(&self) -> Option<i64> {
         if let Expr::Value {
             value: Values::One(Value::I64(v)),
@@ -357,7 +362,7 @@ impl<'p> FatExpr<'p> {
 
     pub fn value(value: Values, ty: TypeId, loc: Span) -> Self {
         FatExpr {
-            expr: Expr::Value { ty, value },
+            expr: Expr::Value { value },
             loc,
             ty,
         }
@@ -569,6 +574,13 @@ impl<'p> FatExpr<'p> {
             ty: TypeId::unknown(),
         }
     }
+    pub fn synthetic_ty(expr: Expr<'p>, loc: Span, ty: TypeId) -> Self {
+        debug_assert!(!ty.is_unknown());
+        let mut e = Self::synthetic(expr, loc);
+        e.ty = ty;
+        e
+    }
+
     // used for moving out of ast
     pub fn null(loc: Span) -> Self {
         FatExpr::synthetic(Expr::Poison, loc)
@@ -1441,27 +1453,6 @@ impl<'p> Expr<'p> {
         }
     }
 
-    pub fn unit() -> Expr<'p> {
-        Expr::Value {
-            ty: TypeId::unit(),
-            value: Value::Unit.into(),
-        }
-    }
-
-    pub fn ty(ty: TypeId) -> Expr<'p> {
-        Expr::Value {
-            ty: TypeId::ty(),
-            value: Value::Type(ty).into(),
-        }
-    }
-
-    pub fn int(v: i64) -> Expr<'p> {
-        Expr::Value {
-            ty: TypeId::i64(),
-            value: Value::I64(v).into(),
-        }
-    }
-
     pub fn is_raw_unit(&self) -> bool {
         matches!(
             self,
@@ -1505,6 +1496,26 @@ impl<'p> Expr<'p> {
             return Some(name);
         }
         None
+    }
+}
+
+impl<'p> FatExpr<'p> {
+    pub fn unit(loc: Span) -> Self {
+        Self::synthetic_ty(Expr::Value { value: Value::Unit.into() }, loc, TypeId::unit())
+    }
+
+    pub fn ty(ty: TypeId, loc: Span) -> Self {
+        Self::synthetic_ty(
+            Expr::Value {
+                value: Value::Type(ty).into(),
+            },
+            loc,
+            TypeId::ty(),
+        )
+    }
+
+    pub fn int(v: i64, loc: Span) -> Self {
+        Self::synthetic_ty(Expr::Value { value: Value::I64(v).into() }, loc, TypeId::i64())
     }
 }
 

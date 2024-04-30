@@ -10,7 +10,7 @@ pub fn break_here(_e: &CErr) {
     let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
     if depth == 0 {
         // TODO: make this never happen so dont have to worry about short circuiting -- Apr 25
-        // println!("err {e:?}")
+        // println!("err: {e:?}");
     }
 }
 
@@ -25,8 +25,6 @@ macro_rules! err {
             loc: None,
             reason: e,
             trace: String::new(),
-            value_stack: vec![],
-            call_stack: String::new(),
         })
     }};
     ($($arg:tt)*) => {{

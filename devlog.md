@@ -1,6 +1,9 @@
 Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.
 
 - can get rid of the hack about reconstructing slices
+- c call go though ints instead of values
+- reduce the big dispatch thing for turing values into asm consts
+- can get rid of the values version of serialize
 
 ## ConstantData arena (Apr 28)
 

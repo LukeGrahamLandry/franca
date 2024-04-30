@@ -4,7 +4,6 @@
 
 use crate::ast::TypeId;
 use crate::ast::VarType;
-use crate::bc::Value;
 use crate::ffi::InterpSend;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};

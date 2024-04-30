@@ -248,18 +248,18 @@ impl<'a, 'p> Parser<'a, 'p> {
             Number(f) => {
                 self.start_subexpr();
                 self.pop();
-                Ok(self.expr(Expr::Value {
-                    ty: TypeId::i64(),
-                    value: Value::I64(f).into(),
-                }))
+                let mut e = self.expr(Expr::Value { value: Value::I64(f).into() });
+                e.ty = TypeId::i64();
+                Ok(e)
             }
             Float(f) => {
                 self.start_subexpr();
                 self.pop();
-                Ok(self.expr(Expr::Value {
-                    ty: TypeId::f64(),
+                let mut e = self.expr(Expr::Value {
                     value: Value::F64(f.to_bits()).into(),
-                }))
+                });
+                e.ty = TypeId::f64();
+                Ok(e)
             }
             BinaryNum { bit_count, value } => {
                 if bit_count > 64 {
@@ -272,8 +272,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.pop();
                 let v = i64::from_le_bytes((value).to_le_bytes());
-                let v = self.expr(Expr::int(v));
-                let bits = self.expr(Expr::int(bit_count as i64));
+                let mut v = self.expr(Expr::Value { value: Value::I64(v).into() });
+                v.ty = TypeId::i64();
+                let mut bits = self.expr(Expr::Value {
+                    value: Value::I64(bit_count as i64).into(),
+                });
+                bits.ty = TypeId::i64();
                 let pair = self.expr(Expr::Tuple(vec![bits, v]));
                 let call = self.expr(Expr::SuffixMacro(Flag::From_Bit_Literal.ident(), Box::new(pair)));
                 Ok(call)
@@ -320,14 +324,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                     //        hangs if you forget this so unwrap and that thread crashes.
                     //        cause its not waiting on a mutex, just the counter never goes up. -- Apr 28
                     self.start_subexpr();
-                    Box::new(self.expr(Expr::unit()))
+                    Box::new(self.raw_unit())
                 };
 
                 let target = match self.peek() {
                     Semicolon | Comma | RightParen | RightSquiggle | Dot | RightAngle => {
                         // target is optional.
                         self.start_subexpr();
-                        Box::new(self.expr(Expr::unit()))
+                        Box::new(self.raw_unit())
                     }
                     _ => Box::new(self.parse_expr()?),
                 };
@@ -448,7 +452,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         self.start_subexpr();
         self.eat(LeftParen)?;
         if self.maybe(RightParen) {
-            return Ok(self.expr(Expr::unit()));
+            return Ok(self.raw_unit());
         }
         let mut args: Vec<FatExpr<'p>> = vec![];
         loop {
@@ -512,7 +516,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         self.eat(RightParen)?;
 
         Ok(match args.len() {
-            0 => self.expr(Expr::unit()),
+            0 => self.raw_unit(),
             1 => {
                 self.end_subexpr();
                 args.into_iter().next().unwrap()
@@ -901,6 +905,12 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
+    fn raw_unit(&mut self) -> FatExpr<'p> {
+        let mut e = self.expr(Expr::Value { value: Value::Unit.into() });
+        e.ty = TypeId::unit();
+        e
+    }
+
     #[track_caller]
     fn stmt(&mut self, annotations: Vec<Annotation<'p>>, stmt: Stmt<'p>) -> FatStmt<'p> {
         outln!(
@@ -975,11 +985,11 @@ impl<'a, 'p> Parser<'a, 'p> {
                 }
             } else {
                 self.start_subexpr();
-                self.expr(Expr::unit())
+                self.raw_unit()
             }
         } else {
             self.start_subexpr();
-            self.expr(Expr::unit())
+            self.raw_unit()
         };
         Ok(self.expr(Expr::Block {
             resolved: None,

@@ -20,7 +20,6 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let get_type = get_type(&input.ident, &input.data);
     let deserialize_from_ints = deserialize(&input.ident, &input.data, false);
     let serialize_to_ints = serialize(&input.ident, &input.data, false);
-    let serialize = serialize(&input.ident, &input.data, true);
     let size = size_for(&input.ident, &input.data);
 
     let definition = get_definition(&input.data);
@@ -35,9 +34,6 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
             fn create_type(program: &mut crate::ast::Program<'p>) -> TypeId {
                 #get_type
-            }
-            fn serialize(self, values: &mut Vec<Value>) {
-                #serialize
             }
 
             fn serialize_to_ints(self, values: &mut Vec<i64>) {

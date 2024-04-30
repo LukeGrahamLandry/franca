@@ -31,7 +31,6 @@ use llvm_sys::{
 use compiler::{
     ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, BcReady, StackOffset, Value},
-    bc_to_asm::ConstBytes,
     compiler::{Compile, ExecTime, Res},
     err, extend_options,
     logging::PoolLog,
@@ -50,7 +49,6 @@ pub struct JittedLlvm {
     functions: Vec<Option<(LLVMValueRef, CString, bool)>>,
     i32_ty: LLVMTypeRef,
     ptr_ty: *mut llvm_sys::LLVMType,
-    constants: ConstBytes,
 }
 
 impl JittedLlvm {
@@ -96,7 +94,6 @@ impl JittedLlvm {
                 functions: vec![],
                 i32_ty: LLVMInt32TypeInContext(context),
                 ptr_ty: LLVMPointerTypeInContext(context, c_uint::from(0u16)),
-                constants: ConstBytes::default(),
             };
 
             for f in program.inline_llvm_ir.clone() {

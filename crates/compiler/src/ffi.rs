@@ -4,8 +4,8 @@ use codemap::Span;
 
 use crate::{
     ast::{Program, TypeId, TypeInfo},
-    bc::{Value, Values},
-    Map, STATS,
+    bc::Value,
+    Map,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
@@ -17,19 +17,8 @@ pub trait InterpSend<'p>: Sized {
     fn get_type(program: &mut Program<'p>) -> TypeId {
         program.get_ffi_type::<Self>(Self::get_type_key())
     }
-    /// This should only be called once! Use get_type which caches it.
     fn create_type(interp: &mut Program<'p>) -> TypeId;
-    fn serialize(self, values: &mut Vec<Value>);
-    fn serialize_one(self) -> Values {
-        unsafe {
-            STATS.serialize_one += 1;
-        }
-        let mut values = vec![];
-        self.serialize(&mut values);
-        debug_assert_eq!(values.len(), Self::size());
-        values.into()
-    }
-
+    /// This should only be called once! Use get_type which caches it.
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
     fn serialize_to_ints(self, values: &mut Vec<i64>);
     fn serialize_to_ints_one(self) -> Vec<i64> {
@@ -79,9 +68,6 @@ macro_rules! send_num {
                 TypeId::i64()
             }
 
-            fn serialize(self, values: &mut Vec<Value>) {
-                values.push(Value::I64(self as i64))
-            }
 
             fn serialize_to_ints(self, values: &mut Vec<i64>) {
                 values.push(self as i64)
@@ -117,10 +103,6 @@ impl<'p> InterpSend<'p> for bool {
         TypeId::bool()
     }
 
-    fn serialize(self, values: &mut Vec<Value>) {
-        values.push(Value::Bool(self))
-    }
-
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         values.push(if self { 1 } else { 0 })
     }
@@ -144,10 +126,6 @@ impl<'p> InterpSend<'p> for () {
     }
     fn create_type(_program: &mut Program<'p>) -> TypeId {
         TypeId::unit()
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        values.push(Value::Unit)
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -180,10 +158,6 @@ impl<'p> InterpSend<'p> for char {
         values.push(self as i64)
     }
 
-    fn serialize(self, values: &mut Vec<Value>) {
-        values.push(Value::I64(self as i64))
-    }
-
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         char::from_u32(values.next()? as u32)
     }
@@ -203,10 +177,6 @@ impl<'p> InterpSend<'p> for f64 {
     }
     fn create_type(_program: &mut Program<'p>) -> TypeId {
         TypeId::f64()
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        values.push(Value::F64(self.to_bits()))
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -234,10 +204,6 @@ impl<'p> InterpSend<'p> for TypeId {
         TypeId::ty()
     }
 
-    fn serialize(self, values: &mut Vec<Value>) {
-        values.push(Value::Type(self))
-    }
-
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         values.push(self.as_raw())
     }
@@ -263,11 +229,6 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
         let a = A::get_type(program);
         let b = B::get_type(program);
         program.tuple_of(vec![a, b])
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        self.0.serialize(values);
-        self.1.serialize(values);
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -299,18 +260,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         let ty = T::get_type(program);
         let ty = program.intern_type(TypeInfo::Ptr(ty));
         program.intern_type(TypeInfo::Tuple(vec![ty, TypeId::i64()]))
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        let len = self.len();
-        let mut parts = vec![];
-        for e in self {
-            e.serialize_to_ints(&mut parts);
-        }
-        debug_assert_eq!(parts.len(), T::size() * len);
-        let (ptr, _, _) = parts.into_raw_parts();
-        values.push(Value::Heap(ptr));
-        values.push(Value::I64(len as i64));
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -359,15 +308,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         program.intern_type(TypeInfo::Ptr(ty))
     }
 
-    fn serialize(self, values: &mut Vec<Value>) {
-        let mut parts = vec![];
-        let inner: T = *self;
-        inner.serialize_to_ints(&mut parts);
-        debug_assert_eq!(parts.len(), T::size());
-        let (ptr, _, _) = parts.into_raw_parts();
-        values.push(Value::Heap(ptr))
-    }
-
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         let mut parts = vec![];
         let inner: T = *self;
@@ -403,11 +343,6 @@ impl<'p> InterpSend<'p> for Value {
         TypeId::any()
     }
 
-    fn serialize(self, values: &mut Vec<Value>) {
-        let addr = Box::into_raw(Box::new(self)) as *const Self as usize as i64;
-        values.push(Value::I64(addr))
-    }
-
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         let addr = Box::into_raw(Box::new(self)) as *const Self as usize as i64;
         values.push(addr)
@@ -437,21 +372,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
     fn create_type(interp: &mut Program<'p>) -> TypeId {
         let t = T::get_type(interp);
         interp.tuple_of(vec![TypeId::i64(), t])
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        match self {
-            Some(v) => {
-                values.push(Value::I64(0));
-                v.serialize(values);
-            }
-            None => {
-                values.push(Value::I64(1));
-                for _ in 0..T::size() {
-                    values.push(Value::Unit);
-                }
-            }
-        }
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -502,11 +422,6 @@ impl<'p> InterpSend<'p> for Span {
     }
 
     // This looks wierd because no breaking changes is when private field.
-    fn serialize(self, values: &mut Vec<Value>) {
-        let (a, b): (u32, u32) = unsafe { mem::transmute(self) };
-        (a, b).serialize(values)
-    }
-
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         let (a, b): (u32, u32) = unsafe { mem::transmute(self) };
         (a, b).serialize_to_ints(values)
@@ -540,10 +455,6 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
         Vec::<(K, V)>::get_type(interp)
     }
 
-    fn serialize(self, values: &mut Vec<Value>) {
-        self.into_iter().collect::<Vec<_>>().serialize(values)
-    }
-
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         self.into_iter().collect::<Vec<_>>().serialize_to_ints(values)
     }
@@ -568,10 +479,6 @@ impl<'p> InterpSend<'p> for String {
 
     fn create_type(interp: &mut Program<'p>) -> TypeId {
         Vec::<u8>::get_type(interp)
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        Vec::<u8>::from(self).serialize(values)
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -599,12 +506,6 @@ macro_rules! send_arr {
             }
             fn create_type(_: &mut Program<'p>) -> TypeId {
                 TypeId::i64()
-            }
-
-            fn serialize(self, values: &mut Vec<Value>) {
-                for v in self.into_iter() {
-                    v.serialize(values);
-                }
             }
 
             fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -641,7 +542,6 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 #[test]
 fn interp_send() {
     use crate::ast::TargetArch;
-    use crate::bc_to_asm::ConstBytes;
     use crate::pool::StringPool;
     use interp_derive::InterpSend;
     #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
@@ -671,18 +571,15 @@ fn interp_send() {
         j: Option<i64>,
     }
 
-    let mut bytes = ConstBytes::default();
     let pool = Box::leak(Box::<StringPool>::default());
     let mut p = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
     let one = HelloWorld { a: 123, b: 345 };
-    let two = one.serialize_one();
-    let two_b = bytes.store_to_ints(two.vec().iter());
+    let two_b = one.serialize_to_ints_one();
     let three_b = HelloWorld::deserialize_from_ints(&mut two_b.into_iter()).unwrap();
     assert_eq!(one, three_b);
 
     let four = vec![one, one, HelloWorld { a: 678, b: 910 }, one];
-    let five = four.clone().serialize_one();
-    let five_b = bytes.store_to_ints(five.vec().iter());
+    let five_b = four.clone().serialize_to_ints_one();
     let six_b = Vec::<HelloWorld>::deserialize_from_ints(&mut five_b.into_iter()).unwrap();
     assert_eq!(four, six_b);
 
@@ -695,8 +592,7 @@ fn interp_send() {
         h: HelloEnum::G,
         j: Some(123),
     };
-    let eight = seven.serialize_one();
-    let eight_b = bytes.store_to_ints(eight.vec().iter());
+    let eight_b = seven.serialize_to_ints_one();
     let nine_b = Nested::deserialize_from_ints(&mut eight_b.into_iter()).unwrap();
     assert_eq!(seven, nine_b);
 
@@ -711,7 +607,6 @@ pub mod c {
     use crate::err;
     use crate::{
         ast::{Program, TypeId, TypeInfo},
-        bc::{Value, Values},
         compiler::Res,
     };
 
@@ -733,21 +628,8 @@ pub mod c {
         }
     }
 
-    pub fn to_void_ptr(v: &Value) -> Arg {
-        match v {
-            Value::I64(v) => Arg::new(v),
-            Value::Bool(v) => Arg::new(v),
-            Value::Symbol(v) => Arg::new(v),
-            Value::Type(v) => Arg::new(v),
-            // This is weird because I want Value to impl Hash so it can't contain a float, but the u64 is f64::to_bits so it works as a pointer
-            Value::F64(v) => Arg::new(v),
-            _ => todo!("to_void_ptr {v:?}"),
-        }
-    }
-
     // NOTE: pointers passed to Arg::new must live until into_cif
-    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, arg: Values, comp_ctx: bool) -> Res<'p, i64> {
-        let args: Vec<Value> = arg.into();
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
         let mut b = Builder::new();
@@ -761,10 +643,10 @@ pub mod c {
             for ty in fields {
                 b = b.arg(program.program.as_c_type(*ty)?);
             }
-            args.iter().map(crate::ffi::c::to_void_ptr).collect()
+            args.iter().map(Arg::new).collect()
         } else {
             b = b.arg(program.program.as_c_type(f_ty.arg)?);
-            args.iter().map(crate::ffi::c::to_void_ptr).collect()
+            args.iter().map(Arg::new).collect()
         };
 
         if f_ty.ret != TypeId::unit() {

@@ -203,12 +203,15 @@ impl Structured {
         }
     }
 
-    pub fn get<'p>(self) -> Res<'p, Values> {
+    pub fn expect<'p>(self) -> Res<'p, Values> {
+        let ty = self.ty();
+        Ok(unwrap!(self.get(), "not const {ty:?}"))
+    }
+
+    pub fn get(self) -> Option<Values> {
         match self {
-            Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) | Structured::RuntimeOnly(_) => {
-                err!("not const {self:?}",)
-            }
-            Structured::Const(_, v) => Ok(v),
+            Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) | Structured::RuntimeOnly(_) => None,
+            Structured::Const(_, v) => Some(v),
         }
     }
 

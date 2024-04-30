@@ -239,55 +239,20 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 &Bc::CallDirect { f, ret, arg } => {
                     self.call_direct(f, ret, arg)?;
                 }
-                Bc::LoadConstant { slot, value } => match value {
-                    &Value::F64(n) => {
-                        // Don't care that its a float since we always write it to memory anyway.
-                        self.load_imm(x0, n);
-                        self.set_slot(x0, *slot);
-                    }
-                    Value::I64(n) => {
-                        self.load_imm(x0, u64::from_le_bytes(n.to_le_bytes()));
-                        self.set_slot(x0, *slot);
-                    }
-                    // These only make sense during comptime execution, but they're also really just numbers.
-                    Value::Symbol(i) => {
-                        self.load_imm(x0, *i as u64);
-                        self.set_slot(x0, *slot);
-                    }
-                    Value::OverloadSet(i) => {
-                        self.load_imm(x0, *i as u64);
-                        self.set_slot(x0, *slot);
-                    }
-                    Value::Type(ty) => {
-                        self.load_imm(x0, ty.as_raw() as u64);
-                        self.set_slot(x0, *slot);
-                    }
-                    Value::GetFn(f) => {
-                        self.load_imm(x0, f.as_raw() as u64);
-                        self.set_slot(x0, *slot);
-                    }
-                    &Value::Bool(b) => {
-                        self.compile.aarch64.push(movz(X64, x0, b as i64, 0));
-                        self.set_slot(x0, *slot);
-                    }
-                    Value::Unit => {}
-                    &Value::Heap(value) => {
-                        // ty will generally be Ptr(whatever), but could be an int for comptime ffi void ptr stuff.
-                        let ty = self.slot_type(*slot);
-                        // TODO: this needs to be different when I actually want to emit an executable.
-                        self.load_imm(x0, value as u64);
-                        self.set_slot(x0, *slot);
-                    }
-                    &Value::GetNativeFnPtr(f) => {
+                Bc::LoadConstant { slot, value } => {
+                    if let &Value::GetNativeFnPtr(f) = value {
                         // TODO: use adr+adrp instead of an integer.
                         // TODO: do linker-ish things to allow forward references.
                         //       actually the way i do that rn is with the dispatch table so could just use that for now.
                         let ptr = unwrap!(self.compile.aarch64.get_fn(f), "GetNativeFnPtr not compiled yet. TODO: mutual recursion.");
                         self.load_imm(x0, ptr.as_ptr() as u64);
                         self.set_slot(x0, *slot);
+                    } else {
+                        let n = value.as_raw_int();
+                        self.load_imm(x0, u64::from_le_bytes(n.to_le_bytes()));
+                        self.set_slot(x0, *slot);
                     }
-                    Value::SplitFunc { ct, rt } => todo!(),
-                },
+                }
                 &Bc::JumpIf { cond, true_ip, false_ip } => {
                     self.get_slot(x0, cond);
                     self.compile.aarch64.push(brk(0));
@@ -563,43 +528,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             .set_slot_f(floats, slot));
     }
 
-    // TODO: i want to do this though asm but that means i need to bootstrap more stuff.
-    fn emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
-        todo!()
-        // let mut out = Vec::<i64>::new();
-        // extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
-        //     ops.push(op);
-        // }
-        // let arg = (((&mut out) as *mut Vec<i64> as usize, consume as usize), registers).serialize_one();
-        // self.compile.ready.run(template, arg, ExecTime::Comptime, 1, self.compile.program).unwrap();
-        // out
-    }
-
-    fn _emit_any_reg(&mut self, template: FuncId, registers: Vec<i64>) -> Vec<i64> {
-        todo!()
-        // let f = self.compile.aarch64.get_fn(template).unwrap().as_ptr();
-        // // TODO: this relies on my slice layout. use ffi types.
-        // type TemplateFn = extern "C" fn(&mut Vec<i64>, extern "C" fn(&mut Vec<i64>, i64), *const i64, usize);
-        // let f: TemplateFn = unsafe { transmute(f) };
-        // let mut out = Vec::<i64>::new();
-        // extern "C" fn consume(ops: &mut Vec<i64>, op: i64) {
-        //     ops.push(op);
-        // }
-        // self.compile.aarch64.make_exec();
-        // let indirect_fns = self.compile.aarch64.get_dispatch();
-        // unsafe {
-        //     asm!(
-        //     "mov x21, {fns}",
-        //     fns = in(reg) indirect_fns,
-        //     out("x21") _
-        //     );
-        // }
-        // f(&mut out, consume, registers.as_ptr(), registers.len());
-        // self.compile.aarch64.make_write();
-        // // TODO: cache these so I don't have to keep doing sys-calls to toggle the permissions every call?
-        // out
-    }
-
     fn slot_is_var(&self, slot: StackOffset) -> bool {
         self.compile.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
     }
@@ -705,54 +633,45 @@ use crate::ffi::InterpSend;
 #[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
 
-#[derive(Default)]
-pub struct ConstBytes {
-    /// Safety: the asm code will alias these pointers so be careful. TODO: does it have to be a *const [UnsafeCell<i64>]?
-    constants: Vec<UnsafeCell<Vec<i64>>>,
+pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
+    let mut out = vec![];
+    for value in values {
+        write_int_copy(value, &mut out);
+    }
+    out
 }
 
-impl ConstBytes {
-    pub fn store_to_ints<'a>(&mut self, values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
-        let mut out = vec![];
-        for value in values {
-            self.write_int_copy(value, &mut out);
-        }
-        out
-    }
+pub fn store_to_ints_values(values: Values) -> Vec<i64> {
+    store_to_ints(&mut values.vec().iter())
+}
 
-    pub fn store<'a>(&mut self, values: impl Iterator<Item = &'a Value>) -> *const u8 {
-        let mut out = self.store_to_ints(values);
-        let ptr = out.as_ptr() as *const u8;
-        self.constants.push(UnsafeCell::new(out));
-        ptr
-    }
+pub fn store<'a>(values: impl Iterator<Item = &'a Value>) -> *const u8 {
+    let mut out = store_to_ints(values);
+    out.into_raw_parts().0 as *const u8
+}
 
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn copy_heap(&mut self, value: *mut InterpBox, first: usize, count: usize) -> *const u8 {
-        let value = unsafe { &*value };
-        // No longer true since now i do seialization stuff so it might have been mutable before... idk. the whole thing's a giant hack
-        // assert!(value.is_constant, "wont be shared by reference so only makes sense for constants?");
-        let values = &value.values[first..first + count];
-        self.store(values.iter())
-    }
+pub fn write_int_copy(value: &Value, out: &mut Vec<i64>) {
+    out.push(value.as_raw_int());
+}
 
-    pub fn write_int_copy(&mut self, value: &Value, out: &mut Vec<i64>) {
-        match value {
+impl Value {
+    pub fn as_raw_int(&self) -> i64 {
+        match self {
+            Value::F64(f) => i64::from_le_bytes(f.to_le_bytes()),
+            &Value::I64(i) => i,
+            &Value::Bool(i) => i as i64,
+            &Value::OverloadSet(i) => i as i64,
+            &Value::GetFn(i) => i.as_raw(),
+            &Value::Symbol(i) => i as i64,
+            &Value::Type(ty) => ty.as_raw(),
+            Value::Unit => 0, // TODO
+            &Value::Heap(ptr) => ptr as usize as i64,
             Value::SplitFunc { ct, rt } => todo!(),
-            Value::F64(_) => todo!(),
-            &Value::I64(i) => out.push(i),
-            &Value::Bool(i) => out.push(i as i64),
-            &Value::OverloadSet(i) => out.push(i as i64),
-            &Value::GetFn(i) => out.push(i.as_raw()),
-            &Value::Symbol(i) => out.push(i as i64),
-            &Value::Type(ty) => out.push(ty.as_raw()),
-            Value::Unit => out.push(0), // TODO
             &Value::GetNativeFnPtr(i) => {
                 // TODO: not sure if we want to preserve the id or use the actual address
                 // out.push(i.0 as i64);
                 todo!()
             }
-            &Value::Heap(ptr) => out.push(ptr as usize as i64),
         }
     }
 }
@@ -760,7 +679,6 @@ impl ConstBytes {
 //#[cfg(target_arch = "aarch64")]
 pub mod jit {
     use crate::ast::FuncId;
-    use crate::bc_to_asm::ConstBytes;
     use crate::bootstrap_gen::brk;
     use crate::STATS;
     use std::cell::UnsafeCell;
@@ -778,7 +696,6 @@ pub mod jit {
         next: *mut u8,
         old: *mut u8,
         ip_to_inst: Vec<*const u8>,
-        pub constants: ConstBytes,
         pub low: usize,
         pub high: usize,
     }
@@ -799,7 +716,6 @@ pub mod jit {
                 dispatch: vec![],
                 ranges: vec![],
                 ip_to_inst: vec![],
-                constants: ConstBytes::default(),
             }
         }
 

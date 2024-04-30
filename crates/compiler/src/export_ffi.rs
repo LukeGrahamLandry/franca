@@ -5,6 +5,7 @@ use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{values_from_ints, Value, Values};
+use crate::bc_to_asm::store_to_ints_values;
 use crate::compiler::{bit_literal, Compile, Res, Unquote};
 use crate::err;
 use crate::ffi::InterpSend;
@@ -386,7 +387,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
     let ret_count = compile.ready.sizes.slot_count(compile.program, ret_type);
-    let mut arg = compile.aarch64.constants.store_to_ints(arg.vec().iter());
+    let mut arg = store_to_ints_values(arg);
     let mut ret = vec![0i64; ret_count];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     let mut out = vec![];
@@ -489,7 +490,7 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
     match compile.immediate_eval_expr(expr, ty) {
         Ok(val) => {
             let slots = compile.ready.sizes.slot_count(compile.program, ty);
-            let val = compile.aarch64.constants.store_to_ints(val.vec().iter());
+            let val = store_to_ints_values(val);
             debug_assert_eq!(val.len(), slots);
             let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut i64, val.len()) };
             out.copy_from_slice(&val);
@@ -557,7 +558,7 @@ fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) ->
     values_from_ints(compile, ty, &mut value.iter().copied(), &mut out).unwrap();
     let value: Values = out.into();
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
-    FatExpr::synthetic(Expr::Value { ty, value }, loc)
+    FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
 }
 
 fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> bool {

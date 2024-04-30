@@ -9,7 +9,7 @@ use std::{
     thread::yield_now,
 };
 
-use crate::{ast::Flag, bc::Value, ffi::InterpSend, Map};
+use crate::{ast::Flag, ffi::InterpSend, Map};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub u32, pub PhantomData<&'pool str>);
@@ -281,10 +281,6 @@ impl<'p> InterpSend<'p> for Ident<'p> {
 
     fn create_type(_: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
         crate::ast::TypeId::i64() // TODO: have a unique Symbol type
-    }
-
-    fn serialize(self, values: &mut Vec<Value>) {
-        self.0.serialize(values)
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {

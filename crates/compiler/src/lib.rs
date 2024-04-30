@@ -7,7 +7,6 @@
 #![feature(sync_unsafe_cell)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
-#![allow(clippy::result_large_err)] // TODO: fix i guess. started happening when i made Value smaller.
 extern crate core;
 
 struct MyAllocator;
@@ -109,9 +108,6 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Stats {
-    pub interp_box: usize,
-    pub interp_box_values: usize,
-    pub serialize_one: usize,
     pub ast_expr_nodes: usize,
     pub fn_body_resolve: usize,
     pub make_lit_fn: usize,
@@ -121,9 +117,6 @@ pub struct Stats {
 }
 
 pub static mut STATS: Stats = Stats {
-    interp_box: 0,
-    interp_box_values: 0,
-    serialize_one: 0,
     ast_expr_nodes: 0,
     fn_body_resolve: 0,
     make_lit_fn: 0,
@@ -236,8 +229,6 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
                 loc: Some(e.diagnostic[0].spans[0].span),
                 reason: CErr::Diagnostic(e.diagnostic),
                 trace: String::new(),
-                value_stack: vec![],
-                call_stack: String::new(),
             })
         }
     };
@@ -421,7 +412,6 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&
     }
 
     outln!(ShowErr, "{}", e.trace);
-    outln!(ShowErr, "{}", e.call_stack);
     log_dbg(interp, save);
 }
 
@@ -451,7 +441,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
         Expr::Block {
             resolved: None,
             body: stmts,
-            result: Box::new(FatExpr::synthetic(Expr::unit(), user_span)),
+            result: Box::new(FatExpr::unit(user_span)),
         },
         user_span,
     ));

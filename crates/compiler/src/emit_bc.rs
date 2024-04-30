@@ -214,6 +214,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(stmt.loc);
         match stmt.deref() {
             Stmt::Eval(expr) => {
+                debug_assert!(!expr.ty.is_unknown());
                 let ret = result.reserve_slots(self, expr.ty)?;
                 self.compile_expr(result, expr, ret)?;
             }
@@ -852,46 +853,6 @@ impl<'p> FnBody<'p> {
                 Ok(StackRange { first, count })
             }
             _ => self.reserve_slots_raw(program, count, ty),
-        }
-    }
-
-    #[track_caller]
-    fn _load_constant(&mut self, program: &mut EmitBc<'_, 'p>, value: Values, ty: TypeId) -> Res<'p, (StackRange, TypeId)> {
-        match value {
-            Values::One(value) => {
-                let to = self.reserve_slots(program, ty)?;
-                self.push(Bc::LoadConstant { slot: to.single(), value });
-                Ok((to, ty))
-            }
-            Values::Many(values) => {
-                self.mark_contiguous(program, ty);
-                let start = self.stack_slots;
-                let count = values.len();
-                let res = (
-                    StackRange {
-                        first: StackOffset(start),
-                        count,
-                    },
-                    ty,
-                );
-                let ty = program.program.raw_type(ty); // TODO: enums
-                if let Some(types) = program.program.flat_types(ty) {
-                    if types.len() == values.len() {
-                        let types = types.to_vec();
-                        for (value, ty) in values.into_iter().zip(types.into_iter()) {
-                            let to = self.reserve_slots_inner(program, ty)?;
-                            self.push(Bc::LoadConstant { slot: to.single(), value });
-                        }
-                        return Ok(res);
-                    }
-                }
-
-                for value in values {
-                    let to = self.reserve_slots_inner(program, TypeId::any())?; // TODO: this breaks llvm, now just for enums maybe
-                    self.push(Bc::LoadConstant { slot: to.single(), value });
-                }
-                Ok(res)
-            }
         }
     }
 
