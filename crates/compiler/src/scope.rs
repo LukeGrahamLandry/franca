@@ -178,7 +178,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     } else if let Expr::Value { value, .. } = &mut prev_val.expr {
                         debug_assert_eq!(prev_ty.ty(), Some(TypeId::overload_set()));
                         let os = value.as_overload_set()?;
-                        self.compiler.program.overload_sets[os].just_resolved.extend(mem::take(new));
+                        self.compiler.program[os].just_resolved.extend(mem::take(new));
                         continue;
                     }
                 }

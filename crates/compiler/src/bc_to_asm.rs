@@ -660,7 +660,7 @@ impl Value {
             Value::F64(f) => i64::from_le_bytes(f.to_le_bytes()),
             &Value::I64(i) => i,
             &Value::Bool(i) => i as i64,
-            &Value::OverloadSet(i) => i as i64,
+            &Value::OverloadSet(i) => i.as_raw(),
             &Value::GetFn(i) => i.as_raw(),
             &Value::Symbol(i) => i as i64,
             &Value::Type(ty) => ty.as_raw(),

@@ -68,6 +68,10 @@ macro_rules! send_num {
                 TypeId::i64()
             }
 
+            // TODO: use correct types
+            fn get_type(_: &mut Program<'p>) -> TypeId {
+                TypeId::i64()
+            }
 
             fn serialize_to_ints(self, values: &mut Vec<i64>) {
                 values.push(self as i64)
@@ -124,7 +128,11 @@ impl<'p> InterpSend<'p> for () {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
-    fn create_type(_program: &mut Program<'p>) -> TypeId {
+    fn create_type(_: &mut Program<'p>) -> TypeId {
+        TypeId::unit()
+    }
+
+    fn get_type(_: &mut Program<'p>) -> TypeId {
         TypeId::unit()
     }
 
@@ -200,7 +208,11 @@ impl<'p> InterpSend<'p> for TypeId {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
-    fn create_type(_program: &mut Program<'p>) -> TypeId {
+    fn create_type(_: &mut Program<'p>) -> TypeId {
+        TypeId::ty()
+    }
+
+    fn get_type(_: &mut Program<'p>) -> TypeId {
         TypeId::ty()
     }
 

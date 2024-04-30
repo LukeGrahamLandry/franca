@@ -1,5 +1,5 @@
 //! Low level instructions that the interpreter can execute.
-use crate::ast::TypeInfo;
+use crate::ast::{OverloadSetId, TypeInfo};
 use crate::compiler::Compile;
 use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
@@ -130,7 +130,7 @@ pub enum Value {
     // Note: you can't just put these in a function's arena because they get copied by value.
     Heap(*mut i64),
     Symbol(u32), // TODO: this is an Ident<'p> but i really dont want the lifetime
-    OverloadSet(usize),
+    OverloadSet(OverloadSetId),
     /// TODO: Different from GetFn because this must be compiled and produces a real native function pointer that can be passed to ffi code.
     GetNativeFnPtr(FuncId),
     // TOOD: shrink
@@ -293,7 +293,7 @@ impl std::fmt::Debug for ConstId {
 }
 
 impl Values {
-    pub fn as_overload_set<'p>(&self) -> Res<'p, usize> {
+    pub fn as_overload_set<'p>(&self) -> Res<'p, OverloadSetId> {
         if let Value::OverloadSet(i) = self.clone().single()? {
             Ok(i)
         } else {
@@ -329,7 +329,7 @@ impl Values {
 }
 
 impl Value {
-    pub fn to_overloads(&self) -> Option<usize> {
+    pub fn to_overloads(&self) -> Option<OverloadSetId> {
         if let &Value::OverloadSet(f) = self {
             Some(f)
         } else {
@@ -454,7 +454,7 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         }
         TypeInfo::OverloadSet => {
             let n = unwrap!(ints.next(), "");
-            out.push(Value::OverloadSet(n as usize));
+            out.push(Value::OverloadSet(OverloadSetId::from_raw(n)));
         }
         &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
         TypeInfo::Tuple(types) => {

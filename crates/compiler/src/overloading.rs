@@ -1,4 +1,4 @@
-use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, Pattern, Program, TargetArch, TypeId, Var, VarType};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TargetArch, TypeId, Var, VarType};
 use crate::bc::{FuncRef, Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::{LogTag, PoolLog};
@@ -124,11 +124,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: &mut FnWip<'p>,
         arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
-        i: usize,
+        i: OverloadSetId,
     ) -> Res<'p, FuncRef> {
-        let name = self.program.overload_sets[i].name;
+        let name = self.program[i].name;
         self.compute_new_overloads(i)?;
-        let mut overloads = self.program.overload_sets[i].clone(); // Sad
+        let mut overloads = self.program[i].clone(); // Sad
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             self.prune_overloads_by_named_args(&mut overloads, pattern)?;
 
@@ -242,16 +242,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn compute_new_overloads(&mut self, i: usize) -> Res<'p, ()> {
-        let overloads = &mut self.program.overload_sets[i];
+    pub fn compute_new_overloads(&mut self, i: OverloadSetId) -> Res<'p, ()> {
+        let overloads = &mut self.program[i];
         // debug_assert!(overloads.just_resolved.is_empty());
         let mut decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
         if decls.is_empty() {
             return Ok(());
         }
-        outln!(LogTag::Generics, "Compute overloads of {} = L{i}", self.pool.get(overloads.name),);
+        outln!(LogTag::Generics, "Compute overloads of {} = L{i:?}", self.pool.get(overloads.name),);
         while let Some(f) = decls.pop() {
-            decls.extend(mem::take(&mut self.program.overload_sets[i].pending));
+            decls.extend(mem::take(&mut self.program[i].pending));
 
             if self.program[f].evil_uninit {
                 continue;
@@ -269,7 +269,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.log_type(f_ty.ret)
                     );
                     // TODO: this is probably wrong if you use !assert_compile_error
-                    self.program.overload_sets[i].ready.push(OverloadOption {
+                    self.program[i].ready.push(OverloadOption {
                         arg: f_ty.arg,
                         ret: Some(f_ty.ret),
                         func: f,
@@ -277,7 +277,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 Ok(None) => {
                     if let Some(arg) = self.program[f].finished_arg {
-                        self.program.overload_sets[i].ready.push(OverloadOption { arg, ret: None, func: f });
+                        self.program[i].ready.push(OverloadOption { arg, ret: None, func: f });
                     } else {
                         todo!()
                     }

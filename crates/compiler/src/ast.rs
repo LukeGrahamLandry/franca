@@ -19,10 +19,6 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[repr(transparent)]
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
-pub struct TypeId(u64);
-
 impl std::fmt::Debug for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Ty{}", self.as_index())
@@ -130,11 +126,13 @@ pub enum Expr<'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn as_overload_set(&self) -> Option<usize> {
+    pub fn as_overload_set(&self) -> Option<OverloadSetId> {
         if let Expr::Value { value } = &self.expr {
             if self.ty == TypeId::overload_set() {
                 if let &Values::One(Value::OverloadSet(i)) = value {
                     return Some(i);
+                } else {
+                    unreachable!("this would be bad since im trying to replace Value with i64")
                 }
             }
         }
@@ -349,12 +347,22 @@ impl<'p> FatExpr<'p> {
         self.ty = ty;
     }
 
+    pub fn as_structured(&self) -> Res<'p, Structured> {
+        debug_assert!(!self.ty.is_unknown());
+        if let Expr::Value { value } = &self.expr {
+            Ok(Structured::Const(self.ty, value.clone()))
+        } else {
+            err!("not Expr::Value",)
+        }
+    }
+
     pub fn as_int(&self) -> Option<i64> {
         if let Expr::Value {
             value: Values::One(Value::I64(v)),
             ..
         } = self.expr
         {
+            debug_assert!(self.ty == TypeId::i64());
             return Some(v);
         }
         None
@@ -643,7 +651,7 @@ pub enum Stmt<'p> {
         place: FatExpr<'p>,
         value: FatExpr<'p>,
     },
-    DoneDeclFunc(FuncId, usize), // TODO: OverloadSetId
+    DoneDeclFunc(FuncId, OverloadSetId), // TODO: OverloadSetId
     ExpandParsedStmts(usize),
 }
 #[repr(C)]
@@ -820,10 +828,7 @@ pub enum LazyType<'p> {
     Finished(TypeId),
     Different(Vec<Self>),
 }
-#[repr(C)]
-#[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
-pub struct FuncId(u64);
-#[repr(C)]
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
 pub struct VarInfo {
     pub kind: VarType,
@@ -854,6 +859,7 @@ pub struct Program<'p> {
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
 impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
+impl_index!(Program<'p>, OverloadSetId, OverloadSet<'p>, overload_sets);
 
 #[derive(Clone, Debug)]
 pub struct OverloadSet<'p> {
@@ -1104,8 +1110,7 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Unique(ty, self.types.len()))
     }
 
-    pub fn load_value(&mut self, v: Value) -> Structured {
-        let ty = self.type_of(&v);
+    pub fn load_value(&mut self, v: Value, ty: TypeId) -> Structured {
         let v: Values = v.into();
         Structured::Const(ty, v)
     }
@@ -1214,31 +1219,6 @@ impl<'p> Program<'p> {
         let ret = func.ret.unwrap();
         let ty = &self[ret];
         ty == &TypeInfo::Type
-    }
-
-    pub fn type_of(&mut self, v: &Value) -> TypeId {
-        match v {
-            Value::F64(_) => self.intern_type(TypeInfo::F64),
-            Value::I64(_) => TypeId::i64(),
-            Value::Bool(_) => TypeId::bool(),
-            Value::Type(_) => TypeId::ty(),
-            // TODO: its unfortunate that this means you cant ask the type of a value unless you already know
-            // TODO: assert SplitFunc branches are the same type.
-            Value::SplitFunc { rt: f, .. } | Value::GetNativeFnPtr(f) | Value::GetFn(f) => self.func_type(*f),
-            Value::Unit => TypeId::unit(),
-            Value::Symbol(_) => Ident::get_type(self),
-            Value::Heap { .. } => TypeId::void_ptr(),
-            Value::OverloadSet(_) => TypeId::overload_set(),
-        }
-    }
-    pub fn type_of_raw(&mut self, v: &Values) -> TypeId {
-        match v {
-            Values::One(v) => self.type_of(v),
-            Values::Many(values) => {
-                let types = values.iter().map(|v| self.type_of(v)).collect();
-                self.tuple_of(types)
-            }
-        }
     }
 
     pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
@@ -1496,26 +1476,6 @@ impl<'p> Expr<'p> {
             return Some(name);
         }
         None
-    }
-}
-
-impl<'p> FatExpr<'p> {
-    pub fn unit(loc: Span) -> Self {
-        Self::synthetic_ty(Expr::Value { value: Value::Unit.into() }, loc, TypeId::unit())
-    }
-
-    pub fn ty(ty: TypeId, loc: Span) -> Self {
-        Self::synthetic_ty(
-            Expr::Value {
-                value: Value::Type(ty).into(),
-            },
-            loc,
-            TypeId::ty(),
-        )
-    }
-
-    pub fn int(v: i64, loc: Span) -> Self {
-        Self::synthetic_ty(Expr::Value { value: Value::I64(v).into() }, loc, TypeId::i64())
     }
 }
 
@@ -1787,9 +1747,23 @@ macro_rules! tagged_index {
 }
 
 // Make sure these tag numbers are all different!
-tagged_index!(FuncId, 30);
 tagged_index!(TypeId, 31);
+tagged_index!(FuncId, 30);
 tagged_index!(ScopeId, 29);
+tagged_index!(OverloadSetId, 28);
+
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
+pub struct TypeId(u64);
+
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
+pub struct FuncId(u64);
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub struct ScopeId(pub u64);
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
+pub struct OverloadSetId(pub u64);

@@ -745,7 +745,7 @@ impl Debug for Value {
             &Value::Unit => write!(f, "unit"),
             Value::Heap(ptr) => write!(f, "{:p}", ptr),
             &Value::Symbol(v) => write!(f, "sym{v}"),
-            &Value::OverloadSet(v) => write!(f, "os{v}"),
+            &Value::OverloadSet(v) => write!(f, "os{v:?}"),
             &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),
             &Value::SplitFunc { ct, rt } => write!(f, "cr={ct:?}|rt={rt:?}"),
         }

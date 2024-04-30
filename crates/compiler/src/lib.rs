@@ -53,6 +53,7 @@ use std::ptr::null_mut;
 
 use ast::FuncId;
 use ast::ScopeId;
+use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::{CErr, Res};
@@ -441,7 +442,11 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
         Expr::Block {
             resolved: None,
             body: stmts,
-            result: Box::new(FatExpr::unit(user_span)),
+            result: Box::new(FatExpr::synthetic_ty(
+                Expr::Value { value: Value::Unit.into() },
+                user_span,
+                TypeId::unit(),
+            )),
         },
         user_span,
     ));

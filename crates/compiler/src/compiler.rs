@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, Pattern, ScopeId, TargetArch, Var, VarType, WalkAst,
+    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, OverloadSetId, Pattern, ScopeId, TargetArch, Var,
+    VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, store_to_ints_values, Jitted};
@@ -388,7 +389,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             } else if let Some(os) = val.as_overload_set() {
                 const_info.0.set(Value::OverloadSet(os).into(), TypeId::overload_set());
                 const_info.1 = LazyType::Finished(TypeId::overload_set());
-                for func in mem::take(&mut self.program.overload_sets[os].just_resolved) {
+                for func in mem::take(&mut self.program[os].just_resolved) {
                     self.decl_func(func)?;
                 }
             } else {
@@ -781,9 +782,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             unreachable!("builtin")
         };
 
-        let ty = self.program.type_of_raw(&result);
-        self.type_check_arg(ty, ret, "generic result")?;
-
         outln!(LogTag::Generics, "{:?}={} of {:?} => {:?}", key.0, self.pool.get(name), key.1, result);
 
         if !no_memo {
@@ -877,7 +875,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Fix trivial tuples
                 binding.if_empty_add_unit();
                 if exprs.is_empty() {
-                    value.set(Value::Unit.into(), TypeId::unit());
+                    self.set_literal(value, ())?;
                 } else if exprs.len() == 1 {
                     *value = mem::take(exprs.iter_mut().next().unwrap());
                 }
@@ -891,7 +889,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    fn decl_func(&mut self, mut func: Func<'p>) -> Res<'p, (Option<FuncId>, Option<usize>)> {
+    fn decl_func(&mut self, mut func: Func<'p>) -> Res<'p, (Option<FuncId>, Option<OverloadSetId>)> {
         debug_assert!(!func.evil_uninit);
         // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
         if let Some(when) = func.get_tag_mut(Flag::When) {
@@ -917,7 +915,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         if is_struct {
             ResolveScope::resolve_sign(&mut func, self)?;
             ResolveScope::resolve_body(&mut func, self)?;
-            let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
+            // TODO: HACK: this doesn't respect shadowing.
+            let init_overloadset = OverloadSetId::from_index(self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap());
             let ty = self.struct_type(&mut func.arg)?;
             let ty = self.program.intern_type(ty);
             assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
@@ -940,7 +939,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 func.body = Some(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
             }
             let id = self.add_func(func)?;
-            self.program.overload_sets[init_overloadset].pending.push(id);
+            self.program[init_overloadset].pending.push(id);
             return Ok((Some(id), Some(init_overloadset)));
         }
         if is_enum {
@@ -983,12 +982,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let referencable_name = func.referencable_name;
 
-        if any_reg_template {
-            todo!("apr 25 const rework");
-            // let mut body = func.body.take().unwrap();
-            // self.compile_expr(result, &mut body, None)?;
-            // func.any_reg_template = Some(body.as_fn().unwrap());
-        }
+        assert!(!any_reg_template, "not yet implemented");
 
         let public = func.has_tag(Flag::Pub);
         let id = self.add_func(func)?;
@@ -1008,13 +1002,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 debug_assert!(!self.program[id].resolved_body);
                 if let Some(overloads) = self.find_const(var)? {
                     let i = overloads.0.as_overload_set().unwrap();
-                    let os = &mut self.program.overload_sets[i];
+                    let os = &mut self.program[i];
                     assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
 
                     os.pending.push(id);
                     out = (Some(id), Some(i));
                 } else {
-                    let index = self.program.overload_sets.len();
+                    let index = OverloadSetId::from_index(self.program.overload_sets.len());
                     self.program.overload_sets.push(OverloadSet {
                         ready: vec![],
                         name: var.0,
@@ -1327,8 +1321,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // Note: this does not evaluate the expression.
                         // TODO: warning if it has side effects. especially if it does const stuff.
                         let ty = self.compile_expr(result, arg, None)?.ty();
-                        expr.set(Value::Type(ty).into(), TypeId::ty());
-                        self.program.load_value(Value::Type(ty))
+                        self.set_literal(expr, ty)?;
+                        expr.as_structured()?
                     }
                     Flag::Const_Eval => {
                         let res = self.compile_expr(result, arg, requested)?;
@@ -1345,8 +1339,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::Size_Of => {
                         let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
                         let size = self.ready.sizes.slot_count(self.program, ty);
-                        expr.set(Value::I64(size as i64).into(), TypeId::i64());
-                        self.program.load_value(Value::I64(size as i64))
+
+                        self.set_literal(expr, size as i64)?;
+                        expr.as_structured()?
                     }
                     Flag::Assert_Compile_Error => {
                         // TODO: this can still have side-effects on the compiler state tho :(
@@ -1365,15 +1360,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.debug_trace.pop();
                         }
 
-                        expr.set(Value::Unit.into(), TypeId::unit());
-                        self.program.load_value(Value::Unit)
+                        self.set_literal(expr, ())?;
+                        expr.as_structured()?
                     }
                     Flag::Struct => {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(pattern)?;
                             let ty = self.program.intern_type(ty);
-                            expr.set(Value::Type(ty).into(), TypeId::ty());
-                            self.program.load_value(Value::Type(ty))
+
+                            self.set_literal(expr, ty)?;
+                            expr.as_structured()?
                         } else {
                             err!("expected map literal: .{{ name: Type, ... }} but found {:?}", arg);
                         }
@@ -1382,8 +1378,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
                             let ty = self.struct_type(pattern)?;
                             let ty = self.program.to_enum(ty);
-                            expr.set(Value::Type(ty).into(), TypeId::ty());
-                            self.program.load_value(Value::Type(ty))
+                            self.set_literal(expr, ty)?;
+                            expr.as_structured()?
                         } else {
                             err!("expected map literal: .{{ name: Type, ... }} but found {:?}", arg);
                         }
@@ -1400,17 +1396,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::Symbol => {
                         // TODO: use match
                         let value = if let Expr::GetNamed(i) = arg.deref_mut().deref_mut() {
-                            Value::Symbol(i.0)
+                            *i
                         } else if let Expr::GetVar(v) = arg.deref_mut().deref_mut() {
-                            Value::Symbol(v.0 .0)
+                            v.0
                         } else if let Expr::String(i) = arg.deref_mut().deref_mut() {
-                            Value::Symbol(i.0)
+                            *i
                         } else {
                             ice!("Expected identifier found {arg:?}")
                         };
 
-                        expr.set(value.into(), Ident::get_type(self.program));
-                        self.program.load_value(value)
+                        self.set_literal(expr, value)?;
+                        expr.as_structured()?
                     }
                     Flag::Fn_Ptr => {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
@@ -1517,7 +1513,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let index = self.field_access_expr(result, e, *name)?;
                 expr.expr = Expr::Index {
                     ptr: mem::take(e),
-                    index: Box::new(FatExpr::int(index as i64, loc)),
+                    index: Box::new(self.as_literal(index as i64, loc)?),
                 };
                 self.compile_expr(result, expr, requested)? // TODO: dont dispatch again
             }
@@ -1525,7 +1521,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ptr = self.compile_expr(result, ptr, None)?;
                 self.compile_expr(result, index, Some(TypeId::i64()))?;
                 let i: usize = self.immediate_eval_expr_known(*index.clone())?;
-                index.set(Value::I64(i as i64).into(), TypeId::i64());
+                self.set_literal(index, i as i64)?;
                 self.index_expr(ptr, i)?
             }
             // TODO: replace these with a more explicit node type?
@@ -1533,13 +1529,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
                 let bytes = self.pool.get(i).to_string();
-                let ty = String::get_type(self.program);
-                let ints = bytes.serialize_to_ints_one();
-                let mut bytes = vec![];
-                values_from_ints(self, ty, &mut ints.into_iter(), &mut bytes)?;
-                let bytes = Values::Many(bytes);
-                expr.set(bytes.clone(), ty);
-                Structured::Const(ty, bytes)
+                self.set_literal(expr, bytes)?;
+                expr.as_structured()?
             }
             Expr::PrefixMacro { handler, arg, target } => {
                 outln!(
@@ -1562,10 +1553,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let os = unwrap!(os.single()?.to_overloads(), "expected overload set. TODO: allow direct function");
                 self.compute_new_overloads(os)?;
 
-                let os = self.program.overload_sets[os]
-                    .ready
-                    .iter()
-                    .filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
+                let os = self.program[os].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
                 let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
 
                 // This allows @a E; instead of @a(E);
@@ -1646,7 +1634,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut the_type = Pattern::empty(loc);
             let unique_ty = self.program.unique_ty(ty);
             let mut ctx_fields = Map::default();
-            // Note: we expand target to an anonamus struct literal, not a type.
             for b in &mut pattern.bindings {
                 assert!(b.default.is_some());
                 assert!(matches!(b.lazy(), LazyType::Infer));
@@ -1660,7 +1647,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 the_type.bindings.push(Binding {
                     name: b.name,
                     // ty: LazyType::Finished(unique_ty),
-                    ty: LazyType::PendingEval(FatExpr::ty(unique_ty, loc)),
+                    ty: LazyType::PendingEval(self.as_literal(unique_ty, loc)?),
                     default: None,
                     kind: VarType::Let,
                 });
@@ -1669,16 +1656,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             extend_options(&mut self.program.contextual_fields, i);
             let old = self.program.contextual_fields[i].replace(ctx_fields);
             debug_assert!(old.is_none());
-
-            let e = FatExpr::synthetic_ty(
-                Expr::Value {
-                    value: Values::One(Value::Type(unique_ty)),
-                },
-                loc,
-                TypeId::ty(),
-            );
-
-            return Ok(e);
+            return self.as_literal(unique_ty, loc);
         }
         err!("Expected struct literal found {target:?}",);
     }
@@ -1846,7 +1824,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Ok(res) => {
                         let os = res.expect()?.as_overload_set()?;
                         // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
-                        if self.program.overload_sets[os].name == Flag::As.ident() && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
+                        if self.program[os].name == Flag::As.ident() && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
                             // HACK: sad that 'as' is special
                             let ty: TypeId = self.immediate_eval_expr_known(*arg.clone())?;
                             return Ok(Some(ty));
@@ -1917,6 +1895,20 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::String(_) => String::get_type(self.program),
         }))
+    }
+
+    pub fn set_literal<T: InterpSend<'p>>(&mut self, e: &mut FatExpr<'p>, t: T) -> Res<'p, ()> {
+        *e = self.as_literal(t, e.loc)?;
+        Ok(())
+    }
+
+    pub fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
+        let ty = T::get_type(self.program);
+        let ints = t.serialize_to_ints_one();
+        let mut bytes = vec![];
+        values_from_ints(self, ty, &mut ints.into_iter(), &mut bytes)?;
+        let value = bytes.into();
+        Ok(FatExpr::synthetic_ty(Expr::Value { value }, loc, ty))
     }
 
     // TODO: this kinda sucks. it should go in a builtin generated file like libc and use the normal name resolution rules
@@ -2101,6 +2093,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     unreachable!("{}", self.program.log_type(ret_ty))
                 };
                 // TODO: this only helps if some can be quick-evaled by special cases above, otherwise makes it worse.
+                // TODO:  however.... it debug_asserts it you comment this case out!! -- Apr 30
                 let values: Res<'p, Vec<Values>> = elements
                     .iter()
                     .zip(types)
@@ -2122,7 +2115,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             match val {
                                 Values::One(Value::GetFn(f)) => Some(f),
                                 Values::One(Value::OverloadSet(f)) => {
-                                    let ol = &self.program.overload_sets[f];
+                                    let ol = &self.program[f];
                                     if ol.pending.is_empty() && ol.ready.len() == 1 {
                                         Some(ol.ready[0].func)
                                     } else {
@@ -2269,7 +2262,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // }
         let unit = TypeId::unit();
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
-        let mut unit_expr = FatExpr::unit(if_macro_arg.loc);
+        let mut unit_expr = self.as_literal((), if_macro_arg.loc)?;
         if let Expr::Tuple(parts) = if_macro_arg.deref_mut() {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
@@ -2292,7 +2285,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let res = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index], requested)?;
                     assert!(self.program[branch_body].finished_ret.is_some());
                     // TODO: fully dont emit the branch
-                    let unit = FatExpr::unit(parts[other_index].loc);
+                    let unit = self.as_literal((), parts[other_index].loc)?;
                     parts[other_index].expr = Expr::SuffixMacro(Flag::Unreachable.ident(), Box::new(unit));
                     parts[other_index].ty = TypeId::never();
                     return Ok(res);
@@ -2342,7 +2335,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
-        let mut unit_expr = FatExpr::unit(while_macro_arg.loc);
+        let mut unit_expr = self.as_literal((), while_macro_arg.loc)?;
         if let Expr::Tuple(parts) = while_macro_arg.deref_mut() {
             if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
                 let cond_fn = cond_fn.single()?;
@@ -2649,7 +2642,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut arg_val = self.compile_expr(result, arg_expr, Some(arg_ty))?;
         // TODO: this fixes inline calls when no arguments. do better. support zero-sized types in general.
         if arg_val.is_empty() {
-            arg_val = self.program.load_value(Value::Unit);
+            arg_val = self.program.load_value(Value::Unit, TypeId::unit());
         }
         self.last_loc = Some(loc);
         self.type_check_arg(arg_val.ty(), arg_ty, "fn arg")?;
@@ -2713,7 +2706,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert_eq!(kind, VarType::Const);
             let name = unwrap!(name, "arg needs name (unreachable?)");
             self.bind_const_arg(new_fid, name, arg_val)?;
-            arg_expr.set(Value::Unit.into(), TypeId::unit());
+            self.set_literal(arg_expr, ())?;
 
             let ty = self.program.func_type(new_fid);
             f_expr.set(Value::GetFn(new_fid).into(), ty);
@@ -2781,7 +2774,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
                         if v.is_empty() {
                             // Note: this started being required when I added fn while.
-                            arg_expr.set(Value::Unit.into(), TypeId::unit());
+                            self.set_literal(arg_expr, ())?;
                         } else if v.len() == 1 {
                             *arg_expr = mem::take(v.iter_mut().next().unwrap());
                         }
@@ -2811,7 +2804,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     ) -> Res<'p, Structured> {
         let (e, ty) = self.func_expr(cond_fn);
         let get_fn = FatExpr::synthetic_ty(e, expr_out.loc, ty);
-        let unit = FatExpr::unit(expr_out.loc);
+        let unit = self.as_literal((), expr_out.loc)?;
         expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
         expr_out.ty = self.program[cond_fn].finished_ret.unwrap_or(TypeId::unknown());
         self.compile_expr(result, expr_out, requested)
@@ -2996,7 +2989,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                     self.compute_new_overloads(i)?;
                     // TODO: just filter the iterator.
-                    let mut overloads = self.program.overload_sets[i].clone(); // sad
+                    let mut overloads = self.program[i].clone(); // sad
 
                     overloads
                         .ready
@@ -3015,7 +3008,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        // let found_ty = self.program.type_of_raw(&val);
         let final_ty = if let Some(expected_ty) = ty.ty() {
             if self.program[expected_ty] == TypeInfo::Type {
                 // HACK. todo: general overloads for cast()

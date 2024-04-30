@@ -447,7 +447,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                                 }
                             }
                             // Fn has to be int because the only time you have them is at comptime where the index is whats important.
-                            Value::OverloadSet(n) => LLVMConstInt(ty, n as u64, LLVMBool::from(false)),
+                            Value::OverloadSet(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),
                             Value::Type(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),
 
                             Value::GetFn(n) => LLVMConstInt(ty, n.as_raw() as u64, LLVMBool::from(false)),

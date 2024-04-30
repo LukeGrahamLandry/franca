@@ -1,9 +1,16 @@
-Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.
+## working towards replacing 'enum Value' with bytes (Apr 30)
 
+- Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.
 - can get rid of the hack about reconstructing slices
 - c call go though ints instead of values
 - reduce the big dispatch thing for turing values into asm consts
 - can get rid of the values version of serialize
+- need to get rid of type_of_raw because you don't be able to do that when its just bytes. but thats fine casue it was only used redundantly it seems.
+  same for type_of(Value)
+- switch overload set to tagged_index because i live in fear
+- use a generic over InterpSend to create Expr::Value when the rust type is statically known.
+  rn its worse cause it has to allocate the vec even for ints but makes a thinner interface to switch to byte repr and after that's done it will be better than the old way.
+- have to be careful about which rust ffi types get wrapped in a unique and which don't. like i64 is the same on both sides.
 
 ## ConstantData arena (Apr 28)
 
