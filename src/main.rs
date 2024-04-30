@@ -2,12 +2,11 @@
 #![feature(pattern)]
 
 use compiler::{
-    ast::{FatStmt, Flag, Program, TargetArch, TypeId},
+    ast::{Flag, Program, TargetArch, TypeId},
     bc_to_asm::emit_aarch64,
     compiler::{Compile, ExecTime},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
-    ffi::InterpSend,
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
@@ -15,7 +14,15 @@ use compiler::{
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
-use std::{arch::asm, env, fs, io::Write, mem::transmute, path::PathBuf, process::exit, str::pattern::Pattern};
+use std::{
+    arch::asm,
+    env, fs,
+    io::Write,
+    mem::{self, transmute},
+    path::PathBuf,
+    process::exit,
+    str::pattern::Pattern,
+};
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
 //       Make sure theres some prefix that lets you run/compile the next arg as a file path for shabang line.
@@ -256,7 +263,6 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
         log_err(&comp, e, save);
         exit(1);
     }
-    comp.parsing.stop();
 
     assert_eq!(comp.program[f].finished_ret, Some(TypeId::i64()));
     assert_eq!(comp.program[f].finished_arg, Some(TypeId::i64()));
@@ -324,7 +330,8 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     } else {
         println!("__Get_Assertions_Passed not found. COUNT_ASSERT :: false?");
     }
-    comp.parsing.stop();
+    mem::forget(comp);
+    mem::forget(program);
 }
 
 #[test]

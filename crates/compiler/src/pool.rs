@@ -42,7 +42,6 @@ type Map<'pool> = HashMap<Ptr<str>, Ident<'pool>>;
 pub struct StringPool<'pool> {
     lookup: SyncUnsafeCell<Map<'pool>>,
     values: SyncUnsafeCell<Vec<Ptr<str>>>,
-    lock: AtomicBool,
     constants: SyncUnsafeCell<ConstantData>,
 }
 
@@ -65,51 +64,43 @@ pub fn locked<T>(lock: &AtomicBool, f: impl FnOnce() -> T) -> T {
 
 impl<'pool> StringPool<'pool> {
     pub fn use_constants<T>(&self, f: impl FnOnce(&mut ConstantData) -> T) -> T {
-        locked(&self.lock, || {
-            let v = unsafe { &mut *self.constants.get() };
-            f(v)
-        })
+        let v = unsafe { &mut *self.constants.get() };
+        f(v)
     }
 
     pub fn get(&self, i: Ident) -> &'pool str {
-        locked(&self.lock, || {
-            let v = unsafe { &*self.values.get() };
-            // # Safety
-            // Strings are not removed from the pool until its dropped.
-            unsafe { &*(v.get(i.0 as usize).expect("Valid Ident").0) }
-        })
+        let v = unsafe { &*self.values.get() };
+        // # Safety
+        // Strings are not removed from the pool until its dropped.
+        unsafe { &*(v.get(i.0 as usize).expect("Valid Ident").0) }
     }
 
     pub fn upcast(&self, i: u32) -> Option<Ident<'pool>> {
-        locked(&self.lock, || {
-            let values = unsafe { &*self.values.get() };
-            if i > 0 && (i as usize) < values.len() {
-                Some(Ident(i, PhantomData))
-            } else {
-                None
-            }
-        })
+        let values = unsafe { &*self.values.get() };
+        if i > 0 && (i as usize) < values.len() {
+            Some(Ident(i, PhantomData))
+        } else {
+            None
+        }
     }
 
     pub fn intern(&self, s: &str) -> Ident<'pool> {
-        locked(&self.lock, || {
-            let temp: *const str = s;
-            let temp = temp as *mut str;
+        let temp: *const str = s;
+        let temp = temp as *mut str;
 
-            let lookup = unsafe { &mut *self.lookup.get() };
-            if let Some(i) = lookup.get(&Ptr(temp)) {
-                return *i;
-            }
+        let lookup = unsafe { &mut *self.lookup.get() };
+        if let Some(i) = lookup.get(&Ptr(temp)) {
+            return *i;
+        }
 
-            let consts = unsafe { &mut *self.constants.get() }; // we already have the lock.
-            let alloc = Ptr(consts.push_str_zero_term(s));
+        let consts = unsafe { &mut *self.constants.get() }; // we already have the lock.
+        let alloc = Ptr(consts.push_str_zero_term(s));
 
-            let values = unsafe { &mut *self.values.get() };
-            let i = Ident(values.len() as u32, PhantomData);
-            values.push(alloc);
-            lookup.insert(alloc, i);
-            i
-        })
+        let values = unsafe { &mut *self.values.get() };
+        let i = Ident(values.len() as u32, PhantomData);
+        values.push(alloc);
+        lookup.insert(alloc, i);
+        i
     }
 
     pub fn get_c_str(&self, i: Ident<'pool>) -> *const u8 {
@@ -228,7 +219,6 @@ impl<'p> Default for StringPool<'p> {
         let this = Self {
             lookup: SyncUnsafeCell::new(Map::with_capacity(len)),
             values: SyncUnsafeCell::new(Vec::with_capacity(len)),
-            lock: AtomicBool::new(false),
             constants: SyncUnsafeCell::new(ConstantData::default()),
         };
         for i in 0..len {

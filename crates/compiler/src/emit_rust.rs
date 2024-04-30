@@ -56,7 +56,7 @@ pub fn bootstrap() -> (String, String) {
     (rs, fr)
 }
 
-pub struct EmitRs<'z, 'p: 'static> {
+pub struct EmitRs<'z, 'p> {
     comp: Compile<'z, 'p>,
     last_loc: Option<Span>,
     ready: Vec<Option<String>>,

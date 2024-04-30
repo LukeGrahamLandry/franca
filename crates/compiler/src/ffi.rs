@@ -49,7 +49,7 @@ pub trait InterpSend<'p>: Sized {
         String::new()
     }
 
-    fn add_child_ffi_definitions(program: Program<'p>) {}
+    fn add_child_ffi_definitions(_: Program<'p>) {}
 }
 
 macro_rules! init_interp_send {

@@ -13,7 +13,7 @@ use crate::{
     STATS,
 };
 
-pub struct ResolveScope<'z, 'a, 'p: 'static> {
+pub struct ResolveScope<'z, 'a, 'p> {
     captures: Vec<Var<'p>>,
     local_constants: Vec<Vec<(Var<'p>, LazyType<'p>, FatExpr<'p>)>>,
     compiler: &'z mut Compile<'a, 'p>,

@@ -1,5 +1,5 @@
 use proc_macro2::{Ident, TokenStream};
-use quote::{quote, quote_spanned, ToTokens};
+use quote::{quote, quote_spanned};
 use syn::{parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed, FieldsUnnamed, GenericParam, Generics, TypeParamBound};
 
 #[proc_macro_derive(InterpSend)]

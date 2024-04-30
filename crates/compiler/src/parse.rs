@@ -1,9 +1,4 @@
 //! Convert a stream of tokens into ASTs.
-use std::cell::SyncUnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, RwLock};
-use std::thread::{sleep, spawn};
-use std::time::Duration;
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{CodeMap, File, Span};
@@ -12,7 +7,6 @@ use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 use crate::ast::{Binding, Flag, Name, TypeId, VarType};
 use crate::bc::Values;
 use crate::export_ffi::get_include_std;
-use crate::pool::locked;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
     bc::Value,
@@ -20,15 +14,15 @@ use crate::{
     logging::{LogTag::Parsing, PoolLog},
     pool::{Ident, StringPool},
 };
-use crate::{outln, MEM, STATS};
+use crate::{outln, STATS};
 use TokenType::*;
 
-pub struct Parser<'a, 'p: 'static> {
+pub struct Parser<'a, 'p> {
     pool: &'p StringPool<'p>,
     expr_id: usize,
     lexer: Lexer<'a, 'p>,
     spans: Vec<Span>,
-    ctx: Arc<ParseTasks<'p>>,
+    ctx: &'a mut ParseTasks<'p>,
 }
 
 type Res<T> = Result<T, ParseErr>;
@@ -57,159 +51,83 @@ pub enum ParseFile<'p> {
 /// Because of resizing the vec, the lock allows only one of A) main thread reading B) parse thread pushing.
 /// 'fn handle' doesn't worry about resize because there's only one parser thread.
 /// (i know its not faster than std locks, i just find it entertaining)
-pub struct ParseTasks<'p: 'static> {
+pub struct ParseTasks<'p> {
     pub pool: &'p StringPool<'p>,
-    pub codemap: RwLock<CodeMap>,
-    tasks: SyncUnsafeCell<Vec<ParseFile<'p>>>,
-    next: AtomicUsize,
-    pub workm_req: Mutex<()>,
-    pub work_requested: Condvar,
-    pub die: RwLock<bool>,
-    lock_resize: AtomicBool,
+    pub codemap: CodeMap,
+    tasks: Vec<ParseFile<'p>>,
 }
 
 unsafe impl<'p> Sync for ParseTasks<'p> {}
 unsafe impl<'p> Send for ParseTasks<'p> {}
 
-fn handle(parse: Arc<ParseTasks<'static>>) {
-    loop {
-        let lock = parse.workm_req.lock().unwrap();
-        let l = parse.work_requested.wait(lock);
-        drop(l);
-
-        if *parse.die.read().unwrap() {
-            return;
-        }
-
-        loop {
-            let task = parse.next.load(Ordering::Acquire);
-
-            unsafe { STATS.parser_did += 1 };
-
-            let file = unsafe { &mut *parse.tasks.get() }.get_mut(task).map(|f| mem::replace(f, ParseFile::Wip));
-
-            let file = match file {
-                Some(f) => f,
-                None => {
-                    break;
-                }
-            };
-            match file {
-                ParseFile::PendingStmts(file, span) => {
-                    let res = Parser::parse_stmts(parse.clone(), Lexer::new(file, parse.pool, span), parse.pool);
-                    let t = &mut unsafe { &mut *parse.tasks.get() }[task];
-                    match res {
-                        Ok(stmts) => {
-                            *t = ParseFile::ParsedStmts(stmts);
-                        }
-                        Err(e) => {
-                            *t = ParseFile::Err(e);
-                        }
-                    }
-                }
-                ParseFile::PendingExpr(file, span) => {
-                    debug_assert_ne!(file.span, span);
-                    let res = Parser::parse_expr_outer(parse.clone(), Lexer::new(file, parse.pool, span), parse.pool);
-                    let t = &mut unsafe { &mut *parse.tasks.get() }[task];
-                    match res {
-                        Ok(stmts) => {
-                            *t = ParseFile::ParsedExpr(stmts);
-                        }
-                        Err(e) => {
-                            *t = ParseFile::Err(e);
-                        }
-                    }
-                }
-                e => todo!("{task}: {e:?}"),
-            }
-
-            parse.next.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-}
-
-impl<'p: 'static> ParseTasks<'p> {
-    pub fn new(pool: &'p StringPool<'p>) -> Arc<Self> {
-        let a = Arc::new(Self {
+impl<'p> ParseTasks<'p> {
+    pub fn new(pool: &'p StringPool<'p>) -> Self {
+        Self {
             pool,
-            codemap: RwLock::new(CodeMap::new()),
+            codemap: CodeMap::new(),
             tasks: Default::default(),
-            workm_req: Mutex::new(()),
-            work_requested: Condvar::new(),
-            die: RwLock::new(false),
-            next: AtomicUsize::new(0),
-            lock_resize: AtomicBool::new(false),
-        });
-
-        let b = a.clone();
-        spawn(|| handle(b));
-
-        a
-    }
-
-    pub fn wait_for_stmts(&self, name: usize) -> Res<Vec<FatStmt<'p>>> {
-        loop {
-            unsafe { STATS.parser_check += 1 };
-            let next = self.next.load(Ordering::Acquire);
-            if next > name {
-                return locked(&self.lock_resize, || {
-                    let e = &mut unsafe { &mut *self.tasks.get() }[name];
-                    match e {
-                        ParseFile::ParsedStmts(v) => Ok(v.clone()),
-                        ParseFile::Err(e) => Err(e.clone()),
-                        e => todo!("{e:?}"),
-                    }
-                });
-            }
-
-            self.work_requested.notify_one();
-            unsafe { STATS.parser_wait += 1 };
-            sleep(Duration::from_micros(800));
         }
     }
 
-    pub fn wait_for_expr(&self, name: usize) -> Res<FatExpr<'p>> {
-        loop {
-            unsafe { STATS.parser_check += 1 };
-            let next = self.next.load(Ordering::Acquire);
-            if next > name {
-                return locked(&self.lock_resize, || {
-                    let e = &mut unsafe { &mut *self.tasks.get() }[name];
-                    match e {
-                        ParseFile::ParsedExpr(v) => Ok(v.clone()),
-                        ParseFile::Err(e) => Err(e.clone()),
-                        e => todo!("{e:?}"),
+    pub fn wait_for_stmts(&mut self, name: usize) -> Res<Vec<FatStmt<'p>>> {
+        match &mut self.tasks[name] {
+            ParseFile::PendingStmts(file, span) => {
+                let lex = Lexer::new(file.clone(), self.pool, *span);
+                let res = Parser::parse_stmts(self, lex, self.pool);
+                match res {
+                    Ok(stmts) => {
+                        unsafe { STATS.parser_did += 1 };
+                        self.tasks[name] = ParseFile::Wip; // stmts are single use it seems.
+                        Ok(stmts)
                     }
-                });
+                    Err(e) => {
+                        self.tasks[name] = ParseFile::Err(e.clone());
+                        Err(e)
+                    }
+                }
             }
-
-            self.work_requested.notify_one();
-            unsafe { STATS.parser_wait += 1 };
-            sleep(Duration::from_micros(800));
+            ParseFile::ParsedStmts(v) => Ok(v.clone()), // unreachable
+            ParseFile::Err(e) => Err(e.clone()),
+            _ => todo!(),
         }
     }
 
-    pub fn add_task(&self, is_expr: bool, file: Arc<File>, span: Span) -> usize {
-        locked(&self.lock_resize, || {
-            let tasks = unsafe { &mut *self.tasks.get() };
-            if is_expr {
-                tasks.push(ParseFile::PendingExpr(file, span));
-            } else {
-                tasks.push(ParseFile::PendingStmts(file, span));
+    pub fn wait_for_expr(&mut self, name: usize) -> Res<FatExpr<'p>> {
+        match &mut self.tasks[name] {
+            ParseFile::PendingExpr(file, span) => {
+                let lex = Lexer::new(file.clone(), self.pool, *span);
+                let res = Parser::parse_expr_outer(self, lex, self.pool);
+                match res {
+                    Ok(stmts) => {
+                        unsafe { STATS.parser_did += 1 };
+                        self.tasks[name] = ParseFile::ParsedExpr(stmts.clone());
+                        Ok(stmts)
+                    }
+                    Err(e) => {
+                        self.tasks[name] = ParseFile::Err(e.clone());
+                        Err(e)
+                    }
+                }
             }
-            tasks.len() - 1
-        })
+            ParseFile::ParsedExpr(v) => Ok(v.clone()),
+            ParseFile::Err(e) => Err(e.clone()),
+            _ => todo!(),
+        }
     }
 
-    pub fn stop(&self) {
-        *(self.die.write().unwrap()) = true;
-        // self.next.store(self.tasks.read().unwrap().len() + 100, Ordering::Release);
-        self.work_requested.notify_all();
+    pub fn add_task(&mut self, is_expr: bool, file: Arc<File>, span: Span) -> usize {
+        unsafe { STATS.parser_queue += 1 };
+        if is_expr {
+            self.tasks.push(ParseFile::PendingExpr(file, span));
+        } else {
+            self.tasks.push(ParseFile::PendingStmts(file, span));
+        }
+        self.tasks.len() - 1
     }
 }
 
-impl<'a, 'p: 'static> Parser<'a, 'p> {
-    pub fn parse_stmts(ctx: Arc<ParseTasks<'p>>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
+impl<'a, 'p> Parser<'a, 'p> {
+    pub fn parse_stmts(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
         let mut p = Parser {
             pool,
             lexer,
@@ -228,7 +146,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
         Ok(stmts)
     }
 
-    pub fn parse_expr_outer(ctx: Arc<ParseTasks<'p>>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<FatExpr<'p>> {
+    pub fn parse_expr_outer(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<FatExpr<'p>> {
         let mut p = Parser {
             pool,
             lexer,
@@ -753,7 +671,7 @@ impl<'a, 'p: 'static> Parser<'a, 'p> {
                         self.eat(Semicolon)?;
                         let name = self.pool.get(name);
                         if let Some(src) = get_include_std(name) {
-                            let file = self.ctx.codemap.write().unwrap().add_file(name.to_string(), src);
+                            let file = self.ctx.codemap.add_file(name.to_string(), src);
                             let s = file.span;
                             Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
                         } else {

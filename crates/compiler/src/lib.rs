@@ -30,7 +30,7 @@ unsafe impl GlobalAlloc for MyAllocator {
         ptr
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {
         // leak it
     }
 }
@@ -112,8 +112,7 @@ pub struct Stats {
     pub ast_expr_nodes: usize,
     pub fn_body_resolve: usize,
     pub make_lit_fn: usize,
-    pub parser_wait: usize,
-    pub parser_check: usize,
+    pub parser_queue: usize,
     pub parser_did: usize,
     pub jit_mprotect: usize,
 }
@@ -125,8 +124,7 @@ pub static mut STATS: Stats = Stats {
     ast_expr_nodes: 0,
     fn_body_resolve: 0,
     make_lit_fn: 0,
-    parser_wait: 0,
-    parser_check: 0,
+    parser_queue: 0,
     jit_mprotect: 0,
     parser_did: 0,
 };
@@ -192,12 +190,10 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
     let file = comp
         .parsing
         .codemap
-        .write()
-        .unwrap()
         .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
     let user_span = file.span;
     let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    let parsed = match Parser::parse_stmts(comp.parsing.clone(), lex, comp.pool) {
+    let parsed = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
         Ok(s) => s,
         Err(e) => {
             return Err(CompileError {
@@ -211,7 +207,6 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
         }
     };
 
-    comp.parsing.work_requested.notify_all();
     let mut global = make_toplevel(comp.pool, user_span, parsed);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
     let f = comp.compile_top_level(global)?;
@@ -221,7 +216,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
 // If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
-pub fn run_main<'a: 'p, 'p: 'static>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
+pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
     init_logs_flag(0xFFFFFFFFF);
     log_tag_info();
     let start = timestamp();
@@ -369,7 +364,7 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&
         outln!(ShowErr, "Internal: {}", e.internal_loc.unwrap());
     }
     if let CErr::Diagnostic(diagnostic) = &e.reason {
-        emit_diagnostic(&interp.parsing.codemap.read().unwrap(), diagnostic);
+        emit_diagnostic(&interp.parsing.codemap, diagnostic);
     } else if let Some(loc) = e.loc {
         let diagnostic = vec![Diagnostic {
             level: Level::Error,
@@ -381,7 +376,7 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&
                 style: SpanStyle::Primary,
             }],
         }];
-        emit_diagnostic(&interp.parsing.codemap.read().unwrap(), &diagnostic);
+        emit_diagnostic(&interp.parsing.codemap, &diagnostic);
     } else {
         outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
     }

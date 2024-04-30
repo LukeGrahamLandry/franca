@@ -11,6 +11,10 @@
 - Allowing constants with internal pointers is weird for exe so being able to reason about whether its in the range and needs to be remapped seems useful.
   Then maybe this should store type info too because what if you just happen to have a large int constant in the range by chance.
 
+ok fuck it, the parser isnt actually in parallel (i looked in Instuments) because it needs to wait on files at the beginning because it needs the whole top level before it can to anything.
+and i cant add more threads because then the contention for the intern pool lock is too high and it gets way slower.
+so no point in extra complexity of thread stuff.
+
 ## lox ch 1/2 (Apr 27/28)
 
 Feel like i need to do some project in my language to see what the biggest pain points are to decide what to work on.

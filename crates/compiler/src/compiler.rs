@@ -13,7 +13,6 @@ use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::Arc;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
@@ -62,7 +61,7 @@ pub enum CErr<'p> {
 pub type Res<'p, T> = Result<T, CompileError<'p>>;
 
 #[repr(C)]
-pub struct Compile<'a, 'p: 'static> {
+pub struct Compile<'a, 'p> {
     pub program: &'a mut Program<'p>, // SAFETY: this must be the first field (repr(C))
     pub pool: &'p StringPool<'p>,
     // Since there's a kinda confusing recursive structure for interpreting a program, it feels useful to keep track of where you are.
@@ -77,7 +76,7 @@ pub struct Compile<'a, 'p: 'static> {
     pub ready: BcReady<'p>,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
     pub scopes: Vec<Scope<'p>>,
-    pub parsing: Arc<ParseTasks<'p>>,
+    pub parsing: ParseTasks<'p>,
 }
 
 pub struct Scope<'p> {
@@ -125,7 +124,7 @@ pub struct FnWip<'p> {
 
 pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
 
-impl<'a, 'p: 'static> Compile<'a, 'p> {
+impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         let parsing = ParseTasks::new(pool);
         let mut c = Self {
@@ -3290,7 +3289,7 @@ impl ToBytes for i64 {
     }
 }
 
-pub struct Unquote<'z, 'a, 'p: 'static> {
+pub struct Unquote<'z, 'a, 'p> {
     pub compiler: &'z mut Compile<'a, 'p>,
     pub placeholders: Vec<Option<FatExpr<'p>>>,
     pub result: &'z mut FnWip<'p>,
