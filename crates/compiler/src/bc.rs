@@ -1,5 +1,6 @@
 //! Low level instructions that the interpreter can execute.
 use crate::ast::{OverloadSetId, TypeInfo};
+use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
 use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
@@ -30,7 +31,7 @@ pub enum Bc<'p> {
     },
     LoadConstant {
         slot: StackOffset,
-        value: Value,
+        value: i64,
     },
     JumpIf {
         cond: StackOffset,
@@ -185,7 +186,7 @@ impl From<FuncId> for FuncRef {
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
 pub enum Values {
     One(Value),
-    Many(Vec<Value>),
+    Many(Vec<i64>),
 }
 
 #[derive(Debug, Clone)]
@@ -301,25 +302,12 @@ impl Values {
         }
     }
 
-    pub fn normalize(self) -> Self {
-        match self {
-            Values::One(_) => self,
-            Values::Many(v) => {
-                if v.len() == 1 {
-                    Values::One(v[0])
-                } else {
-                    Values::Many(v)
-                }
-            }
-        }
-    }
-
     pub(crate) fn as_int_pair(&self) -> Res<'static, (i64, i64)> {
         match self {
             Values::One(_) => err!("expected (i64, i64)",),
             Values::Many(vals) => {
                 if vals.len() == 2 {
-                    Ok((vals[0].as_int()?, vals[1].as_int()?))
+                    Ok((vals[0], vals[1]))
                 } else {
                     err!("expected (i64, i64)",)
                 }
@@ -358,27 +346,8 @@ impl From<Vec<Value>> for Values {
         if value.len() == 1 {
             Values::One(value.into_iter().next().unwrap())
         } else {
-            Values::Many(value)
+            Values::Many(store_to_ints(&mut value.iter()))
         }
-    }
-}
-
-impl From<Values> for Vec<Value> {
-    fn from(value: Values) -> Self {
-        match value {
-            Values::One(v) => vec![v],
-            Values::Many(v) => v,
-        }
-    }
-}
-impl From<Vec<Values>> for Values {
-    fn from(value: Vec<Values>) -> Self {
-        let mut res = vec![];
-        for x in value {
-            let x: Vec<_> = x.into();
-            res.extend(x)
-        }
-        res.into()
     }
 }
 
@@ -389,15 +358,19 @@ impl Values {
             Values::One(v) => Ok(v),
             Values::Many(v) => {
                 if v.len() == 1 {
-                    return Ok(v.into_iter().next().unwrap());
+                    todo!()
+                    // return Ok(v.into_iter().next().unwrap());
                 }
                 err!("expected single found {v:?}",)
             }
         }
     }
 
-    pub fn vec(self) -> Vec<Value> {
-        self.into()
+    pub fn vec(self) -> Vec<i64> {
+        match self {
+            Values::One(i) => store_to_ints(&mut [i].iter()),
+            Values::Many(v) => v,
+        }
     }
 
     #[allow(clippy::len_without_is_empty)]
@@ -416,6 +389,12 @@ impl IntoIterator for StackRange {
     fn into_iter(self) -> Self::IntoIter {
         self.first.0..self.first.0 + self.count
     }
+}
+
+pub fn values_from_ints_one(compile: &mut Compile, ty: TypeId, ints: Vec<i64>) -> Res<'static, Vec<Value>> {
+    let mut vals = vec![];
+    values_from_ints(compile, ty, &mut ints.into_iter(), &mut vals)?;
+    Ok(vals)
 }
 
 pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {

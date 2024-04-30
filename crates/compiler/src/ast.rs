@@ -1343,8 +1343,8 @@ impl<'p> Program<'p> {
             Values::One(Value::Unit) => Ok(TypeId::unit()),
             Values::One(Value::Type(id)) => Ok(id),
             Values::Many(values) => {
-                let values: Res<'_, Vec<_>> = values.into_iter().map(|v| self.to_type(v.into())).collect();
-                Ok(self.tuple_of(values?))
+                let values: Vec<_> = values.into_iter().map(|v| TypeId::from_raw(v)).collect();
+                Ok(self.tuple_of(values))
             }
             _ => {
                 err!(CErr::TypeError("Type", value))

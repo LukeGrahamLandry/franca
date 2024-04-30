@@ -706,6 +706,16 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
         let mut key = (template_f, arg_value); // TODO: no clone
+
+        // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
+        // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
+        // let arg_value = arg_value.normalize(); // TODO: general <-, this is just HACK because i know @comptime is always a type.
+        if let Values::Many(ints) = &key.1 {
+            if ints.len() == 1 && arg_ty == TypeId::ty() {
+                key.1 = Values::One(Value::Type(TypeId::from_raw(ints[0])));
+            }
+        }
+
         if !no_memo {
             let found = self.program.generics_memo.get(&key);
             if let Some(found) = found {
@@ -728,10 +738,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       or when impl new functions so can only happen once so they dont make redundant overloads.  -- Apr 20
         debug_assert!(!func.evil_uninit);
         func.referencable_name = false;
-
-        // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
-        // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
-        let arg_value = arg_value.normalize();
 
         assert!(!arg_expr.ty.is_unknown());
         arg_expr.set(arg_value.clone(), arg_expr.ty);
@@ -757,7 +763,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             if let Some(var) = name {
                 assert_eq!(kind, VarType::Const, "@comptime arg not const in {}", self.pool.get(self.program[f].name)); // not outside the check because of implicit Unit.
-                self.save_const_values(var, values.into(), ty)?; // this is fine cause we renumbered at the top.
+                self.save_const_values(var, Values::Many(values), ty)?; // this is fine cause we renumbered at the top.
             }
         }
         assert!(arg_values.next().is_none(), "ICE: unused arguments");
@@ -1266,9 +1272,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         let ty = FatExpr::get_type(self.program);
                         let ints = arg.serialize_to_ints_one();
-                        let mut value = vec![];
-                        values_from_ints(self, ty, &mut ints.into_iter(), &mut value)?;
-                        let value = Values::Many(value);
+                        let value = Values::Many(ints);
 
                         expr.set(value.clone(), ty);
                         if placeholders.is_empty() {
@@ -2105,7 +2109,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         pls.push(v);
                     }
                 }
-                return Ok(Some(pls.into()));
+                return Ok(Some(Values::Many(pls)));
             }
             Expr::Call(f, arg) => {
                 // !slice and !addr can't be const evaled!
@@ -2607,7 +2611,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!(all_const && all_stack), "todo empty");
         if all_const {
             let values: Vec<_> = owned_values.into_iter().map(|v| v.get().unwrap()).collect();
-            return Ok(Structured::Const(tuple_ty, values.into()));
+            let mut v = vec![];
+            for val in values {
+                v.append(&mut val.vec());
+            }
+
+            return Ok(Structured::Const(tuple_ty, Values::Many(v)));
         }
 
         if !all_stack {
@@ -2722,16 +2731,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                     values,
                     func.synth_name(self.pool)
                 );
+
+                let vals = values_from_ints_one(self, ty, values.vec())?;
+
                 arg_val = Structured::TupleDifferent(
                     ty,
-                    values
-                        .vec()
-                        .into_iter()
+                    vals.into_iter()
                         .zip(pattern.iter())
                         .map(|(val, (_, ty, _))| Structured::Const(*ty, Values::One(val)))
                         .collect(),
                 )
             }
+            let func = &self.program[new_fid];
 
             match arg_val {
                 Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!("const arg but {:?} is only known at runtime.", arg_val),

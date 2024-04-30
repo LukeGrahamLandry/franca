@@ -12,6 +12,10 @@
   rn its worse cause it has to allocate the vec even for ints but makes a thinner interface to switch to byte repr and after that's done it will be better than the old way.
 - have to be careful about which rust ffi types get wrapped in a unique and which don't. like i64 is the same on both sides.
 
+Almost successfully changed Values::Many to be a vec of ints instead of tagged Value.
+Only problem is tests/flat_call where its trying to pass a function pointer to the compiler as a callback.
+What used to be a GetNativeFnPtr now gets serialized to an int and its a problem if you try to emit asm for one thats already been turned into a pointer?
+
 ## ConstantData arena (Apr 28)
 
 - The idea here is that unsafe language with no const pointer type yet,

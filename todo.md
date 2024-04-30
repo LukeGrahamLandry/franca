@@ -19,6 +19,7 @@
 
 ## Feature Ideas
 
+- good error message for accidently using ' as character literal.
 - embeding other languages would be a good demo of the comptime/meta programming stuff.
   - need a raw string syntax that passes it to a macro (like nim?)
   - lualit would be cool cause they have c abi stuff and dynamic language so notably different from mine.

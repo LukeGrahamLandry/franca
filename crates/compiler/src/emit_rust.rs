@@ -312,7 +312,8 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             Values::One(v) => self.emit_value(v),
             Values::Many(v) => {
                 if v.len() == 1 {
-                    self.emit_value(&v[0])
+                    todo!()
+                    // self.emit_value(&v[0])
                 } else {
                     todo!("{v:?}")
                 }

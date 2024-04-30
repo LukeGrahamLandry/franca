@@ -4,7 +4,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
 
-use crate::ast::{Flag, FnType, Func, FuncId, TypeId};
+use crate::ast::{Flag, FnType, Func, FuncId, TypeId, TypeInfo};
 use crate::bc::{Bc, BcReady, InterpBox, StackOffset, StackRange, Value, Values};
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::{ast::Program, bc::FnBody};
@@ -240,16 +240,20 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.call_direct(f, ret, arg)?;
                 }
                 Bc::LoadConstant { slot, value } => {
-                    if let &Value::GetNativeFnPtr(f) = value {
+                    let ty = self.slot_type(*slot);
+                    let ty = self.compile.program.raw_type(ty);
+                    let is_fn_ptr = matches!(self.compile.program[ty], TypeInfo::FnPtr(_)); // TODO: make this a different opcode.
+
+                    if is_fn_ptr {
                         // TODO: use adr+adrp instead of an integer.
                         // TODO: do linker-ish things to allow forward references.
                         //       actually the way i do that rn is with the dispatch table so could just use that for now.
+                        let f = FuncId::from_raw(*value);
                         let ptr = unwrap!(self.compile.aarch64.get_fn(f), "GetNativeFnPtr not compiled yet. TODO: mutual recursion.");
                         self.load_imm(x0, ptr.as_ptr() as u64);
                         self.set_slot(x0, *slot);
                     } else {
-                        let n = value.as_raw_int();
-                        self.load_imm(x0, u64::from_le_bytes(n.to_le_bytes()));
+                        self.load_imm(x0, u64::from_le_bytes(value.to_le_bytes()));
                         self.set_slot(x0, *slot);
                     }
                 }
@@ -642,7 +646,7 @@ pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
 }
 
 pub fn store_to_ints_values(values: Values) -> Vec<i64> {
-    store_to_ints(&mut values.vec().iter())
+    values.vec()
 }
 
 pub fn store<'a>(values: impl Iterator<Item = &'a Value>) -> *const u8 {
@@ -669,8 +673,8 @@ impl Value {
             Value::SplitFunc { ct, rt } => todo!(),
             &Value::GetNativeFnPtr(i) => {
                 // TODO: not sure if we want to preserve the id or use the actual address
-                // out.push(i.0 as i64);
-                todo!()
+                i.as_raw()
+                // todo!()
             }
         }
     }

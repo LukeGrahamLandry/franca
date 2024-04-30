@@ -368,6 +368,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Value { value, .. } => {
                 // TODO: sometimes you probably want to reference by pointer?
+
                 for (i, value) in value.clone().vec().into_iter().enumerate() {
                     result.push(Bc::LoadConstant {
                         slot: output.offset(i),
@@ -410,7 +411,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         });
                         result.push(Bc::LoadConstant {
                             slot: output.offset(1),
-                            value: Value::I64(count as i64),
+                            value: count as i64,
                         });
                         self.locals_drop.last_mut().unwrap().push(container);
                     }
@@ -554,7 +555,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.slot_is_var.set(output.single().0); // TODO: just don't even do any of this shit with Unit. this is for ssa
         result.push(Bc::LoadConstant {
             slot: output.single(),
-            value: Value::Unit,
+            value: 0,
         });
 
         let cond_ret = result.reserve_slots(self, TypeId::bool())?;
@@ -732,13 +733,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: make this constexpr in compiler
                 result.push(Bc::LoadConstant {
                     slot: output.first,
-                    value: Value::I64(i as i64),
+                    value: i as i64,
                 });
                 // If this is a smaller varient, pad out the slot instead of poisons. cant be unit because then asm doesnt copy it around
                 for i in (payload_size + 1)..output.count {
                     result.push(Bc::LoadConstant {
                         slot: output.offset(i),
-                        value: Value::I64(123),
+                        value: 123,
                     });
                 }
                 // TODO: support explicit uninit so backend doesn't emit code for the padding above.

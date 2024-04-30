@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{values_from_ints, Value, Values};
+use crate::bc::{values_from_ints, Values};
 use crate::bc_to_asm::store_to_ints_values;
 use crate::compiler::{bit_literal, Compile, Res, Unquote};
 use crate::err;
@@ -586,5 +586,5 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
 
     compile.pending_ffi.push(Some(result));
 
-    FatExpr::value(Values::Many(vec![Value::I64(s.as_raw()), Value::I64(block as i64)]), TypeId::scope(), loc)
+    FatExpr::value(Values::Many(vec![s.as_raw(), block as i64]), TypeId::scope(), loc)
 }
