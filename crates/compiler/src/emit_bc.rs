@@ -366,22 +366,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::Value { value, .. } => {
-                // TODO: sometimes you probably want to reference by pointer
-                //       like this will load a string byte by byte
+                // TODO: sometimes you probably want to reference by pointer?
                 for (i, value) in value.clone().vec().into_iter().enumerate() {
                     result.push(Bc::LoadConstant {
                         slot: output.offset(i),
                         value,
-                    });
-                }
-            }
-            Expr::Raw { value, .. } => {
-                // TODO: sometimes you probably want to reference by pointer
-                //       like this will load a string byte by byte
-                for (i, value) in value.iter().enumerate() {
-                    result.push(Bc::LoadConstant {
-                        slot: output.offset(i),
-                        value: Value::I64(*value),
                     });
                 }
             }

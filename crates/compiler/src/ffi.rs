@@ -305,10 +305,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         let len = self.len();
         let mut parts = vec![];
         for e in self {
-            e.serialize(&mut parts);
+            e.serialize_to_ints(&mut parts);
         }
         debug_assert_eq!(parts.len(), T::size() * len);
-        values.push(Value::new_box(parts, false));
+        let (ptr, _, _) = parts.into_raw_parts();
+        values.push(Value::Heap(ptr));
         values.push(Value::I64(len as i64));
     }
 
@@ -361,9 +362,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     fn serialize(self, values: &mut Vec<Value>) {
         let mut parts = vec![];
         let inner: T = *self;
-        inner.serialize(&mut parts);
+        inner.serialize_to_ints(&mut parts);
         debug_assert_eq!(parts.len(), T::size());
-        values.push(Value::new_box(parts, false))
+        let (ptr, _, _) = parts.into_raw_parts();
+        values.push(Value::Heap(ptr))
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -588,6 +590,49 @@ impl<'p> InterpSend<'p> for String {
         Vec::<u8>::name()
     }
 }
+
+macro_rules! send_arr {
+    ($ty:tt, $len:expr) => {
+        impl<'p> InterpSend<'p> for [$ty; $len] {
+            fn get_type_key() -> u128 {
+                unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+            }
+            fn create_type(_: &mut Program<'p>) -> TypeId {
+                TypeId::i64()
+            }
+
+            fn serialize(self, values: &mut Vec<Value>) {
+                for v in self.into_iter() {
+                    v.serialize(values);
+                }
+            }
+
+            fn serialize_to_ints(self, values: &mut Vec<i64>) {
+                for v in self.into_iter() {
+                    v.serialize_to_ints(values);
+                }
+            }
+
+            fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+                let mut s: Self = Default::default();
+                for i in 0..$len {
+                    s[i] = <$ty>::deserialize_from_ints(values)?;
+                }
+                Some(s)
+            }
+
+            fn size() -> usize {
+                1
+            }
+
+            fn name() -> String {
+                stringify!($ty).to_string()
+            }
+        }
+    };
+}
+
+send_arr!(i64, 6);
 
 fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
     A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)

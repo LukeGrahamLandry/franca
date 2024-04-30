@@ -465,15 +465,7 @@ impl<'z, 'p, 'a> BcToLlvm<'z, 'p, 'a> {
                                 let f = f64::from_bits(bits);
                                 LLVMConstReal(LLVMDoubleTypeInContext(self.llvm.context), f)
                             }
-                            Value::Heap {
-                                value,
-                                physical_first,
-                                physical_count,
-                            } => {
-                                // TODO: this needs to be different when I actually want to emit an executable.
-                                let ptr = self.llvm.constants.copy_heap(value, physical_first, physical_count);
-                                self.llvm.const_ptr(ptr)
-                            }
+                            Value::Heap(ptr) => self.llvm.const_ptr(ptr as *const u8),
                         };
                         self.write_slot(slot, value);
                     }

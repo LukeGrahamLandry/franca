@@ -745,11 +745,7 @@ impl Debug for Value {
             &Value::Type(v) => write!(f, "{:?}", v),
             &Value::GetFn(v) => write!(f, "{:?}", v),
             &Value::Unit => write!(f, "unit"),
-            Value::Heap {
-                value,
-                physical_first,
-                physical_count,
-            } => write!(f, "{value:p}[{physical_first}..{}]", physical_first + physical_count),
+            Value::Heap(ptr) => write!(f, "{:p}", ptr),
             &Value::Symbol(v) => write!(f, "sym{v}"),
             &Value::OverloadSet(v) => write!(f, "os{v}"),
             &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),

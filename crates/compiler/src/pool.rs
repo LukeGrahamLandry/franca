@@ -115,7 +115,7 @@ use std::{
 };
 
 pub struct ConstantData {
-    first: *mut u8,
+    _first: *mut u8,
     prev_page: *mut u8,
     pub next: *mut u8,
 }
@@ -138,7 +138,7 @@ impl Default for ConstantData {
 
         Self {
             next,
-            first: next,
+            _first: next,
             prev_page: next,
         }
     }

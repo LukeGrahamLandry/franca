@@ -262,7 +262,6 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             Expr::Poison => ice!("POISON",),
             Expr::Index { .. } => todo!(),
             Expr::WipFunc(_) => unreachable!(),
-            Expr::Raw { .. } => todo!(),
             Expr::Value { value, .. } => self.emit_values(value)?,
             Expr::Call(f, arg) => {
                 if let Some(f_id) = f.as_fn() {

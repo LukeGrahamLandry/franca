@@ -1,3 +1,7 @@
+Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.
+
+- can get rid of the hack about reconstructing slices
+
 ## ConstantData arena (Apr 28)
 
 - The idea here is that unsafe language with no const pointer type yet,

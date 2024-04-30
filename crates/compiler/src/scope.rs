@@ -378,7 +378,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Expr::SuffixMacro(_, e) => self.resolve_expr(e)?,
             Expr::Closure(func) => self.resolve_func(func)?,
-            Expr::Raw { .. } | Expr::Value { .. } => {}
+            Expr::Value { .. } => {}
             Expr::GetNamed(name) => {
                 if let Some(var) = self.find_var(name) {
                     *expr.deref_mut() = Expr::GetVar(var);

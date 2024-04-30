@@ -10,11 +10,10 @@ use crate::{
     ffi::InterpSend,
     pool::Ident,
 };
-use crate::{impl_index, unwrap, Map, STATS};
+use crate::{impl_index, unwrap, Map};
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::ops::Range;
-use std::ptr::slice_from_raw_parts_mut;
 
 #[derive(Clone, InterpSend, Debug)]
 pub enum Bc<'p> {
@@ -129,15 +128,12 @@ pub enum Value {
     /// The empty tuple.
     Unit,
     // Note: you can't just put these in a function's arena because they get copied by value.
-    Heap {
-        value: *mut InterpBox,
-        physical_first: usize,
-        physical_count: usize,
-    },
+    Heap(*mut i64),
     Symbol(u32), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(usize),
     /// TODO: Different from GetFn because this must be compiled and produces a real native function pointer that can be passed to ffi code.
     GetNativeFnPtr(FuncId),
+    // TOOD: shrink
     SplitFunc {
         ct: FuncId,
         rt: FuncId,
@@ -294,25 +290,6 @@ impl std::fmt::Debug for ConstId {
 }
 
 impl Values {
-    pub fn make_heap_constant(&mut self) {
-        match self {
-            Values::One(v) => {
-                if let Value::Heap { value, .. } = v {
-                    let value = unsafe { &mut **value };
-                    value.is_constant = true;
-                }
-            }
-            Values::Many(values) => {
-                for v in values {
-                    if let Value::Heap { value, .. } = v {
-                        let value = unsafe { &mut **value };
-                        value.is_constant = true;
-                    }
-                }
-            }
-        }
-    }
-
     pub fn as_overload_set<'p>(&self) -> Res<'p, usize> {
         if let Value::OverloadSet(i) = self.clone().single()? {
             Ok(i)
@@ -349,24 +326,6 @@ impl Values {
 }
 
 impl Value {
-    pub fn new_box(values: Vec<Value>, is_constant: bool) -> Value {
-        let count = values.len();
-        let value = Box::into_raw(Box::new(InterpBox {
-            references: 1,
-            values,
-            is_constant,
-        }));
-        unsafe {
-            STATS.interp_box += 1;
-            STATS.interp_box_values += count;
-        }
-        Value::Heap {
-            value,
-            physical_first: 0,
-            physical_count: count,
-        }
-    }
-
     pub fn to_overloads(&self) -> Option<usize> {
         if let &Value::OverloadSet(f) = self {
             Some(f)
@@ -496,25 +455,6 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         }
         &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
         TypeInfo::Tuple(types) => {
-            if types.len() == 2 && types[1] == TypeId::i64() && matches!(compile.program[types[0]], TypeInfo::Ptr(_)) {
-                // (ptr, len)
-                // TODO: HACK. just assuming this is a slice so we can reconstruct the box
-                let addr = unwrap!(ints.next(), "") as usize;
-                let len = unwrap!(ints.next(), "") as usize;
-                debug_assert!(len < 1000, "read padding?");
-                let val_ty = unwrap!(compile.program.unptr_ty(types[0]), "unreachable");
-                let count = len * compile.ready.sizes.slot_count(compile.program, val_ty);
-                let values = unsafe { &*slice_from_raw_parts_mut(addr as *mut i64, count) };
-                let mut output = vec![];
-                let mut values = values.iter().copied(); // NOTE: outside the loop, you dont want to read the first element n times!
-                for _ in 0..len {
-                    values_from_ints(compile, val_ty, &mut values, &mut output)?;
-                }
-                out.push(Value::new_box(output, false)); // ptr
-                out.push(Value::I64(len as i64)); // len
-
-                return Ok(());
-            }
             // TODO: no clone
             for ty in types.clone() {
                 values_from_ints(compile, ty, ints, out)?;
@@ -543,16 +483,9 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             assert_eq!(end - start, payload_size + 1, "{out:?}");
         }
         TypeInfo::FnPtr(_) => todo!(),
-        &TypeInfo::Ptr(val_ty) => {
-            // TODO: untested -- Apr 19
-            // TODO: this assumes that it points to exactly one thing so slices had special handling somewhere else.
-            let addr = unwrap!(ints.next(), "") as usize;
-            let count = compile.ready.sizes.slot_count(compile.program, val_ty);
-            let values = unsafe { &*slice_from_raw_parts_mut(addr as *mut i64, count) };
-            let mut output = vec![];
-            let mut values = values.iter().copied();
-            values_from_ints(compile, val_ty, &mut values, &mut output)?;
-            out.push(Value::new_box(output, false));
+        &TypeInfo::Ptr(_) => {
+            let addr = unwrap!(ints.next(), "") as usize as *mut i64;
+            out.push(Value::Heap(addr));
         }
         TypeInfo::VoidPtr => {
             let n = unwrap!(ints.next(), "");

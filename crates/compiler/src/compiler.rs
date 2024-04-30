@@ -1241,12 +1241,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::GetNamed(name) => err!("Undeclared Ident {}", self.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { ty, value } => Structured::Const(*ty, value.clone()),
-            Expr::Raw { ty, value } => {
-                // TODO: the whole point is to not always have to deserialize it. allow Structured::ConstRaw
-                let mut out = vec![];
-                values_from_ints(self, *ty, &mut value.iter().copied(), &mut out)?;
-                Structured::Const(*ty, Values::from(out))
-            }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = Flag::try_from(*macro_name)?;
                 match name {
@@ -1269,8 +1263,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         // TODO: want to do this but then my mutation fucks everything. you really do need to do the clone.
                         //       replace with that constant and a clone. need to impl clone. but deep clone that works on heap ptrs.
-                        let mut value = arg.serialize_one();
-                        value.make_heap_constant();
+                        let value = arg.serialize_one();
                         let ty = FatExpr::get_type(self.program);
                         expr.expr = Expr::Value { ty, value: value.clone() };
                         expr.ty = ty;
@@ -1319,18 +1312,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ptr = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr.ty()), "deref not ptr: {}", self.program.log_type(ptr.ty()));
 
-                        if let &Structured::Const(
-                            _,
-                            Values::One(Value::Heap {
-                                value,
-                                physical_first,
-                                physical_count,
-                            }),
-                        ) = &ptr
-                        {
+                        if let &Structured::Const(_, Values::One(Value::Heap(ptr))) = &ptr {
                             // this check + the const eval in field access lets me do asm enum constants without doing heap values first.
-                            if physical_count == 1 {
-                                let value = Values::One(unsafe { (*value).values[physical_first] });
+                            let size = self.ready.sizes.slot_count(self.program, ty);
+                            if size == 1 {
+                                todo!("apparently unreachable");
+                                let int = unsafe { *ptr };
+                                let mut out = vec![];
+                                values_from_ints(self, ty, &mut [int].into_iter(), &mut out).unwrap();
+                                debug_assert!(out.len() == 1);
+                                let value = Values::One(out[0]);
                                 expr.expr = Expr::Value { ty, value: value.clone() };
                                 Structured::Const(ty, value)
                             } else {
@@ -1564,8 +1555,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
                 let bytes = self.pool.get(i).to_string();
-                let mut bytes = bytes.serialize_one();
-                bytes.make_heap_constant();
+                let bytes = bytes.serialize_one();
                 let ty = String::get_type(self.program);
                 expr.expr = Expr::Value { ty, value: bytes.clone() };
                 Structured::Const(ty, bytes)
@@ -1793,7 +1783,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::WipFunc(_) => return Ok(None),
-            Expr::Value { ty, .. } | Expr::Raw { ty, .. } => *ty,
+            Expr::Value { ty, .. } => *ty,
             Expr::Call(f, arg) => {
                 if let Some(id) = f.as_fn() {
                     return Ok(self.program.funcs[id.as_index()].finished_ret);
@@ -2609,22 +2599,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if i == index {
                     let ty = self.program.ptr_type(*f_ty);
                     // const eval lets me do enum fields in asm without doign heap values first.
-                    if let &Structured::Const(
-                        _,
-                        Values::One(Value::Heap {
-                            value,
-                            physical_first,
-                            physical_count,
-                        }),
-                    ) = &container_ptr
-                    {
-                        let size = self.ready.sizes.slot_count(self.program, *f_ty);
-                        assert!(physical_count >= size);
-                        let value = Values::One(Value::Heap {
-                            value,
-                            physical_first: physical_first + count,
-                            physical_count: size,
-                        });
+                    if let &Structured::Const(_, Values::One(Value::Heap(ptr))) = &container_ptr {
+                        todo!("apparently unreachable");
+                        let new_ptr = unsafe { ptr.add(count) };
+                        let value = Values::One(Value::Heap(new_ptr));
                         let s = Structured::Const(ty, value);
                         return Ok(s);
                     }

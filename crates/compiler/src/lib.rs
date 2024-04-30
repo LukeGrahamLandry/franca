@@ -7,6 +7,7 @@
 #![feature(sync_unsafe_cell)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
+#![allow(clippy::result_large_err)] // TODO: fix i guess. started happening when i made Value smaller.
 extern crate core;
 
 struct MyAllocator;

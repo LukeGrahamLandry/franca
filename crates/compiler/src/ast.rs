@@ -102,10 +102,6 @@ pub enum Expr<'p> {
         ty: TypeId,
         value: Values,
     },
-    Raw {
-        ty: TypeId,
-        value: Vec<i64>,
-    },
     WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
@@ -197,7 +193,7 @@ pub trait WalkAst<'p> {
                 self.func(func);
             }
             Expr::WipFunc(_) => todo!("walkwip"),
-            Expr::Raw { .. } | Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
+            Expr::Value { .. } | Expr::GetNamed(_) | Expr::String(_) => {}
         }
         self.post_walk_expr(expr);
     }
@@ -1098,8 +1094,7 @@ impl<'p> Program<'p> {
 
     pub fn load_value(&mut self, v: Value) -> Structured {
         let ty = self.type_of(&v);
-        let mut v: Values = v.into();
-        v.make_heap_constant();
+        let v: Values = v.into();
         Structured::Const(ty, v)
     }
 

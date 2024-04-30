@@ -271,16 +271,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.set_slot(x0, *slot);
                     }
                     Value::Unit => {}
-                    &Value::Heap {
-                        value,
-                        physical_first,
-                        physical_count,
-                    } => {
+                    &Value::Heap(value) => {
                         // ty will generally be Ptr(whatever), but could be an int for comptime ffi void ptr stuff.
                         let ty = self.slot_type(*slot);
                         // TODO: this needs to be different when I actually want to emit an executable.
-                        let ptr = self.compile.aarch64.constants.copy_heap(value, physical_first, physical_count);
-                        self.load_imm(x0, ptr as u64);
+                        self.load_imm(x0, value as u64);
                         self.set_slot(x0, *slot);
                     }
                     &Value::GetNativeFnPtr(f) => {
@@ -757,14 +752,7 @@ impl ConstBytes {
                 // out.push(i.0 as i64);
                 todo!()
             }
-            &Value::Heap {
-                value,
-                physical_first,
-                physical_count,
-            } => {
-                let ptr = self.copy_heap(value, physical_first, physical_count);
-                out.push(ptr as usize as i64);
-            }
+            &Value::Heap(ptr) => out.push(ptr as usize as i64),
         }
     }
 }
