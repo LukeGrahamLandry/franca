@@ -8,13 +8,12 @@ use crate::{
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
     reflect::{Reflect, RsType},
-    STATS,
+    Map, STATS,
 };
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
 use std::{
     cell::RefCell,
-    collections::HashMap,
     hash::Hash,
     mem::{self, transmute},
     ops::{Deref, DerefMut},
@@ -62,8 +61,6 @@ pub enum TypeInfo<'p> {
         // You probably always have few enough that this is faster than a hash map.
         fields: Vec<Field<'p>>,
         as_tuple: TypeId,
-        ffi_byte_align: Option<usize>,
-        ffi_byte_stride: Option<usize>,
     },
     Enum {
         cases: Vec<(Ident<'p>, TypeId)>,
@@ -94,7 +91,7 @@ pub struct Annotation<'p> {
 // TODO: this is getting a bit chonky if I want to store the kind here instead of globally. 32 bit indices would make it reasonable again
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
-pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType, pub usize);
+pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType, pub u32);
 
 // TODO: should really get an arena going because boxes make me sad.
 #[repr(C)]
@@ -277,7 +274,7 @@ pub trait WalkAst<'p> {
 // Used for inlining closures.
 pub(crate) struct RenumberVars<'a, 'p> {
     pub vars: usize,
-    pub mapping: &'a mut HashMap<Var<'p>, Var<'p>>,
+    pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
 }
 
 impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
@@ -333,7 +330,7 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 
 impl<'p> FatExpr<'p> {
     pub fn renumber_vars(&mut self, vars: usize) -> usize {
-        let mut mapping = HashMap::new();
+        let mut mapping = Default::default();
         let mut ctx = RenumberVars { vars, mapping: &mut mapping };
         ctx.expr(self);
         ctx.vars
@@ -665,10 +662,7 @@ pub struct Func<'p> {
     pub loc: Span,
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
-    pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub wip: Option<FnWip<'p>>,
-    pub evil_uninit: bool,
-    pub allow_rt_capture: bool,
 
     /// Implies body.is_none(). For native targets this is the symbol to put in the indirect table for this forward declaration.
     /// This can be used for calling at runtime but not at comptime because we can't just ask the linker for the address.
@@ -681,15 +675,17 @@ pub struct Func<'p> {
     pub jitted_code: Option<Vec<u32>>,
     pub any_reg_template: Option<FuncId>,
     pub llvm_ir: Option<Vec<Ident<'p>>>,
-    pub resolved_body: bool,
-    pub resolved_sign: bool,
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
     pub args_block: Option<usize>,
-
     pub why_resolved_sign: Option<String>,
     pub why_resolved_body: Option<String>,
     pub high_jitted_callee: usize,
+    pub resolved_body: bool,
+    pub resolved_sign: bool,
+    pub evil_uninit: bool,
+    pub allow_rt_capture: bool,
+    pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
 }
 
 // TODO: use this instead of having a billion fields.
@@ -831,20 +827,20 @@ pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
     // twice as much memory but it's so much faster. TODO: can i just store hashes?
-    type_lookup: HashMap<TypeInfo<'p>, TypeId>,
+    type_lookup: Map<TypeInfo<'p>, TypeId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
-    pub generics_memo: HashMap<(FuncId, Values), (Values, TypeId)>,
+    pub generics_memo: Map<(FuncId, Values), (Values, TypeId)>,
     pub next_var: usize,
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
-    pub ffi_types: HashMap<u128, TypeId>,
+    pub ffi_types: Map<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
     pub assertion_count: usize,
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
-    pub contextual_fields: Vec<Option<HashMap<Ident<'p>, (Values, TypeId)>>>,
+    pub contextual_fields: Vec<Option<Map<Ident<'p>, (Values, TypeId)>>>,
     pub ffi_definitions: String,
 }
 
@@ -962,7 +958,7 @@ impl<'p> Program<'p> {
             runtime_arch,
             comptime_arch,
             inline_llvm_ir: vec![],
-            type_lookup: HashMap::new(),
+            type_lookup: Default::default(),
             contextual_fields: vec![],
             ffi_definitions: String::new(),
         };
@@ -1025,12 +1021,7 @@ impl<'p> Program<'p> {
             let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Struct {
-                fields: vec![],
-                as_tuple: n,
-                ffi_byte_align: Some(type_info.align),
-                ffi_byte_stride: Some(type_info.stride),
-            });
+            self.types.push(TypeInfo::Struct { fields: vec![], as_tuple: n });
             self.ffi_types.insert(id, ty_final);
 
             let ty = match type_info.data {
@@ -1047,12 +1038,7 @@ impl<'p> Program<'p> {
                         })
                     }
                     let as_tuple = self.tuple_of(types);
-                    self.intern_type(TypeInfo::Struct {
-                        fields,
-                        as_tuple,
-                        ffi_byte_align: Some(type_info.align),
-                        ffi_byte_stride: Some(type_info.stride),
-                    })
+                    self.intern_type(TypeInfo::Struct { fields, as_tuple })
                 }
                 RsData::Enum { .. } => todo!(),
                 RsData::Ptr { inner, .. } => {
@@ -1581,12 +1567,7 @@ impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
 
 impl<'p> TypeInfo<'p> {
     pub fn simple_struct(fields: Vec<Field<'p>>, as_tuple: TypeId) -> Self {
-        TypeInfo::Struct {
-            fields,
-            as_tuple,
-            ffi_byte_align: None,
-            ffi_byte_stride: None,
-        }
+        TypeInfo::Struct { fields, as_tuple }
     }
 }
 

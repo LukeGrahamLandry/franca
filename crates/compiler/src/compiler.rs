@@ -7,7 +7,6 @@
 use codemap::Span;
 use codemap_diagnostic::Diagnostic;
 use interp_derive::InterpSend;
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
@@ -29,7 +28,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, Map, STATS};
 use crate::{
     logging::{LogTag, PoolLog},
     outln,
@@ -81,7 +80,7 @@ pub struct Compile<'a, 'p> {
 
 pub struct Scope<'p> {
     pub parent: ScopeId,
-    pub constants: HashMap<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
+    pub constants: Map<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
     pub vars: Vec<BlockScope<'p>>,
     pub depth: usize,
     pub funcs: Vec<FuncId>,
@@ -114,7 +113,7 @@ pub enum DebugState<'p> {
 #[derive(Clone, Debug, InterpSend)]
 pub struct FnWip<'p> {
     pub stack_slots: usize,
-    pub vars: HashMap<Var<'p>, TypeId>, // TODO: use a vec
+    pub vars: Map<Var<'p>, TypeId>, // TODO: use a vec
     pub when: ExecTime,
     pub func: FuncId,
     pub why: String,
@@ -1675,7 +1674,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Expr::StructLiteralP(pattern) = target.deref_mut().deref_mut().deref_mut() {
             let mut the_type = Pattern::empty(loc);
             let unique_ty = self.program.unique_ty(ty);
-            let mut ctx_fields = HashMap::new();
+            let mut ctx_fields = Map::default();
             // Note: we expand target to an anonamus struct literal, not a type.
             for b in &mut pattern.bindings {
                 assert!(b.default.is_some());
@@ -3225,16 +3224,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn save_const_values(&mut self, name: Var<'p>, value: Values, final_ty: TypeId) -> Res<'p, ()> {
         self.save_const(name, Expr::Value { ty: final_ty, value }, final_ty, garbage_loc())
-    }
-}
-
-pub fn insert_multi<K: Hash + Eq, V: Eq>(set: &mut HashMap<K, Vec<V>>, key: K, value: V) {
-    if let Some(prev) = set.get_mut(&key) {
-        if !prev.contains(&value) {
-            prev.push(value);
-        }
-    } else {
-        set.insert(key, vec![value]);
     }
 }
 

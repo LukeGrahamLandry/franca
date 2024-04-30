@@ -19,7 +19,6 @@ use TokenType::*;
 
 pub struct Parser<'a, 'p> {
     pool: &'p StringPool<'p>,
-    expr_id: usize,
     lexer: Lexer<'a, 'p>,
     spans: Vec<Span>,
     ctx: &'a mut ParseTasks<'p>,
@@ -131,7 +130,6 @@ impl<'a, 'p> Parser<'a, 'p> {
         let mut p = Parser {
             pool,
             lexer,
-            expr_id: 0, // TODO: remove
             spans: vec![],
             ctx,
         };
@@ -150,7 +148,6 @@ impl<'a, 'p> Parser<'a, 'p> {
         let mut p = Parser {
             pool,
             lexer,
-            expr_id: 0,
             spans: vec![],
             ctx,
         };
@@ -893,8 +890,6 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     #[track_caller]
     fn expr(&mut self, expr: Expr<'p>) -> FatExpr<'p> {
-        self.expr_id += 1;
-
         unsafe {
             STATS.ast_expr_nodes += 1;
         }

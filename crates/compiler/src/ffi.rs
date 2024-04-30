@@ -1,11 +1,11 @@
-use std::{collections::HashMap, mem, ptr::slice_from_raw_parts};
+use std::{mem, ptr::slice_from_raw_parts};
 
 use codemap::Span;
 
 use crate::{
     ast::{Program, TypeId, TypeInfo},
     bc::{Value, Values},
-    STATS,
+    Map, STATS,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
@@ -529,7 +529,7 @@ impl<'p> InterpSend<'p> for Span {
     }
 }
 
-impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for HashMap<K, V> {
+impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for Map<K, V> {
     fn get_type_key() -> u128 {
         mix::<K, V>(1234567890)
     }

@@ -39,6 +39,8 @@ unsafe impl GlobalAlloc for MyAllocator {
 #[global_allocator]
 static GLOBAL: MyAllocator = MyAllocator;
 
+pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
+
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::arch::asm;
@@ -129,6 +131,38 @@ pub static mut STATS: Stats = Stats {
     parser_did: 0,
 };
 
+/*
+macro_rules! include_std {
+    ($name:expr) => {
+        (concat!($name, ".fr"), include_str!(concat!("../../../lib/", $name, ".fr")))
+    };
+}
+
+pub const INCLUDE_STD: &[(&str, &str)] = &[
+    include_std!("core"),
+    include_std!("ast"),
+    include_std!("fmt"),
+    include_std!("list"),
+    include_std!("map"),
+    include_std!("mem"),
+    include_std!("option"),
+    include_std!("pointers"),
+    include_std!("prelude"),
+    include_std!("macros"),
+    include_std!("testing"),
+    include_std!("slice"),
+    include_std!("system"),
+    include_std!("codegen/aarch64/basic"),
+    include_std!("codegen/aarch64/basic.gen"),
+    include_std!("codegen/aarch64/instructions"),
+    include_std!("codegen/aarch64/unwind"),
+    include_std!("codegen/bf/instructions"),
+    include_std!("codegen/llvm/basic"),
+    include_std!("codegen/wasm/basic"),
+    include_std!("codegen/wasm/instructions"),
+];
+*/
+
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
 // (maybe include_bytes in a seperate crate would make it better)
 // I also like that users can put the lib somewhere an edit it for thier program. I dont want the compiler to just force its blessed version.
@@ -217,7 +251,8 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
 // I should really just use arenas for everything.
 #[allow(clippy::too_many_arguments)]
 pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
-    init_logs_flag(0xFFFFFFFFF);
+    let beg = MEM.get();
+    init_logs_flag(0x0); //init_logs_flag(0xFFFFFFFFF);
     log_tag_info();
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
@@ -291,11 +326,14 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
     } // TODO: this is dereanged. put it in a function so you can just use ? to call log_err
 
     outln!(Perf, "===============");
-    log_dbg(&comp, save);
+    // log_dbg(&comp, save);
     if leak {
         let _ = ManuallyDrop::new(comp);
         let _ = ManuallyDrop::new(program);
     }
+
+    let end = MEM.get();
+    println!("Used {} KB of memory.", (end as usize - beg as usize) / 1000);
 
     true
 }

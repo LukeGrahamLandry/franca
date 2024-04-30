@@ -187,9 +187,10 @@ pub fn get_include_std(name: &str) -> Option<String> {
             Some(out)
         }
         _ => {
-            // if let Some((_, src)) = LIB.iter().find(|(check, _)| name == *check) {
+            // if let Some((_, src)) = INCLUDE_STD.iter().find(|(check, _)| name == *check) {
             //     return Some(src.to_string());
             // }
+
             let path = STDLIB_PATH.lock();
             let path = path.as_ref().unwrap().as_ref();
             if let Some(path) = path {
@@ -205,6 +206,10 @@ pub fn get_include_std(name: &str) -> Option<String> {
 
                 println!("Missing path {path:?}");
             } else {
+                // TODO: have a different macro for this (cwd)
+                if let Ok(src) = fs::read_to_string(name) {
+                    return Some(src);
+                }
                 println!("STDLIB_PATH not set.");
             }
             None

@@ -484,7 +484,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             )
         }
 
-        let var = Var(*name, self.compiler.program.next_var, s, kind, self.block);
+        let var = Var(*name, self.compiler.program.next_var, s, kind, self.block as u32);
         if kind == VarType::Const {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
             self.compiler[s].constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.

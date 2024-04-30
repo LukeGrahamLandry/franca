@@ -10,10 +10,9 @@ use crate::{
     ffi::InterpSend,
     pool::Ident,
 };
-use crate::{impl_index, unwrap, STATS};
+use crate::{impl_index, unwrap, Map, STATS};
 use codemap::Span;
 use interp_derive::InterpSend;
-use std::collections::HashMap;
 use std::ops::Range;
 use std::ptr::slice_from_raw_parts_mut;
 
@@ -94,7 +93,7 @@ pub struct FnBody<'p> {
     pub debug: Vec<DebugInfo<'p>>,
     pub arg_range: StackRange,
     pub stack_slots: usize,
-    pub vars: HashMap<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
+    pub vars: Map<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
     pub func: FuncId,

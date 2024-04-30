@@ -1,6 +1,5 @@
 use std::{
     cell::SyncUnsafeCell,
-    collections::HashMap,
     fmt::Debug,
     hash::Hash,
     io::Write,
@@ -10,7 +9,7 @@ use std::{
     thread::yield_now,
 };
 
-use crate::{ast::Flag, bc::Value, ffi::InterpSend};
+use crate::{ast::Flag, bc::Value, ffi::InterpSend, Map};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub u32, pub PhantomData<&'pool str>);
@@ -36,11 +35,8 @@ impl Debug for Ident<'_> {
 /// A raw pointer that uses the reference's Hash/PartialEq implementations.
 struct Ptr<T: ?Sized>(*const T);
 
-// type Map<'pool> = HashMap<Ptr<str>, Ident<'pool>, gxhash::GxBuildHasher>;
-type Map<'pool> = HashMap<Ptr<str>, Ident<'pool>>;
-
 pub struct StringPool<'pool> {
-    lookup: SyncUnsafeCell<Map<'pool>>,
+    lookup: SyncUnsafeCell<Map<Ptr<str>, Ident<'pool>>>,
     values: SyncUnsafeCell<Vec<Ptr<str>>>,
     constants: SyncUnsafeCell<ConstantData>,
 }
@@ -217,7 +213,7 @@ impl<'p> Default for StringPool<'p> {
     fn default() -> Self {
         let len = Flag::_Reserved_Count_ as usize;
         let this = Self {
-            lookup: SyncUnsafeCell::new(Map::with_capacity(len)),
+            lookup: SyncUnsafeCell::new(Default::default()),
             values: SyncUnsafeCell::new(Vec::with_capacity(len)),
             constants: SyncUnsafeCell::new(ConstantData::default()),
         };

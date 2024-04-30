@@ -38,8 +38,8 @@ fn main() {
         eprintln!("Found installed lib at {:?}", STDLIB_PATH.lock().unwrap().as_ref().unwrap());
     } else {
         // TODO: show search locations
-        eprintln!("Standard library not found.");
-        exit(1);
+        // eprintln!("Standard library not found.");
+        // exit(1);
     }
     if let Some(name) = env::args().nth(1) {
         if name == "--" {
