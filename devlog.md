@@ -1,4 +1,17 @@
-## lox (Apr 28)
+## ConstantData arena (Apr 28)
+
+- The idea here is that unsafe language with no const pointer type yet,
+  but it gets pretty scary if you mutate something the compiler expects to be constant (like an interned string).
+  So put all the constants together and any time you build up a whole page, mark it as read only.
+  So there's a chance that a program trying to do crimes will fault but I don't have to pay the price of adding checking to every dereference.
+  Doing it with 16K granularity isn't really enough to be reassuring but mprotect is already ~10% of compile time because of the jit stuff, so i dont really want to do extra on every ffi call.
+  I really need to work on a more clever page rotating scheme.
+- I've dug myself such a hole with the lifetimes that I mostly just leak everything, so might as well put it in an arena and not pay for the book-keeping.
+- I think I'll need to be strict about memory segments when trying to emit an exe anyway so might as well start now and have everything go through a central point.
+- Allowing constants with internal pointers is weird for exe so being able to reason about whether its in the range and needs to be remapped seems useful.
+  Then maybe this should store type info too because what if you just happen to have a large int constant in the range by chance.
+
+## lox ch 1/2 (Apr 27/28)
 
 Feel like i need to do some project in my language to see what the biggest pain points are to decide what to work on.
 Gonna go through crafting interpreters again and keep a list of problems I have.
@@ -8,6 +21,8 @@ Did:
 - more pointer math helper functions.
 - print negative numbers.
 - round float to int asm and print that. TODO: llvm
+- inline the basic functions (like add) asm so dont have to do the jump.
+- load/store for u8 for working with CStrs.
 
 ## out of order constants (Apr 27)
 

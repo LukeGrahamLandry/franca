@@ -774,6 +774,7 @@ pub mod jit {
     use crate::ast::FuncId;
     use crate::bc_to_asm::ConstBytes;
     use crate::bootstrap_gen::brk;
+    use crate::STATS;
     use std::cell::UnsafeCell;
     use std::ptr::null;
     use std::slice;
@@ -790,6 +791,8 @@ pub mod jit {
         old: *mut u8,
         ip_to_inst: Vec<*const u8>,
         pub constants: ConstBytes,
+        pub low: usize,
+        pub high: usize,
     }
 
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
@@ -799,6 +802,8 @@ pub mod jit {
             assert_eq!(map.as_ptr() as usize % 4, 0, "alignment's fucked");
             Self {
                 current_start: map.as_ptr(),
+                low: map.as_mut_ptr() as usize,
+                high: map.as_mut_ptr() as usize + bytes,
                 next: map.as_mut_ptr(),
                 old: map.as_mut_ptr(),
                 map_mut: Some(map),
@@ -889,13 +894,15 @@ pub mod jit {
 
         pub fn make_exec(&mut self) {
             if let Some(map) = self.map_mut.take() {
-                self.map_exec = Some(map.make_exec().unwrap())
+                self.map_exec = Some(map.make_exec().unwrap());
+                unsafe { STATS.jit_mprotect += 1 };
             }
         }
 
         pub fn make_write(&mut self) {
             if let Some(map) = self.map_exec.take() {
-                self.map_mut = Some(map.make_mut().unwrap())
+                self.map_mut = Some(map.make_mut().unwrap());
+                unsafe { STATS.jit_mprotect += 1 };
             }
         }
 

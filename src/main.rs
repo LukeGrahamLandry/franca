@@ -10,7 +10,7 @@ use compiler::{
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, STATS,
+    run_main, timestamp, MEM, STATS,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
@@ -51,7 +51,10 @@ fn main() {
         }
 
         if name == "--no-fork" {
+            let beg = MEM.get();
             run_tests_serial_for_profile();
+            let end = MEM.get();
+            println!("Used {} KB of memory.", (end as usize - beg as usize) / 1000);
             return;
         }
 
@@ -59,7 +62,6 @@ fn main() {
         let path = PathBuf::from(format!("tests/{name}.fr"));
         if path.exists() {
             init_logs_flag(0xFFFFFFFFF);
-
             run_main(pool, fs::read_to_string(format!("tests/{name}.fr")).unwrap(), Some(&name), true);
         } else {
             init_logs(&[LogTag::Scope, LogTag::ShowPrint]);

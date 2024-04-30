@@ -226,7 +226,13 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '>' => self.pair('-', RightAngle, RightArrow),
             '\'' => self.one(Quote),
             '“' | '”' => self.err(LexErr::ThatsNotANormalQuoteDidYouCopyPasteFromAPdf),
-            c => self.err(LexErr::Unexpected(c)),
+            c => {
+                if !c.is_ascii() && !c.is_whitespace() {
+                    self.lex_ident()
+                } else {
+                    self.err(LexErr::Unexpected(c))
+                }
+            }
         }
     }
 
@@ -375,7 +381,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
         self.pop();
         let mut c = self.peek_c();
         // TODO: only sometimes allow #
-        while c.is_ascii_alphanumeric() || c == '_' {
+        while c.is_ascii_alphanumeric() || c == '_' || (!c.is_ascii() && !c.is_whitespace()) {
             self.pop();
             c = self.peek_c();
         }

@@ -9,11 +9,45 @@
 #![allow(clippy::format_collect)]
 extern crate core;
 
+struct MyAllocator;
+
+thread_local! {
+     pub static MEM: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
+         null_mut(),
+         1 << 30,
+         libc::PROT_WRITE | libc::PROT_READ,
+         libc::MAP_ANON | libc::MAP_PRIVATE,
+         -1,
+         0,
+     )} as *mut u8);
+}
+
+unsafe impl GlobalAlloc for MyAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = MEM.get();
+        let ptr = ptr.add(ptr.align_offset(layout.align()));
+        MEM.set(ptr.add(layout.size()));
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // leak it
+    }
+}
+
+// Apr 29. this makes tests ~20% faster.
+#[global_allocator]
+static GLOBAL: MyAllocator = MyAllocator;
+
+use std::alloc::GlobalAlloc;
+use std::alloc::Layout;
 use std::arch::asm;
+use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::mem::{transmute, ManuallyDrop};
 use std::path::PathBuf;
+use std::ptr::null_mut;
 
 use ast::FuncId;
 use ast::ScopeId;
@@ -80,6 +114,8 @@ pub struct Stats {
     pub make_lit_fn: usize,
     pub parser_wait: usize,
     pub parser_check: usize,
+    pub parser_did: usize,
+    pub jit_mprotect: usize,
 }
 
 pub static mut STATS: Stats = Stats {
@@ -91,6 +127,8 @@ pub static mut STATS: Stats = Stats {
     make_lit_fn: 0,
     parser_wait: 0,
     parser_check: 0,
+    jit_mprotect: 0,
+    parser_did: 0,
 };
 
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
@@ -263,6 +301,7 @@ pub fn run_main<'a: 'p, 'p: 'static>(pool: &'a StringPool<'p>, src: String, save
         let _ = ManuallyDrop::new(comp);
         let _ = ManuallyDrop::new(program);
     }
+
     true
 }
 

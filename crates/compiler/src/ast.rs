@@ -685,6 +685,7 @@ pub struct Func<'p> {
 
     pub why_resolved_sign: Option<String>,
     pub why_resolved_body: Option<String>,
+    pub high_jitted_callee: usize,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -1541,6 +1542,7 @@ impl<'p> Default for Func<'p> {
             why_resolved_sign: None,
             why_resolved_body: None,
             args_block: None,
+            high_jitted_callee: 0,
         }
     }
 }

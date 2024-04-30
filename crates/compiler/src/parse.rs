@@ -20,7 +20,7 @@ use crate::{
     logging::{LogTag::Parsing, PoolLog},
     pool::{Ident, StringPool},
 };
-use crate::{outln, STATS};
+use crate::{outln, MEM, STATS};
 use TokenType::*;
 
 pub struct Parser<'a, 'p: 'static> {
@@ -83,6 +83,8 @@ fn handle(parse: Arc<ParseTasks<'static>>) {
 
         loop {
             let task = parse.next.load(Ordering::Acquire);
+
+            unsafe { STATS.parser_did += 1 };
 
             let file = unsafe { &mut *parse.tasks.get() }.get_mut(task).map(|f| mem::replace(f, ParseFile::Wip));
 

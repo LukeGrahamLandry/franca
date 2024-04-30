@@ -42,6 +42,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         debug_assert!(r.local_constants.is_empty());
         debug_assert_eq!(r.scope, scope, "ICE: unmatched scopes");
+        r.compiler.pool.use_constants(|c| c.adjust_writable());
         Ok(r.captures)
     }
 

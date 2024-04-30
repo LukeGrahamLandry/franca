@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     hash::Hash,
+    io::Write,
     marker::PhantomData,
     mem,
     sync::atomic::{AtomicBool, Ordering},
@@ -33,7 +34,7 @@ impl Debug for Ident<'_> {
 }
 
 /// A raw pointer that uses the reference's Hash/PartialEq implementations.
-struct Ptr<T: ?Sized>(*mut T);
+struct Ptr<T: ?Sized>(*const T);
 
 // type Map<'pool> = HashMap<Ptr<str>, Ident<'pool>, gxhash::GxBuildHasher>;
 type Map<'pool> = HashMap<Ptr<str>, Ident<'pool>>;
@@ -42,6 +43,7 @@ pub struct StringPool<'pool> {
     lookup: SyncUnsafeCell<Map<'pool>>,
     values: SyncUnsafeCell<Vec<Ptr<str>>>,
     lock: AtomicBool,
+    constants: SyncUnsafeCell<ConstantData>,
 }
 
 unsafe impl Send for StringPool<'_> {}
@@ -62,6 +64,13 @@ pub fn locked<T>(lock: &AtomicBool, f: impl FnOnce() -> T) -> T {
 }
 
 impl<'pool> StringPool<'pool> {
+    pub fn use_constants<T>(&self, f: impl FnOnce(&mut ConstantData) -> T) -> T {
+        locked(&self.lock, || {
+            let v = unsafe { &mut *self.constants.get() };
+            f(v)
+        })
+    }
+
     pub fn get(&self, i: Ident) -> &'pool str {
         locked(&self.lock, || {
             let v = unsafe { &*self.values.get() };
@@ -92,14 +101,9 @@ impl<'pool> StringPool<'pool> {
                 return *i;
             }
 
-            let mut alloc = s.to_owned().into_bytes();
-            alloc.push(0); // might as well make it a c string since have to reallocate anyway
+            let consts = unsafe { &mut *self.constants.get() }; // we already have the lock.
+            let alloc = Ptr(consts.push_str_zero_term(s));
 
-            let alloc: Box<[u8]> = alloc.into_boxed_slice();
-            let alloc = Box::into_raw(alloc);
-            let alloc = Ptr(unsafe { &mut (*alloc)[..alloc.len() - 1] } as *mut [u8] as *mut str);
-
-            // Delay taking this lock as long as possible to not block calls to get().
             let values = unsafe { &mut *self.values.get() };
             let i = Ident(values.len() as u32, PhantomData);
             values.push(alloc);
@@ -118,21 +122,103 @@ impl<'pool> StringPool<'pool> {
     }
 }
 
-impl Drop for StringPool<'_> {
-    fn drop(&mut self) {
-        locked(&self.lock, || {
-            let v = unsafe { &mut *self.values.get() };
-            for s in v.drain(0..) {
-                // # Safety
-                // Drop can only be called once.
-                unsafe {
-                    let s = s.0 as *mut [u8];
-                    let s = core::ptr::slice_from_raw_parts_mut(s.as_mut_ptr(), s.len() + 1); // it was a c string
+use std::{
+    mem::align_of,
+    ptr::{null_mut, slice_from_raw_parts, slice_from_raw_parts_mut},
+};
 
-                    drop(Box::from_raw(s));
-                }
+pub struct ConstantData {
+    first: *mut u8,
+    prev_page: *mut u8,
+    pub next: *mut u8,
+}
+
+const PAGE_SIZE: isize = 16384; // TODO: where does one ask the os for this
+
+impl Default for ConstantData {
+    fn default() -> Self {
+        const SIZE: usize = 1 << 22; // we work at the virtual memory factory I feel
+        let next = unsafe {
+            libc::mmap(
+                null_mut(),
+                SIZE,
+                libc::PROT_WRITE | libc::PROT_READ,
+                libc::MAP_ANON | libc::MAP_PRIVATE,
+                -1,
+                0,
+            )
+        } as *mut u8;
+
+        Self {
+            next,
+            first: next,
+            prev_page: next,
+        }
+    }
+}
+
+impl ConstantData {
+    pub fn push_i64(&mut self, i: i64) {
+        self.ensure_align::<i64>();
+        self.push_bytes(&i.to_le_bytes());
+    }
+
+    pub fn push_ints(&mut self, i: &[i64]) -> *const [i64] {
+        self.ensure_align::<i64>();
+        let bytes = unsafe { &*slice_from_raw_parts(i.as_ptr() as *const u8, i.len() * 8) };
+        let ptr = self.push_bytes(bytes).as_ptr();
+        unsafe { &*slice_from_raw_parts(ptr as *const i64, i.len()) }
+    }
+
+    pub fn push_str_zero_term(&mut self, s: &str) -> *const str {
+        let ptr = self.push_bytes(s.as_bytes()).as_ptr();
+        self.push_bytes(&[0]);
+        unsafe { std::str::from_utf8_unchecked(&*slice_from_raw_parts(ptr, s.len())) }
+    }
+
+    pub fn push_bytes(&mut self, s: &[u8]) -> *const [u8] {
+        let ptr = self.next;
+        unsafe {
+            self.next = ptr.add(s.len());
+            let dest = &mut *slice_from_raw_parts_mut(ptr, s.len());
+            dest.copy_from_slice(s);
+            slice_from_raw_parts(ptr, s.len())
+        }
+    }
+
+    pub fn ensure_align<T>(&mut self) {
+        unsafe {
+            let n = self.next;
+            self.next = n.add(n.align_offset(align_of::<T>()));
+        }
+    }
+
+    pub fn adjust_writable(&mut self) {
+        unsafe {
+            let prev = self.prev_page;
+            let bytes = self.next.offset_from(prev);
+            if bytes < PAGE_SIZE {
+                return;
             }
-        })
+            let pages = bytes / PAGE_SIZE;
+            if pages > 0 {
+                let len = (pages * PAGE_SIZE) as usize;
+                libc::mprotect(prev as *mut libc::c_void, len, libc::PROT_READ);
+                self.prev_page = prev.add(len);
+            }
+        }
+    }
+}
+
+impl Write for ConstantData {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.push_bytes(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.adjust_writable();
+        Ok(())
     }
 }
 
@@ -143,6 +229,7 @@ impl<'p> Default for StringPool<'p> {
             lookup: SyncUnsafeCell::new(Map::with_capacity(len)),
             values: SyncUnsafeCell::new(Vec::with_capacity(len)),
             lock: AtomicBool::new(false),
+            constants: SyncUnsafeCell::new(ConstantData::default()),
         };
         for i in 0..len {
             let flag: Flag = unsafe { mem::transmute(i as u8) };
