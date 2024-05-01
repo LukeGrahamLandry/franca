@@ -51,16 +51,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Value {
                 value: Values::Many(vals), ..
             } => {
-                if vals.len() == 1 {
-                    if f.ty == TypeId::overload_set() {
-                        todo!()
-                    }
-                    // TODO -- Apr 30
-                    // if let Value::OverloadSet(i) = vals[0] {
-                    //     let id = self.resolve_in_overload_set(result, arg, ret, i)?;
-                    //     return Ok(Some(id));
-                    // }
-                }
+                debug_assert!(vals.len() != 1);
                 None
             }
             Expr::Closure(_) => {

@@ -534,10 +534,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             .set_slot_f(floats, slot));
     }
 
-    fn slot_is_var(&self, slot: StackOffset) -> bool {
-        self.compile.ready[self.f].as_ref().unwrap().slot_is_var.get(slot.0)
-    }
-
     fn call_direct(&mut self, f: FuncId, ret: StackRange, arg: StackRange) -> Res<'p, ()> {
         let target = &self.compile.program[f];
         let target_c_call = target.has_tag(Flag::C_Call);

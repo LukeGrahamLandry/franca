@@ -5,125 +5,57 @@ use crate::compiler::Compile;
 use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
 use crate::{
-    ast::{FnType, FuncId, TypeId, Var},
+    ast::{FnType, FuncId, TypeId},
     compiler::{ExecTime, Res},
     err,
     ffi::InterpSend,
-    pool::Ident,
 };
-use crate::{impl_index, unwrap, Map};
+use crate::{impl_index, unwrap};
 use codemap::Span;
 use interp_derive::InterpSend;
 use std::ops::Range;
 
 #[derive(Clone, InterpSend, Debug)]
-pub enum Bc2 {
+pub enum Bc {
     CallDirect { f: FuncId },                 // <args:m> -> <ret:n>
     CallSplit { ct: FuncId, rt: FuncId },     // <args:m> -> <ret:n>
-    CallFnPtr { ty: FnType, comp_ctx: bool }, // <args:m> <ptr:1> -> <ret:n>
+    CallFnPtr { ty: FnType, comp_ctx: bool }, // <ptr:1> <args:m> -> <ret:n>
     PushConstant { value: i64 },              // _ -> <v:1>
-    JumpIfFalse { false_ip: usize },          // <cond:1> -> _
-    Goto { ip: usize },                       // _ -> _
+    JumpIf { true_ip: u16, false_ip: u16 },   // <cond:1> -> _
+    Goto { ip: u16 },                         // _ -> _
     Ret,                                      //
     GetNativeFnPtr(FuncId),                   // _ -> <ptr:1>
-    Load { slots: usize },                    // <ptr:1> -> <?:n>
-    Store { slots: usize },                   // <?:n> <ptr:1> -> _
+    Load { slots: u16 },                      // <ptr:1> -> <?:n>
+    Store { slots: u16 },                     // <?:n> <ptr:1> -> _
     AddrVar { id: u16 },                      // _ -> <ptr:1>
     IncPtr { offset: u16 },                   // <ptr:1> -> <ptr:1>
-    Pop { slots: usize },                     // <?:n> -> _
-}
-
-#[derive(Clone, InterpSend, Debug)]
-pub enum Bc<'p> {
-    CallDirect {
-        f: FuncId,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    CallSplit {
-        ct: FuncId,
-        rt: FuncId,
-        ret: StackRange,
-        arg: StackRange,
-    },
-    LoadConstant {
-        slot: StackOffset,
-        value: i64,
-    },
-    JumpIf {
-        cond: StackOffset,
-        true_ip: usize,
-        false_ip: usize,
-    },
-    Goto {
-        ip: usize,
-    },
-    Ret(StackRange),
-    AbsoluteStackAddr {
-        of: StackRange,
-        to: StackOffset,
-    },
-    DebugMarker(Ident<'p>, Ident<'p>),
-    DebugLine(Span),
-    Clone {
-        from: StackOffset,
-        to: StackOffset,
-    },
-    CloneRange {
-        from: StackRange,
-        to: StackRange,
-    },
-    SlicePtr {
-        base: StackOffset,
-        offset: usize,
-        count: usize,
-        ret: StackOffset,
-    },
-    Load {
-        from: StackOffset,
-        to: StackRange,
-    },
-    TagCheck {
-        enum_ptr: StackOffset,
-        value: i64,
-    },
-    Store {
-        to: StackOffset,
-        from: StackRange,
-    },
-    GetNativeFnPtr {
-        slot: StackOffset,
-        f: FuncId,
-    },
-    CallFnPtr {
-        f: StackOffset,
-        arg: StackRange,
-        ret: StackRange,
-        ty: FnType,
-        comp_ctx: bool,
-    },
-    LastUse(StackRange),
-    NoCompile,
+    Pop { slots: u16 },                       // <?:n> -> _
+    TagCheck { expected: u16 },               // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     Unreachable,
-    MarkContiguous(StackRange, TypeId),
+    NoCompile,
+    LastUse { id: u16 },
 }
 
 #[derive(Clone)]
 pub struct FnBody<'p> {
-    pub insts: Vec<Bc<'p>>,
+    pub insts: Vec<Bc>,
     pub debug: Vec<DebugInfo<'p>>,
     pub arg_range: StackRange,
     pub stack_slots: usize,
-    pub vars: Map<Var<'p>, (StackRange, TypeId)>, // TODO: use a vec
+    pub vars: Vec<TypeId>,
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
     pub func: FuncId,
     pub why: String,
     pub last_loc: Span,
-    pub to_drop: Vec<(StackRange, TypeId)>,
-    /// true -> we might Drop but the put a value back. false -> it's an ssa intermediate only needed once.
-    pub slot_is_var: BitSet,
     pub jump_targets: BitSet,
+}
+
+impl<'p> FnBody<'p> {
+    pub fn add_var(&mut self, ty: TypeId) -> u16 {
+        self.vars.push(ty);
+        self.vars.len() as u16 - 1
+    }
 }
 
 #[derive(Clone, Default)]
@@ -270,6 +202,7 @@ impl From<(Values, TypeId)> for Structured {
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackOffset(pub usize);
+
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, InterpSend)]
 pub struct StackRange {
@@ -343,15 +276,6 @@ impl Value {
             Some(f)
         } else {
             None
-        }
-    }
-
-    // TODO: remove
-    fn as_int(&self) -> Res<'static, i64> {
-        if let &Value::I64(f) = self {
-            Ok(f)
-        } else {
-            err!("want int",)
         }
     }
 }

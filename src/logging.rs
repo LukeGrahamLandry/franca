@@ -565,7 +565,7 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
         writeln!(f);
         let width = 75;
         for (i, bc) in self.insts.iter().enumerate() {
-            let bc = format!("{i}. {}", bc.log(pool));
+            let bc = format!("{i}. {bc:?}");
             writeln!(
                 f,
                 "{:width$} {}",
@@ -574,38 +574,6 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
             );
         }
         writeln!(f, "{}", self.why);
-        f
-    }
-}
-
-impl<'p> PoolLog<'p> for Bc<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
-        let mut f = String::new();
-        match self {
-            Bc::CallFnPtr { f: func_slot, ret, arg, .. } => {
-                write!(f, "{ret:?} = call_c({func_slot:?}, {arg:?});")
-            }
-            Bc::CallDirect { f: func, ret, arg } => {
-                write!(f, "{ret:?} = call(f({:?}), {arg:?});", func.as_index())
-            }
-            Bc::CallSplit { ct, rt, ret, arg } => {
-                write!(f, "{ret:?} = call(f({ct:?} | {rt:?}), {arg:?});")
-            }
-            Bc::LoadConstant { slot, value } => write!(f, "{:?} = {:?};", slot, value),
-            Bc::JumpIf { cond, true_ip, false_ip } => write!(f, "if ({:?}) goto {} else goto {};", cond, true_ip, false_ip),
-            Bc::Goto { ip } => write!(f, "goto {ip};",),
-            Bc::Ret(i) => write!(f, "return {i:?};"),
-            Bc::Clone { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
-            Bc::CloneRange { from, to } => write!(f, "{:?} = @clone({:?});", to, from),
-            Bc::Load { from, to } => write!(f, "{:?} = {:?}!deref;", to, from),
-            Bc::Store { from, to } => write!(f, "{:?}!deref = {:?};", to, from),
-            Bc::SlicePtr { base, offset, count, ret } => write!(f, "{:?} = slice({:?}, first={}, count={});", ret, base, offset, count),
-            Bc::AbsoluteStackAddr { of, to } => write!(f, "{:?} = @addr({:?});", to, of),
-            Bc::DebugMarker(s, i) => write!(f, "debug({:?}, {:?} = {:?});", s, i, pool.get(*i)),
-            Bc::DebugLine(loc) => write!(f, "debug({:?});", loc),
-            Bc::TagCheck { enum_ptr, value } => write!(f, "@assert(Tag({enum_ptr:?}) == {value});"),
-            _ => write!(f, "{self:?}"),
-        };
         f
     }
 }

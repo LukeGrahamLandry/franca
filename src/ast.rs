@@ -1343,7 +1343,7 @@ impl<'p> Program<'p> {
             Values::One(Value::Unit) => Ok(TypeId::unit()),
             Values::One(Value::Type(id)) => Ok(id),
             Values::Many(values) => {
-                let values: Vec<_> = values.into_iter().map(|v| TypeId::from_raw(v)).collect();
+                let values: Vec<_> = values.into_iter().map(TypeId::from_raw).collect();
                 Ok(self.tuple_of(values))
             }
             _ => {

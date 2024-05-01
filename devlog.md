@@ -13,6 +13,8 @@ Maybe I want to commit to only having one backend in rust and write the rest in 
 It doesn't work anyway and I'm not inspired to fix it cause the error message is always just SEGSEV so you can't even see the broken ir you generated.
 Maybe thier cli stuff has friendlier validation, it can't be worse, and I could still link to thier c api and just call LLVMParseIRInContext if I want to jit it in my process.
 
+So far looks like stack based bc removes a bunch of reserve slots stuff which is nice.
+
 ## working towards replacing 'enum Value' with bytes (Apr 30)
 
 - Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.
