@@ -578,20 +578,6 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
     }
 }
 
-impl Debug for StackOffset {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "${}", self.0)
-    }
-}
-
-impl Debug for StackRange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let args: Vec<_> = (self.first.0..(self.first.0 + self.count)).map(|i| format!("${}", i)).collect();
-        let args = args.join(", ");
-        write!(f, "({args})")
-    }
-}
-
 impl Stmt<'_> {
     pub fn get_loc(&self) -> Option<Span> {
         match self {

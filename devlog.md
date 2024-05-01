@@ -15,6 +15,9 @@ Maybe thier cli stuff has friendlier validation, it can't be worse, and I could 
 
 So far looks like stack based bc removes a bunch of reserve slots stuff which is nice.
 
+- confusion about the stack having addr of a stack slot vs deref of a stack slot. currently I don't have spilling.
+- there's somethign weird where functions with a constant value body still get emitted asm so have to fix that later but it should work anyway
+
 ## working towards replacing 'enum Value' with bytes (Apr 30)
 
 - Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.

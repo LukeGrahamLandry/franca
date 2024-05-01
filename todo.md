@@ -4,8 +4,6 @@
 ## Deeply annoying
 
 - no u32/u16/u8
-- constants must be forward declared. no mutual recursion
-- comptime runs on interp instead of asm
 - no typechecking through fn arg/ret so if/loop body closures need annotations
 - can't output an exe, only jit
 - no way to say trait bounds on generics (it just tries to compile like c++ templates)
@@ -16,6 +14,7 @@
 - test runner glue code is done in rust instead of fancy metaprogram
 - no string escape codes like "\n"
 - sometimes it can't show the codemap. should never use garbage_loc.
+- typing my_struct&.field_name[] every time feels like working at the nightmares factory even tho weird place expressions in other languages annoy me
 
 ## Feature Ideas
 
@@ -23,7 +22,6 @@
 - embeding other languages would be a good demo of the comptime/meta programming stuff.
   - need a raw string syntax that passes it to a macro (like nim?)
   - lualit would be cool cause they have c abi stuff and dynamic language so notably different from mine.
-- A :: b === const A = b. maybe := for var or let, idk which.
 - adding 'e->name(a) === (e.vptr.name)(e, a)' would make <- the "function oriented programming" operator and -> the "object-al programming" operator.
 - need chained compile errors.
   - maybe loc should be a specific token so you don't highlight the whole expression just to complain about a function signature

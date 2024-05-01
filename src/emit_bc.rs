@@ -65,11 +65,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         jump_targets.set(0); // entry is the first instruction
         FnBody {
             jump_targets,
-            arg_range: StackRange {
-                first: StackOffset(0),
-                count: 0,
-            },
-            stack_slots: 0,
             vars: Default::default(),
             when: func.when,
             func: func.func,
@@ -78,6 +73,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             insts: vec![],
             debug: vec![],
             slot_types: vec![],
+            if_debug_count: 0,
         }
     }
 
@@ -88,7 +84,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
         let mut result = self.empty_fn(wip);
-        let func = &self.program[f];
         match self.emit_body(&mut result, f) {
             Ok(_) => Ok(result),
             Err(mut e) => {
@@ -108,7 +103,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
             let id = result.add_var(ty);
             result.push(Bc::AddrVar { id });
-            let slots = self.slot_count(ty) as u16;
+            let slots = self.slot_count(ty);
             result.push(Bc::Store { slots });
 
             self.locals.last_mut().unwrap().push(id);
@@ -141,7 +136,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.compile_expr(result, body)?;
 
         for id in self.locals.pop().unwrap() {
-            result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
+            // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
         }
         assert!(self.locals.is_empty());
 
@@ -152,8 +147,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>) -> Res<'p, ()> {
         self.compile_expr(result, arg_expr)?;
-        let func = &self.program[f];
-        let f_ty = func.unwrap_ty();
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));
@@ -167,7 +160,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Stmt::Eval(expr) => {
                 debug_assert!(!expr.ty.is_unknown());
                 self.compile_expr(result, expr)?;
-                let slots = self.slot_count(expr.ty) as u16;
+                let slots = self.slot_count(expr.ty);
                 result.push(Bc::Pop { slots });
             }
             Stmt::DeclVar { name, ty, value, kind } => {
@@ -178,7 +171,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.compile_expr(result, expr)?; // TODO: ()!uninit
                 let id = result.add_var(ty);
                 result.push(Bc::AddrVar { id });
-                let slots = self.slot_count(ty) as u16;
+                let slots = self.slot_count(ty);
                 result.push(Bc::Store { slots });
 
                 let prev = self.var_lookup.insert(*name, id);
@@ -189,7 +182,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Stmt::DeclVarPattern { binding, value } => {
                 if let Some(value) = value.as_ref() {
                     self.compile_expr(result, value)?;
-                    let args_to_drop = self.bind_args(result, binding)?;
+                    self.bind_args(result, binding)?;
                 } else {
                     assert!(binding.bindings.is_empty());
                 }
@@ -270,7 +263,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Value { value, .. } => {
                 // TODO: sometimes you probably want to reference by pointer?
-                for (i, value) in value.clone().vec().into_iter().enumerate() {
+                for value in value.clone().vec().into_iter() {
                     result.push(Bc::PushConstant { value });
                 }
             }
@@ -286,7 +279,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     // Note: arg is not evalutated
                     Flag::If => self.emit_call_if(result, arg)?,
                     Flag::While => self.emit_call_while(result, arg)?,
-                    Flag::Addr => self.addr_macro(result, arg, expr.ty)?,
+                    Flag::Addr => self.addr_macro(result, arg)?,
                     Flag::Quote => unreachable!(),
                     Flag::Slice => {
                         let container_ty = arg.ty;
@@ -346,7 +339,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn addr_macro(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, ptr_ty: TypeId) -> Res<'p, ()> {
+    fn addr_macro(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, ()> {
         self.last_loc = Some(arg.loc);
         match arg.deref() {
             Expr::GetVar(var) => {
@@ -388,13 +381,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             ice!("if args must be tuple not {:?}", arg);
         };
 
+        let index = result.if_debug_count;
+        result.if_debug_count += 1;
+
         let branch_ip = result.push(Bc::NoCompile); // patch
         let true_ip = result.insts.len() as u16;
         self.compile_expr(result, if_true)?;
+        result.push(Bc::EndIf { index });
         let jump_over_false = result.push(Bc::NoCompile); // patch
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
-
+        result.push(Bc::EndIf { index });
         result.insts[branch_ip] = Bc::JumpIf { false_ip, true_ip };
         result.insts[jump_over_false] = Bc::Goto {
             ip: result.insts.len() as u16,
@@ -413,11 +410,23 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             ice!("if args must be tuple not {:?}", arg);
         };
 
+        debug_assert_eq!(body_fn.ty, TypeId::unit());
+        result.push(Bc::PushConstant { value: 0 }); // TODO: caller expects a unit on the stack
+
+        let index = result.if_debug_count;
+        result.if_debug_count += 1;
+
+        result.push(Bc::EndIf { index });
         let cond_ip = result.insts.len() as u16;
+        debug_assert_eq!(cond_fn.ty, TypeId::bool());
         self.compile_expr(result, cond_fn)?;
         let branch_ip = result.push(Bc::NoCompile); // patch
         let body_ip = result.insts.len() as u16;
         self.compile_expr(result, body_fn)?;
+        let slots = self.slot_count(body_fn.ty);
+        result.push(Bc::Pop { slots });
+
+        result.push(Bc::EndIf { index });
         result.push(Bc::Goto { ip: cond_ip });
         let end_ip = result.insts.len() as u16;
 
@@ -427,7 +436,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             false_ip: end_ip,
         };
         result.jump_targets.set(cond_ip as usize);
-        result.jump_targets.set(branch_ip as usize);
+        result.jump_targets.set(branch_ip);
         result.jump_targets.set(body_ip as usize);
         result.jump_targets.set(end_ip as usize);
 
@@ -488,9 +497,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 };
                 result.push(Bc::IncPtr { offset });
             }
-            TypeInfo::Enum { cases, .. } => {
-                let f_ty = cases[index].1;
-                let count = self.slot_count(f_ty);
+            TypeInfo::Enum { .. } => {
                 result.push(Bc::TagCheck { expected: index as u16 });
                 result.push(Bc::IncPtr { offset: 1 });
             }
@@ -556,8 +563,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: make this constexpr in compiler
                 result.push(Bc::PushConstant { value: i as i64 });
 
-                // If this is a smaller varient, pad out the slot instead of poisons. cant be unit because then asm doesnt copy it around
-                for i in (payload_size + 1)..size {
+                // If this is a smaller varient, pad out the slot.
+                for _ in (payload_size + 1)..size {
                     result.push(Bc::PushConstant { value: 123 });
                 }
                 // TODO: support explicit uninit so backend doesn't emit code for the padding above.

@@ -1723,11 +1723,11 @@ macro_rules! tagged_index {
             pub const MASK: u64 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
 
             pub fn as_index(self) -> usize {
-                debug_assert!(self.is_valid());
+                debug_assert!(self.is_valid(), "{}", self.0);
                 (self.0 & (!Self::MASK)) as usize
             }
             pub fn as_raw(self) -> i64 {
-                debug_assert!(self.is_valid());
+                debug_assert!(self.is_valid(), "{}", self.0);
                 self.0 as i64
             }
             pub fn from_raw(value: i64) -> Self {

@@ -10,7 +10,7 @@ use franca::{
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, MEM, STATS,
+    run_main, timestamp, where_am_i, MEM, STACK_START, STATS,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
@@ -19,6 +19,7 @@ use std::{
     env, fs,
     io::Write,
     mem::{self, transmute},
+    panic::{set_hook, take_hook},
     path::PathBuf,
     process::exit,
     str::pattern::Pattern,
@@ -30,7 +31,17 @@ use std::{
 //       Or just passs remaining cli args as args of a function.
 //       Because it seems nicer if things are composable and the compiler functions don't assume they can just read the args except the top level one which you can define in userland.
 // TODO: repl(). works nicely with ^ so you could experiment but then always be able to run things as a command when working with other tools
+
 fn main() {
+    let marker = 0;
+    unsafe { STACK_START = &marker as *const i32 as usize };
+
+    let prev = take_hook();
+    set_hook(Box::new(move |arg| {
+        where_am_i();
+        prev(arg);
+    }));
+
     // TODO: option to hardcode path
     // TODO: its a problem that someone could add one at a higher prio place maybe?
     if find_std_lib() {

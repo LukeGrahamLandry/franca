@@ -13,7 +13,6 @@ use crate::{
 use crate::{impl_index, unwrap};
 use codemap::Span;
 use interp_derive::InterpSend;
-use std::ops::Range;
 
 #[derive(Clone, InterpSend, Debug)]
 pub enum Bc {
@@ -34,14 +33,13 @@ pub enum Bc {
     Unreachable,
     NoCompile,
     LastUse { id: u16 },
+    EndIf { index: u16 }, // For debug check. There will be two with the same index and the virtual stack must be identical when both are reached.
 }
 
 #[derive(Clone)]
 pub struct FnBody<'p> {
     pub insts: Vec<Bc>,
     pub debug: Vec<DebugInfo<'p>>,
-    pub arg_range: StackRange,
-    pub stack_slots: usize,
     pub vars: Vec<TypeId>,
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
@@ -49,6 +47,7 @@ pub struct FnBody<'p> {
     pub why: String,
     pub last_loc: Span,
     pub jump_targets: BitSet,
+    pub if_debug_count: u16,
 }
 
 impl<'p> FnBody<'p> {
@@ -144,7 +143,6 @@ pub enum Values {
 
 #[derive(Debug, Clone)]
 pub enum Structured {
-    Emitted(TypeId, StackRange),
     Const(TypeId, Values),
     TupleDifferent(TypeId, Vec<Structured>),
     RuntimeOnly(TypeId),
@@ -153,7 +151,7 @@ pub enum Structured {
 impl Structured {
     pub fn ty(&self) -> TypeId {
         match self {
-            Structured::Emitted(ty, _) | Structured::Const(ty, _) | Structured::TupleDifferent(ty, _) | Structured::RuntimeOnly(ty) => *ty,
+            Structured::Const(ty, _) | Structured::TupleDifferent(ty, _) | Structured::RuntimeOnly(ty) => *ty,
         }
     }
 
@@ -164,14 +162,13 @@ impl Structured {
 
     pub fn get(self) -> Option<Values> {
         match self {
-            Structured::Emitted(_, _) | Structured::TupleDifferent(_, _) | Structured::RuntimeOnly(_) => None,
+            Structured::TupleDifferent(_, _) | Structured::RuntimeOnly(_) => None,
             Structured::Const(_, v) => Some(v),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
-            Structured::Emitted(_, s) => s.count == 0,
             Structured::TupleDifferent(_, s) => s.is_empty(),
             Structured::RuntimeOnly(_) | Structured::Const(_, _) => false,
         }
@@ -179,7 +176,6 @@ impl Structured {
 
     pub fn unchecked_cast(self, ty: TypeId) -> Structured {
         match self {
-            Structured::Emitted(_, v) => Structured::Emitted(ty, v),
             Structured::TupleDifferent(_, v) => Structured::TupleDifferent(ty, v),
             Structured::Const(_, v) => Structured::Const(ty, v),
             Structured::RuntimeOnly(_) => Structured::RuntimeOnly(ty),
@@ -187,63 +183,9 @@ impl Structured {
     }
 }
 
-// TOOD: dont switch the order. cri
-impl From<(StackRange, TypeId)> for Structured {
-    fn from((slot, ty): (StackRange, TypeId)) -> Self {
-        Structured::Emitted(ty, slot)
-    }
-}
-
 impl From<(Values, TypeId)> for Structured {
     fn from((value, ty): (Values, TypeId)) -> Self {
         Structured::Const(ty, value)
-    }
-}
-#[repr(C)]
-#[derive(Copy, Clone, PartialEq, InterpSend)]
-pub struct StackOffset(pub usize);
-
-#[repr(C)]
-#[derive(Copy, Clone, PartialEq, InterpSend)]
-pub struct StackRange {
-    pub first: StackOffset,
-    pub count: usize,
-}
-
-impl StackRange {
-    #[track_caller]
-    pub fn offset(&self, offset: usize) -> StackOffset {
-        debug_assert!(offset < self.count);
-        StackOffset(self.first.0 + offset)
-    }
-
-    #[track_caller]
-    pub fn single(&self) -> StackOffset {
-        debug_assert_eq!(self.count, 1, "{self:?}");
-        self.first
-    }
-
-    pub fn range(&self, offset: usize, count: usize) -> StackRange {
-        debug_assert!(self.count >= offset + count, "{self:?}[{offset}..{}]", offset + count);
-        StackRange {
-            first: self.offset(offset),
-            count,
-        }
-    }
-}
-
-pub struct InterpBox {
-    pub references: isize,
-    pub values: Vec<Value>,
-    pub is_constant: bool,
-}
-
-#[derive(Clone, Copy)]
-pub struct ConstId(pub usize);
-
-impl std::fmt::Debug for ConstId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "C{}", self.0)
     }
 }
 
@@ -324,15 +266,6 @@ impl Values {
             Values::One(_) => 1,
             Values::Many(v) => v.len(),
         }
-    }
-}
-
-impl IntoIterator for StackRange {
-    type Item = usize;
-    type IntoIter = Range<usize>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.first.0..self.first.0 + self.count
     }
 }
 

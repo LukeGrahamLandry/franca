@@ -9,7 +9,7 @@ use std::{
     thread::yield_now,
 };
 
-use crate::{ast::Flag, ffi::InterpSend, Map};
+use crate::{ast::Flag, ffi::InterpSend, Map, MY_CONST_DATA};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub u32, pub PhantomData<&'pool str>);
@@ -136,6 +136,9 @@ impl Default for ConstantData {
             )
         } as *mut u8;
 
+        unsafe {
+            MY_CONST_DATA = (next as usize, SIZE);
+        }
         Self {
             next,
             _first: next,

@@ -11,10 +11,12 @@ extern crate core;
 
 struct MyAllocator;
 
+pub const ARENA_SIZE: usize = 1 << 30;
+
 thread_local! {
      pub static MEM: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
          null_mut(),
-         1 << 30,
+         ARENA_SIZE,
          libc::PROT_WRITE | libc::PROT_READ,
          libc::MAP_ANON | libc::MAP_PRIVATE,
          -1,
@@ -157,6 +159,33 @@ pub const INCLUDE_STD: &[(&str, &str)] = &[
     include_std!("codegen/wasm/instructions"),
 ];
 */
+
+pub static mut STACK_START: usize = 0;
+pub static mut JITTED_PAGE: (usize, usize) = (0, 0);
+pub static mut MY_CONST_DATA: (usize, usize) = (0, 0);
+pub static mut STACK_MIN: usize = usize::max_value();
+
+pub static MY_STRING: &str = "Hello World";
+
+#[inline(never)]
+pub fn where_am_i() {
+    let marker = 0;
+    println!("ADDR OF RUST FUNCTION: {}", where_am_i as usize);
+    println!("ADDR OF RUST CONSTANT DATA: {}", MY_STRING.as_ptr() as usize);
+    println!(
+        "ADDR OF RUST STACK: {} to {} (min: {})",
+        unsafe { STACK_START },
+        &marker as *const i32 as usize,
+        unsafe { STACK_MIN }
+    );
+    println!("ADDR OF MMAP ARENA NEXT: {} ", MEM.get() as usize);
+    println!("ADDR OF MMAP JITTED: {} to {}", unsafe { JITTED_PAGE.0 }, unsafe {
+        JITTED_PAGE.0 + JITTED_PAGE.1
+    });
+    println!("ADDR OF MMAP CONST DATA: {} to {}", unsafe { MY_CONST_DATA.0 }, unsafe {
+        MY_CONST_DATA.0 + MY_CONST_DATA.1
+    });
+}
 
 // I'd rather include it in the binary but I do this so I don't have to wait for the compiler to recompile every time I change the lib
 // (maybe include_bytes in a seperate crate would make it better)

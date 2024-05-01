@@ -19,7 +19,7 @@ use crate::ast::{
     VarType, WalkAst,
 };
 
-use crate::bc_to_asm::{emit_aarch64, store_to_ints_values, Jitted};
+use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
@@ -29,7 +29,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, Map, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
 use crate::{
     logging::{LogTag, PoolLog},
     outln,
@@ -143,6 +143,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
+    }
+
+    pub(crate) fn slot_count(&mut self, ty: TypeId) -> usize {
+        self.ready.sizes.slot_count(self.program, ty)
     }
 }
 impl<'a, 'p> Compile<'a, 'p> {
@@ -262,14 +266,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.aarch64.make_exec();
                 self.flush_cpu_instruction_cache();
                 debug_assert_eq!(addr as usize % 4, 0);
+                println!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
                 // TODO: not setting x21 !!! -- Apr 30
                 if flat_call {
                     assert!(comp_ctx && !c_call);
                     do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
                 } else if c_call {
                     assert!(!flat_call);
-                    let ints = store_to_ints_values(arg);
+                    let ints = arg.vec();
+                    println!("IN: {ints:?}");
                     let r = ffi::c::call(self, addr as usize, ty, ints, comp_ctx)?;
+                    println!("OUT: {r}");
                     let mut out = vec![];
                     values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
                     Ok(out.into())
@@ -1117,6 +1124,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     // what the actual fuck. this makes it segfault
     // #[cfg_attr(debug_assertions, inline(always))]
     pub fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
+        let marker = 0;
+        unsafe { STACK_MIN = STACK_MIN.min(&marker as *const i32 as usize) };
         assert!(expr.ty.as_index() < self.program.types.len());
         // println!("{}", expr.log(self.pool));
 
@@ -2067,7 +2076,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
-        let ints = store_to_ints_values(values);
+        let ints = values.vec();
         Ok(unwrap!(Ret::deserialize_from_ints(&mut ints.into_iter()), ""))
     }
 
@@ -2608,7 +2617,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     all_const = false;
                     all_stack = false;
                 }
-                Structured::Emitted(_, _) => unreachable!(),
             }
         }
 
@@ -2749,7 +2757,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let func = &self.program[new_fid];
 
             match arg_val {
-                Structured::RuntimeOnly(_) | Structured::Emitted(_, _) => ice!("const arg but {:?} is only known at runtime.", arg_val),
+                Structured::RuntimeOnly(_) => ice!("const arg but {:?} is only known at runtime.", arg_val),
                 Structured::Const(_, _) => unreachable!(),
                 Structured::TupleDifferent(_, arg_values) => {
                     // TODO: Really what you want is to cache the newly baked function so it can be reused if called multiple times but I don't do that yet.

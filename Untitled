@@ -12,10 +12,7 @@ use crate::{bootstrap_gen::*, unwrap};
 use crate::{err, logging::PoolLog};
 use std::arch::asm;
 use std::cell::UnsafeCell;
-use std::fmt::Debug;
-use std::fs;
 use std::mem::transmute;
-use std::process::Command;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct SpOffset(usize);
@@ -39,14 +36,7 @@ enum Val {
     Literal(i64),
 }
 
-impl Debug for Val {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Val::Increment { reg, offset_bytes } => write!(f, "x{reg} + {offset_bytes}"),
-            Val::Literal(x) => write!(f, "{x}"),
-        }
-    }
-}
+impl std::fmt::Debug for Val {}
 
 const x0: i64 = 0;
 const x1: i64 = 1;
@@ -127,20 +117,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             } else {
                 self.bc_to_asm(f)?;
                 self.compile.aarch64.save_current(f);
-                // if cfg!(feature = "llvm_dis_debug") {
-                let asm = self.compile.aarch64.get_fn(f).unwrap();
-                let asm = unsafe { &*asm };
-                let hex: String = asm
-                    .iter()
-                    .copied()
-                    .array_chunks::<4>()
-                    .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
-                    .collect();
-                let path = "target/latest_log/temp.asm".to_string();
-                fs::write(&path, hex).unwrap();
-                let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
-                println!("{dis}");
-                // }
             }
         }
 
@@ -219,13 +195,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             // Save the result pointer.
             flat_result = Some(self.next_slot);
-            self.store_u64(x3, sp, self.next_slot.0 as u16);
-            self.next_slot.0 += 8;
+            self.compile.aarch64.push(str_uo(X64, x3, sp, self.next_slot.0 as i64 / 8));
+            self.next_slot = SpOffset(self.next_slot.0 + 8);
 
             // Copy arguments into their stack slots.
             // This is the same as the load instruction. We have a pointer and we want to splat it out onto the virtual stack.
             // TODO: better would be allowing storing deref offsets on the stack so loads could be suspended. -- May 1
-            self.reset_free_reg();
+            self.reset_free_reg(); // Now the arguments are all
             self.free_reg.retain(|r| *r != x1);
             self.stack.push(Val::Increment { reg: x1, offset_bytes: 0 });
             self.emit_load(arg_size as u16);
@@ -246,7 +222,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let mut patch_cbz = vec![]; // (patch_idx, jump_idx, register)
         let mut patch_b = vec![];
 
-        println!("entry: ({:?})", self.stack);
+        println!("entry: {:?}", self.stack);
         debug_assert_eq!(self.stack.len(), arg_size);
         let func = self.compile.ready[f].as_ref().unwrap();
         for i in 0..func.insts.len() {
@@ -432,7 +408,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             let stack_index = self.stack.len() - (slots as usize) + i;
 
-            print!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
+            print!("[x{} <- {:?}] ", i, self.stack[stack_index]);
             match self.stack[stack_index] {
                 Val::Increment { reg, offset_bytes } => {
                     self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
@@ -456,50 +432,42 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     /// <ptr:1> -> <?:n>
     fn emit_load(&mut self, slots: u16) {
-        print!("LOAD: [{:?}] to ", self.stack.last().unwrap());
         // TODO: really you want to suspend this too because the common case is probably that the next thing is a store but thats harder to think about so just gonna start with the dumb thing i was doing before -- May 1
         let (reg, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
-
         debug_assert_eq!(offset_bytes % 8, 0);
         let working = self.get_free_reg();
-        // let mut saved = self.create_slots(slots as usize); // TODO: leaking stack space -- May 1
+        let mut saved = self.create_slots(slots as usize); // TODO: leaking stack space -- May 1
         for _ in 0..slots {
             self.load_u64(working, reg, offset_bytes);
-            // self.store_u64(working, sp, saved.0 as u16);
-            let v = Val::Increment {
-                reg: working,
-                offset_bytes: 0,
-            };
-            self.stack.push(v);
-            print!("({:?}), ", self.stack.last().unwrap());
+            self.store_u64(working, sp, saved.0 as u16);
+            self.stack.push(Val::Increment {
+                reg: sp,
+                offset_bytes: saved.0 as u16,
+            });
             offset_bytes += 8;
-            // saved.0 += 8;
+            saved.0 += 8;
         }
-        println!();
-        // debug_assert!(saved.0 / 8 < (1 << 12));
+        debug_assert!(saved.0 / 8 < (1 << 12));
         debug_assert!(offset_bytes / 8 < (1 << 12));
-        // self.drop_reg(working);
+        self.drop_reg(working);
         self.drop_reg(reg);
     }
 
     /// <?:n> <ptr:1> -> _
     fn emit_store(&mut self, slots: u16) {
         println!(
-            "STORE: ({:?}) to [{:?}]",
+            "STORE: {:?} to {:?}",
             &self.stack[self.stack.len() - slots as usize - 1..self.stack.len() - 1],
             self.stack.last().unwrap()
         );
         let (reg, mut offset_bytes) = self.pop_to_reg_with_offset();
         // Note: we're going backwards: popping off the stack and storing right to left.
         for i in (0..slots).rev() {
-            let o = offset_bytes + (i * 8);
-            print!("| [x{reg} + {o}] <- ({:?}) |", self.stack.last().unwrap());
             let val = self.pop_to_reg();
-            self.store_u64(val, reg, o);
+            self.store_u64(val, reg, offset_bytes + (i * 8));
             self.drop_reg(val);
         }
         self.drop_reg(reg);
-        println!();
     }
 
     fn load_u64(&mut self, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
@@ -515,7 +483,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     fn reset_free_reg(&mut self) {
         self.free_reg.clear();
-        self.free_reg.extend([0, 1, 2, 3, 4]);
+        self.free_reg.extend([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     fn get_free_reg(&mut self) -> i64 {
@@ -778,7 +746,7 @@ impl Value {
 pub mod jit {
     use crate::ast::FuncId;
     use crate::bootstrap_gen::brk;
-    use crate::{JITTED_PAGE, STATS};
+    use crate::STATS;
     use std::cell::UnsafeCell;
     use std::ptr::null;
     use std::slice;
@@ -803,8 +771,6 @@ pub mod jit {
         pub fn new(bytes: usize) -> Self {
             let mut map = memmap2::MmapOptions::new().len(bytes).map_anon().unwrap();
             assert_eq!(map.as_ptr() as usize % 4, 0, "alignment's fucked");
-            unsafe { JITTED_PAGE = (map.as_ptr() as usize, bytes) }
-
             Self {
                 current_start: map.as_ptr(),
                 low: map.as_mut_ptr() as usize,
