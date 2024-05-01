@@ -1,7 +1,7 @@
 #![feature(slice_ptr_get)]
 #![feature(pattern)]
 
-use compiler::{
+use franca::{
     ast::{Flag, Program, TargetArch, TypeId},
     bc_to_asm::emit_aarch64,
     compiler::{Compile, ExecTime},
@@ -178,10 +178,6 @@ fn run_tests_serial_for_profile() {
         for backend in s[..end].split(", ") {
             let arch = match backend {
                 "aarch64" => TargetArch::Aarch64,
-                #[cfg(not(feature = "llvm"))]
-                "llvm" => continue,
-                #[cfg(feature = "llvm")]
-                "llvm" => TargetArch::Llvm,
                 "skip" => break,
                 other => panic!("Unknown backend {other}"),
             };

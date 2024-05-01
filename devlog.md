@@ -1,3 +1,18 @@
+I think my current bc format is dumb.
+It tries to treat tempararies the same as variables in a weird way and uses MarkContiguous/slot_is_var to reconstruct that info.
+It tracks slot types but I don't really trust that its always the raw ones and you only really care about unit/int/float, and i guess other int sizes eventually.
+I think a stack based on would be easier, don't bother specifying ins and outs of each op, its just implicit flow.
+Then you know temps are on the working stack and have var slots for vars.
+Originally i was thinking llvm does infinite registers so i should too but there's no point if im not doing data flow optimisations-y stuff.
+As long as im friendly about how I use the stack, like an if branch can't pop backwards and replace, it should be trivial to turn into llvm ir,
+probably easier than the current one.
+
+I think I'll ditch my current llvm backend regardless because thier c api is annoying.
+It feels like it would be less code to just generate the text.
+Maybe I want to commit to only having one backend in rust and write the rest in my language.
+It doesn't work anyway and I'm not inspired to fix it cause the error message is always just SEGSEV so you can't even see the broken ir you generated.
+Maybe thier cli stuff has friendlier validation, it can't be worse, and I could still link to thier c api and just call LLVMParseIRInContext if I want to jit it in my process.
+
 ## working towards replacing 'enum Value' with bytes (Apr 30)
 
 - Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.

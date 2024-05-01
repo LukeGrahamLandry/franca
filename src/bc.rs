@@ -17,6 +17,23 @@ use interp_derive::InterpSend;
 use std::ops::Range;
 
 #[derive(Clone, InterpSend, Debug)]
+pub enum Bc2 {
+    CallDirect { f: FuncId },                 // <args:m> -> <ret:n>
+    CallSplit { ct: FuncId, rt: FuncId },     // <args:m> -> <ret:n>
+    CallFnPtr { ty: FnType, comp_ctx: bool }, // <args:m> <ptr:1> -> <ret:n>
+    PushConstant { value: i64 },              // _ -> <v:1>
+    JumpIfFalse { false_ip: usize },          // <cond:1> -> _
+    Goto { ip: usize },                       // _ -> _
+    Ret,                                      //
+    GetNativeFnPtr(FuncId),                   // _ -> <ptr:1>
+    Load { slots: usize },                    // <ptr:1> -> <?:n>
+    Store { slots: usize },                   // <?:n> <ptr:1> -> _
+    AddrVar { id: u16 },                      // _ -> <ptr:1>
+    IncPtr { offset: u16 },                   // <ptr:1> -> <ptr:1>
+    Pop { slots: usize },                     // <?:n> -> _
+}
+
+#[derive(Clone, InterpSend, Debug)]
 pub enum Bc<'p> {
     CallDirect {
         f: FuncId,

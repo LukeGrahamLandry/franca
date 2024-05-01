@@ -319,7 +319,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
     } // TODO: this is dereanged. put it in a function so you can just use ? to call log_err
 
     outln!(Perf, "===============");
-    // log_dbg(&comp, save);
+    log_dbg(&comp, save);
     if leak {
         let _ = ManuallyDrop::new(comp);
         let _ = ManuallyDrop::new(program);

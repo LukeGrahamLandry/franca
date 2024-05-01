@@ -261,17 +261,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // symptom if you forget: bus error
                 self.aarch64.make_exec();
                 self.flush_cpu_instruction_cache();
+                debug_assert_eq!(addr as usize % 4, 0);
+                // TODO: not setting x21 !!! -- Apr 30
                 if flat_call {
                     assert!(comp_ctx && !c_call);
                     do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
                 } else if c_call {
                     assert!(!flat_call);
-                    assert!(addr as usize % 4 == 0);
                     let ints = store_to_ints_values(arg);
                     let r = ffi::c::call(self, addr as usize, ty, ints, comp_ctx)?;
                     let mut out = vec![];
                     values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
-
                     Ok(out.into())
                 } else {
                     todo!()
