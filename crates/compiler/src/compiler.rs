@@ -328,6 +328,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(!flat_call);
             assert!(addr as usize % 4 == 0);
             let arg = arg.serialize_to_ints_one();
+            // TODO: not setting x21 !!!
             let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx)?;
             let r = Ret::deserialize_from_ints(&mut [r].into_iter());
             Ok(unwrap!(r, ""))
@@ -1428,13 +1429,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 self.add_callee(result, id, ExecTime::Both);
                                 self.compile(id, result.when)?;
                                 // The backend still needs to do something with this, so just leave it
-                                let ty = self.program.func_type(id);
-                                let ty = self.program.fn_ty(ty).unwrap();
+                                let fn_ty = self.program.func_type(id);
+                                let ty = self.program.fn_ty(fn_ty).unwrap();
                                 let ty = self.program.intern_type(TypeInfo::FnPtr(ty));
-                                expr.set(Value::GetNativeFnPtr(id).into(), ty);
+                                arg.set(Value::GetFn(id).into(), fn_ty);
+                                expr.ty = ty;
                                 Structured::RuntimeOnly(ty)
                             }
-                            Values::One(Value::GetNativeFnPtr(_)) => err!("redundant use of !fn_ptr",),
+                            Values::One(Value::GetNativeFnPtr(_)) => {
+                                err!("redundant use of !fn_ptr",)
+                            } // err!("redundant use of !fn_ptr",),
                             _ => err!("!fn_ptr expected const fn not {fn_val:?}",),
                         }
                     }

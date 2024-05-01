@@ -438,7 +438,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             ret: output.single(),
                         });
                     }
-                    Flag::Fn_Ptr => unreachable!(),
+                    Flag::Fn_Ptr => {
+                        // TODO: say arg is of type fn and dont let as_fn accept addr ptr. -- Apr 30
+                        let f = unwrap!(arg.as_fn(), "expected fn for ptr");
+                        result.push(Bc::GetNativeFnPtr { slot: output.single(), f });
+                    }
                     Flag::Unreachable => {
                         result.push(Bc::Unreachable);
                         // Don't care about setting output to anything.

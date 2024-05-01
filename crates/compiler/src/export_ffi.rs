@@ -11,6 +11,7 @@ use crate::err;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
+use std::arch::asm;
 use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::transmute;
@@ -368,6 +369,12 @@ extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg:
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
         let addr = *arg as usize;
+        // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
+        debug_assert!(
+            addr % 4 == 0 && (addr as u64 & FuncId::MASK == 0 || FuncId::from_raw(addr as i64).as_index() > compile.program.funcs.len()),
+            "thats a weird ptr my dude, did you mean to call {:?}?",
+            FuncId::from_raw(addr as i64)
+        );
         let f: FlatCallFn = transmute(addr);
         *ret = do_flat_call(compile, f, ((10, 5), 7));
         assert_eq!(*ret, 57);
@@ -389,6 +396,15 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
     let ret_count = compile.ready.sizes.slot_count(compile.program, ret_type);
     let mut arg = store_to_ints_values(arg);
     let mut ret = vec![0i64; ret_count];
+    let indirect_fns = compile.aarch64.get_dispatch();
+    // TODO: im breaking the cc
+    unsafe {
+        asm!(
+        "mov x21, {fns}",
+        fns = in(reg) indirect_fns,
+        out("x21") _
+        );
+    }
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     let mut out = vec![];
     values_from_ints(compile, ret_type, &mut ret.into_iter(), &mut out)?;

@@ -35,7 +35,7 @@ unsafe impl GlobalAlloc for MyAllocator {
     }
 }
 
-// Apr 29. this makes tests ~20% faster.
+// Apr 29. this makes (release mode) tests ~20% faster.
 #[global_allocator]
 static GLOBAL: MyAllocator = MyAllocator;
 

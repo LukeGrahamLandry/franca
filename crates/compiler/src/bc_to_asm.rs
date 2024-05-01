@@ -102,11 +102,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         self.wip.push(f);
         if let Some(template) = self.compile.program[f].any_reg_template {
-            // TODO: want to use asm instead of interp so will need to compile.
-            //       but really it would be better to have the separation of compiling for host vs target so I could cross compile once I support other architectures.
-            // self.compile(template)?;
-        } else if self.compile.program[f].comptime_addr.is_some() && self.compile.program[f].jitted_code.is_none() {
-            // println!("Skip asm for {f:?}");
+            todo!()
+        } else if let Some(addr) = self.compile.program[f].comptime_addr {
+            self.compile.aarch64.dispatch[f.as_index()] = addr as *const u8;
         } else {
             let callees = self.compile.program[f].wip.as_ref().unwrap().callees.clone();
             for c in callees {
@@ -123,10 +121,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let op = *op as i64;
                     self.compile.aarch64.push(op);
                 }
+                self.compile.aarch64.save_current(f);
             } else {
                 self.bc_to_asm(f)?;
+                self.compile.aarch64.save_current(f);
             }
-            self.compile.aarch64.save_current(f);
         }
 
         self.wip.retain(|c| c != &f);
@@ -240,21 +239,24 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.call_direct(f, ret, arg)?;
                 }
                 Bc::LoadConstant { slot, value } => {
-                    let ty = self.slot_type(*slot);
-                    let ty = self.compile.program.raw_type(ty);
-                    let is_fn_ptr = matches!(self.compile.program[ty], TypeInfo::FnPtr(_)); // TODO: make this a different opcode.
+                    self.load_imm(x0, u64::from_le_bytes(value.to_le_bytes()));
+                    self.set_slot(x0, *slot);
+                }
+                &Bc::GetNativeFnPtr { slot, f } => {
+                    // TODO: use adr+adrp instead of an integer.
+                    // TODO: do linker-ish things to allow forward references.
+                    //       actually the way i do that rn is with the dispatch table so could just use that for now.
 
-                    if is_fn_ptr {
-                        // TODO: use adr+adrp instead of an integer.
-                        // TODO: do linker-ish things to allow forward references.
-                        //       actually the way i do that rn is with the dispatch table so could just use that for now.
-                        let f = FuncId::from_raw(*value);
-                        let ptr = unwrap!(self.compile.aarch64.get_fn(f), "GetNativeFnPtr not compiled yet. TODO: mutual recursion.");
+                    if let Some(ptr) = self.compile.aarch64.get_fn(f) {
                         self.load_imm(x0, ptr.as_ptr() as u64);
-                        self.set_slot(x0, *slot);
+                        self.set_slot(x0, slot);
+                    } else if let Some(addr) = self.compile.program[f].comptime_addr {
+                        self.load_imm(x0, addr);
+                        self.set_slot(x0, slot);
                     } else {
-                        self.load_imm(x0, u64::from_le_bytes(value.to_le_bytes()));
-                        self.set_slot(x0, *slot);
+                        assert!(f.as_index() < 4096);
+                        self.compile.aarch64.push(ldr_uo(X64, x0, x21, f.as_index() as i64));
+                        self.set_slot(x0, slot);
                     }
                 }
                 &Bc::JumpIf { cond, true_ip, false_ip } => {

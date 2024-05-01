@@ -15,6 +15,7 @@
 Almost successfully changed Values::Many to be a vec of ints instead of tagged Value.
 Only problem is tests/flat_call where its trying to pass a function pointer to the compiler as a callback.
 What used to be a GetNativeFnPtr now gets serialized to an int and its a problem if you try to emit asm for one thats already been turned into a pointer?
+Because I store both the funcid requesting to be a pointer and after the addr that is the pointer as the same FnPtr type because to the user program they're the same.
 
 ## ConstantData arena (Apr 28)
 

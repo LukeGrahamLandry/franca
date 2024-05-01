@@ -1425,7 +1425,7 @@ impl<'p> Expr<'p> {
     pub fn as_fn(&self) -> Option<FuncId> {
         match self {
             &Expr::Value {
-                value: Values::One(Value::GetFn(f)),
+                value: Values::One(Value::GetFn(f)), // Note: NOT GetNativeFnPtr thats a different type
                 ..
             }
             | &Expr::WipFunc(f) => Some(f),
@@ -1720,7 +1720,7 @@ flag_subset!(Flag, Flag::_Reserved_Null_, Flag::_Reserved_Count_);
 macro_rules! tagged_index {
     ($name:ty, $magic_offset:expr) => {
         impl $name {
-            const MASK: u64 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
+            pub const MASK: u64 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
 
             pub fn as_index(self) -> usize {
                 debug_assert!(self.is_valid());

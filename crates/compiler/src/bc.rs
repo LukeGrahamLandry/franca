@@ -74,6 +74,10 @@ pub enum Bc<'p> {
         to: StackOffset,
         from: StackRange,
     },
+    GetNativeFnPtr {
+        slot: StackOffset,
+        f: FuncId,
+    },
     CallFnPtr {
         f: StackOffset,
         arg: StackRange,
@@ -464,7 +468,11 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             let end = out.len();
             assert_eq!(end - start, payload_size + 1, "{out:?}");
         }
-        TypeInfo::FnPtr(_) => todo!(),
+        TypeInfo::FnPtr(_) => {
+            let ptr = unwrap!(ints.next(), "");
+            debug_assert!(ptr % 4 == 0);
+            out.push(Value::I64(ptr));
+        }
         &TypeInfo::Ptr(_) => {
             let addr = unwrap!(ints.next(), "") as usize as *mut i64;
             out.push(Value::Heap(addr));
