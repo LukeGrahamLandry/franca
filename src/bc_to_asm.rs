@@ -6,7 +6,7 @@
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId, TypeInfo};
 use crate::bc::{Bc, BcReady, Value, Values};
-use crate::compiler::{Compile, ExecTime, Res};
+use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::{ast::Program, bc::FnBody};
 use crate::{bootstrap_gen::*, unwrap};
 use crate::{err, logging::PoolLog};
@@ -37,6 +37,7 @@ struct BcToAsm<'z, 'p, 'a> {
 enum Val {
     Increment { reg: i64, offset_bytes: u16 }, // not a pointer derefernce, just adding a static number to the value in the register.
     Literal(i64),
+    Spill(SpOffset),
 }
 
 impl Debug for Val {
@@ -44,6 +45,7 @@ impl Debug for Val {
         match self {
             Val::Increment { reg, offset_bytes } => write!(f, "x{reg} + {offset_bytes}"),
             Val::Literal(x) => write!(f, "{x}"),
+            Val::Spill(slot) => write!(f, "[sp, {}]", slot.0),
         }
     }
 }
@@ -348,6 +350,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     Val::Literal(v) => {
                         *v += offset as i64 * 8;
                     }
+                    Val::Spill(_) => {
+                        // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
+                        let (reg, offset_bytes) = self.pop_to_reg_with_offset();
+                        self.stack.push(Val::Increment {
+                            reg,
+                            offset_bytes: offset_bytes + offset,
+                        })
+                    }
                 },
                 &Bc::Load { slots } => self.emit_load(slots),
                 &Bc::Store { slots } => self.emit_store(slots),
@@ -424,20 +434,42 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     // TODO: floats -- May 1
     fn stack_to_ccall_reg(&mut self, slots: u16) {
         for i in 0..(slots as usize) {
-            if let Some(want) = self.free_reg.iter().position(|r| *r as usize == i) {
-                self.free_reg.remove(want);
-            } else {
-                panic!("TODO: x{i} is not free");
+            let stack_index = self.stack.len() - (slots as usize) + i;
+            if let Val::Increment { reg, offset_bytes } = self.stack[stack_index] {
+                if reg == i as i64 {
+                    if offset_bytes != 0 {
+                        self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
+                    }
+
+                    // if we happen to already be in the right register, cool, don't worry about it.
+                    print!("|x{} already| ", i);
+                    continue;
+                }
             }
 
-            let stack_index = self.stack.len() - (slots as usize) + i;
+            if let Some(want) = self.free_reg.iter().position(|r| *r as usize == i) {
+                self.free_reg.remove(want);
+            } else if let Some(used) = self.stack.iter().position(|r| r.reg().map(|(r, _)| r as usize == i).unwrap_or(false)) {
+                // The one we want is already used by something on the v-stack; swap it with a random free one. TODO: put in the right place if you can.
+                let (old_reg, offset_bytes) = self.stack[used].reg().unwrap();
+                debug_assert_ne!(old_reg, sp); // encoding but unreachable
+                let reg = self.get_free_reg();
+                self.compile.aarch64.push(mov(X64, reg, old_reg));
+                self.stack[used] = Val::Increment { reg, offset_bytes };
+                // Now x{i} is free and we'll use it below.
+            } else {
+                panic!("TODO: x{i} is not free. stack is {:?}. free is {:?}", self.stack, self.free_reg);
+            }
 
             print!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
             match self.stack[stack_index] {
                 Val::Increment { reg, offset_bytes } => {
-                    self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
+                    if offset_bytes != 0 {
+                        self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
+                    }
                 }
                 Val::Literal(x) => self.load_imm(i as i64, x as u64),
+                Val::Spill(slot) => self.load_u64(i as i64, sp, slot.0 as u16),
             }
         }
         println!();
@@ -456,6 +488,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     /// <ptr:1> -> <?:n>
     fn emit_load(&mut self, slots: u16) {
+        debug_assert!(!self.stack.is_empty());
         print!("LOAD: [{:?}] to ", self.stack.last().unwrap());
         // TODO: really you want to suspend this too because the common case is probably that the next thing is a store but thats harder to think about so just gonna start with the dumb thing i was doing before -- May 1
         let (reg, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
@@ -484,6 +517,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     /// <?:n> <ptr:1> -> _
     fn emit_store(&mut self, slots: u16) {
+        debug_assert!(self.stack.len() > slots as usize);
         println!(
             "STORE: ({:?}) to [{:?}]",
             &self.stack[self.stack.len() - slots as usize - 1..self.stack.len() - 1],
@@ -518,6 +552,24 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.free_reg.extend([0, 1, 2, 3, 4]);
     }
 
+    fn spill_abi_stompable(&mut self) {
+        for i in 0..self.stack.len() {
+            let v = self.stack[i];
+            if let Val::Increment { reg, offset_bytes } = v {
+                if reg == sp {
+                    continue;
+                }
+
+                // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
+                let slot = self.create_slots(1);
+                self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
+                self.store_u64(reg, sp, slot.0 as u16);
+                self.drop_reg(reg);
+                self.stack[i] = Val::Spill(slot);
+            }
+        }
+    }
+
     fn get_free_reg(&mut self) -> i64 {
         if let Some(r) = self.free_reg.pop() {
             debug_assert_ne!(r, sp);
@@ -529,6 +581,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     fn drop_reg(&mut self, reg: i64) {
         if reg != sp {
+            debug_assert!(!self.free_reg.contains(&reg), "drop r{reg} -> {:?}", self.free_reg);
             self.free_reg.push(reg);
         }
     }
@@ -549,6 +602,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.load_imm(r, u64::from_le_bytes(x.to_le_bytes()));
                 r
             }
+            Val::Spill(slot) => {
+                let r = self.get_free_reg();
+                self.load_u64(r, sp, slot.0 as u16);
+                r
+            }
         }
     }
 
@@ -558,6 +616,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             Val::Literal(x) => {
                 let r = self.get_free_reg();
                 self.load_imm(r, u64::from_le_bytes(x.to_le_bytes()));
+                (r, 0)
+            }
+            Val::Spill(slot) => {
+                let r = self.get_free_reg();
+                self.load_u64(r, sp, slot.0 as u16);
                 (r, 0)
             }
         }
@@ -581,6 +644,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         made
     }
 
+    // TODO: this should check if adr is close enough since it statically knows the ip cause we're jitting.
     fn load_imm(&mut self, reg: i64, mut value: u64) {
         let bottom = u16::MAX as u64;
         self.compile.aarch64.push(movz(X64, reg, (value & bottom) as i64, 0));
@@ -610,33 +674,41 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             let c = self.compile as *const Compile as u64;
             let p = &self.compile.program as *const &mut Program as u64;
             debug_assert_eq!(c, p, "need repr c");
+            // put it on the stack as though it were a normal argument so the cc assigner doesn't need a special case
             self.stack.insert(first_arg_index, Val::Literal(c as i64));
         }
 
         self.stack_to_ccall_reg((arg_count + reg_offset) as u16);
         do_call(self);
+        self.spill_abi_stompable();
         self.ccall_reg_to_stack(ret_count as u16);
+        for i in ret_count..7 {
+            add_unique(&mut self.free_reg, i as i64); // now the extras are usable again.
+        }
     }
 
     fn call_direct(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.compile.program[f];
+        debug_assert!(target.any_reg_template.is_none());
         let target_c_call = target.has_tag(Flag::C_Call);
+        let target_flat_call = target.has_tag(Flag::Flat_Call);
         let comp_ctx = target.has_tag(Flag::Ct);
         let f_ty = target.unwrap_ty();
-        if let Some(template) = target.any_reg_template {
-            todo!("any_reg_template")
-        } else if target.has_tag(Flag::Flat_Call) {
+
+        if target_flat_call {
             println!("flat_call");
             // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
             assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
-            assert!(!target.has_tag(Flag::C_Call), "multiple calling conventions doesn't make sense");
+            assert!(!target_c_call, "multiple calling conventions doesn't make sense");
 
             let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v.as_ptr() as u64));
 
             let arg_count = self.compile.slot_count(f_ty.arg);
             let ret_count = self.compile.slot_count(f_ty.ret);
             let arg_offset = self.create_slots(arg_count);
+            // TODO: super simple data flow lookahead so if you're about to store the whole thing to a var, use that as the address.
             let ret_offset = self.create_slots(ret_count);
+            debug_assert!(self.stack.len() >= arg_count, "{}", arg_count);
             self.stack.push(Val::Increment {
                 reg: sp,
                 offset_bytes: arg_offset.0 as u16,
@@ -651,6 +723,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.compile.aarch64.push(add_im(X64, x3, sp, ret_offset.0 as i64, 0));
             self.load_imm(x4, ret_count as u64);
             self.branch_with_link(f);
+            self.spill_abi_stompable();
 
             self.stack.push(Val::Increment {
                 reg: sp,
@@ -732,6 +805,16 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
 
         self.compile.aarch64.push(br(x16, 1))
+    }
+}
+
+impl Val {
+    fn reg(&self) -> Option<(i64, u16)> {
+        match self {
+            &Val::Increment { reg, offset_bytes } => Some((reg, offset_bytes)),
+            Val::Literal(_) => None,
+            Val::Spill(_) => None,
+        }
     }
 }
 

@@ -2452,7 +2452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
-        println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
+        // println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
 
         debug_assert!(!found.is_any() && !expected.is_any(), "wip removing Any");
 

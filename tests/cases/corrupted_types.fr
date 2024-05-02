@@ -1,29 +1,41 @@
 #test(aarch64)
 fn main(canary: i64) i64 = {
-
     // The problem here was after switching to stack based ir, I would try to load a pointer into seperate stack slots
     // but i assigned the register outside the loop so each part of the typeinfo struct would stomp each other 
     // and then the last one would get spread to all slots when tried to put it on the real stack. 
     // and it would segfault on something. this was in fact not the problem I was actually looking for. -- May 1
-    #comptime
-    fn my_int() Type = {
-        info := get_type_info(i64);
-        i64
+    fn thing1() Unit = {
+        #comptime
+        fn my_int() Type = {
+            info := get_type_info(i64);
+            i64
+        }
+        T :: my_int();
+        debug_log_type(T);
     }
-    T :: my_int();
-    debug_log_type(T);
+    thing1(); 
+
+    // - Attempt to subtract with overflow, not enough args on the stack for a directcall. 
+    // GetVar in emit_bc was just getting the address without doing a Load. 
+    // - Next problem here was lack of spilling with trying to setup for c_call,
+    // but just checking if the thing was already in the right register was enough to fix it. 
+    fn thing2() Unit = {
+        #comptime
+        fn my_int_2() Type = {
+            info := get_type_info(i64);
+            intern_type(info)
+        }
+        K :: my_int_2();
+        debug_log_type(K);
+    }
+    thing2();
+    
+    // - this forces the spilling issue. it needs to flip the result of the first add into x0 because it doesn't know fn add is commutable. 
+    // - then i wasn't releasing x1 after the first call. that was enough to fix this. 
+    // - however, now the above debug_log_type says i1 instead of i64. i was double dropping, not checking unique. 
+    fn nested() i64 = add(1, add(2, 3));
+    nested(); 
+    // a ssert_eq(6, nested());
     
     canary
 }
-
-/*
-
-    
-    #comptime // attempt to subtract with overflow in emit_asm but above is enoug hto trigger current bug
-    fn my_int_2() Type = {
-        t := IntType(32, true);
-        info := get_type_info(t);
-        intern_type(t);
-    }
-    
-    */

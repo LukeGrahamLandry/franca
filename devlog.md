@@ -21,6 +21,12 @@ So far looks like stack based bc removes a bunch of reserve slots stuff which is
   oh and im keeping anything with annotations just in case but that inlcude #pub.
 - lamo in my load after switching to trying to keep reg on stack instead of storing immediatly i forgot to move get_free_reg into the loop so a big store was putting all parts in the same reg (and stomping)
   that was enough to fix cases/corrupted_types.fr.
+- GetVar emit_bc was just getting the address without doing a Load
+- wasn't dropping x1 after flat call prelude but that wasn't the problem. I bet its that i dont restore args as free after a c_call, yeah that helped.
+  oh and i was wrong about dropping x1, load() drops the ptr reg
+- added spill support for when you make a call so your v-stack doesn't get stomped
+  thats enough to get hello_world to run but it just prints one letter "H".
+  thats very unfortunate. if its gonna be wrong it really shouldn't compile.
 
 ## working towards replacing 'enum Value' with bytes (Apr 30)
 

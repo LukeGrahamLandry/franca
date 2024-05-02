@@ -268,6 +268,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::GetVar(var) => {
                 if let Some(id) = self.var_lookup.get(var).cloned() {
                     result.push(Bc::AddrVar { id });
+                    let slots = self.slot_count(result.vars[id as usize]);
+                    result.push(Bc::Load { slots });
                 } else {
                     ice!("(emit_bc) Missing resolved variable {:?}", var.log(self.program.pool),)
                 }
