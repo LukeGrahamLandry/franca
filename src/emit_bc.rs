@@ -403,17 +403,19 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let index = result.if_debug_count;
         result.if_debug_count += 1;
 
+        let id = result.add_var(if_true.ty);
+
         let branch_ip = result.push(Bc::NoCompile); // patch
         let true_ip = result.insts.len() as u16;
         self.compile_expr(result, if_true)?;
         let slots = self.slot_count(if_true.ty);
-        result.push(Bc::EndIf { index, slots });
+        result.push(Bc::AddrVar { id });
+        result.push(Bc::Store { slots });
         let jump_over_false = result.push(Bc::NoCompile);
-        // Since both branches need to produce a result in the same place on the stack, pop the first one after you jump away.
-        result.push(Bc::Pop { slots });
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
-        result.push(Bc::EndIf { index, slots });
+        result.push(Bc::AddrVar { id });
+        result.push(Bc::Store { slots });
         result.insts[branch_ip] = Bc::JumpIf { false_ip, true_ip };
         result.insts[jump_over_false] = Bc::Goto {
             ip: result.insts.len() as u16,
@@ -421,6 +423,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.jump_targets.set(result.insts.len());
         result.jump_targets.set(true_ip as usize);
         result.jump_targets.set(false_ip as usize);
+        result.push(Bc::AddrVar { id });
+        result.push(Bc::Load { slots });
 
         Ok(())
     }
@@ -438,7 +442,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let index = result.if_debug_count;
         result.if_debug_count += 1;
 
-        result.push(Bc::EndIf { index, slots: 0 });
         let cond_ip = result.insts.len() as u16;
         debug_assert_eq!(cond_fn.ty, TypeId::bool());
         self.compile_expr(result, cond_fn)?;
@@ -448,7 +451,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let slots = self.slot_count(body_fn.ty);
         result.push(Bc::Pop { slots });
 
-        result.push(Bc::EndIf { index, slots: 0 });
         result.push(Bc::Goto { ip: cond_ip });
         let end_ip = result.insts.len() as u16;
 
@@ -581,9 +583,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if payload_size >= size {
                     ice!("Enum value won't fit.")
                 }
-                self.compile_expr(result, values[0])?;
                 // TODO: make this constexpr in compiler
                 result.push(Bc::PushConstant { value: i as i64 });
+                self.compile_expr(result, values[0])?;
 
                 // If this is a smaller varient, pad out the slot.
                 for _ in (payload_size + 1)..size {

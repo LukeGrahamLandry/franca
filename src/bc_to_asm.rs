@@ -357,11 +357,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 &Bc::Store { slots } => self.emit_store(slots),
                 &Bc::TagCheck { expected } => {
                     // TODO: this leaks a register if it was literal but it probably never will be -- May 1
-                    let (reg, offset_bytes) = self.pop_to_reg_with_offset(); // enum_ptr. can't stomp!
+                    let (reg, offset_bytes) = self.peek_to_reg_with_offset(); // enum_ptr. can't stomp!
                     let working = self.get_free_reg();
                     debug_assert_eq!(offset_bytes % 8, 0);
                     debug_assert!(offset_bytes / 8 < (1 << 12));
-                    self.compile.aarch64.push(ldr_uo(X64, working, reg, (offset_bytes / 8) as i64)); // working = *ptr
+                    self.load_u64(working, reg, offset_bytes); // working = *ptr
 
                     self.compile.aarch64.push(cmp_im(X64, working, expected as i64, 0));
                     self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
@@ -388,40 +388,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.drop_reg(r);
                     }
                 }
-                #[cfg(debug_assertions)]
-                &Bc::EndIf { index, slots } => {
-                    for i in self.stack.len() - slots as usize..self.stack.len() {
-                        // TODO: this is kidna copy paste from pop_to_reg
-                        match self.stack[i] {
-                            Val::Increment { mut reg, offset_bytes } => {
-                                if offset_bytes > 0 {
-                                    debug_assert!(offset_bytes < (1 << 12), "TODO: not enough bits");
-                                    let out = if reg == sp { self.get_free_reg() } else { reg };
-                                    self.compile.aarch64.push(add_im(X64, out, reg, offset_bytes as i64, 0));
-                                    reg = out;
-                                }
-                                self.stack[i] = Val::Increment { reg, offset_bytes: 0 };
-                            }
-                            Val::Literal(x) => {
-                                let reg = self.get_free_reg();
-                                self.load_imm(reg, u64::from_le_bytes(x.to_le_bytes()));
-                                self.stack[i] = Val::Increment { reg, offset_bytes: 0 };
-                            }
-                            Val::Spill(_) => {}
-                        }
-                    }
-
-                    match &self.debug_if_saved_stack[index as usize] {
-                        Some(prev) => {
-                            assert_eq!(&self.stack, prev)
-                        }
-                        None => {
-                            self.debug_if_saved_stack[index as usize] = Some(self.stack.clone());
-                        }
-                    }
-                }
-                #[cfg(not(debug_assertions))]
-                Bc::EndIf { .. } => {}
+                &Bc::EndIf { index, slots } => {} // TODO: dont use vars
             }
 
             println!("{i} {inst:?} => {:?} | free: {:?}", self.stack, self.free_reg);
@@ -766,6 +733,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             });
             self.emit_store(arg_count);
 
+            // Do this way up here before putting things in x0-4
+            self.spill_abi_stompable();
+
             let c = self.compile as *const Compile as u64;
             self.load_imm(x0, c);
             debug_assert!(arg_offset.0 < 4096 && ret_offset.0 < 4096);
@@ -773,8 +743,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.load_imm(x2, arg_count as u64);
             self.compile.aarch64.push(add_im(X64, x3, sp, ret_offset.0 as i64, 0));
             self.load_imm(x4, ret_count as u64);
-            self.spill_abi_stompable();
             self.branch_with_link(f);
+
+            for i in 0..7 {
+                add_unique(&mut self.free_reg, i as i64); // now the extras are usable again.
+            }
 
             self.stack.push(Val::Increment {
                 reg: sp,

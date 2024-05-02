@@ -4,6 +4,7 @@
   fixing folded ifs made that work, now 4/29 but i have more faith.
 - why are so many things flat_call?
 - fixing corruped types was enough to make hello world actually print the whole string!
+- problem with slize size vs len. sadly i even rememeber deleting the code that got it right cause it looked weird.
 
 ## stack based ir (May 1)
 
