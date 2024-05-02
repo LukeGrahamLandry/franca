@@ -28,6 +28,8 @@ So far looks like stack based bc removes a bunch of reserve slots stuff which is
   thats enough to get hello_world to run but it just prints one letter "H".
   thats very unfortunate. if its gonna be wrong it really shouldn't compile.
 
+// TODO: dont have to do full spill for inline basic ops that only use fewer registers than args. have the annotation mean that too.
+
 ## working towards replacing 'enum Value' with bytes (Apr 30)
 
 - Made Value::Heap just be the pointer. I have to track type anyway so i already know the length.

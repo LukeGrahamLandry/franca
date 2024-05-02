@@ -2300,7 +2300,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         debug_assert!(func.resolved_body);
                         // TODO: this is very suspisious! what if it has captures
                         let res = self.type_of(result, body);
-                        debug_assert!(res.is_ok()); // clearly its fine tho...
+                        debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
                         if let Some(ret_ty) = res? {
                             func.finished_ret = Some(ret_ty);
                         }

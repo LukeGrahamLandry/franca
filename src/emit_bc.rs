@@ -401,7 +401,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let true_ip = result.insts.len() as u16;
         self.compile_expr(result, if_true)?;
         result.push(Bc::EndIf { index });
-        let jump_over_false = result.push(Bc::NoCompile); // patch
+        let jump_over_false = result.push(Bc::NoCompile);
+        // Since both branches need to produce a result in the same place on the stack, pop the first one after you jump away.
+        let slots = self.slot_count(if_true.ty);
+        result.push(Bc::Pop { slots });
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
         result.push(Bc::EndIf { index });

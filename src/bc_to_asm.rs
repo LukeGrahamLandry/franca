@@ -292,6 +292,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(brk(0));
                     assert_eq!(true_ip as usize, i + 1);
                     patch_cbz.push((self.compile.aarch64.prev(), false_ip, cond));
+                    self.drop_reg(cond);
                 }
                 &Bc::Goto { ip } => {
                     self.compile.aarch64.push(brk(0));
@@ -404,7 +405,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 Bc::EndIf { .. } => {}
             }
 
-            println!("{i} {inst:?} => {:?}", self.stack);
+            println!("{i} {inst:?} => {:?} | free: {:?}", self.stack, self.free_reg);
         }
         for (inst, false_ip, reg) in patch_cbz {
             let offset = self.compile.aarch64.offset_words_inst_ip(inst, false_ip as usize);
