@@ -228,49 +228,54 @@ use crate::compiler::EXPECT_ERR_DEPTH;
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
         safe_rec!(self, t, format!("{t:?}"), {
-            match &self[t] {
-                TypeInfo::Unknown => "Unknown".to_owned(),
-                TypeInfo::Any => "Any".to_owned(),
-                TypeInfo::Never => "Never".to_owned(),
-                TypeInfo::F64 => "f64".to_owned(),
-                TypeInfo::Bool => "bool".to_owned(),
-                TypeInfo::OverloadSet => "OverloadSet".to_owned(),
-                // TODO: be careful of recursion
-                TypeInfo::Ptr(e) => format!("*{}", self.log_type(*e)),
-                TypeInfo::Struct { fields, .. } => {
-                    // TODO: factor out iter().join(str), how does that not already exist
-                    let v: Vec<_> = fields
-                        .iter()
-                        .map(|f| format!("{}: {}", self.pool.get(f.name), self.log_type(f.ty)))
-                        .collect();
-                    format!("{{ {}}}!struct", v.join(", "))
+            if t.is_valid() {
+                match &self[t] {
+                    TypeInfo::Unknown => "Unknown".to_owned(),
+                    TypeInfo::Any => "Any".to_owned(),
+                    TypeInfo::Never => "Never".to_owned(),
+                    TypeInfo::F64 => "f64".to_owned(),
+                    TypeInfo::Bool => "bool".to_owned(),
+                    TypeInfo::OverloadSet => "OverloadSet".to_owned(),
+                    // TODO: be careful of recursion
+                    TypeInfo::Ptr(e) => format!("*{}", self.log_type(*e)),
+                    TypeInfo::Struct { fields, .. } => {
+                        // TODO: factor out iter().join(str), how does that not already exist
+                        let v: Vec<_> = fields
+                            .iter()
+                            .map(|f| format!("{}: {}", self.pool.get(f.name), self.log_type(f.ty)))
+                            .collect();
+                        format!("{{ {}}}!struct", v.join(", "))
+                    }
+                    TypeInfo::Enum { cases, .. } => {
+                        // TODO: factor out iter().join(str), how does that not already exist
+                        let v: Vec<_> = cases
+                            .iter()
+                            .map(|(name, ty)| format!("{}: {}", self.pool.get(*name), self.log_type(*ty)))
+                            .collect();
+                        format!("{{ {}}}!enum", v.join(", "))
+                    }
+                    TypeInfo::Unique(inner, _) => self.log_type(*inner),
+                    TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
+                    TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
+                    TypeInfo::FnPtr(f) => {
+                        format!("&(fn({}) {})", self.log_type(f.arg), self.log_type(f.ret))
+                    }
+                    TypeInfo::Tuple(v) => {
+                        let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
+                        format!("({})", v.join(", "))
+                    }
+                    TypeInfo::Type => "Type".to_owned(),
+                    TypeInfo::Unit => "Unit".to_owned(),
+                    TypeInfo::VoidPtr => "VoidPtr".to_owned(),
+                    TypeInfo::Int(int) => {
+                        format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
+                    }
+                    TypeInfo::Scope => "ScopeId".to_owned(),
                 }
-                TypeInfo::Enum { cases, .. } => {
-                    // TODO: factor out iter().join(str), how does that not already exist
-                    let v: Vec<_> = cases
-                        .iter()
-                        .map(|(name, ty)| format!("{}: {}", self.pool.get(*name), self.log_type(*ty)))
-                        .collect();
-                    format!("{{ {}}}!enum", v.join(", "))
-                }
-                TypeInfo::Unique(inner, _) => self.log_type(*inner),
-                TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
-                TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
-                TypeInfo::FnPtr(f) => {
-                    format!("&(fn({}) {})", self.log_type(f.arg), self.log_type(f.ret))
-                }
-                TypeInfo::Tuple(v) => {
-                    let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
-                    format!("({})", v.join(", "))
-                }
-                TypeInfo::Type => "Type".to_owned(),
-                TypeInfo::Unit => "Unit".to_owned(),
-                TypeInfo::VoidPtr => "VoidPtr".to_owned(),
-                TypeInfo::Int(int) => {
-                    format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
-                }
-                TypeInfo::Scope => "ScopeId".to_owned(),
+            } else {
+                format!("INVALID:{}", t.0)
             }
+
             // format!("{t:?}={s}")
         })
     }
@@ -396,7 +401,7 @@ impl<'p> Expr<'p> {
             Expr::Block { body, result, .. } => {
                 let es: Vec<_> = body
                     .iter()
-                    .filter(|s| !matches!(s.stmt, Stmt::Noop))
+                    .filter(|s| !matches!(s.stmt, Stmt::Noop) || !s.annotations.is_empty())
                     .filter(|s| {
                         // HACK to skip the useless args added by !if and !while.
                         if let Stmt::DeclVarPattern { binding, value } = &s.stmt {
@@ -406,7 +411,15 @@ impl<'p> Expr<'p> {
                         }
                         true
                     })
-                    .map(|e| e.logd(pool, depth + 1))
+                    .map(|e| {
+                        let s = e.logd(pool, depth + 1);
+                        let a: String = e
+                            .annotations
+                            .iter()
+                            .map(|a| format!("#{}({})", pool.get(a.name), a.args.as_ref().map(|f| f.log(pool)).unwrap_or_default()))
+                            .collect();
+                        format!("{a} {s}")
+                    })
                     .collect();
                 let es = es.join(";\n");
                 format!(

@@ -131,6 +131,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             err!("called function without body: {f:?} {}", self.program.pool.get(func.name));
         }
 
+        // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
+        if let Expr::Value { value } = &func.body.as_ref().unwrap().expr {
+            let slots = self.slot_count(func.finished_arg.unwrap());
+            result.push(Bc::Pop { slots });
+            for value in value.clone().vec().into_iter() {
+                result.push(Bc::PushConstant { value });
+            }
+            result.push(Bc::Ret);
+            return Ok(());
+        }
+
         self.bind_args(result, &func.arg)?;
         let body = func.body.as_ref().unwrap();
         self.compile_expr(result, body)?;
@@ -261,7 +272,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     ice!("(emit_bc) Missing resolved variable {:?}", var.log(self.program.pool),)
                 }
             }
-            Expr::Value { value, .. } => {
+            Expr::Value { value } => {
                 // TODO: sometimes you probably want to reference by pointer?
                 for value in value.clone().vec().into_iter() {
                     result.push(Bc::PushConstant { value });

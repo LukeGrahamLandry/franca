@@ -300,7 +300,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         assert!(!is_c_call);
                         let working = self.get_free_reg();
                         // Retrive result address
-                        self.compile.aarch64.push(ldr_uo(X64, working, sp, flat_result.unwrap().0 as i64 / 8));
+                        self.load_u64(working, sp, flat_result.unwrap().0 as u16);
                         // We have the values on the virtual stack, they want them at some address, that's the same as my store instruction.
                         self.stack.push(Val::Increment {
                             reg: working,
@@ -461,9 +461,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let (reg, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
 
         debug_assert_eq!(offset_bytes % 8, 0);
-        let working = self.get_free_reg();
         // let mut saved = self.create_slots(slots as usize); // TODO: leaking stack space -- May 1
         for _ in 0..slots {
+            let working = self.get_free_reg();
             self.load_u64(working, reg, offset_bytes);
             // self.store_u64(working, sp, saved.0 as u16);
             let v = Val::Increment {

@@ -12,11 +12,20 @@ extern crate core;
 struct MyAllocator;
 
 pub const ARENA_SIZE: usize = 1 << 30;
+pub const COMPTIME_STACK_SIZE: usize = 1 << 20;
 
 thread_local! {
      pub static MEM: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
          null_mut(),
          ARENA_SIZE,
+         libc::PROT_WRITE | libc::PROT_READ,
+         libc::MAP_ANON | libc::MAP_PRIVATE,
+         -1,
+         0,
+     )} as *mut u8);
+     pub static COMPTIME_STACK: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
+         null_mut(),
+         COMPTIME_STACK_SIZE,
          libc::PROT_WRITE | libc::PROT_READ,
          libc::MAP_ANON | libc::MAP_PRIVATE,
          -1,
@@ -164,6 +173,7 @@ pub static mut STACK_START: usize = 0;
 pub static mut JITTED_PAGE: (usize, usize) = (0, 0);
 pub static mut MY_CONST_DATA: (usize, usize) = (0, 0);
 pub static mut STACK_MIN: usize = usize::max_value();
+pub static mut COMPILER_CTX_PTR: usize = 0;
 
 pub static MY_STRING: &str = "Hello World";
 
@@ -178,6 +188,7 @@ pub fn where_am_i() {
         &marker as *const i32 as usize,
         unsafe { STACK_MIN }
     );
+    println!("COMPILER_CTX_PTR: {}", unsafe { COMPILER_CTX_PTR });
     println!("ADDR OF MMAP ARENA NEXT: {} ", MEM.get() as usize);
     println!("ADDR OF MMAP JITTED: {} to {}", unsafe { JITTED_PAGE.0 }, unsafe {
         JITTED_PAGE.0 + JITTED_PAGE.1
@@ -244,6 +255,7 @@ pub fn find_std_lib() -> bool {
 }
 
 pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId> {
+    unsafe { COMPILER_CTX_PTR = comp as *const Compile as usize };
     // TODO: this will get less dumb when I have first class modules.
     let file = comp
         .parsing

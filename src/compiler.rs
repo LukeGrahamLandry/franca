@@ -247,6 +247,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             ExecTime::Runtime => self.program.runtime_arch,
             ExecTime::Both => todo!(),
         };
+        let ty = self.program[f].unwrap_ty();
         let result = match arch {
             TargetArch::Aarch64 => {
                 emit_aarch64(self, f, when)?;
@@ -257,7 +258,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr()
                 };
 
-                let ty = self.program[f].unwrap_ty();
                 let comp_ctx = self.program[f].has_tag(Flag::Ct);
                 let c_call = self.program[f].has_tag(Flag::C_Call);
                 let flat_call = self.program[f].has_tag(Flag::Flat_Call);
@@ -289,8 +289,12 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.pending_ffi.pop().unwrap();
         let result = self.tag_err(result);
-        if result.is_ok() {
+        if let Ok(vals) = &result {
             self.pop_state(state2);
+
+            // TODO: rmeove this. just want to force do a check  of type goodness-- May 1
+            let mut out = vec![];
+            values_from_ints(self, ty.ret, &mut vals.clone().vec().into_iter(), &mut out)?;
         }
         result
     }
@@ -812,29 +816,45 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::ExpandParsedStmts(_) => unreachable!(),
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
-                self.compile_expr(result, expr, None)?;
+                let res = self.compile_expr(result, expr, None)?;
+                if matches!(res, Structured::Const(_, _)) {
+                    stmt.stmt = Stmt::Noop; // TODO: might need to remove this for janky @namespace but should find better fix. having less stuff makes it nicer to debug -- May 1
+
+                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                }
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
             }
-            Stmt::Noop => {}
+            Stmt::Noop => {
+                stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+            }
             Stmt::DeclFunc(func) => {
                 if let (Some(id), Some(os)) = self.decl_func(mem::take(func))? {
-                    stmt.stmt = Stmt::DoneDeclFunc(id, os);
+                    stmt.stmt = Stmt::Noop;
+                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    // stmt.stmt = Stmt::DoneDeclFunc(id, os); // TODO: do i ever need this? -- May 1
                 } else {
+                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                     stmt.stmt = Stmt::Noop;
                 }
             }
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
-            Stmt::DeclVar { name, ty, value, kind, .. } => self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?,
+            Stmt::DeclVar { name, ty, value, kind, .. } => {
+                self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?;
+                debug_assert_ne!(*kind, VarType::Const);
+            }
             // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn.
             //       be able to expand this into multiple statements so backend never even sees a DeclVarPattern (and skip constants when doing so)
             // TODO: this is extremly similar to what bind_const_arg has to do. should be able to express args as this thing?
             // TODO: remove useless statements
             Stmt::DeclVarPattern { binding, value } => {
-                if binding.bindings.is_empty() {
+                if binding.bindings.is_empty() || value.is_none() || value.as_ref().unwrap().expr.is_raw_unit() {
                     assert!(value.is_none() || value.as_ref().unwrap().expr.is_raw_unit());
+                    stmt.stmt = Stmt::Noop;
+
+                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                     return Ok(());
                 }
                 let arguments = binding.flatten();
@@ -851,6 +871,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     } else {
                         let e = value.as_mut().unwrap();
                         assert!(e.expr.is_raw_unit(), "var no name not unit: {}", e.log(self.pool));
+
+                        stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                         stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         return Ok(());
                     }
@@ -889,7 +911,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Fix trivial tuples
                 binding.if_empty_add_unit();
                 if exprs.is_empty() {
-                    self.set_literal(value, ())?;
+                    self.set_literal(value, ())?; // redundant now
+                    stmt.stmt = Stmt::Noop;
+
+                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    return Ok(());
                 } else if exprs.len() == 1 {
                     *value = mem::take(exprs.iter_mut().next().unwrap());
                 }
@@ -1127,19 +1153,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         let marker = 0;
         unsafe { STACK_MIN = STACK_MIN.min(&marker as *const i32 as usize) };
         assert!(expr.ty.as_index() < self.program.types.len());
-        // println!("{}", expr.log(self.pool));
 
         // TODO: it seems like i shouldn't compile something twice
         // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
         let old = expr.ty;
 
         let mut res = self.compile_expr_inner(result, expr, requested)?;
+        debug_assert!(expr.ty.is_valid());
+        debug_assert!(res.ty().is_valid());
         if !expr.ty.is_unknown() {
             self.last_loc = Some(expr.loc);
             //format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak())?;
+
             self.type_check_arg(expr.ty, res.ty(), "sanity ICE")?;
         }
         if let Some(requested) = requested {
+            debug_assert!(requested.is_valid());
             // TODO: its possible to write code that gets here without being caught first.
             //       should fix so everywhere that relies on 'requested' does thier own typecheck because they can give a more contextual error message.
             //       but its annoying becuase this happens first so you cant just sanity check here and i dont want to trust that everyone remembered.
@@ -1223,8 +1252,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Block { body, result: value, .. } => {
                 body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
                 for stmt in body.iter_mut() {
+                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                     self.compile_stmt(result, stmt)?;
                 }
+                body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
+
                 // TODO: insert drops for locals
                 let res = self.compile_expr(result, value, requested)?;
                 if body.is_empty() {
@@ -2086,14 +2118,28 @@ impl<'a, 'p> Compile<'a, 'p> {
             return self.deserialize_values(val);
         }
         let func_id = self.make_lit_function(e, ret_ty)?;
+        // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
+        //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
+        let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
+        if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
+            return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
+        }
+        println!("Call jitted {:?}", e);
+
         self.call_jitted(func_id, ExecTime::Comptime, None, ())
     }
 
     fn check_quick_eval(&mut self, e: &mut FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Option<Values>> {
         match e.deref_mut() {
+            Expr::Block { body, result, .. } => {
+                if body.is_empty() {
+                    return self.check_quick_eval(result, ret_ty);
+                }
+            }
             Expr::Value { value, .. } => return Ok(Some(value.clone())),
             Expr::GetVar(var) => {
-                if let Some((value, _)) = self.find_const(*var)? {
+                if let Some((value, ty)) = self.find_const(*var)? {
+                    self.type_check_arg(ty, ret_ty, "quick eval")?;
                     return Ok(Some(value));
                 } else {
                     // TODO: -- Apr 24 I think this is always the problem. but what changed??
@@ -2174,6 +2220,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
+        println!("make_lit_function: {}", e.log(self.pool));
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
@@ -2195,6 +2242,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func_id = self.program.add_func(fake_func);
         logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
         self.compile(func_id, ExecTime::Comptime)?;
+
+        println!(
+            "after compile make_lit_function: {}",
+            self.program[func_id].body.as_ref().unwrap().log(self.pool)
+        );
         Ok(func_id)
     }
 
@@ -2204,6 +2256,15 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(values);
         }
         let func_id = self.make_lit_function(e, ret_ty)?;
+
+        // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
+        //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
+        let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
+        if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
+            return Ok(res);
+        }
+        println!("Call jitted {:?}", e);
+
         self.run(func_id, Value::Unit.into(), ExecTime::Comptime, None)
     }
 
@@ -2391,6 +2452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
+        println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
 
         debug_assert!(!found.is_any() && !expected.is_any(), "wip removing Any");
 

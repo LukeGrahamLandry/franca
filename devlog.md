@@ -17,6 +17,10 @@ So far looks like stack based bc removes a bunch of reserve slots stuff which is
 
 - confusion about the stack having addr of a stack slot vs deref of a stack slot. currently I don't have spilling.
 - there's somethign weird where functions with a constant value body still get emitted asm so have to fix that later but it should work anyway
+  its comptimes ones where the function decls get left in the body as declfinished so it doesn't know its safe to ignore the block body.
+  oh and im keeping anything with annotations just in case but that inlcude #pub.
+- lamo in my load after switching to trying to keep reg on stack instead of storing immediatly i forgot to move get_free_reg into the loop so a big store was putting all parts in the same reg (and stomping)
+  that was enough to fix cases/corrupted_types.fr.
 
 ## working towards replacing 'enum Value' with bytes (Apr 30)
 

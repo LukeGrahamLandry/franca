@@ -1082,7 +1082,10 @@ impl<'p> Program<'p> {
         Ok(self.pool.intern(&out))
     }
 
+    #[track_caller]
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
+        debug_assert!(ty.is_valid(), "{}", ty.0);
+
         while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) = &self[ty] {
             ty = inner
         }
@@ -1722,23 +1725,31 @@ macro_rules! tagged_index {
         impl $name {
             pub const MASK: u64 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
 
+            #[track_caller]
             pub fn as_index(self) -> usize {
                 debug_assert!(self.is_valid(), "{}", self.0);
                 (self.0 & (!Self::MASK)) as usize
             }
+
+            #[track_caller]
             pub fn as_raw(self) -> i64 {
                 debug_assert!(self.is_valid(), "{}", self.0);
                 self.0 as i64
             }
+
+            #[track_caller]
             pub fn from_raw(value: i64) -> Self {
                 let s = Self(value as u64);
                 debug_assert!(s.is_valid());
                 s
             }
+
+            #[track_caller]
             pub const fn from_index(value: usize) -> Self {
                 debug_assert!((value as u64) < Self::MASK);
                 Self(value as u64 | Self::MASK)
             }
+
             pub fn is_valid(self) -> bool {
                 (self.0 & Self::MASK) != 0
             }
@@ -1754,7 +1765,7 @@ tagged_index!(OverloadSetId, 28);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
-pub struct TypeId(u64);
+pub struct TypeId(pub u64);
 
 #[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]

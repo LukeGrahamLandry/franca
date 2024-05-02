@@ -10,18 +10,19 @@ use franca::{
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, where_am_i, MEM, STACK_START, STATS,
+    run_main, timestamp, where_am_i, COMPILER_CTX_PTR, COMPTIME_STACK, COMPTIME_STACK_SIZE, MEM, STACK_START, STATS,
 };
 #[cfg(feature = "llvm")]
 use llvm_backend::{verify_module, BcToLlvm};
 use std::{
-    arch::asm,
+    arch::{asm, global_asm},
     env, fs,
     io::Write,
     mem::{self, transmute},
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::exit,
+    ptr::{null, null_mut},
     str::pattern::Pattern,
 };
 
@@ -32,6 +33,41 @@ use std::{
 //       Because it seems nicer if things are composable and the compiler functions don't assume they can just read the args except the top level one which you can define in userland.
 // TODO: repl(). works nicely with ^ so you could experiment but then always be able to run things as a command when working with other tools
 
+global_asm!(
+    "_test_stack_shit:",
+    // setup new stack
+    "mov x16, sp",
+    "mov sp, x0",
+    "sub sp, sp, 32",
+    // save the old stack and our return info on the new stack.
+    "str x16, [sp]",
+    "str lr, [sp, #8]",
+    "str fp, [sp, #16]",
+    // call a user function
+    "mov x0, x2",
+    "blr x1",
+    // restore return info
+    "ldr x16, [sp]", // x16 is allowed to be scratch during function calls in arm c abi.
+    "ldr lr, [sp, #8]",
+    "ldr fp, [sp, #16]",
+    // restore stack
+    "add sp, sp, 32",
+    "mov sp, x16",
+    "ret",
+);
+
+extern "C" {
+    fn test_stack_shit(_new_sp: usize, callback: extern "C" fn(ctx: *mut libc::c_void), ctx: *mut libc::c_void);
+}
+
+extern "C" fn do_stuff(ctx: *mut libc::c_void) {
+    let marker = 0;
+    println!(
+        "Hello world. My stack is at {}, My context ptr is {ctx:p}",
+        &marker as *const i32 as usize
+    );
+}
+
 fn main() {
     let marker = 0;
     unsafe { STACK_START = &marker as *const i32 as usize };
@@ -41,6 +77,14 @@ fn main() {
         where_am_i();
         prev(arg);
     }));
+
+    let new_sp = COMPTIME_STACK.get() as usize + COMPTIME_STACK_SIZE;
+    println!("new_sp: {new_sp} {:p}", new_sp as *const u8);
+    do_stuff(null_mut());
+    unsafe {
+        test_stack_shit(new_sp, do_stuff, null_mut());
+    }
+    do_stuff(null_mut());
 
     // TODO: option to hardcode path
     // TODO: its a problem that someone could add one at a higher prio place maybe?
