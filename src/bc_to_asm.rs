@@ -17,15 +17,16 @@ use std::fs;
 use std::mem::transmute;
 use std::process::Command;
 
+// I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-struct SpOffset(usize);
+struct SpOffset(u16);
 
 struct BcToAsm<'z, 'p, 'a> {
     compile: &'z mut Compile<'a, 'p>,
     vars: Vec<Option<SpOffset>>,
     stack: Vec<Val>,
     free_reg: Vec<i64>,
-    open_slots: Vec<(SpOffset, usize)>,
+    open_slots: Vec<(SpOffset, u16)>,
     next_slot: SpOffset,
     f: FuncId,
     wip: Vec<FuncId>,
@@ -221,7 +222,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             // Save the result pointer.
             flat_result = Some(self.next_slot);
-            self.store_u64(x3, sp, self.next_slot.0 as u16);
+            self.store_u64(x3, sp, self.next_slot.0);
             self.next_slot.0 += 8;
 
             // Copy arguments into their stack slots.
@@ -230,14 +231,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.reset_free_reg();
             self.free_reg.retain(|r| *r != x1);
             self.stack.push(Val::Increment { reg: x1, offset_bytes: 0 });
-            self.emit_load(arg_size as u16);
+            self.emit_load(arg_size);
         } else {
             self.free_reg.clear();
             assert!(arg_size <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
             assert!(!has_ct, "compiler context is implicitly passed as first argument for #ct builtins.");
             self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
 
-            self.ccall_reg_to_stack(arg_size as u16);
+            self.ccall_reg_to_stack(arg_size);
 
             // Any registers not containing args can be used.
             for i in arg_size..8 {
@@ -249,7 +250,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let mut patch_b = vec![];
 
         println!("entry: ({:?})", self.stack);
-        debug_assert_eq!(self.stack.len(), arg_size);
+        debug_assert_eq!(self.stack.len() as u16, arg_size);
         let func = self.compile.ready[f].as_ref().unwrap();
         for i in 0..func.insts.len() {
             let inst = &(self.compile.ready[f].as_ref().unwrap().insts[i].clone());
@@ -260,7 +261,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let slot = slot.unwrap();
                     let ty = self.compile.ready[f].as_ref().unwrap().vars[id as usize];
                     let count = self.compile.slot_count(ty);
-                    self.open_slots.push((slot, count)); // TODO: keep this sorted by count?
+                    self.open_slots.push((slot, count * 8)); // TODO: keep this sorted by count?
                 }
                 Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
                 &Bc::CallSplit { rt, ct } => {
@@ -303,16 +304,16 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         assert!(!is_c_call);
                         let working = self.get_free_reg();
                         // Retrive result address
-                        self.load_u64(working, sp, flat_result.unwrap().0 as u16);
+                        self.load_u64(working, sp, flat_result.unwrap().0);
                         // We have the values on the virtual stack, they want them at some address, that's the same as my store instruction.
                         self.stack.push(Val::Increment {
                             reg: working,
                             offset_bytes: 0,
                         });
-                        self.emit_store(ret_size as u16);
+                        self.emit_store(ret_size);
                     } else {
                         // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
-                        self.stack_to_ccall_reg(ret_size as u16)
+                        self.stack_to_ccall_reg(ret_size)
                     }
                     debug_assert!(self.stack.is_empty());
 
@@ -330,7 +331,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     if let Some(slot) = self.vars[id as usize] {
                         self.stack.push(Val::Increment {
                             reg: sp,
-                            offset_bytes: slot.0 as u16,
+                            offset_bytes: slot.0,
                         });
                     } else {
                         let ty = self.compile.ready[f].as_ref().unwrap().vars[id as usize];
@@ -339,7 +340,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.vars[id as usize] = Some(slot);
                         self.stack.push(Val::Increment {
                             reg: sp,
-                            offset_bytes: slot.0 as u16,
+                            offset_bytes: slot.0,
                         });
                     }
                 }
@@ -389,8 +390,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(brk(123));
                 }
                 Bc::Pop { slots } => {
-                    let r = self.pop_to_reg(); // TODO: dont bother actually making the value, just return the reg -- May 1
-                    self.drop_reg(r);
+                    debug_assert!(self.stack.len() >= *slots as usize);
+                    for _ in 0..*slots {
+                        let r = self.pop_to_reg(); // TODO: dont bother actually making the value, just return the reg -- May 1
+                        self.drop_reg(r);
+                    }
                 }
                 #[cfg(debug_assertions)]
                 &Bc::EndIf { index } => match &self.debug_if_saved_stack[index as usize] {
@@ -465,12 +469,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             print!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
             match self.stack[stack_index] {
                 Val::Increment { reg, offset_bytes } => {
-                    if offset_bytes != 0 {
-                        self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
-                    }
+                    // even if offset_bytes is 0, we need to move it to the right register. and add can encode that mov even if reg is sp.
+                    self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
                 }
                 Val::Literal(x) => self.load_imm(i as i64, x as u64),
-                Val::Spill(slot) => self.load_u64(i as i64, sp, slot.0 as u16),
+                Val::Spill(slot) => self.load_u64(i as i64, sp, slot.0),
             }
         }
         println!();
@@ -563,12 +566,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
                 // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
                 let slot = self.create_slots(1);
+                print!("(spill ({reg:?} + {offset_bytes})) ");
                 self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
-                self.store_u64(reg, sp, slot.0 as u16);
+                self.store_u64(reg, sp, slot.0);
                 self.drop_reg(reg);
                 self.stack[i] = Val::Spill(slot);
             }
         }
+        println!();
     }
 
     fn get_free_reg(&mut self) -> i64 {
@@ -605,7 +610,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Val::Spill(slot) => {
                 let r = self.get_free_reg();
-                self.load_u64(r, sp, slot.0 as u16);
+                self.load_u64(r, sp, slot.0);
+                self.open_slots.push((slot, 8));
                 r
             }
         }
@@ -621,7 +627,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Val::Spill(slot) => {
                 let r = self.get_free_reg();
-                self.load_u64(r, sp, slot.0 as u16);
+                self.load_u64(r, sp, slot.0);
                 (r, 0)
             }
         }
@@ -633,7 +639,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         res
     }
 
-    fn create_slots(&mut self, count: usize) -> SpOffset {
+    fn create_slots(&mut self, count: u16) -> SpOffset {
         for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
             if size == count * 8 {
                 return self.open_slots.remove(i).0;
@@ -666,11 +672,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
         let arg_count = self.compile.slot_count(f_ty.arg);
         let ret_count = self.compile.slot_count(f_ty.ret);
-        assert!(arg_count <= 7, "indirect c_call only supports 7 arguments. TODO: pass on stack");
+        assert!(
+            (arg_count + reg_offset) <= 7,
+            "indirect c_call only supports 7 arguments. TODO: pass on stack"
+        );
         assert!(ret_count <= 7, "indirect c_call only supports 7 returns. TODO: pass on stack");
 
         if comp_ctx {
-            let first_arg_index = self.stack.len() - arg_count;
+            let first_arg_index = self.stack.len() - arg_count as usize;
             // TODO: this has gotta be UB
             let c = self.compile as *const Compile as u64;
             let p = &self.compile.program as *const &mut Program as u64;
@@ -679,10 +688,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.stack.insert(first_arg_index, Val::Literal(c as i64));
         }
 
-        self.stack_to_ccall_reg((arg_count + reg_offset) as u16);
+        self.stack_to_ccall_reg(arg_count + reg_offset);
         do_call(self);
         self.spill_abi_stompable();
-        self.ccall_reg_to_stack(ret_count as u16);
+        self.ccall_reg_to_stack(ret_count);
         for i in ret_count..7 {
             add_unique(&mut self.free_reg, i as i64); // now the extras are usable again.
         }
@@ -709,12 +718,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             let arg_offset = self.create_slots(arg_count);
             // TODO: super simple data flow lookahead so if you're about to store the whole thing to a var, use that as the address.
             let ret_offset = self.create_slots(ret_count);
-            debug_assert!(self.stack.len() >= arg_count, "{}", arg_count);
+            debug_assert!(self.stack.len() as u16 >= arg_count, "{}", arg_count);
             self.stack.push(Val::Increment {
                 reg: sp,
-                offset_bytes: arg_offset.0 as u16,
+                offset_bytes: arg_offset.0,
             });
-            self.emit_store(arg_count as u16);
+            self.emit_store(arg_count);
 
             let c = self.compile as *const Compile as u64;
             self.load_imm(x0, c);
@@ -728,9 +737,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             self.stack.push(Val::Increment {
                 reg: sp,
-                offset_bytes: ret_offset.0 as u16,
+                offset_bytes: ret_offset.0,
             });
-            self.emit_load(ret_count as u16);
+            self.emit_load(ret_count);
 
             // TODO: leaking slots -- May 1
             // self.release_many(arg); // Note: release after to make sure they don't alias ret which might not be what the callee is expecting (even tho it would be fine for current uses).

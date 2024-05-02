@@ -96,8 +96,6 @@ pub mod emit_rust;
 pub mod export_ffi;
 pub mod ffi;
 pub mod lex;
-#[cfg(feature = "llvm")]
-pub mod llvm;
 pub mod logging;
 pub mod overloading;
 pub mod parse;
@@ -174,6 +172,7 @@ pub static mut JITTED_PAGE: (usize, usize) = (0, 0);
 pub static mut MY_CONST_DATA: (usize, usize) = (0, 0);
 pub static mut STACK_MIN: usize = usize::max_value();
 pub static mut COMPILER_CTX_PTR: usize = 0;
+pub static mut MMAP_ARENA_START: usize = 0;
 
 pub static MY_STRING: &str = "Hello World";
 
@@ -189,7 +188,7 @@ pub fn where_am_i() {
         unsafe { STACK_MIN }
     );
     println!("COMPILER_CTX_PTR: {}", unsafe { COMPILER_CTX_PTR });
-    println!("ADDR OF MMAP ARENA NEXT: {} ", MEM.get() as usize);
+    println!("ADDR OF MMAP ARENA: {} to {} ", unsafe { MMAP_ARENA_START }, MEM.get() as usize);
     println!("ADDR OF MMAP JITTED: {} to {}", unsafe { JITTED_PAGE.0 }, unsafe {
         JITTED_PAGE.0 + JITTED_PAGE.1
     });

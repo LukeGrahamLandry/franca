@@ -6,10 +6,10 @@ use libc::c_void;
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{values_from_ints, Values};
 use crate::compiler::{bit_literal, Compile, Res, Unquote};
-use crate::err;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
+use crate::{err, where_am_i};
 use std::arch::asm;
 use std::fmt::Write;
 use std::hint::black_box;
@@ -34,6 +34,7 @@ macro_rules! bounce_flat_call {
                 debug_assert_eq!(ret_count, <$Ret>::size() as i64, "bad ret count. expected {}", stringify!($Ret));
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
+                    println!("bounce ARG: {argslice:?}");
                     let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).unwrap();
                     let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_to_ints_one();
@@ -41,6 +42,7 @@ macro_rules! bounce_flat_call {
                     out.fill(0); // TODO: remove
                     out.copy_from_slice(&ret);
                     argslice.fill(0); // TODO: remove
+                    println!("bounce RET: {out:?}");
                 }
             }
         }
@@ -318,7 +320,8 @@ extern "C-unwind" fn resolve_backtrace_symbol(_: &mut &mut Program, addr: *mut c
 }
 
 extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
-    println!("{}", p.log_type(a));
+    println!("{a:?} = {}", p.log_type(a));
+    // where_am_i();
 }
 
 extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) {
@@ -346,7 +349,9 @@ extern "C-unwind" fn make_int_type(program: &mut &mut Program<'_>, bit_count: i6
 }
 
 extern "C-unwind" fn do_ptr_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
-    program.ptr_type(ty)
+    let t = program.ptr_type(ty);
+    println!("*{ty:?} = {t:?}");
+    t
 }
 
 extern "C-unwind" fn do_unique_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
@@ -495,6 +500,7 @@ fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
 }
 
 fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
+    println!("get_type_info: {}", compile.program.log_type(ty));
     compile.program[ty].clone()
 }
 

@@ -10,10 +10,8 @@ use franca::{
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, where_am_i, COMPILER_CTX_PTR, COMPTIME_STACK, COMPTIME_STACK_SIZE, MEM, STACK_START, STATS,
+    run_main, timestamp, where_am_i, COMPTIME_STACK, COMPTIME_STACK_SIZE, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
-#[cfg(feature = "llvm")]
-use llvm_backend::{verify_module, BcToLlvm};
 use std::{
     arch::{asm, global_asm},
     env, fs,
@@ -22,7 +20,7 @@ use std::{
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::exit,
-    ptr::{null, null_mut},
+    ptr::null_mut,
     str::pattern::Pattern,
 };
 
@@ -71,6 +69,7 @@ extern "C" fn do_stuff(ctx: *mut libc::c_void) {
 fn main() {
     let marker = 0;
     unsafe { STACK_START = &marker as *const i32 as usize };
+    unsafe { MMAP_ARENA_START = MEM.get() as usize };
 
     let prev = take_hook();
     set_hook(Box::new(move |arg| {
@@ -233,6 +232,7 @@ fn run_tests_serial_for_profile() {
         for backend in s[..end].split(", ") {
             let arch = match backend {
                 "aarch64" => TargetArch::Aarch64,
+                "llvm" => continue,
                 "skip" => break,
                 other => panic!("Unknown backend {other}"),
             };
@@ -266,10 +266,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
         let arch = match backend {
             "interp" => continue, // TargetArch::Interp,
             "aarch64" => TargetArch::Aarch64,
-            #[cfg(not(feature = "llvm"))]
             "llvm" => continue,
-            #[cfg(feature = "llvm")]
-            "llvm" => TargetArch::Llvm,
             "skip" => break,
             other => panic!("Unknown backend {other}"),
         };
@@ -345,30 +342,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
             }
             code(arg)
         }
-        #[cfg(not(feature = "llvm"))]
         TargetArch::Llvm => unreachable!(),
-        #[cfg(feature = "llvm")]
-        TargetArch::Llvm => {
-            let mut asm = BcToLlvm::new(&mut comp);
-
-            if let Err(e) = asm.compile(f) {
-                log_err(&comp, e, None);
-                exit(1);
-            }
-
-            if let Err(e) = verify_module(asm.llvm.module) {
-                log_err(&comp, e, None);
-                exit(1);
-            }
-
-            let code = asm.llvm.get_fn_jitted(f).unwrap();
-            let code: extern "C" fn(i64) -> i64 = unsafe { transmute(code) };
-            let res = code(arg);
-            unsafe {
-                asm.llvm.release();
-            }
-            res
-        }
     };
     let end = timestamp();
     let _seconds = end - start;

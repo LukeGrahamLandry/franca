@@ -1,3 +1,12 @@
+- calling assert_eq wasn't leaving the v-stack empty at the end. lol Bc::Pop wasn't doing the right count, always 1.
+- thats enough to get through 5/29, but I can't turn on COUNT_ASSERT so I don't trust that its actually working.
+  yeah assert_eq(1, 2) passes :( i was replacing any eval that gave structured::const with Noop, but might still have runtime side effects.
+  fixing folded ifs made that work, now 4/29 but i have more faith.
+- why are so many things flat_call?
+- fixing corruped types was enough to make hello world actually print the whole string!
+
+## stack based ir (May 1)
+
 I think my current bc format is dumb.
 It tries to treat tempararies the same as variables in a weird way and uses MarkContiguous/slot_is_var to reconstruct that info.
 It tracks slot types but I don't really trust that its always the raw ones and you only really care about unit/int/float, and i guess other int sizes eventually.

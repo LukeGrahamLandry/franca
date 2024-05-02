@@ -145,8 +145,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         c
     }
 
-    pub(crate) fn slot_count(&mut self, ty: TypeId) -> usize {
-        self.ready.sizes.slot_count(self.program, ty)
+    pub(crate) fn slot_count(&mut self, ty: TypeId) -> u16 {
+        self.ready.sizes.slot_count(self.program, ty) as u16
     }
 }
 impl<'a, 'p> Compile<'a, 'p> {
@@ -817,9 +817,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
                 let res = self.compile_expr(result, expr, None)?;
-                if matches!(res, Structured::Const(_, _)) {
-                    stmt.stmt = Stmt::Noop; // TODO: might need to remove this for janky @namespace but should find better fix. having less stuff makes it nicer to debug -- May 1
 
+                // Don't match on res being const because the function might still have side effects
+                if expr.is_raw_unit() {
+                    stmt.stmt = Stmt::Noop; // TODO: might need to remove this for janky @namespace but should find better fix. having less stuff makes it nicer to debug -- May 1
                     stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                 }
             }
@@ -831,7 +832,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
             }
             Stmt::DeclFunc(func) => {
-                if let (Some(id), Some(os)) = self.decl_func(mem::take(func))? {
+                if let (Some(_id), Some(_os)) = self.decl_func(mem::take(func))? {
                     stmt.stmt = Stmt::Noop;
                     stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                     // stmt.stmt = Stmt::DoneDeclFunc(id, os); // TODO: do i ever need this? -- May 1
@@ -1297,7 +1298,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match name {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
-                    Flag::If => self.emit_call_if(result, arg, requested)?,
+                    Flag::If => self.emit_call_if(result, expr, requested)?,
                     Flag::While => self.emit_call_while(result, arg)?,
                     Flag::Addr => self.addr_macro(result, arg)?,
                     Flag::Quote => {
@@ -2233,7 +2234,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         fake_func.finished_ret = Some(ret_ty);
         fake_func.scope = Some(ScopeId::from_index(0));
         self.anon_fn_counter += 1;
-        if self.ready.sizes.slot_count(self.program, ret_ty) > 1 && self.program.comptime_arch == TargetArch::Aarch64 {
+        if self.slot_count(ret_ty) > 1 && self.program.comptime_arch == TargetArch::Aarch64 {
             // println!("imm_eval as flat_call for ret {}", self.program.log_type(ret_ty));
             // TODO: my c_call can't handle aggragate returns
             fake_func.add_tag(Flag::Flat_Call);
@@ -2331,9 +2332,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_call_if(
         &mut self,
         result: &mut FnWip<'p>,
-        if_macro_arg: &mut FatExpr<'p>,
+        if_macro: &mut FatExpr<'p>,
         requested: Option<TypeId>, // TODO: allow giving return type to infer
     ) -> Res<'p, Structured> {
+        let if_macro_arg = if let Expr::SuffixMacro(_, arg) = &mut if_macro.expr {
+            arg
+        } else {
+            err!("expected !if",)
+        };
         // if !arg.ty.is_unknown() {
         //     // We've been here before and already replaced closures with calls.
         //     return Ok(Structured::RuntimeOnly(arg.ty));
@@ -2341,7 +2347,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let unit = TypeId::unit();
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
         let mut unit_expr = self.as_literal((), if_macro_arg.loc)?;
-        if let Expr::Tuple(parts) = if_macro_arg.deref_mut() {
+        if let Expr::Tuple(parts) = &mut if_macro_arg.expr {
             let cond = self.compile_expr(result, &mut parts[0], Some(TypeId::bool()))?;
             self.type_check_arg(cond.ty(), TypeId::bool(), "bool cond")?;
 
@@ -2354,7 +2360,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     err!("expected !if cond: bool",)
                 };
                 let cond_index = if cond { 1 } else { 2 };
-                let other_index = if cond { 2 } else { 1 };
                 if let Some(branch_body) = self.maybe_direct_fn(result, &mut parts[cond_index], &mut unit_expr, requested)? {
                     let branch_body = branch_body.single()?;
                     let branch_arg = self.infer_arg(branch_body)?;
@@ -2362,10 +2367,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.program[branch_body].add_tag(Flag::Inline);
                     let res = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index], requested)?;
                     assert!(self.program[branch_body].finished_ret.is_some());
-                    // TODO: fully dont emit the branch
-                    let unit = self.as_literal((), parts[other_index].loc)?;
-                    parts[other_index].expr = Expr::SuffixMacro(Flag::Unreachable.ident(), Box::new(unit));
-                    parts[other_index].ty = TypeId::never();
+                    // Now we fully dont emit the branch
+                    *if_macro = mem::take(&mut parts[cond_index]);
                     return Ok(res);
                 } else {
                     ice!("!if arg must be func not {:?}", parts[cond_index]);

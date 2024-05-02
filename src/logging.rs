@@ -228,7 +228,7 @@ use crate::compiler::EXPECT_ERR_DEPTH;
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
         safe_rec!(self, t, format!("{t:?}"), {
-            if t.is_valid() {
+            if t.is_valid() && t.as_index() < self.types.len() {
                 match &self[t] {
                     TypeInfo::Unknown => "Unknown".to_owned(),
                     TypeInfo::Any => "Any".to_owned(),

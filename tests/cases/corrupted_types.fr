@@ -34,8 +34,8 @@ fn main(canary: i64) i64 = {
     // - then i wasn't releasing x1 after the first call. that was enough to fix this. 
     // - however, now the above debug_log_type says i1 instead of i64. i was double dropping, not checking unique. 
     fn nested() i64 = add(1, add(2, 3));
-    nested(); 
-    // a ssert_eq(6, nested());
+    nested();
+    assert_eq(6, nested());
     
     // - JumpIf not dropping cond reg. 
     // - TODO: the first EndIf needs reg_free to be the same as it was at the if branch. 
@@ -43,17 +43,61 @@ fn main(canary: i64) i64 = {
     //   after the jump away for the first branch. it wont exist at runtime but emit_asm will fall through and reset the stack. 
     fn thing3() Unit = {
         // cond is in x0. branch on c. 
-        c := (eq(add(0, 1), 0), fn()bool = {
+        c := if(eq(add(0, 1), 0), fn()bool = {
             a := false;
             a
         }, fn()bool = {
             a := true;
             a
-        })!if;
+        });
     }
     thing3();
     
-    // assert_eq(1, 1); // TODO: makes stack not empty at the end. 
+    // - constant folded !if still leaves the unreachable branch, but that doesn't leave enough on the v-stack to pop. 
+    //   didn't actually fix the unreachable thing but just correctly full folding ifs makes it come up less often. 
+    fn thing4() Unit = {
+        a := 0;
+        b := 1;
+        c := (::true, fn = a, fn = b)!if;
+    }
+    thing4();
+    
+    assert_eq(1, 1);
+    
+    
+    // - c calling '#ct fn Ptr' wasn't putting the arg in x1 because offset_bytes was zero and i dumbly skipped the add because i was like "well why add zero",
+    //   but for zero you're just using add as mov because it doesn't care if the input reg is sp. 
+    //   so the symptom was do_ptr_type getting a garbage value as its x1 arg, and it was an address because it was coming from operator_star_prefix,
+    //   which decided to be a flat call for some reason so the junk in the reg was always the args_ptr. 
+    //   this was the actaul problem i was looking for in the first place with this file. 
+    fn thing5() Unit = {
+        A :: i64;
+        debug_log_type(A);
+        B :: *A;
+        debug_log_type(B);
+    }
+    thing5();
+    
     
     canary
 }
+
+/*
+// TODO: provide this in export_ffi
+
+
+a : Fn(Unit, Unit) : thing3;
+b := a;
+
+// TODO: have enum macro do auto ordinals and auto raw type. maybe rename the other enum to @tagged, the rust naming is kinda silly. 
+IrFormat :: @enum(i64) (
+    Ast      = 0,
+    BcBytes  = 1,
+    BcText   = 2,
+    ArmHex   = 3,
+    ArmText  = 4, // requires 'llvm-mc' CLI installed. 
+);
+
+fn render_func_body(f: FuncId, out: *List$u8, ir: IrFormat) Unit;
+
+*/

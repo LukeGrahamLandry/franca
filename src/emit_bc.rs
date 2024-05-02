@@ -146,7 +146,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let body = func.body.as_ref().unwrap();
         self.compile_expr(result, body)?;
 
-        for id in self.locals.pop().unwrap() {
+        for _id in self.locals.pop().unwrap() {
             // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
         }
         assert!(self.locals.is_empty());
@@ -322,8 +322,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::GetNativeFnPtr(f));
                     }
                     Flag::Unreachable => {
-                        result.push(Bc::Unreachable);
                         // Don't care about setting output to anything.
+                        // TODO: but it does need to leave the v-stack with the expected amount of stuff or asm gest confused. -- May 2
+                        result.push(Bc::Unreachable);
                     }
                     Flag::Uninitialized => {
                         assert!(!expr.ty.is_never(), "call exit() to produce a value of type 'Never'");

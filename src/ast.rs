@@ -1751,7 +1751,7 @@ macro_rules! tagged_index {
             }
 
             pub fn is_valid(self) -> bool {
-                (self.0 & Self::MASK) != 0
+                cfg!(not(debug_assertions)) || (self.0 & Self::MASK) != 0
             }
         }
     };
