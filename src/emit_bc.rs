@@ -401,14 +401,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let branch_ip = result.push(Bc::NoCompile); // patch
         let true_ip = result.insts.len() as u16;
         self.compile_expr(result, if_true)?;
-        result.push(Bc::EndIf { index });
+        let slots = self.slot_count(if_true.ty);
+        result.push(Bc::EndIf { index, slots });
         let jump_over_false = result.push(Bc::NoCompile);
         // Since both branches need to produce a result in the same place on the stack, pop the first one after you jump away.
-        let slots = self.slot_count(if_true.ty);
         result.push(Bc::Pop { slots });
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
-        result.push(Bc::EndIf { index });
+        result.push(Bc::EndIf { index, slots });
         result.insts[branch_ip] = Bc::JumpIf { false_ip, true_ip };
         result.insts[jump_over_false] = Bc::Goto {
             ip: result.insts.len() as u16,
@@ -433,7 +433,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let index = result.if_debug_count;
         result.if_debug_count += 1;
 
-        result.push(Bc::EndIf { index });
+        result.push(Bc::EndIf { index, slots: 0 });
         let cond_ip = result.insts.len() as u16;
         debug_assert_eq!(cond_fn.ty, TypeId::bool());
         self.compile_expr(result, cond_fn)?;
@@ -443,7 +443,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let slots = self.slot_count(body_fn.ty);
         result.push(Bc::Pop { slots });
 
-        result.push(Bc::EndIf { index });
+        result.push(Bc::EndIf { index, slots: 0 });
         result.push(Bc::Goto { ip: cond_ip });
         let end_ip = result.insts.len() as u16;
 
@@ -612,6 +612,7 @@ impl SizeCache {
             return size;
         }
         let ty = program.raw_type(ty);
+        extend_options(&mut self.known, ty.as_index());
         let size = match &program[ty] {
             TypeInfo::Unknown => 9999,
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(program, *t)).sum(),

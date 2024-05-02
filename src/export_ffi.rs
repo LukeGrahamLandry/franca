@@ -6,10 +6,10 @@ use libc::c_void;
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{values_from_ints, Values};
 use crate::compiler::{bit_literal, Compile, Res, Unquote};
+use crate::err;
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
-use crate::{err, where_am_i};
 use std::arch::asm;
 use std::fmt::Write;
 use std::hint::black_box;
@@ -35,7 +35,7 @@ macro_rules! bounce_flat_call {
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     println!("bounce ARG: {argslice:?}");
-                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).unwrap();
+                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).expect("deserialize arg");
                     let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_to_ints_one();
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
@@ -533,9 +533,9 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
 }
 
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    let result = compile.pending_ffi.pop().expect("ffi ctx").expect("fn result ctx");
 
-    let mut template = args.pop().unwrap();
+    let mut template = args.pop().expect("template arg");
     let mut walk = Unquote {
         compiler: compile,
         placeholders: args.into_iter().map(Some).collect(),

@@ -617,6 +617,7 @@ pub mod c {
 
     use crate::compiler::Compile;
     use crate::err;
+    use crate::logging::PoolLog;
     use crate::{
         ast::{Program, TypeId, TypeInfo},
         compiler::Res,
@@ -632,16 +633,18 @@ pub mod c {
                 TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::Never => CTy::i64(),
                 // Not a whole word!
                 TypeInfo::Bool => CTy::c_uchar(),
-                TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
+                TypeInfo::FnPtr(_) | TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
                 TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) => self.as_c_type(*ty)?,
-                TypeInfo::Enum { .. } | TypeInfo::Tuple(_) | TypeInfo::Struct { .. } => err!("i use wrong c abi for aggragates",),
+                TypeInfo::Enum { .. } | TypeInfo::Tuple(_) | TypeInfo::Struct { .. } => {
+                    err!("i use wrong c abi for aggragates {}", self.log_type(ty))
+                }
                 _ => err!("No c abi for {}", self.log_type(ty)),
             })
         }
     }
 
     // NOTE: pointers passed to Arg::new must live until into_cif
-    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, mut f_ty: crate::ast::FnType, args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
         use libffi::middle::{Builder, CodePtr};
         let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
         let mut b = Builder::new();
@@ -649,6 +652,7 @@ pub mod c {
         if comp_ctx {
             b = b.arg(Type::pointer());
         }
+        f_ty.arg = program.program.raw_type(f_ty.arg); // so it notises things are tuples and should get splatted into multiple args
         let mut args: Vec<_> = if f_ty.arg == TypeId::unit() {
             vec![]
         } else if let TypeInfo::Tuple(fields) = &program.program[f_ty.arg] {

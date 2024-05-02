@@ -33,7 +33,7 @@ pub enum Bc {
     Unreachable,
     NoCompile,
     LastUse { id: u16 },
-    EndIf { index: u16 }, // For debug check. There will be two with the same index and the virtual stack must be identical when both are reached.
+    EndIf { index: u16, slots: u16 }, // For debug check. There will be two with the same index and the virtual stack must be identical when both are reached.
 }
 
 #[derive(Clone)]

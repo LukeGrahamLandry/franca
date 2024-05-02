@@ -816,7 +816,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::ExpandParsedStmts(_) => unreachable!(),
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
-                let res = self.compile_expr(result, expr, None)?;
+                self.compile_expr(result, expr, None)?;
 
                 // Don't match on res being const because the function might still have side effects
                 if expr.is_raw_unit() {
@@ -2368,6 +2368,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let res = self.emit_call_on_unit(result, branch_body, &mut parts[cond_index], requested)?;
                     assert!(self.program[branch_body].finished_ret.is_some());
                     // Now we fully dont emit the branch
+                    // TODO: this is wrong, the cond could have returned a const but still had rt side effects (like if it was a block { blow_up_moon(); true }) -- May 2
                     *if_macro = mem::take(&mut parts[cond_index]);
                     return Ok(res);
                 } else {

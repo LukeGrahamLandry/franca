@@ -154,13 +154,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let a = self.compile.program[f].finished_arg.unwrap();
         let r = self.compile.program[f].finished_ret.unwrap();
-        let ret_limit = match self.when {
-            ExecTime::Runtime => 7,
-            _ => 1,
-        };
-        if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7
-            || self.compile.ready.sizes.slot_count(self.compile.program, r) >= ret_limit
-        {
+        // TODO: i could change the ret_limit if i knew only called at runtime because internal abi doesn't have to match c but should just add explicit cc stuff less hackily -- May 2
+        if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.ready.sizes.slot_count(self.compile.program, r) > 1 {
             debug_assert!(!self.compile.program[f].has_tag(Flag::C_Call),);
             debug_assert!(self.compile.program[f].comptime_addr.is_none());
             // my cc can do 8 returns in the arg regs but my ffi with compiler can't
@@ -201,11 +196,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let mut flat_result = None;
 
         self.free_reg.clear();
-        self.free_reg.push(x17); // grant ourselves one work slot for copying around arguments.
-
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
         if is_flat_call {
-            self.free_reg.clear();
             // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
             assert!(!is_c_call);
 
@@ -215,10 +207,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             assert!(ret_size < (1 << 12));
             self.compile.aarch64.push(cmp_im(X64, x2, arg_size as i64, 0));
             self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
-            self.compile.aarch64.push(brk(456));
+            self.compile.aarch64.push(brk(0xbad0));
             self.compile.aarch64.push(cmp_im(X64, x4, ret_size as i64, 0));
             self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
-            self.compile.aarch64.push(brk(456));
+            self.compile.aarch64.push(brk(0xbad0));
 
             // Save the result pointer.
             flat_result = Some(self.next_slot);
@@ -231,9 +223,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.reset_free_reg();
             self.free_reg.retain(|r| *r != x1);
             self.stack.push(Val::Increment { reg: x1, offset_bytes: 0 });
+            // TODO: this is really dumb. it should just refer to them in mmoery if the arg is big because rn it will spill onto its own stack anyway.
             self.emit_load(arg_size);
         } else {
-            self.free_reg.clear();
             assert!(arg_size <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
             assert!(!has_ct, "compiler context is implicitly passed as first argument for #ct builtins.");
             self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
@@ -373,7 +365,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
                     self.compile.aarch64.push(cmp_im(X64, working, expected as i64, 0));
                     self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
-                    self.compile.aarch64.push(brk(456));
+                    self.compile.aarch64.push(brk(0xbeef));
                     self.drop_reg(working);
                     self.drop_reg(reg);
                 }
@@ -397,14 +389,37 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     }
                 }
                 #[cfg(debug_assertions)]
-                &Bc::EndIf { index } => match &self.debug_if_saved_stack[index as usize] {
-                    Some(prev) => {
-                        assert_eq!(&self.stack, prev)
+                &Bc::EndIf { index, slots } => {
+                    for i in self.stack.len() - slots as usize..self.stack.len() {
+                        // TODO: this is kidna copy paste from pop_to_reg
+                        match self.stack[i] {
+                            Val::Increment { mut reg, offset_bytes } => {
+                                if offset_bytes > 0 {
+                                    debug_assert!(offset_bytes < (1 << 12), "TODO: not enough bits");
+                                    let out = if reg == sp { self.get_free_reg() } else { reg };
+                                    self.compile.aarch64.push(add_im(X64, out, reg, offset_bytes as i64, 0));
+                                    reg = out;
+                                }
+                                self.stack[i] = Val::Increment { reg, offset_bytes: 0 };
+                            }
+                            Val::Literal(x) => {
+                                let reg = self.get_free_reg();
+                                self.load_imm(reg, u64::from_le_bytes(x.to_le_bytes()));
+                                self.stack[i] = Val::Increment { reg, offset_bytes: 0 };
+                            }
+                            Val::Spill(_) => {}
+                        }
                     }
-                    None => {
-                        self.debug_if_saved_stack[index as usize] = Some(self.stack.clone());
+
+                    match &self.debug_if_saved_stack[index as usize] {
+                        Some(prev) => {
+                            assert_eq!(&self.stack, prev)
+                        }
+                        None => {
+                            self.debug_if_saved_stack[index as usize] = Some(self.stack.clone());
+                        }
                     }
-                },
+                }
                 #[cfg(not(debug_assertions))]
                 Bc::EndIf { .. } => {}
             }
@@ -469,6 +484,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             print!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
             match self.stack[stack_index] {
                 Val::Increment { reg, offset_bytes } => {
+                    debug_assert_ne!(reg as usize, i);
                     // even if offset_bytes is 0, we need to move it to the right register. and add can encode that mov even if reg is sp.
                     self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
                 }
@@ -553,27 +569,37 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     fn reset_free_reg(&mut self) {
         self.free_reg.clear();
-        self.free_reg.extend([0, 1, 2, 3, 4]);
+        self.free_reg.extend([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     fn spill_abi_stompable(&mut self) {
         for i in 0..self.stack.len() {
-            let v = self.stack[i];
-            if let Val::Increment { reg, offset_bytes } = v {
-                if reg == sp {
-                    continue;
-                }
-
-                // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
-                let slot = self.create_slots(1);
-                print!("(spill ({reg:?} + {offset_bytes})) ");
-                self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
-                self.store_u64(reg, sp, slot.0);
-                self.drop_reg(reg);
-                self.stack[i] = Val::Spill(slot);
-            }
+            self.try_spill(i);
         }
         println!();
+    }
+
+    fn try_spill(&mut self, i: usize) -> bool {
+        let v = self.stack[i];
+        if let Val::Increment { reg, offset_bytes } = v {
+            if reg == sp {
+                return false;
+            }
+
+            // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
+            let slot = self.create_slots(1);
+            print!("(spill ({reg:?} + {offset_bytes}) -> [sp, {}]) ", slot.0);
+            if offset_bytes != 0 {
+                self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
+            }
+
+            self.store_u64(reg, sp, slot.0);
+            self.drop_reg(reg);
+            self.stack[i] = Val::Spill(slot);
+            return true;
+        }
+
+        false
     }
 
     fn get_free_reg(&mut self) -> i64 {
@@ -581,7 +607,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             debug_assert_ne!(r, sp);
             r
         } else {
-            todo!("spill from stack")
+            let mut i = 0;
+            while i < self.stack.len() && !self.try_spill(i) {
+                i += 1;
+            }
+            if i == self.stack.len() {
+                panic!("spill to stack failed");
+            }
+            self.free_reg.pop().unwrap()
         }
     }
 
@@ -689,8 +722,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
 
         self.stack_to_ccall_reg(arg_count + reg_offset);
-        do_call(self);
         self.spill_abi_stompable();
+        do_call(self);
         self.ccall_reg_to_stack(ret_count);
         for i in ret_count..7 {
             add_unique(&mut self.free_reg, i as i64); // now the extras are usable again.
@@ -732,8 +765,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.load_imm(x2, arg_count as u64);
             self.compile.aarch64.push(add_im(X64, x3, sp, ret_offset.0 as i64, 0));
             self.load_imm(x4, ret_count as u64);
-            self.branch_with_link(f);
             self.spill_abi_stompable();
+            self.branch_with_link(f);
 
             self.stack.push(Val::Increment {
                 reg: sp,

@@ -18,6 +18,22 @@
 
 ## Feature Ideas
 
+// TODO: provide this in export_ffi
+
+a : Fn(Unit, Unit) : thing3;
+b := a;
+
+// TODO: have enum macro do auto ordinals and auto raw type. maybe rename the other enum to @tagged, the rust naming is kinda silly.
+IrFormat :: @enum(i64) (
+Ast = 0,
+BcBytes = 1,
+BcText = 2,
+ArmHex = 3,
+ArmText = 4, // requires 'llvm-mc' CLI installed.
+);
+
+fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
+
 - good error message for accidently using ' as character literal.
 - embeding other languages would be a good demo of the comptime/meta programming stuff.
   - need a raw string syntax that passes it to a macro (like nim?)
@@ -40,8 +56,6 @@
 - give macros access to type info for auto debug printing
 - const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
   safety(Bounds, fn= lt(i, len(self));
-- deref for constants,
-- inferred container type for constants. so fn a(b: @enum(A, B)); can be called like a(.A);
 - enum bitset
 - c style flags: fn Enum(Arr(Symbol)) Type; so Enum(A, B, C) === @enum(i64) (A = 0, B = 1, C = 2). could be macro so don't have to deal with passing symbols.
 - quick union types: fn Enum(Arr(Type)) Type; so Enum(A, B, C) === (A: A, B: B, C: C)!enum;
