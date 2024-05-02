@@ -1,5 +1,9 @@
+//! May 1/2: debugging new asm. 
+
 #test(aarch64)
 fn main(canary: i64) i64 = {
+    /// Looking for corrupted_types bug /// 
+
     // The problem here was after switching to stack based ir, I would try to load a pointer into seperate stack slots
     // but i assigned the register outside the loop so each part of the typeinfo struct would stomp each other 
     // and then the last one would get spread to all slots when tried to put it on the real stack. 
@@ -85,6 +89,56 @@ fn main(canary: i64) i64 = {
         assert_eq(b, 1);
     }
     literal_if();
+    
+    
+    /// Looking for deser_args_literal bug /// 
+    
+    // this ones not my actual problem but can't be good. from specific.fr. 
+    // - i was spill_abi_stompable after doing the call. thats why you had to call a random c function like malloc so it actually used x6 or whatever reg i was trying to keep. 
+    fn spilling_stompable() Unit = {
+        fn identity(cc: i64) i64 = {
+            malloc(8);
+            cc
+        }
+        c := 17;
+        assert_eq(c, identity(c));
+    }
+    
+    spilling_stompable();
+    
+    // - the value for str_uo can't be the stack pointer, so if you're trying to store the address of a variable, you need to use an extra register. 
+    //   fixing this was enough to get basic.fr working. still not the problem i was looking for tho. 
+    fn try_store_sp() Unit = {
+        fn identity2(var arg: i64) i64 = {
+            let arg_ptr = arg&;
+            arg_ptr[]
+        }
+        
+        assert_eq(6, identity2(6));
+    }
+    
+    try_store_sp();
+    
+    
+
+    // - this is the problem i was looking for. its just the slice bug below. 
+    fn deser_arg() Unit = {
+        #macro
+        fn identity(n: FatExpr) FatExpr = '<n>';
+        @identity(i64);
+    }
+    
+    deser_arg();
+    
+    // - think i just fucked up my !slice. its doing len as number of slots not number of items. 
+    //   and then trying to deserialize the unquote args slice doesn't work cause it wants way too many.  at 14/30
+    fn use_slice() Unit = {
+        fat_slice : Slice$Str = ("a", "b")!slice;
+        assert_eq(fat_slice.len(), 2); // it thought len was 4. 
+        
+    }
+    use_slice();
+
     
     canary
 }

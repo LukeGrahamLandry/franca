@@ -297,13 +297,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     Flag::Slice => {
                         let container_ty = arg.ty;
                         self.compile_expr(result, arg)?;
+
+                        // Note: number of elements, not size of the whole array value.
+                        let ty = self.program.tuple_types(container_ty);
+                        let count = if let Some(types) = ty { types.len() } else { 1 };
+
                         let id = result.add_var(container_ty);
 
                         let slots = self.slot_count(container_ty);
                         result.push(Bc::AddrVar { id });
                         result.push(Bc::Store { slots });
                         result.push(Bc::AddrVar { id });
-                        result.push(Bc::PushConstant { value: slots as i64 });
+                        result.push(Bc::PushConstant { value: count as i64 });
                         self.locals.last_mut().unwrap().push(id);
                     }
                     Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),

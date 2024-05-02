@@ -557,12 +557,20 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn load_u64(&mut self, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
-        debug_assert!(dest_reg != sp);
+        debug_assert_ne!(dest_reg, sp);
         self.compile.aarch64.push(ldr_uo(X64, dest_reg, src_addr_reg, (offset_bytes / 8) as i64));
         debug_assert!(offset_bytes / 8 < (1 << 12));
     }
 
     fn store_u64(&mut self, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) {
+        if src_reg == sp {
+            // TODO: this is weird. can only happen for exactly the sp, not an offset from it. so i guess somewhere else is saving an add, maybe its fine. -- May 2
+            let reg = self.get_free_reg();
+            self.compile.aarch64.push(add_im(X64, reg, sp, 0, 0)); // not mov!
+            self.store_u64(reg, dest_addr_reg, offset_bytes);
+            self.drop_reg(reg);
+            return;
+        }
         self.compile.aarch64.push(str_uo(X64, src_reg, dest_addr_reg, (offset_bytes / 8) as i64));
         debug_assert!(offset_bytes / 8 < (1 << 12));
     }
