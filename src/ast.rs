@@ -332,6 +332,7 @@ pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Span,
     pub ty: TypeId,
+    pub done: bool,
 }
 
 impl<'p> FatExpr<'p> {
@@ -367,6 +368,7 @@ impl<'p> FatExpr<'p> {
             expr: Expr::Value { value },
             loc,
             ty,
+            done: true,
         }
     }
 }
@@ -567,13 +569,14 @@ impl<'p> Pattern<'p> {
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
         unsafe {
-            STATS.ast_expr_nodes += 1;
+            STATS.ast_expr_nodes_all += 1;
         }
 
         FatExpr {
             expr,
             loc,
             ty: TypeId::unknown(),
+            done: false,
         }
     }
     pub fn synthetic_ty(expr: Expr<'p>, loc: Span, ty: TypeId) -> Self {

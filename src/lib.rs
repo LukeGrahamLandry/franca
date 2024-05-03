@@ -138,21 +138,31 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Stats {
-    pub ast_expr_nodes: usize,
+    pub ast_expr_nodes_all: usize,
     pub fn_body_resolve: usize,
     pub make_lit_fn: usize,
     pub parser_queue: usize,
     pub parser_did: usize,
     pub jit_mprotect: usize,
+    pub inflated_lexer_lines: usize,
+    pub skipped_lexer_lines: usize,
+    pub ast_expr_nodes_parser_only: usize,
+    pub compile_expr_calls_all: usize,
+    pub compile_expr_calls_with_done_set: usize,
 }
 
 pub static mut STATS: Stats = Stats {
-    ast_expr_nodes: 0,
+    ast_expr_nodes_all: 0,
     fn_body_resolve: 0,
     make_lit_fn: 0,
     parser_queue: 0,
     jit_mprotect: 0,
     parser_did: 0,
+    inflated_lexer_lines: 0,
+    skipped_lexer_lines: 0,
+    ast_expr_nodes_parser_only: 0,
+    compile_expr_calls_all: 0,
+    compile_expr_calls_with_done_set: 0,
 };
 
 /*

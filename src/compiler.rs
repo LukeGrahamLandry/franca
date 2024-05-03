@@ -1147,7 +1147,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     // #[cfg_attr(debug_assertions, inline(always))]
     pub fn compile_expr(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, Structured> {
         let marker = 0;
-        unsafe { STACK_MIN = STACK_MIN.min(&marker as *const i32 as usize) };
+        unsafe {
+            STACK_MIN = STACK_MIN.min(&marker as *const i32 as usize);
+            STATS.compile_expr_calls_all += 1;
+            if expr.done {
+                STATS.compile_expr_calls_with_done_set += 1;
+            }
+        };
         assert!(expr.ty.as_index() < self.program.types.len());
 
         // TODO: it seems like i shouldn't compile something twice
@@ -1273,9 +1279,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetVar(var) => {
                 if let Some(ty) = result.vars.get(var).cloned() {
                     expr.ty = ty;
+                    expr.done = true;
                     Structured::RuntimeOnly(ty)
                 } else if let Some((value, ty)) = self.find_const(*var)? {
                     expr.set(value.clone(), ty);
+                    expr.done = true;
                     Structured::Const(ty, value)
                 } else {
                     outln!(ShowErr, "VARS: {:?}", result.vars);
@@ -1285,6 +1293,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetNamed(name) => err!("Undeclared Ident {}", self.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
             Expr::Value { value } => {
                 let v = value.clone();
+                expr.done = true;
                 debug_assert!(!expr.ty.is_unknown(), "Value expr must have type: {v:?}");
                 Structured::Const(expr.ty, v)
             }
@@ -1573,6 +1582,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::StructLiteralP(pattern) => self.construct_struct(result, requested, pattern)?,
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
+                expr.done = true;
                 let bytes = self.pool.get(i).to_string();
                 self.set_literal(expr, bytes)?;
                 expr.as_structured()?
@@ -2752,13 +2762,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn curry_const_args(
-        &mut self,
-        original_f: FuncId,
-        f_expr: &mut FatExpr<'p>,
-        arg_expr: &mut FatExpr<'p>,
-        mut arg_val: Structured,
-    ) -> Res<'p, FuncId> {
+    fn curry_const_args(&mut self, original_f: FuncId, f_expr: &mut FatExpr<'p>, arg_expr: &mut FatExpr<'p>, arg_val: Structured) -> Res<'p, FuncId> {
         self.program[original_f].assert_body_not_resolved()?;
         let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
         self.push_state(&state);
@@ -2779,7 +2783,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             let (name, _, kind) = pattern.into_iter().next().unwrap();
             debug_assert_eq!(kind, VarType::Const);
             let name = unwrap!(name, "arg needs name (unreachable?)");
-            self.bind_const_arg(new_fid, name, arg_val)?;
+            let ty = arg_expr.ty;
+            let arg_value = if let Expr::Value { value } = mem::take(arg_expr).expr {
+                value
+            } else {
+                unreachable!()
+            };
+            self.bind_const_arg(new_fid, name, Structured::Const(ty, arg_value))?;
             self.set_literal(arg_expr, ())?;
 
             let ty = self.program.func_type(new_fid);
@@ -2787,87 +2797,89 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.pop_state(state);
             Ok(new_fid)
         } else {
-            if let Structured::Const(ty, values) = arg_val {
+            // TODO: i think this is the only place that really relies on Structured::Const containing the values.
+            //       want to get rid of that so dont have to keep cloning the vecs on every redundant ast traversal.
+            let check_len = |len| {
                 assert_eq!(
                     pattern.len(),
-                    values.len(),
+                    len,
                     "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
                     pattern,
-                    values,
+                    arg_expr.log(self.pool),
                     func.synth_name(self.pool)
                 );
+                Ok(())
+            };
 
-                let vals = values_from_ints_one(self, ty, values.vec())?;
-
-                arg_val = Structured::TupleDifferent(
-                    ty,
-                    vals.into_iter()
-                        .zip(pattern.iter())
-                        .map(|(val, (_, ty, _))| Structured::Const(*ty, Values::One(val)))
-                        .collect(),
-                )
+            let ty = unwrap!(self.program.tuple_types(arg_expr.ty), "TODO: non-trivial pattern matching");
+            check_len(ty.len())?;
+            match &arg_expr.expr {
+                Expr::Value { value } => {
+                    check_len(value.len())?;
+                    // TODO: this is super dumb but better than what I did before. -- May 3
+                    let mut parts = vec![];
+                    let ty = ty.to_vec(); // sad
+                    let values = values_from_ints_one(self, arg_expr.ty, value.clone().vec())?;
+                    for (v, ty) in values.into_iter().zip(ty.into_iter()) {
+                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg_expr.loc, ty))
+                    }
+                    arg_expr.expr = Expr::Tuple(parts);
+                }
+                Expr::Tuple(parts) => {
+                    check_len(parts.len())?;
+                }
+                _ => err!("TODO: fancier pattern matching",),
             }
-            let func = &self.program[new_fid];
 
-            match arg_val {
-                Structured::RuntimeOnly(_) => ice!("const arg but {:?} is only known at runtime.", arg_val),
-                Structured::Const(_, _) => unreachable!(),
-                Structured::TupleDifferent(_, arg_values) => {
-                    // TODO: Really what you want is to cache the newly baked function so it can be reused if called multiple times but I don't do that yet.
-                    assert_eq!(
-                        pattern.len(),
-                        arg_values.len(),
-                        "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
-                        pattern,
-                        arg_values,
-                        func.synth_name(self.pool)
-                    );
-                    let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() {
-                        v
+            let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() {
+                v
+            } else {
+                err!("TODO: pattern match on non-tuple",)
+            };
+            assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
+            let mut skipped_types = vec![];
+            let mut removed = 0;
+            for (i, (name, ty, kind)) in pattern.into_iter().enumerate() {
+                if kind == VarType::Const {
+                    let name = unwrap!(name, "arg needs name (unreachable?)");
+                    // TODO: this would be better if i was iterating backwards
+                    let this_arg_expr = arg_exprs.remove(i - removed);
+                    let arg_value = if let Expr::Value { value } = this_arg_expr.expr {
+                        value
                     } else {
-                        err!("TODO: pattern match on non-tuple",)
+                        unreachable!()
                     };
-                    assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
-                    let mut skipped_args = vec![];
-                    let mut skipped_types = vec![];
-                    let mut removed = 0;
-                    for (i, ((name, ty, kind), arg_value)) in pattern.into_iter().zip(arg_values).enumerate() {
-                        if kind == VarType::Const {
-                            let name = unwrap!(name, "arg needs name (unreachable?)");
-                            // bind_const_arg handles adding closure captures.
-                            // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
-                            self.bind_const_arg(new_fid, name, arg_value)?;
-                            // TODO: this would be better if i was iterating backwards
-                            arg_exprs.remove(i - removed);
-                            removed += 1; // TODO: this sucks
-                        } else {
-                            skipped_args.push(arg_value);
-                            skipped_types.push(ty);
-                        }
-                    }
-                    let arg_ty = self.program.tuple_of(skipped_types);
-                    debug_assert_ne!(new_fid, original_f);
-                    if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
-                        if v.is_empty() {
-                            // Note: this started being required when I added fn while.
-                            self.set_literal(arg_expr, ())?;
-                        } else if v.len() == 1 {
-                            *arg_expr = mem::take(v.iter_mut().next().unwrap());
-                        }
-                    }
-                    // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
-                    // Symptom of forgetting this was emit_bc passing extra uninit args.
-                    arg_expr.ty = arg_ty;
 
-                    let ty = self.program.func_type(new_fid);
-                    f_expr.set(Value::GetFn(new_fid).into(), ty);
-                    let f_ty = self.program.fn_ty(ty).unwrap();
-                    self.type_check_arg(arg_ty, f_ty.arg, "sanity: post bake arg")?;
-                    self.pop_state(state);
-                    // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
-                    Ok(new_fid)
+                    // bind_const_arg handles adding closure captures.
+                    // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
+                    self.bind_const_arg(new_fid, name, Structured::Const(ty, arg_value))?;
+
+                    removed += 1; // TODO: this sucks
+                } else {
+                    skipped_types.push(ty);
                 }
             }
+            let arg_ty = self.program.tuple_of(skipped_types);
+            debug_assert_ne!(new_fid, original_f);
+            if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
+                if v.is_empty() {
+                    // Note: this started being required when I added fn while.
+                    self.set_literal(arg_expr, ())?;
+                } else if v.len() == 1 {
+                    *arg_expr = mem::take(v.iter_mut().next().unwrap());
+                }
+            }
+            // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
+            // Symptom of forgetting this was emit_bc passing extra uninit args.
+            arg_expr.ty = arg_ty;
+
+            let ty = self.program.func_type(new_fid);
+            f_expr.set(Value::GetFn(new_fid).into(), ty);
+            let f_ty = self.program.fn_ty(ty).unwrap();
+            self.type_check_arg(arg_ty, f_ty.arg, "sanity: post bake arg")?;
+            self.pop_state(state);
+            // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
+            Ok(new_fid)
         }
     }
 
@@ -3192,6 +3204,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 loc,
                 expr: val_expr,
                 ty: final_ty,
+                done: true,
             };
             let val = (e, LazyType::Finished(final_ty));
             self[name.2].constants.insert(name, val);

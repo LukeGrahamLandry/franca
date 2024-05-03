@@ -141,6 +141,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
         let _ = p.end_subexpr();
         debug_assert!(p.spans.is_empty(), "leaked parse loc context");
+        unsafe {
+            STATS.inflated_lexer_lines += p.lexer.raw_lines;
+            STATS.skipped_lexer_lines += p.lexer.skipped_lines;
+        };
         Ok(stmts)
     }
 
@@ -156,6 +160,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         let expr = p.parse_expr()?;
         let _ = p.end_subexpr();
         debug_assert!(p.spans.is_empty(), "leaked parse loc context");
+        unsafe {
+            STATS.inflated_lexer_lines += p.lexer.raw_lines;
+            STATS.skipped_lexer_lines += p.lexer.skipped_lines;
+        };
 
         Ok(expr)
     }
@@ -907,13 +915,15 @@ impl<'a, 'p> Parser<'a, 'p> {
     #[track_caller]
     fn expr(&mut self, expr: Expr<'p>) -> FatExpr<'p> {
         unsafe {
-            STATS.ast_expr_nodes += 1;
+            STATS.ast_expr_nodes_all += 1;
+            STATS.ast_expr_nodes_parser_only += 1;
         }
 
         FatExpr {
             expr,
             loc: self.end_subexpr(),
             ty: TypeId::unknown(),
+            done: false,
         }
     }
 

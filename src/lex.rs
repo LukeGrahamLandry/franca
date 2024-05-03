@@ -87,8 +87,8 @@ pub struct Lexer<'a, 'p> {
     current: usize,
     chars: Peekable<Chars<'a>>,
     peeked: VecDeque<Token<'p>>,
-    pub(crate) line: usize,
-    pub(crate) comment_lines: usize,
+    pub(crate) raw_lines: usize,
+    pub(crate) skipped_lines: usize,
     hack: Option<Token<'p>>,
 }
 
@@ -105,8 +105,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
             chars: hack.chars().peekable(),
             root,
             pool,
-            line: 0,
-            comment_lines: 0,
+            raw_lines: 0,
+            skipped_lines: 0,
             hack: None,
         }
     }
@@ -118,6 +118,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
         let start = self.start;
         debug_assert!(self.peeked.is_empty());
 
+        let start_line = self.raw_lines;
+        let start_line_skipped = self.skipped_lines;
         while depth > 0 {
             self.eat_whitespace();
             self.start = self.current;
@@ -143,6 +145,10 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
             }
         }
+        let end_line = self.raw_lines;
+        let end_line_skipped = self.skipped_lines;
+        self.skipped_lines += end_line - start_line;
+        self.skipped_lines -= end_line_skipped - start_line_skipped; // don't double count inner comments
         let end = self.current;
         self.start = self.current;
         self.root.subspan(start as u64, end as u64)
@@ -400,7 +406,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             // TODO count blank as comment
             while self.peek_c().is_whitespace() {
                 if self.pop() == '\n' {
-                    self.line += 1;
+                    self.raw_lines += 1;
                 }
             }
             if self.peek_c() == '/' {
@@ -419,8 +425,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 match self.pop() {
                     '\0' => break,
                     '\n' => {
-                        self.line += 1;
-                        self.comment_lines += 1;
+                        self.raw_lines += 1;
+                        self.skipped_lines += 1;
                         break;
                     }
                     _ => {}
@@ -447,8 +453,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
                             }
                         }
                         '\n' => {
-                            self.line += 1;
-                            self.comment_lines += 1;
+                            self.raw_lines += 1;
+                            self.skipped_lines += 1;
                         }
                         _ => {}
                     }
