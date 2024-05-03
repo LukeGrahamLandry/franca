@@ -1,8 +1,9 @@
 //! Low level instructions that the interpreter can execute.
+use std::marker::PhantomData;
+
 use crate::ast::{OverloadSetId, TypeInfo};
 use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
-use crate::emit_bc::DebugInfo;
 use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId},
@@ -33,14 +34,13 @@ pub enum Bc {
     Unreachable,
     NoCompile,
     LastUse { id: u16 },
-    EndIf { index: u16, slots: u16 }, // For debug check. There will be two with the same index and the virtual stack must be identical when both are reached.
+    EndIf { index: u16, slots: u16 },
     StartLoop,
 }
 
 #[derive(Clone)]
 pub struct FnBody<'p> {
     pub insts: Vec<Bc>,
-    pub debug: Vec<DebugInfo<'p>>,
     pub vars: Vec<TypeId>,
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
@@ -49,6 +49,7 @@ pub struct FnBody<'p> {
     pub last_loc: Span,
     pub jump_targets: BitSet,
     pub if_debug_count: u16,
+    pub(crate) _p: PhantomData<&'p ()>,
 }
 
 impl<'p> FnBody<'p> {

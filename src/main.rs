@@ -8,19 +8,18 @@ use franca::{
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib, load_program, log_err,
-    logging::{init_logs, init_logs_flag, LogTag},
+    logging::{init_logs, LogTag},
     pool::StringPool,
-    run_main, timestamp, where_am_i, MEM, MMAP_ARENA_START, STACK_START, STATS,
+    run_main, timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
-    arch::{asm, global_asm},
+    arch::asm,
     env, fs,
     io::Write,
     mem::{self, transmute},
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::exit,
-    ptr::null_mut,
     str::pattern::Pattern,
 };
 
@@ -31,40 +30,7 @@ use std::{
 //       Because it seems nicer if things are composable and the compiler functions don't assume they can just read the args except the top level one which you can define in userland.
 // TODO: repl(). works nicely with ^ so you could experiment but then always be able to run things as a command when working with other tools
 
-global_asm!(
-    "_test_stack_shit:",
-    // setup new stack
-    "mov x16, sp",
-    "mov sp, x0",
-    "sub sp, sp, 32",
-    // save the old stack and our return info on the new stack.
-    "str x16, [sp]",
-    "str lr, [sp, #8]",
-    "str fp, [sp, #16]",
-    // call a user function
-    "mov x0, x2",
-    "blr x1",
-    // restore return info
-    "ldr x16, [sp]", // x16 is allowed to be scratch during function calls in arm c abi.
-    "ldr lr, [sp, #8]",
-    "ldr fp, [sp, #16]",
-    // restore stack
-    "add sp, sp, 32",
-    "mov sp, x16",
-    "ret",
-);
-
-extern "C" {
-    fn test_stack_shit(_new_sp: usize, callback: extern "C" fn(ctx: *mut libc::c_void), ctx: *mut libc::c_void);
-}
-
-extern "C" fn do_stuff(ctx: *mut libc::c_void) {
-    let marker = 0;
-    println!(
-        "Hello world. My stack is at {}, My context ptr is {ctx:p}",
-        &marker as *const i32 as usize
-    );
-}
+const SHOW_MEM_REGIONS: bool = false;
 
 fn main() {
     let marker = 0;
@@ -72,11 +38,13 @@ fn main() {
     unsafe { MMAP_ARENA_START = MEM.get() as usize };
 
     // If you get random garbage that looks like a pointer, this can help you figure out where its coming from.
-    let prev = take_hook();
-    set_hook(Box::new(move |arg| {
-        where_am_i();
-        prev(arg);
-    }));
+    if SHOW_MEM_REGIONS {
+        let prev = take_hook();
+        set_hook(Box::new(move |arg| {
+            franca::where_am_i();
+            prev(arg);
+        }));
+    }
 
     // TODO: option to hardcode path
     // TODO: its a problem that someone could add one at a higher prio place maybe?
@@ -88,7 +56,8 @@ fn main() {
         // eprintln!("Standard library not found.");
         // exit(1);
     }
-    if let Some(name) = env::args().nth(1) {
+    let mut args = env::args();
+    if let Some(name) = args.nth(1) {
         if name == "--" {
             panic!("dont put double dash to seperate args");
         }
@@ -118,13 +87,16 @@ fn main() {
 
         let pool = Box::leak(Box::<StringPool>::default());
         let path = PathBuf::from(format!("tests/{name}.fr"));
-        if path.exists() {
-            init_logs_flag(0xFFFFFFFFF);
-            run_main(pool, fs::read_to_string(format!("tests/{name}.fr")).unwrap(), Some(&name), true);
-        } else {
-            init_logs(&[LogTag::Scope, LogTag::ShowPrint]);
-            run_main(pool, fs::read_to_string(&name).unwrap(), Some(&name), true);
+        let mut src = match fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(_) => fs::read_to_string(&name).unwrap(),
+        };
+
+        for a in args {
+            src += &a;
         }
+
+        run_main(pool, src, Some(&name), true);
     } else {
         run_tests();
     }

@@ -568,7 +568,7 @@ impl<'p> PoolLog<'p> for DebugInfo<'p> {
 }
 
 impl<'p> PoolLog<'p> for FnBody<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+    fn log(&self, _: &StringPool<'p>) -> String {
         let mut f = String::new();
         writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when,);
         writeln!(f, "TYPES: ");
@@ -576,15 +576,9 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
             write!(f, "${i}:{ty:?}, ");
         }
         writeln!(f);
-        let width = 75;
         for (i, bc) in self.insts.iter().enumerate() {
             let bc = format!("{i}. {bc:?}");
-            writeln!(
-                f,
-                "{:width$} {}",
-                bc,
-                self.debug.get(i).map(|d| d.log(pool)).unwrap_or_else(|| String::from("// ???"))
-            );
+            writeln!(f, "{}", bc,);
         }
         writeln!(f, "{}", self.why);
         f

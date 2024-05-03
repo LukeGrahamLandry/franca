@@ -12,6 +12,8 @@ Fixed aliasing result location shit so some tests changed:
 
 TODO: fn index doesn't work if not inline thats like something cripplingly wrong in the calling convention stuff!!!!!
 
+- force spill before every loop fixed all except ones with floats (which i dont have yet) and parse_asm
+
 I think my prize for getting this working will be `+=, -=, \*=, /=`.
 Then maybe llvm ir text will get me normal operatiors.
 

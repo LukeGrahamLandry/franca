@@ -31,6 +31,7 @@ pub struct EmitBc<'z, 'p: 'z> {
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
+    stack_height: u16,
 }
 
 pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
@@ -56,6 +57,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             sizes,
             locals: vec![],
             var_lookup: Default::default(),
+            stack_height: 0,
         }
     }
 
@@ -71,9 +73,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             why: func.why.clone(),
             last_loc: func.last_loc,
             insts: vec![],
-            debug: vec![],
             slot_types: vec![],
             if_debug_count: 0,
+            _p: PhantomData,
         }
     }
 
@@ -105,6 +107,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             result.push(Bc::AddrVar { id });
             let slots = self.slot_count(ty);
             result.push(Bc::Store { slots });
+            self.stack_height -= slots;
 
             self.locals.last_mut().unwrap().push(id);
             if let Some(name) = name {
@@ -131,9 +134,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             err!("called function without body: {f:?} {}", self.program.pool.get(func.name));
         }
 
+        let slots = self.slot_count(func.finished_arg.unwrap());
         // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
         if let Expr::Value { value } = &func.body.as_ref().unwrap().expr {
-            let slots = self.slot_count(func.finished_arg.unwrap());
             result.push(Bc::Pop { slots });
             for value in value.clone().vec().into_iter() {
                 result.push(Bc::PushConstant { value });
@@ -141,7 +144,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             result.push(Bc::Ret);
             return Ok(());
         }
-
+        self.stack_height += slots;
         self.bind_args(result, &func.arg)?;
         let body = func.body.as_ref().unwrap();
         self.compile_expr(result, body)?;
@@ -150,6 +153,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
         }
         assert!(self.locals.is_empty());
+
+        let ret_slots = self.slot_count(func.finished_ret.unwrap());
+        debug_assert_eq!(self.stack_height, ret_slots, "{}", body.log(self.program.pool));
 
         result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
 
@@ -162,6 +168,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));
         result.push(Bc::CallDirect { f });
+        let f_ty = self.program[f].unwrap_ty();
+        self.stack_height -= self.slot_count(f_ty.arg);
+        self.stack_height += self.slot_count(f_ty.ret);
         Ok(())
     }
 
@@ -173,6 +182,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.compile_expr(result, expr)?;
                 let slots = self.slot_count(expr.ty);
                 result.push(Bc::Pop { slots });
+                self.stack_height -= slots;
             }
             Stmt::DeclVar { name, ty, value, kind } => {
                 assert_ne!(VarType::Const, *kind);
@@ -184,6 +194,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::AddrVar { id });
                 let slots = self.slot_count(ty);
                 result.push(Bc::Store { slots });
+                self.stack_height -= slots;
 
                 let prev = self.var_lookup.insert(*name, id);
                 self.locals.last_mut().unwrap().push(id);
@@ -232,6 +243,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 {
                     self.compile_expr(result, arg)?;
                     result.push(Bc::CallSplit { ct, rt });
+                    let f_ty = self.program[ct].unwrap_ty();
+                    self.stack_height -= self.slot_count(f_ty.arg);
+                    self.stack_height += self.slot_count(f_ty.ret);
                     return Ok(());
                 }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
@@ -242,6 +256,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         ty: f_ty,
                         comp_ctx: false, // TODO
                     });
+
+                    self.stack_height -= self.slot_count(f_ty.arg) + 1;
+                    self.stack_height += self.slot_count(f_ty.ret);
                     return Ok(());
                 }
                 unreachable!("{}", f.log(self.program.pool))
@@ -249,7 +266,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Block { body, result: value, .. } => {
                 self.locals.push(vec![]);
                 for stmt in body {
+                    let s = self.stack_height;
                     self.compile_stmt(result, stmt)?;
+                    debug_assert_eq!(s, self.stack_height, "{}", stmt.log(self.program.pool));
                 }
                 self.compile_expr(result, value)?;
 
@@ -270,6 +289,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::AddrVar { id });
                     let slots = self.slot_count(result.vars[id as usize]);
                     result.push(Bc::Load { slots });
+                    self.stack_height += slots;
                 } else {
                     ice!("(emit_bc) Missing resolved variable {:?}", var.log(self.program.pool),)
                 }
@@ -278,6 +298,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: sometimes you probably want to reference by pointer?
                 for value in value.clone().vec().into_iter() {
                     result.push(Bc::PushConstant { value });
+                    self.stack_height += 1;
                 }
             }
             Expr::SuffixMacro(macro_name, arg) => {
@@ -307,8 +328,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let slots = self.slot_count(container_ty);
                         result.push(Bc::AddrVar { id });
                         result.push(Bc::Store { slots });
+                        self.stack_height -= slots;
                         result.push(Bc::AddrVar { id });
                         result.push(Bc::PushConstant { value: count as i64 });
+                        self.stack_height += 2;
                         self.locals.last_mut().unwrap().push(id);
                     }
                     Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
@@ -316,6 +339,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         self.compile_expr(result, arg)?;
                         let slots = self.slot_count(expr.ty);
                         result.push(Bc::Load { slots });
+                        self.stack_height += slots - 1;
                     }
                     Flag::Tag => {
                         debug_assert_eq!(self.program[expr.ty], TypeInfo::Ptr(TypeId::i64()));
@@ -325,11 +349,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         // TODO: say arg is of type fn and dont let as_fn accept addr ptr. -- Apr 30
                         let f = unwrap!(arg.as_fn(), "expected fn for ptr");
                         result.push(Bc::GetNativeFnPtr(f));
+                        self.stack_height += 1;
                     }
                     Flag::Unreachable => {
                         // Don't care about setting output to anything.
                         // TODO: but it does need to leave the v-stack with the expected amount of stuff or asm gest confused. -- May 2
                         result.push(Bc::Unreachable);
+                        self.stack_height += 1; // oops
                     }
                     Flag::Uninitialized => {
                         assert!(!expr.ty.is_never(), "call exit() to produce a value of type 'Never'");
@@ -339,6 +365,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         for _ in 0..slots {
                             result.push(Bc::PushConstant { value: 0 });
                         }
+                        self.stack_height += slots;
                         return Ok(());
                     }
                     name => err!("{name:?} is known flag but not builtin macro",),
@@ -371,18 +398,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         )
                     }
                     result.push(Bc::AddrVar { id });
+                    self.stack_height += 1;
                 } else {
                     ice!("Missing var {} (in !addr)", var.log(self.program.pool))
                 }
             }
-            Expr::SuffixMacro(macro_name, _) => {
-                let name = self.program.pool.get(*macro_name);
-                ice!("Took address of macro {name} not supported")
-            }
-            Expr::FieldAccess(_, _) => unreachable!(),
             // TODO: this is a bit weird but it makes place expressions work.
             Expr::Index { .. } => self.compile_expr(result, arg)?,
-            &Expr::GetNamed(i) => err!(CErr::UndeclaredIdent(i)),
             _ => err!("took address of r-value",),
         }
         Ok(())
@@ -393,12 +415,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, ()> {
         let (if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
             self.compile_expr(result, &parts[0])?; // cond
+            self.stack_height -= 1;
             let if_true = &parts[1];
             let if_false = &parts[2];
             (if_true, if_false)
         } else {
             ice!("if args must be tuple not {:?}", arg);
         };
+        let slots = self.slot_count(if_true.ty);
 
         let index = result.if_debug_count;
         result.if_debug_count += 1;
@@ -408,15 +432,26 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let branch_ip = result.push(Bc::NoCompile); // patch
         let true_ip = result.insts.len() as u16;
         self.compile_expr(result, if_true)?;
-        let slots = self.slot_count(if_true.ty);
+        self.stack_height -= slots;
         result.push(Bc::AddrVar { id });
         result.push(Bc::Store { slots });
         result.push(Bc::EndIf { index, slots });
         let jump_over_false = result.push(Bc::NoCompile);
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
-        result.push(Bc::AddrVar { id });
-        result.push(Bc::Store { slots });
+
+        // TODO: never should work anywhere, not just false branch of ifs. it just so happens thats the only one my tests need currently -- May 3.
+        // TODO: HACK: need to know how many slots to pretend we have
+        if if_false.ty.is_never() && !if_true.ty.is_never() {
+            // currently we treat Never as taking 1 slot (for unreachable for example), so pop that off, and then pretend we pushed everything they want.
+            // dont bother storing, we never get there, but the backend can load the temp var set by the other branch.
+            result.push(Bc::Pop { slots: 1 });
+            self.stack_height += slots - 1;
+        } else {
+            result.push(Bc::AddrVar { id });
+            result.push(Bc::Store { slots });
+        }
+
         result.push(Bc::EndIf { index, slots });
         result.insts[branch_ip] = Bc::JumpIf { false_ip, true_ip };
         result.insts[jump_over_false] = Bc::Goto {
@@ -449,12 +484,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let cond_ip = result.insts.len() as u16;
         debug_assert_eq!(cond_fn.ty, TypeId::bool());
         self.compile_expr(result, cond_fn)?;
+        self.stack_height -= 1;
         let branch_ip = result.push(Bc::NoCompile); // patch
         let body_ip = result.insts.len() as u16;
         self.compile_expr(result, body_fn)?;
         let slots = self.slot_count(body_fn.ty);
         result.push(Bc::Pop { slots });
         result.push(Bc::EndIf { index, slots: 0 });
+        self.stack_height -= slots;
 
         result.push(Bc::Goto { ip: cond_ip });
         let end_ip = result.insts.len() as u16;
@@ -469,6 +506,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.jump_targets.set(body_ip as usize);
         result.jump_targets.set(end_ip as usize);
 
+        self.stack_height += 1;
         result.push(Bc::PushConstant { value: 0 }); // TODO: caller expects a unit on the stack
 
         Ok(())
@@ -483,6 +521,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::AddrVar { id });
                 let slots = self.slot_count(value.ty);
                 result.push(Bc::Store { slots });
+                self.stack_height -= slots;
                 Ok(())
             }
             Expr::SuffixMacro(macro_name, arg) => {
@@ -494,6 +533,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     self.compile_expr(result, arg)?;
                     let slots = self.slot_count(value.ty);
                     result.push(Bc::Store { slots });
+                    self.stack_height -= slots + 1; // 1 for ptr
                     return Ok(());
                 }
                 todo!()
@@ -592,11 +632,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 // TODO: make this constexpr in compiler
                 result.push(Bc::PushConstant { value: i as i64 });
+                self.stack_height += 1;
                 self.compile_expr(result, values[0])?;
 
                 // If this is a smaller varient, pad out the slot.
                 for _ in (payload_size + 1)..size {
                     result.push(Bc::PushConstant { value: 123 });
+                    self.stack_height += 1;
                 }
                 // TODO: support explicit uninit so backend doesn't emit code for the padding above.
                 //       current system also means weird type stuff where you write ints into units in bc_to_asm.
@@ -657,20 +699,6 @@ impl<'p> FnBody<'p> {
     fn push(&mut self, inst: Bc) -> usize {
         let ip = self.insts.len();
         self.insts.push(inst);
-
-        #[cfg(feature = "some_log")]
-        {
-            self.debug.push(DebugInfo {
-                internal_loc: if cfg!(feature = "trace_errors") {
-                    Some(std::panic::Location::caller())
-                } else {
-                    None
-                },
-                src_loc: self.last_loc,
-                p: Default::default(),
-            });
-            debug_assert_eq!(self.insts.len(), self.debug.len(), "lost debug info");
-        }
         ip
     }
 }

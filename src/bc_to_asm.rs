@@ -39,6 +39,7 @@ enum Val {
     Increment { reg: i64, offset_bytes: u16 }, // not a pointer derefernce, just adding a static number to the value in the register.
     Literal(i64),
     Spill(SpOffset),
+    FloatReg(i64),
 }
 
 impl Debug for Val {
@@ -47,6 +48,7 @@ impl Debug for Val {
             Val::Increment { reg, offset_bytes } => write!(f, "x{reg} + {offset_bytes}"),
             Val::Literal(x) => write!(f, "{x}"),
             Val::Spill(slot) => write!(f, "[sp, {}]", slot.0),
+            Val::FloatReg(x) => write!(f, "v{x}"),
         }
     }
 }
@@ -354,6 +356,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                             offset_bytes: offset_bytes + offset,
                         })
                     }
+                    Val::FloatReg(_) => err!("don't try to gep a float",),
                 },
                 &Bc::Load { slots } => self.emit_load(slots),
                 &Bc::Store { slots } => self.emit_store(slots),
@@ -403,7 +406,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 #[cfg(not(debug_assertions))]
                 &Bc::EndIf { .. } => {}
                 // TODO: don't do it this way but you need everything in the same places whether you go one or zero times through the loop. should really do some sort of basic blocks thing.
-                //       the problem is what happens if you spilled some of your registers in the loop body. so my hack is just always spill them all at the very beginning and then it doesn't matter so much.
+                //       the problem is what happens if you spilled some of your registers in the loop body. so my hack is just always spill them all at the very beginning and then it doesn't matter so much. -- May 2
                 Bc::StartLoop => {
                     self.spill_abi_stompable();
                 }
@@ -475,6 +478,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 Val::Literal(x) => self.load_imm(i as i64, x as u64),
                 Val::Spill(slot) => self.load_u64(i as i64, sp, slot.0),
+                Val::FloatReg(_) => todo!(),
             }
         }
         debugln!();
@@ -519,7 +523,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     /// <?:n> <ptr:1> -> _
     fn emit_store(&mut self, slots: u16) {
-        debug_assert!(self.stack.len() > slots as usize);
+        debug_assert!(self.stack.len() > slots as usize, "want store {slots} slots");
         debugln!(
             "STORE: ({:?}) to [{:?}]",
             &self.stack[self.stack.len() - slots as usize - 1..self.stack.len() - 1],
@@ -637,6 +641,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.open_slots.push((slot, 8));
                 r
             }
+            Val::FloatReg(_) => todo!(),
         }
     }
 
@@ -653,6 +658,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.load_u64(r, sp, slot.0);
                 (r, 0)
             }
+            Val::FloatReg(_) => todo!(),
         }
     }
 
@@ -853,6 +859,7 @@ impl Val {
             &Val::Increment { reg, offset_bytes } => Some((reg, offset_bytes)),
             Val::Literal(_) => None,
             Val::Spill(_) => None,
+            Val::FloatReg(_) => todo!(),
         }
     }
 }

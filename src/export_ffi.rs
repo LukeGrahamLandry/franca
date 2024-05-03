@@ -301,6 +301,7 @@ pub struct RsResolvedSymbol {
 
 extern "C-unwind" fn resolve_backtrace_symbol(_: &mut &mut Program, addr: *mut c_void, out: &mut RsResolvedSymbol) -> i64 {
     let mut success = 0;
+    #[cfg(feature = "backtracers")]
     backtrace::resolve(addr, |symbol| {
         out.line = symbol.lineno().map(|v| v as i64).unwrap_or(-1);
         // out.col = symbol.colno().map(|v| v as i64).unwrap_or(-1);
