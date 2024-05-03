@@ -15,6 +15,12 @@ use crate::{impl_index, unwrap};
 use codemap::Span;
 use interp_derive::InterpSend;
 
+#[derive(Copy, Clone, InterpSend, Debug)]
+pub struct FloatMask {
+    pub arg: u32,
+    pub ret: u32,
+}
+
 #[derive(Clone, InterpSend, Debug)]
 pub enum Bc {
     CallDirect { f: FuncId },                 // <args:m> -> <ret:n>

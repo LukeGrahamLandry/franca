@@ -237,8 +237,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 } = f.expr
                 {
                     self.compile_expr(result, arg)?;
-                    result.push(Bc::CallSplit { ct, rt });
                     let f_ty = self.program[ct].unwrap_ty();
+                    result.push(Bc::CallSplit { ct, rt });
                     self.stack_height -= self.slot_count(f_ty.arg);
                     self.stack_height += self.slot_count(f_ty.ret);
                     return Ok(());
@@ -246,7 +246,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
                     self.compile_expr(result, f)?;
                     self.compile_expr(result, arg)?;
-
                     result.push(Bc::CallFnPtr {
                         ty: f_ty,
                         comp_ctx: false, // TODO

@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId, TypeInfo};
-use crate::bc::{Bc, BcReady, Value, Values};
+use crate::bc::{Bc, BcReady, FloatMask, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::{ast::Program, bc::FnBody};
 use crate::{bootstrap_gen::*, unwrap, TRACE_ASM};
@@ -234,10 +234,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             assert!(!has_ct, "compiler context is implicitly passed as first argument for #ct builtins.");
             self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
 
-            self.ccall_reg_to_stack(arg_size);
+            let floats = self.compile.program.float_mask_one(arg_ty);
+            self.ccall_reg_to_stack(arg_size, floats);
+
+            let float_count = floats.count_ones();
+            let int_count = arg_size as u32 - float_count;
 
             // Any registers not containing args can be used.
-            for i in arg_size..8 {
+            for i in int_count..8 {
                 self.free_reg.push(i as i64);
             }
         }
@@ -305,7 +309,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.emit_store(ret_size);
                     } else {
                         // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
-                        self.stack_to_ccall_reg(ret_size)
+                        let floats = self.compile.program.float_mask_one(ret_ty);
+                        self.stack_to_ccall_reg(ret_size, floats)
                     }
                     debug_assert!(self.stack.is_empty());
 
@@ -370,9 +375,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.drop_reg(working);
                     // don't drop <reg>, we just peeked it
                 }
-                Bc::CallFnPtr { ty, comp_ctx } => {
-                    assert!(!*comp_ctx, "flat call needs special handling");
-                    self.dyn_c_call(*ty, *comp_ctx, |s| {
+                &Bc::CallFnPtr { ty, comp_ctx } => {
+                    assert!(!comp_ctx, "flat call needs special handling");
+                    self.dyn_c_call(ty, comp_ctx, |s| {
                         // dyn_c_call will have popped the args, so now stack is just the pointer to call
                         // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
                         let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
@@ -435,24 +440,92 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     // TODO: floats -- May 1
-    fn stack_to_ccall_reg(&mut self, slots: u16) {
-        for i in 0..(slots as usize) {
-            let stack_index = self.stack.len() - (slots as usize) + i;
+    fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
+        let mut next_int = 0;
+        let mut next_float = 0;
+
+        for slot_index in 0..(slots as usize) {
+            debug_assert_eq!(slot_index, next_int + next_float);
+            let f = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
+            let stack_index = self.stack.len() - (slots as usize) + slot_index;
+
+            if f {
+                if let Val::FloatReg(have) = self.stack[stack_index] {
+                    if have == next_float as i64 {
+                        // its already where we want it.
+                        self.stack[stack_index] = Val::Literal(0); // just make sure we dont see it again later.
+                        next_float += 1;
+                        continue;
+                    }
+                }
+
+                debug!("|(v{}) <- ({:?})| ", next_float, self.stack[stack_index]);
+
+                for i in 0..self.stack.len() {
+                    if let Val::FloatReg(x) = self.stack[i] {
+                        if x == next_float as i64 {
+                            // Someone else already has the one we want, so spill that to the stack since i don't have fmov encoding. TODO
+                            let worked = self.try_spill(i, true);
+                            assert!(worked);
+                        }
+                    }
+                }
+
+                match self.stack[stack_index] {
+                    Val::Increment { reg, offset_bytes } => {
+                        debug_assert_eq!(offset_bytes, 0, "dont GEP a float");
+                        debug_assert_ne!(reg, sp, "dont fmov the stack pointer");
+                        // TODO: fmov encoding.
+                        let worked = self.try_spill(stack_index, false);
+                        assert!(worked);
+                    }
+                    Val::Literal(x) => {
+                        // TODO: fmov encoding.
+                        let reg = self.get_free_reg();
+                        self.load_imm(reg, u64::from_le_bytes(i64::to_le_bytes(x)));
+                        self.stack[stack_index] = Val::Increment { reg, offset_bytes: 0 };
+                        let worked = self.try_spill(stack_index, false);
+                        assert!(worked);
+                    }
+                    Val::Spill(_) => {}
+                    Val::FloatReg(_) => {
+                        // TODO: fmov encoding.
+                        let worked = self.try_spill(stack_index, true);
+                        assert!(worked);
+                    }
+                }
+
+                if let Val::Spill(slot) = self.stack[stack_index] {
+                    self.compile.aarch64.push(f_ldr_uo(X64, next_float as i64, sp, slot.0 as i64 / 8));
+                    self.open_slots.push((slot, 8));
+                } else {
+                    unreachable!()
+                }
+
+                next_float += 1;
+                continue;
+            }
+
             if let Val::Increment { reg, offset_bytes } = self.stack[stack_index] {
-                if reg == i as i64 {
+                if reg == next_int as i64 {
                     if offset_bytes != 0 {
-                        self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
+                        self.compile.aarch64.push(add_im(X64, next_int as i64, reg, offset_bytes as i64, 0));
                     }
 
                     // if we happen to already be in the right register, cool, don't worry about it.
-                    debug!("|x{} already| ", i);
+                    debug!("|x{} already| ", next_int);
+                    next_int += 1;
                     continue;
                 }
             }
 
-            if let Some(want) = self.free_reg.iter().position(|r| *r as usize == i) {
+            if let Some(want) = self.free_reg.iter().position(|r| *r as usize == next_int) {
                 self.free_reg.remove(want);
-            } else if let Some(used) = self.stack.iter().position(|r| r.reg().map(|(r, _)| r as usize == i).unwrap_or(false)) {
+            } else if let Some(used) = self
+                .stack
+                .iter()
+                .position(|r| r.reg().map(|(r, _)| r as usize == next_int).unwrap_or(false))
+            {
                 // The one we want is already used by something on the v-stack; swap it with a random free one. TODO: put in the right place if you can.
                 let (old_reg, offset_bytes) = self.stack[used].reg().unwrap();
                 debug_assert_ne!(old_reg, sp); // encoding but unreachable
@@ -461,33 +534,50 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.stack[used] = Val::Increment { reg, offset_bytes };
                 // Now x{i} is free and we'll use it below.
             } else {
-                panic!("TODO: x{i} is not free. stack is {:?}. free is {:?}", self.stack, self.free_reg);
+                panic!("TODO: x{next_int} is not free. stack is {:?}. free is {:?}", self.stack, self.free_reg);
             }
 
-            debug!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
+            debug!("|(x{}) <- ({:?})| ", next_int, self.stack[stack_index]);
             match self.stack[stack_index] {
                 Val::Increment { reg, offset_bytes } => {
-                    debug_assert_ne!(reg as usize, i);
+                    debug_assert_ne!(reg as usize, next_int);
                     // even if offset_bytes is 0, we need to move it to the right register. and add can encode that mov even if reg is sp.
-                    self.compile.aarch64.push(add_im(X64, i as i64, reg, offset_bytes as i64, 0));
+                    self.compile.aarch64.push(add_im(X64, next_int as i64, reg, offset_bytes as i64, 0));
                 }
-                Val::Literal(x) => self.load_imm(i as i64, x as u64),
-                Val::Spill(slot) => self.load_u64(i as i64, sp, slot.0),
+                Val::Literal(x) => self.load_imm(next_int as i64, x as u64),
+                Val::Spill(slot) => self.load_u64(next_int as i64, sp, slot.0),
                 Val::FloatReg(_) => todo!(),
             }
+            next_int += 1;
         }
         debugln!();
         self.stack.truncate(self.stack.len() - slots as usize);
+        debug_assert_eq!(next_float as u32, float_mask.count_ones());
+        debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
     }
 
     // TODO: floats -- May 1
-    fn ccall_reg_to_stack(&mut self, slots: u16) {
+    fn ccall_reg_to_stack(&mut self, slots: u16, float_mask: u32) {
+        let mut next_float = 0;
+        let mut next_int = 0;
         for i in 0..slots {
-            self.stack.push(Val::Increment {
-                reg: i as i64,
-                offset_bytes: 0,
-            });
+            debug_assert_eq!(i, (next_int + next_float) as u16);
+            let f = (float_mask >> (slots - i - 1)) & 1 == 1;
+            let v = if f {
+                Val::FloatReg(next_float)
+            } else {
+                self.free_reg.retain(|r| *r != next_int);
+                Val::Increment {
+                    reg: next_int,
+                    offset_bytes: 0,
+                }
+            };
+            *(if f { &mut next_float } else { &mut next_int }) += 1;
+            self.stack.push(v);
         }
+
+        debug_assert_eq!(next_float as u32, float_mask.count_ones());
+        debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
     }
 
     /// <ptr:1> -> <?:n>
@@ -528,10 +618,16 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         // Note: we're going backwards: popping off the stack and storing right to left.
         for i in (0..slots).rev() {
             let o = offset_bytes + (i * 8);
-            debug!("| [x{reg} + {o}] <- ({:?}) |", self.stack.last().unwrap());
-            let val = self.pop_to_reg();
-            self.store_u64(val, reg, o);
-            self.drop_reg(val);
+            let v = self.stack.last().unwrap();
+            debug!("| [x{reg} + {o}] <- ({:?}) |", v);
+            if let &Val::FloatReg(r) = v {
+                self.stack.pop().unwrap();
+                self.compile.aarch64.push(f_str_uo(X64, r, reg, o as i64 / 8))
+            } else {
+                let val = self.pop_to_reg();
+                self.store_u64(val, reg, o);
+                self.drop_reg(val);
+            }
         }
         self.drop_reg(reg);
         debugln!();
@@ -563,12 +659,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     fn spill_abi_stompable(&mut self) {
         for i in 0..self.stack.len() {
-            self.try_spill(i);
+            self.try_spill(i, true);
         }
         debugln!();
     }
 
-    fn try_spill(&mut self, i: usize) -> bool {
+    // do_floats:false if you're just trying to free up a gpr, not saving for a call.
+    fn try_spill(&mut self, i: usize, do_floats: bool) -> bool {
         let v = self.stack[i];
         if let Val::Increment { reg, offset_bytes } = v {
             if reg == sp {
@@ -588,6 +685,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             return true;
         }
 
+        if do_floats {
+            if let Val::FloatReg(freg) = v {
+                let slot = self.create_slots(1);
+                self.compile.aarch64.push(f_str_uo(X64, freg, sp, slot.0 as i64 / 8));
+                self.stack[i] = Val::Spill(slot);
+                return true;
+            }
+        }
+
         false
     }
 
@@ -597,7 +703,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             r
         } else {
             let mut i = 0;
-            while i < self.stack.len() && !self.try_spill(i) {
+            while i < self.stack.len() && !self.try_spill(i, false) {
                 i += 1;
             }
             if i == self.stack.len() {
@@ -682,7 +788,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         value >>= 16;
         if value != 0 {
             for shift in 1..4 {
-                self.compile.aarch64.push(movk(X64, reg, (value & bottom) as i64, shift));
+                let part = value & bottom;
+                if part != 0 {
+                    self.compile.aarch64.push(movk(X64, reg, part as i64, shift));
+                }
                 value >>= 16;
                 if value == 0 {
                     break;
@@ -712,11 +821,18 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.stack.insert(first_arg_index, Val::Literal(c as i64));
         }
 
-        self.stack_to_ccall_reg(arg_count + reg_offset);
+        // TODO: if i always just recompute liek this, dont bother putting it on the bc ibstructions -- May 3
+        let floats = self.compile.program.float_mask_one(f_ty.arg);
+        self.stack_to_ccall_reg(arg_count + reg_offset, floats);
         self.spill_abi_stompable();
         do_call(self);
-        self.ccall_reg_to_stack(ret_count);
-        for i in ret_count..7 {
+        let floats = self.compile.program.float_mask_one(f_ty.ret);
+        self.ccall_reg_to_stack(ret_count, floats);
+
+        let float_count = floats.count_ones();
+        let int_count = ret_count as u32 - float_count;
+
+        for i in int_count..7 {
             add_unique(&mut self.free_reg, i as i64); // now the extras are usable again.
         }
     }

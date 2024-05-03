@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, Structured, Value, Values},
+    bc::{Bc, FloatMask, Structured, Value, Values},
     compiler::{CErr, CompileError, FnWip, Res},
     err,
     export_ffi::RsResolvedSymbol,
@@ -1346,6 +1346,44 @@ impl<'p> Program<'p> {
             _ => {
                 err!(CErr::TypeError("Type", value))
             }
+        }
+    }
+
+    // TODO: cache these on the Func
+    pub fn float_mask(&self, ty: FnType) -> FloatMask {
+        let arg = self.float_mask_one(ty.arg);
+        let ret = self.float_mask_one(ty.ret);
+        FloatMask { arg, ret }
+    }
+
+    pub fn float_mask_one(&self, ty: TypeId) -> u32 {
+        let ty = self.raw_type(ty);
+        match &self[ty] {
+            TypeInfo::F64 => 1, // base case
+            TypeInfo::Tuple(types) => {
+                let mut mask = 0;
+                for t in types {
+                    let m = self.float_mask_one(*t);
+                    mask <<= 1; // TODO: HACK: wrong!!!!!!! size_of. -- May 3
+                    mask |= m;
+                }
+                mask
+            }
+            TypeInfo::Unknown | TypeInfo::Any => todo!(),
+            &TypeInfo::Struct { as_tuple, .. } => self.float_mask_one(as_tuple),
+            TypeInfo::Enum { .. } => 0, // the varients can be different, never use float reg.
+            TypeInfo::Never
+            | TypeInfo::Ptr(_)
+            | TypeInfo::Int(_)
+            | TypeInfo::Bool
+            | TypeInfo::Fn(_)
+            | TypeInfo::FnPtr(_)
+            | TypeInfo::Type
+            | TypeInfo::Unit
+            | TypeInfo::VoidPtr
+            | TypeInfo::OverloadSet
+            | TypeInfo::Scope => 0,
+            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!("raw"),
         }
     }
 }
