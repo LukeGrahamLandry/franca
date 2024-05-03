@@ -405,7 +405,7 @@ impl<'p> Expr<'p> {
                     .filter(|s| {
                         // HACK to skip the useless args added by !if and !while.
                         if let Stmt::DeclVarPattern { binding, value } = &s.stmt {
-                            if binding.bindings.len() == 1 && value.is_some() && value.as_ref().unwrap().is_raw_unit() {
+                            if binding.bindings.len() == 1 && value.is_raw_unit() {
                                 return false;
                             }
                         }
@@ -475,19 +475,8 @@ impl<'p> Expr<'p> {
 impl<'p> Stmt<'p> {
     pub(crate) fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
         let s = match self {
-            Stmt::DeclNamed { name, ty, value, kind } => format!(
-                "{kind:?} {}: {} = {};",
-                pool.get(*name),
-                ty.log(pool),
-                value.as_ref().map(|v| v.logd(pool, depth)).unwrap_or_else(|| String::from("uninit()"))
-            ),
-            Stmt::DeclVar { name, ty, value, kind, .. } => format!(
-                "{:?} {}: {} = {};",
-                kind,
-                name.log(pool),
-                ty.log(pool),
-                value.as_ref().map(|v| v.logd(pool, depth)).unwrap_or_else(|| String::from("uninit()"))
-            ),
+            Stmt::DeclNamed { name, ty, value, kind } => format!("{kind:?} {}: {} = {};", pool.get(*name), ty.log(pool), value.logd(pool, depth)),
+            Stmt::DeclVar { name, ty, value, kind, .. } => format!("{:?} {}: {} = {};", kind, name.log(pool), ty.log(pool), value.logd(pool, depth)),
             Stmt::Eval(e) => e.logd(pool, depth),
             Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
             Stmt::Noop => "".to_owned(),
@@ -501,7 +490,7 @@ impl<'p> Stmt<'p> {
                     .map(|b| format!("{}: ({}), ", b.var().map_or("_".to_string(), |n| n.log(pool)), b.lazy().log(pool)))
                     .collect();
 
-                format!("({body}) = {};", value.as_ref().map_or("_".to_string(), |v| v.logd(pool, depth)))
+                format!("({body}) = {};", value.logd(pool, depth))
             }
             _ => format!("{:?}", self),
         };
@@ -591,7 +580,7 @@ impl Stmt<'_> {
             Stmt::Noop => None,
             Stmt::Eval(e) => Some(e.loc),
             Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
-            Stmt::DeclVar { value, .. } => value.as_ref().map(|e| e.loc),
+            Stmt::DeclVar { value, .. } => Some(value.loc),
             Stmt::Set { place, .. } => Some(place.loc),
             _ => None,
         }

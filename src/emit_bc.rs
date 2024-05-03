@@ -188,8 +188,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 assert_ne!(VarType::Const, *kind);
                 let ty = ty.unwrap();
 
-                let expr = value.as_ref().unwrap();
-                self.compile_expr(result, expr)?; // TODO: ()!uninit
+                self.compile_expr(result, value)?; // TODO: ()!uninit
                 let id = result.add_var(ty);
                 result.push(Bc::AddrVar { id });
                 let slots = self.slot_count(ty);
@@ -202,12 +201,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclVarPattern { binding, value } => {
-                if let Some(value) = value.as_ref() {
-                    self.compile_expr(result, value)?;
-                    self.bind_args(result, binding)?;
-                } else {
-                    assert!(binding.bindings.is_empty());
-                }
+                self.compile_expr(result, value)?;
+                self.bind_args(result, binding)?;
             }
             Stmt::Noop => {}
             // Can't hit DoneDeclFunc because we don't re-eval constants.
@@ -440,7 +435,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
 
-        // TODO: never should work anywhere, not just false branch of ifs. it just so happens thats the only one my tests need currently -- May 3.
+        // TODO: 'Never' should work anywhere, not just false branch of ifs. it just so happens thats the only one my tests need currently -- May 3.
         // TODO: HACK: need to know how many slots to pretend we have
         if if_false.ty.is_never() && !if_true.ty.is_never() {
             // currently we treat Never as taking 1 slot (for unreachable for example), so pop that off, and then pretend we pushed everything they want.

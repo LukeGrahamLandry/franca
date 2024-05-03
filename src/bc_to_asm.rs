@@ -264,14 +264,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let f = if self.when == ExecTime::Comptime { ct } else { rt };
                     self.call_direct(f)?;
                 }
-                &Bc::CallDirect { f } => {
-                    self.call_direct(f)?;
-                }
+                &Bc::CallDirect { f } => self.call_direct(f)?,
                 &Bc::PushConstant { value } => self.stack.push(Val::Literal(value)),
                 &Bc::GetNativeFnPtr(f) => {
-                    // TODO: use adr+adrp instead of an integer.
-                    // TODO: do linker-ish things to allow forward references.
-                    //       actually the way i do that rn is with the dispatch table so could just use that for now.
+                    // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
 
                     if let Some(ptr) = self.compile.aarch64.get_fn(f) {
                         self.stack.push(Val::Literal(ptr.as_ptr() as i64));
@@ -378,27 +374,28 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     assert!(!*comp_ctx, "flat call needs special handling");
                     self.dyn_c_call(*ty, *comp_ctx, |s| {
                         // dyn_c_call will have popped the args, so now stack is just the pointer to call
+                        // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
                         let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
                         s.compile.aarch64.push(br(reg, 1));
                         s.drop_reg(reg);
                     });
                 }
-                Bc::Unreachable => {
-                    self.compile.aarch64.push(brk(123));
-                }
+                Bc::Unreachable => self.compile.aarch64.push(brk(0xbabe)),
                 Bc::Pop { slots } => {
                     debug_assert!(self.stack.len() >= *slots as usize);
                     for _ in 0..*slots {
-                        let r = self.pop_to_reg(); // TODO: dont bother actually making the value, just return the reg -- May 1
-                        self.drop_reg(r);
+                        match self.stack.pop().unwrap() {
+                            Val::Increment { reg, .. } => self.drop_reg(reg),
+                            Val::Literal(_) => {}
+                            Val::Spill(slot) => self.open_slots.push((slot, 8)),
+                            Val::FloatReg(_) => todo!(),
+                        }
                     }
                 }
                 // TODO: dont use vars
                 #[cfg(debug_assertions)]
                 &Bc::EndIf { index, slots } => match &self.debug_if_saved_stack[index as usize] {
-                    Some(prev) => {
-                        assert_eq!(&self.stack, prev)
-                    }
+                    Some(prev) => assert_eq!(&self.stack, prev),
                     None => {
                         self.debug_if_saved_stack[index as usize] = Some(self.stack.clone());
                     }
@@ -407,9 +404,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 &Bc::EndIf { .. } => {}
                 // TODO: don't do it this way but you need everything in the same places whether you go one or zero times through the loop. should really do some sort of basic blocks thing.
                 //       the problem is what happens if you spilled some of your registers in the loop body. so my hack is just always spill them all at the very beginning and then it doesn't matter so much. -- May 2
-                Bc::StartLoop => {
-                    self.spill_abi_stompable();
-                }
+                Bc::StartLoop => self.spill_abi_stompable(),
             }
 
             debugln!("{i} {inst:?} => {:?} | free: {:?}", self.stack, self.free_reg);

@@ -219,7 +219,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             }
             Stmt::DeclVar { name, value, .. } => {
                 let name = self.comp.pool.get(name.0);
-                let value = self.compile_expr(value.as_ref().unwrap())?;
+                let value = self.compile_expr(value)?;
                 format!("let mut {} = {};", name, value)
             }
             Stmt::DeclVarPattern { binding, value } => {
@@ -230,7 +230,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                             todo!()
                         }
                         // Probably an if branch. But it could be a call with side-effects so should emit it anyway.
-                        let value = value.as_ref().map(|value| self.compile_expr(value)).unwrap_or(Ok(String::new()));
+                        let value = self.compile_expr(value);
                         format!("{};", value?)
                     } else {
                         todo!()
@@ -238,7 +238,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                 } else {
                     todo!(
                         "{binding:?} {:?} {}",
-                        value.as_ref().map(|v| v.log(self.comp.pool)),
+                        value.log(self.comp.pool),
                         self.comp.pool.get(binding.bindings[0].name().unwrap())
                     )
                 }

@@ -203,7 +203,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     let decl = Stmt::DeclVar {
                         name: new,
                         ty: mem::replace(ty, LazyType::Infer),
-                        value: mem::replace(value, Some(FatExpr::null(loc))),
+                        value: mem::replace(value, FatExpr::null(loc)),
                         kind: *kind,
                     };
                     stmt.stmt = decl;
@@ -246,15 +246,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::DeclNamed { name, ty, value, kind } => {
                 debug_assert!(*kind != VarType::Const);
                 self.walk_ty(ty);
-                if let Some(value) = value {
-                    self.resolve_expr(value)?;
-                }
+                self.resolve_expr(value)?;
 
                 let new = self.decl_var(name, *kind, loc)?;
                 let decl = Stmt::DeclVar {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
-                    value: mem::replace(value, Some(FatExpr::null(loc))),
+                    value: mem::replace(value, FatExpr::null(loc)),
                     kind: *kind,
                 };
                 stmt.stmt = decl;
@@ -279,15 +277,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::DeclVar { kind, ty, value, name, .. } => {
                 debug_assert!(*kind == VarType::Const);
                 self.walk_ty(ty);
-                if let Some(value) = value {
-                    self.resolve_expr(value)?;
-                }
+                self.resolve_expr(value)?;
 
                 let ty = mem::take(ty);
                 let value = mem::take(value);
                 // TODO: take annotations too somehow.
                 let consts = self.local_constants.last_mut().unwrap();
-                consts.push((*name, ty, value.unwrap()));
+                consts.push((*name, ty, value));
                 stmt.stmt = Stmt::Noop;
             }
             Stmt::Set { place, value } => {
@@ -298,9 +294,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Stmt::Eval(e) => self.resolve_expr(e)?,
 
             Stmt::DeclVarPattern { binding, value } => {
-                if let Some(value) = value {
-                    self.resolve_expr(value)?;
-                }
+                self.resolve_expr(value)?;
                 for b in &mut binding.bindings {
                     self.resolve_binding(b)?;
                     self.declare_binding(b, loc)?;

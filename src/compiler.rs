@@ -593,7 +593,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
                     binding: pattern,
-                    value: Some(mem::take(arg_expr)),
+                    value: mem::take(arg_expr),
                 },
                 annotations: vec![],
                 loc,
@@ -812,6 +812,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::ExpandParsedStmts(_) => unreachable!(),
             Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
+                // Note: can't do this check in parser because you want to allow @match/@switch that moves around the stmts.
+                if matches!(expr.expr, Expr::Closure(_) | Expr::WipFunc(_)) {
+                    err!("you probably don't want to discard an anonymous function.",);
+                }
                 self.compile_expr(result, expr, None)?;
 
                 // Don't match on res being const because the function might still have side effects
@@ -847,8 +851,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: this is extremly similar to what bind_const_arg has to do. should be able to express args as this thing?
             // TODO: remove useless statements
             Stmt::DeclVarPattern { binding, value } => {
-                if binding.bindings.is_empty() || value.is_none() || value.as_ref().unwrap().expr.is_raw_unit() {
-                    assert!(value.is_none() || value.as_ref().unwrap().expr.is_raw_unit());
+                if binding.bindings.is_empty() || value.expr.is_raw_unit() {
+                    assert!(value.expr.is_raw_unit());
                     stmt.stmt = Stmt::Noop;
 
                     // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
@@ -862,12 +866,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if kind == VarType::Const {
                             debug_assert_eq!(binding.bindings.len(), 1);
                             binding.bindings.clear();
-                            *value = None;
+                            value.set(Value::Unit.into(), TypeId::unit());
                         }
                         return Ok(());
                     } else {
-                        let e = value.as_mut().unwrap();
-                        assert!(e.expr.is_raw_unit(), "var no name not unit: {}", e.log(self.pool));
+                        assert!(value.expr.is_raw_unit(), "var no name not unit: {}", value.log(self.pool));
 
                         // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                         stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
@@ -875,7 +878,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
 
-                let value = unwrap!(value.as_mut(), "currently DeclVarPattern is always added by compiler and has value.");
                 let exprs = if let Expr::Tuple(exprs) = &mut value.expr {
                     exprs
                 } else {
@@ -886,10 +888,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for ((name, ty, kind), expr) in arguments.iter().zip(exprs.iter_mut()) {
                     if let Some(name) = name {
                         let loc = expr.loc;
-                        // TODO: HACK. make value not optional. cant just flip because when missing decl_var wants to put something there for imports. makes it hard. need to have a marker expr for missing value??
-                        let mut value = Some(mem::take(expr));
-                        self.decl_var(result, *name, &mut LazyType::Finished(*ty), &mut value, *kind, &stmt.annotations, loc)?;
-                        *expr = value.unwrap();
+                        self.decl_var(result, *name, &mut LazyType::Finished(*ty), expr, *kind, &stmt.annotations, loc)?;
                     } else {
                         assert!(expr.expr.is_raw_unit(), "var no name not unit");
                     }
@@ -2991,23 +2990,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: &mut FnWip<'p>,
         name: Var<'p>,
         ty: &mut LazyType<'p>,
-        value: &mut Option<FatExpr<'p>>,
+        value: &mut FatExpr<'p>,
         kind: VarType,
         _annotations: &[Annotation<'p>],
         loc: Span,
     ) -> Res<'p, ()> {
         let no_type = matches!(ty, LazyType::Infer);
         self.infer_types_progress(ty)?;
-
-        let value = match value {
-            Some(value) => value,
-            None => {
-                err!(
-                    "binding {} requires a value (use unsafe '()!uninitilized' if thats what you really want)",
-                    name.log(self.pool)
-                );
-            }
-        };
 
         match kind {
             VarType::Const => self.decl_const(name, ty, value, loc)?,

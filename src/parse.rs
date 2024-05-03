@@ -612,18 +612,13 @@ impl<'a, 'p> Parser<'a, 'p> {
                         let value = self.parse_expr()?;
                         // interestinly, its fine without requiring this semicolon. it was like that for a while and there was only one place it was missing.
                         self.eat(Semicolon)?;
-                        Stmt::DeclNamed {
-                            name,
-                            ty,
-                            value: Some(value),
-                            kind,
-                        }
+                        Stmt::DeclNamed { name, ty, value, kind }
                     }
                     Semicolon => {
                         // I think this is better but then I can't use @import the current way.
-                        // return Err(self.error_next("name binding requires initial value".to_string());
-                        self.eat(Semicolon)?;
-                        Stmt::DeclNamed { name, ty, value: None, kind }
+                        return Err(
+                            self.error_next("binding requires a value (use unsafe '()!uninitilized' if thats what you really want)".to_string())
+                        );
                     }
                     LeftArrow => {
                         self.eat(LeftArrow)?;
@@ -695,7 +690,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     Stmt::DeclNamed {
                         name,
                         ty: LazyType::Infer,
-                        value: Some(value),
+                        value,
                         kind: VarType::Const,
                     }
                 }
@@ -709,19 +704,19 @@ impl<'a, 'p> Parser<'a, 'p> {
 
                     let kind = match self.peek() {
                         Colon => VarType::Const,
-                        Equals => VarType::Let,
-                        _ => return Err(self.expected("':' for const or '=' for let after variable declaration")),
+                        Equals => VarType::Var,
+                        _ => return Err(self.expected("':' for const or '=' for var after variable declaration")),
                     };
                     self.pop();
 
+                    if self.peek() == Semicolon {
+                        return Err(
+                            self.error_next("binding requires a value (use unsafe '()!uninitilized' if thats what you really want)".to_string())
+                        );
+                    }
                     let value = self.parse_expr()?;
                     self.eat(Semicolon)?;
-                    Stmt::DeclNamed {
-                        name,
-                        ty,
-                        value: Some(value),
-                        kind,
-                    }
+                    Stmt::DeclNamed { name, ty, value, kind }
                 }
                 _ => {
                     let e = self.parse_expr()?;

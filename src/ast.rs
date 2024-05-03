@@ -214,25 +214,19 @@ pub trait WalkAst<'p> {
         match &mut stmt.stmt {
             Stmt::ExpandParsedStmts(_) => todo!(),
             Stmt::DeclNamed { ty, value, .. } => {
-                if let Some(value) = value {
-                    self.expr(value);
-                }
+                self.expr(value);
                 self.ty(ty);
             }
             Stmt::Noop | Stmt::DoneDeclFunc(_, _) => {}
             Stmt::Eval(arg) => self.expr(arg),
             Stmt::DeclFunc(func) => self.func(func),
             Stmt::DeclVar { ty, value, .. } => {
-                if let Some(value) = value {
-                    self.expr(value);
-                }
+                self.expr(value);
                 self.ty(ty);
             }
             Stmt::DeclVarPattern { binding, value } => {
                 self.pattern(binding);
-                if let Some(arg) = value {
-                    self.expr(arg);
-                }
+                self.expr(value);
             }
             Stmt::Set { place, value } => {
                 self.expr(place);
@@ -625,7 +619,7 @@ pub enum Stmt<'p> {
     DeclVar {
         name: Var<'p>,
         ty: LazyType<'p>,
-        value: Option<FatExpr<'p>>,
+        value: FatExpr<'p>,
         kind: VarType,
     },
     // I have to write the logic for this anyway to deal with function args and I need it for inlining because I don't want the backend to have to deal with it.
@@ -636,7 +630,7 @@ pub enum Stmt<'p> {
     // TODO: all variables should use this.
     DeclVarPattern {
         binding: Pattern<'p>,
-        value: Option<FatExpr<'p>>,
+        value: FatExpr<'p>,
         // kind: VarType,  // TODO: put this in pattern so function args really are the same as variables. I hate how many minor variations of shit I have.
     },
 
@@ -644,7 +638,7 @@ pub enum Stmt<'p> {
     DeclNamed {
         name: Ident<'p>,
         ty: LazyType<'p>,
-        value: Option<FatExpr<'p>>,
+        value: FatExpr<'p>,
         kind: VarType,
     },
     Set {
