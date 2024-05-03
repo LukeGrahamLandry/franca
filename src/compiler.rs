@@ -266,7 +266,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.aarch64.make_exec();
                 self.flush_cpu_instruction_cache();
                 debug_assert_eq!(addr as usize % 4, 0);
-                println!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
+                debugln!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
                 // TODO: not setting x21 !!! -- Apr 30
                 if flat_call {
                     assert!(comp_ctx && !c_call);
@@ -274,9 +274,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else if c_call {
                     assert!(!flat_call);
                     let ints = arg.vec();
-                    println!("IN: {ints:?}");
+                    debugln!("IN: {ints:?}");
                     let r = ffi::c::call(self, addr as usize, ty, ints, comp_ctx)?;
-                    println!("OUT: {r}");
+                    debugln!("OUT: {r}");
                     let mut out = vec![];
                     values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
                     Ok(out.into())
@@ -821,7 +821,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Don't match on res being const because the function might still have side effects
                 if expr.is_raw_unit() {
                     stmt.stmt = Stmt::Noop; // TODO: might need to remove this for janky @namespace but should find better fix. having less stuff makes it nicer to debug -- May 1
-                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                                            // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                 }
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
@@ -829,15 +829,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
             }
             Stmt::Noop => {
-                stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
             }
             Stmt::DeclFunc(func) => {
                 if let (Some(_id), Some(_os)) = self.decl_func(mem::take(func))? {
                     stmt.stmt = Stmt::Noop;
-                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                     // stmt.stmt = Stmt::DoneDeclFunc(id, os); // TODO: do i ever need this? -- May 1
                 } else {
-                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
                     stmt.stmt = Stmt::Noop;
                 }
             }
@@ -855,7 +855,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     assert!(value.is_none() || value.as_ref().unwrap().expr.is_raw_unit());
                     stmt.stmt = Stmt::Noop;
 
-                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                     return Ok(());
                 }
                 let arguments = binding.flatten();
@@ -873,7 +873,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let e = value.as_mut().unwrap();
                         assert!(e.expr.is_raw_unit(), "var no name not unit: {}", e.log(self.pool));
 
-                        stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                        // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                         stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         return Ok(());
                     }
@@ -915,7 +915,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.set_literal(value, ())?; // redundant now
                     stmt.stmt = Stmt::Noop;
 
-                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                     return Ok(());
                 } else if exprs.len() == 1 {
                     *value = mem::take(exprs.iter_mut().next().unwrap());
@@ -1253,10 +1253,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Block { body, result: value, .. } => {
                 body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
                 for stmt in body.iter_mut() {
-                    stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
+                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TPPD
                     self.compile_stmt(result, stmt)?;
                 }
-                body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
+                // body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
 
                 // TODO: insert drops for locals
                 let res = self.compile_expr(result, value, requested)?;
@@ -2125,7 +2125,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
             return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
         }
-        println!("Call jitted {:?}", e);
 
         self.call_jitted(func_id, ExecTime::Comptime, None, ())
     }
@@ -2221,7 +2220,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
-        println!("make_lit_function: {}", e.log(self.pool));
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
@@ -2243,11 +2241,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func_id = self.program.add_func(fake_func);
         logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
         self.compile(func_id, ExecTime::Comptime)?;
-
-        println!(
-            "after compile make_lit_function: {}",
-            self.program[func_id].body.as_ref().unwrap().log(self.pool)
-        );
         Ok(func_id)
     }
 
@@ -2264,7 +2257,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
             return Ok(res);
         }
-        println!("Call jitted {:?}", e);
 
         self.run(func_id, Value::Unit.into(), ExecTime::Comptime, None)
     }

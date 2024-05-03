@@ -10,7 +10,7 @@ use franca::{
     find_std_lib, load_program, log_err,
     logging::{init_logs, init_logs_flag, LogTag},
     pool::StringPool,
-    run_main, timestamp, where_am_i, COMPTIME_STACK, COMPTIME_STACK_SIZE, MEM, MMAP_ARENA_START, STACK_START, STATS,
+    run_main, timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
     arch::{asm, global_asm},
@@ -71,19 +71,12 @@ fn main() {
     unsafe { STACK_START = &marker as *const i32 as usize };
     unsafe { MMAP_ARENA_START = MEM.get() as usize };
 
-    let prev = take_hook();
-    set_hook(Box::new(move |arg| {
-        where_am_i();
-        prev(arg);
-    }));
-
-    let new_sp = COMPTIME_STACK.get() as usize + COMPTIME_STACK_SIZE;
-    println!("new_sp: {new_sp} {:p}", new_sp as *const u8);
-    do_stuff(null_mut());
-    unsafe {
-        test_stack_shit(new_sp, do_stuff, null_mut());
-    }
-    do_stuff(null_mut());
+    // If you get random garbage that looks like a pointer, this can help you figure out where its coming from.
+    // let prev = take_hook();
+    // set_hook(Box::new(move |arg| {
+    //     where_am_i();
+    //     prev(arg);
+    // }));
 
     // TODO: option to hardcode path
     // TODO: its a problem that someone could add one at a higher prio place maybe?

@@ -8,7 +8,7 @@ use crate::ast::{Flag, FnType, Func, FuncId, TypeId, TypeInfo};
 use crate::bc::{Bc, BcReady, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::{ast::Program, bc::FnBody};
-use crate::{bootstrap_gen::*, unwrap};
+use crate::{bootstrap_gen::*, unwrap, TRACE_ASM};
 use crate::{err, logging::PoolLog};
 use std::arch::asm;
 use std::cell::UnsafeCell;
@@ -132,17 +132,19 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.compile.aarch64.save_current(f);
                 // if cfg!(feature = "llvm_dis_debug") {
                 let asm = self.compile.aarch64.get_fn(f).unwrap();
-                let asm = unsafe { &*asm };
-                let hex: String = asm
-                    .iter()
-                    .copied()
-                    .array_chunks::<4>()
-                    .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
-                    .collect();
-                let path = "target/latest_log/temp.asm".to_string();
-                fs::write(&path, hex).unwrap();
-                let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
-                println!("{dis}");
+                if TRACE_ASM {
+                    let asm = unsafe { &*asm };
+                    let hex: String = asm
+                        .iter()
+                        .copied()
+                        .array_chunks::<4>()
+                        .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
+                        .collect();
+                    let path = "target/latest_log/temp.asm".to_string();
+                    fs::write(&path, hex).unwrap();
+                    let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
+                    debugln!("{dis}");
+                }
                 // }
             }
         }
@@ -165,11 +167,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
         let ff = &self.compile.program[f];
         let is_flat_call = ff.has_tag(Flag::Flat_Call);
-        println!(
+        debugln!(
             "=== {f:?} {} flat:{is_flat_call} ===",
             self.compile.pool.get(self.compile.program[f].name)
         );
-        println!("{}", self.compile.program[f].body.as_ref().unwrap().log(self.compile.pool));
+        debugln!("{}", self.compile.program[f].body.as_ref().unwrap().log(self.compile.pool));
         let is_c_call = ff.has_tag(Flag::C_Call);
         let has_ct = ff.has_tag(Flag::Ct);
         let arg_ty = ff.finished_arg.unwrap();
@@ -241,7 +243,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let mut patch_cbz = vec![]; // (patch_idx, jump_idx, register)
         let mut patch_b = vec![];
 
-        println!("entry: ({:?})", self.stack);
+        debugln!("entry: ({:?})", self.stack);
         debug_assert_eq!(self.stack.len() as u16, arg_size);
         let func = self.compile.ready[f].as_ref().unwrap();
         for i in 0..func.insts.len() {
@@ -367,7 +369,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
                     self.compile.aarch64.push(brk(0xbeef));
                     self.drop_reg(working);
-                    self.drop_reg(reg);
+                    // don't drop <reg>, we just peeked it
                 }
                 Bc::CallFnPtr { ty, comp_ctx } => {
                     assert!(!*comp_ctx, "flat call needs special handling");
@@ -388,10 +390,21 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.drop_reg(r);
                     }
                 }
-                &Bc::EndIf { index, slots } => {} // TODO: dont use vars
+                // TODO: dont use vars
+                #[cfg(debug_assertions)]
+                &Bc::EndIf { index, slots } => match &self.debug_if_saved_stack[index as usize] {
+                    Some(prev) => {
+                        assert_eq!(&self.stack, prev)
+                    }
+                    None => {
+                        self.debug_if_saved_stack[index as usize] = Some(self.stack.clone());
+                    }
+                },
+                #[cfg(not(debug_assertions))]
+                &Bc::EndIf { .. } => {}
             }
 
-            println!("{i} {inst:?} => {:?} | free: {:?}", self.stack, self.free_reg);
+            debugln!("{i} {inst:?} => {:?} | free: {:?}", self.stack, self.free_reg);
         }
         for (inst, false_ip, reg) in patch_cbz {
             let offset = self.compile.aarch64.offset_words_inst_ip(inst, false_ip as usize);
@@ -429,7 +442,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     }
 
                     // if we happen to already be in the right register, cool, don't worry about it.
-                    print!("|x{} already| ", i);
+                    debug!("|x{} already| ", i);
                     continue;
                 }
             }
@@ -448,7 +461,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 panic!("TODO: x{i} is not free. stack is {:?}. free is {:?}", self.stack, self.free_reg);
             }
 
-            print!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
+            debug!("|(x{}) <- ({:?})| ", i, self.stack[stack_index]);
             match self.stack[stack_index] {
                 Val::Increment { reg, offset_bytes } => {
                     debug_assert_ne!(reg as usize, i);
@@ -459,7 +472,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 Val::Spill(slot) => self.load_u64(i as i64, sp, slot.0),
             }
         }
-        println!();
+        debugln!();
         self.stack.truncate(self.stack.len() - slots as usize);
     }
 
@@ -476,12 +489,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     /// <ptr:1> -> <?:n>
     fn emit_load(&mut self, slots: u16) {
         debug_assert!(!self.stack.is_empty());
-        print!("LOAD: [{:?}] to ", self.stack.last().unwrap());
+        debug!("LOAD: [{:?}] to ", self.stack.last().unwrap());
         // TODO: really you want to suspend this too because the common case is probably that the next thing is a store but thats harder to think about so just gonna start with the dumb thing i was doing before -- May 1
         let (reg, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
 
         debug_assert_eq!(offset_bytes % 8, 0);
-        // let mut saved = self.create_slots(slots as usize); // TODO: leaking stack space -- May 1
         for _ in 0..slots {
             let working = self.get_free_reg();
             self.load_u64(working, reg, offset_bytes);
@@ -491,21 +503,19 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 offset_bytes: 0,
             };
             self.stack.push(v);
-            print!("({:?}), ", self.stack.last().unwrap());
+            debug!("({:?}), ", self.stack.last().unwrap());
             offset_bytes += 8;
             // saved.0 += 8;
         }
-        println!();
-        // debug_assert!(saved.0 / 8 < (1 << 12));
+        debugln!();
         debug_assert!(offset_bytes / 8 < (1 << 12));
-        // self.drop_reg(working);
         self.drop_reg(reg);
     }
 
     /// <?:n> <ptr:1> -> _
     fn emit_store(&mut self, slots: u16) {
         debug_assert!(self.stack.len() > slots as usize);
-        println!(
+        debugln!(
             "STORE: ({:?}) to [{:?}]",
             &self.stack[self.stack.len() - slots as usize - 1..self.stack.len() - 1],
             self.stack.last().unwrap()
@@ -514,13 +524,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         // Note: we're going backwards: popping off the stack and storing right to left.
         for i in (0..slots).rev() {
             let o = offset_bytes + (i * 8);
-            print!("| [x{reg} + {o}] <- ({:?}) |", self.stack.last().unwrap());
+            debug!("| [x{reg} + {o}] <- ({:?}) |", self.stack.last().unwrap());
             let val = self.pop_to_reg();
             self.store_u64(val, reg, o);
             self.drop_reg(val);
         }
         self.drop_reg(reg);
-        println!();
+        debugln!();
     }
 
     fn load_u64(&mut self, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
@@ -551,7 +561,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         for i in 0..self.stack.len() {
             self.try_spill(i);
         }
-        println!();
+        debugln!();
     }
 
     fn try_spill(&mut self, i: usize) -> bool {
@@ -563,7 +573,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
             let slot = self.create_slots(1);
-            print!("(spill ({reg:?} + {offset_bytes}) -> [sp, {}]) ", slot.0);
+            debug!("(spill ({reg:?} + {offset_bytes}) -> [sp, {}]) ", slot.0);
             if offset_bytes != 0 {
                 self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
             }
@@ -714,7 +724,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let f_ty = target.unwrap_ty();
 
         if target_flat_call {
-            println!("flat_call");
+            debugln!("flat_call");
             // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
             assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
             assert!(!target_c_call, "multiple calling conventions doesn't make sense");
@@ -758,7 +768,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             // TODO: leaking slots -- May 1
             // self.release_many(arg); // Note: release after to make sure they don't alias ret which might not be what the callee is expecting (even tho it would be fine for current uses).
         } else {
-            println!("c_call");
+            debugln!("c_call");
             self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
             self.dyn_c_call(f_ty, comp_ctx, |s| s.branch_with_link(f));
         }

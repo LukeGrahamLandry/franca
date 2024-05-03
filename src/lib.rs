@@ -52,6 +52,26 @@ static GLOBAL: MyAllocator = MyAllocator;
 
 pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
+pub const TRACE_ASM: bool = false;
+
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {{
+        if $crate::TRACE_ASM {
+            print!($($arg)*);
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! debugln {
+    ($($arg:tt)*) => {{
+        if $crate::TRACE_ASM  {
+            println!($($arg)*);
+        }
+    }};
+}
+
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::arch::asm;

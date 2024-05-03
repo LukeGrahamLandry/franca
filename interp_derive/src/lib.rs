@@ -18,7 +18,7 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     };
 
     let get_type = get_type(&input.ident, &input.data);
-    let deserialize_from_ints = deserialize(&input.ident, &input.data, false);
+    let deserialize_from_ints = deserialize(&input.ident, &input.data);
     let serialize_to_ints = serialize(&input.ident, &input.data);
     let size = size_for(&input.ident, &input.data);
 
@@ -179,10 +179,10 @@ fn get_type_fields(name: &Ident, fields: &syn::Fields) -> TokenStream {
     }
 }
 
-fn deserialize(name: &Ident, data: &Data, from_values: bool) -> TokenStream {
+fn deserialize(name: &Ident, data: &Data) -> TokenStream {
     match data {
         syn::Data::Struct(data) => {
-            let rest = deserialize_fields(quote!(#name), &data.fields, from_values);
+            let rest = deserialize_fields(quote!(#name), &data.fields);
             quote!(
                 #rest
             )
@@ -190,7 +190,7 @@ fn deserialize(name: &Ident, data: &Data, from_values: bool) -> TokenStream {
         syn::Data::Enum(data) => {
             let recurse = data.variants.iter().enumerate().map(|(i, f)| {
                 let varient = &f.ident;
-                let fields = deserialize_fields(quote!(#name :: #varient), &f.fields, from_values);
+                let fields = deserialize_fields(quote!(#name :: #varient), &f.fields);
                 let size = size_for_fields(&f.ident, &f.fields);
                 quote_spanned! {f.span()=>
                     #i => {
@@ -201,12 +201,7 @@ fn deserialize(name: &Ident, data: &Data, from_values: bool) -> TokenStream {
                 }
             });
 
-            let t = if from_values {
-                quote!(usize::deserialize(values)?)
-            } else {
-                quote!(usize::deserialize_from_ints(values)?)
-            };
-
+            let t = quote!(usize::deserialize_from_ints(values)?);
             quote! {
                 let tag = #t;
                 let (result, varient_size): (Option<Self>, usize) = match tag {
@@ -227,12 +222,8 @@ fn deserialize(name: &Ident, data: &Data, from_values: bool) -> TokenStream {
     }
 }
 
-fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields, from_values: bool) -> TokenStream {
-    let t = if from_values {
-        quote!(crate::ffi::deserialize(values)?)
-    } else {
-        quote!(crate::ffi::deserialize_from_ints(values)?)
-    };
+fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream {
+    let t = quote!(crate::ffi::deserialize_from_ints(values)?);
     match fields {
         syn::Fields::Named(FieldsNamed { named: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {

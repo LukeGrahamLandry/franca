@@ -2,6 +2,61 @@
 
 #test(aarch64)
 fn main(canary: i64) i64 = {
+    // found with fn split but the problem is with resizing the list. 
+    fn push_resize() Unit = {
+        T :: Ty(i64, i64);
+        S :: List(T);
+        
+        fun my_resize(self: *S, extra: i64) Unit = {
+            cap := self.maybe_uninit.len[].add(extra);
+            var new: S = list(cap);
+            ptr : VoidPtr =  new&.maybe_uninit.ptr[];
+            ptr := ptr.ptr_to_int();
+            println(ptr);
+            dest: Slice$T = new&.maybe_uninit[].subslice(0, self.len[]);
+            memcpy(dest, items(self));
+            new&.len[] = self.len[];
+            self[] = new;
+        }
+    
+        fun fake_push(self: *S) Unit = {
+            my_resize(self, 1);
+            self.len[] = self.len[].add(1);
+        }
+        
+        var lines: S = list(1);
+        lines&.fake_push();
+        lines&.fake_push(); 
+    }
+    
+    // push_resize();
+    
+    // Found with collections.fr:split, narrowed down to resizing a list. then to memcpy when something is larger than one slot. then to calling set. 
+    // Worked when my_set is #inline but segfault if not. So its a spilling problem. 
+    fn memcpy_wide_values() Unit = {
+        T :: ""!type;
+        S :: Slice(T);
+        
+        fun my_set(var self: S, i: i64, v: T) Unit = {
+            self.index(i)[] = v; 
+        }
+        
+        fn my_memcpy(dest: S, src: S) Unit = {
+            var i = 0;
+            while(fn = lt(i, src.len())) {|
+                src_ptr := src.index(i);
+                dest.my_set(i, src_ptr[]);
+                i = i.add(1);
+            };
+        }
+    
+        var a: S = ("a", "a")!slice;
+        var b: S = ("b", "b")!slice;
+        my_memcpy(a, b);
+    }
+    
+    memcpy_wide_values();
+
 
     canary
 }

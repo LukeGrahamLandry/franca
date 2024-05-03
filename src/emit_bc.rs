@@ -411,11 +411,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let slots = self.slot_count(if_true.ty);
         result.push(Bc::AddrVar { id });
         result.push(Bc::Store { slots });
+        result.push(Bc::EndIf { index, slots });
         let jump_over_false = result.push(Bc::NoCompile);
         let false_ip = result.insts.len() as u16;
         self.compile_expr(result, if_false)?;
         result.push(Bc::AddrVar { id });
         result.push(Bc::Store { slots });
+        result.push(Bc::EndIf { index, slots });
         result.insts[branch_ip] = Bc::JumpIf { false_ip, true_ip };
         result.insts[jump_over_false] = Bc::Goto {
             ip: result.insts.len() as u16,
@@ -425,6 +427,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.jump_targets.set(false_ip as usize);
         result.push(Bc::AddrVar { id });
         result.push(Bc::Load { slots });
+        result.push(Bc::LastUse { id });
 
         Ok(())
     }

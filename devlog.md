@@ -6,6 +6,12 @@
 - fixing corruped types was enough to make hello world actually print the whole string!
 - problem with slize size vs len. sadly i even rememeber deleting the code that got it right cause it looked weird.
 
+Fixed aliasing result location shit so some tests changed:
+// (structs) You'd expect this to be 1. It would be great if you break this test somehow.
+// (structs) BUG. You'd expect this to be the same as above (b=3)
+
+TODO: fn index doesn't work if not inline thats like something cripplingly wrong in the calling convention stuff!!!!!
+
 ## stack based ir (May 1)
 
 I think my current bc format is dumb.
