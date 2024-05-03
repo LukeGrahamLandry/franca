@@ -8,7 +8,7 @@ use crate::{
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
     reflect::{Reflect, RsType},
-    Map, STATS,
+    unwrap, Map, STATS,
 };
 use codemap::Span;
 use interp_derive::{InterpSend, Reflect};
@@ -322,6 +322,18 @@ impl<'p> FatExpr<'p> {
         ctx.expr(self);
         ctx.vars
     }
+
+    pub fn as_const(&self) -> Option<Values> {
+        if let Expr::Value { value } = &self.expr {
+            Some(value.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn expect_const(&self) -> Res<'p, Values> {
+        Ok(unwrap!(self.as_const(), "expected const values"))
+    }
 }
 
 // Some common data needed by all expression types.
@@ -340,12 +352,13 @@ impl<'p> FatExpr<'p> {
         debug_assert!(!ty.is_unknown());
         self.expr = Expr::Value { value };
         self.ty = ty;
+        self.done = true;
     }
 
     pub fn as_structured(&self) -> Res<'p, Structured> {
         debug_assert!(!self.ty.is_unknown());
-        if let Expr::Value { value } = &self.expr {
-            Ok(Structured::Const(self.ty, value.clone()))
+        if let Expr::Value { .. } = &self.expr {
+            Ok(Structured::Const(self.ty))
         } else {
             err!("not Expr::Value",)
         }
@@ -368,7 +381,7 @@ impl<'p> FatExpr<'p> {
             expr: Expr::Value { value },
             loc,
             ty,
-            done: true,
+            done: false,
         }
     }
 }
@@ -583,6 +596,7 @@ impl<'p> FatExpr<'p> {
         debug_assert!(!ty.is_unknown());
         let mut e = Self::synthetic(expr, loc);
         e.ty = ty;
+        e.done = false;
         e
     }
 
@@ -1108,11 +1122,6 @@ impl<'p> Program<'p> {
 
     pub extern "C" fn unique_ty(&mut self, ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Unique(ty, self.types.len()))
-    }
-
-    pub fn load_value(&mut self, v: Value, ty: TypeId) -> Structured {
-        let v: Values = v.into();
-        Structured::Const(ty, v)
     }
 
     pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {

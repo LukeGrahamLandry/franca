@@ -151,7 +151,7 @@ pub enum Values {
 
 #[derive(Debug, Clone)]
 pub enum Structured {
-    Const(TypeId, Values),
+    Const(TypeId),
     TupleDifferent(TypeId, Vec<Structured>),
     RuntimeOnly(TypeId),
 }
@@ -159,41 +159,8 @@ pub enum Structured {
 impl Structured {
     pub fn ty(&self) -> TypeId {
         match self {
-            Structured::Const(ty, _) | Structured::TupleDifferent(ty, _) | Structured::RuntimeOnly(ty) => *ty,
+            Structured::Const(ty) | Structured::TupleDifferent(ty, _) | Structured::RuntimeOnly(ty) => *ty,
         }
-    }
-
-    pub fn expect<'p>(self) -> Res<'p, Values> {
-        let ty = self.ty();
-        Ok(unwrap!(self.get(), "not const {ty:?}"))
-    }
-
-    pub fn get(self) -> Option<Values> {
-        match self {
-            Structured::TupleDifferent(_, _) | Structured::RuntimeOnly(_) => None,
-            Structured::Const(_, v) => Some(v),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Structured::TupleDifferent(_, s) => s.is_empty(),
-            Structured::RuntimeOnly(_) | Structured::Const(_, _) => false,
-        }
-    }
-
-    pub fn unchecked_cast(self, ty: TypeId) -> Structured {
-        match self {
-            Structured::TupleDifferent(_, v) => Structured::TupleDifferent(ty, v),
-            Structured::Const(_, v) => Structured::Const(ty, v),
-            Structured::RuntimeOnly(_) => Structured::RuntimeOnly(ty),
-        }
-    }
-}
-
-impl From<(Values, TypeId)> for Structured {
-    fn from((value, ty): (Values, TypeId)) -> Self {
-        Structured::Const(ty, value)
     }
 }
 
