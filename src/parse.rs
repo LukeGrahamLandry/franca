@@ -732,12 +732,29 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn after_expr_stmt(&mut self, e: FatExpr<'p>) -> Res<Stmt<'p>> {
-        let s = if self.maybe(Equals) {
-            let value = self.parse_expr()?;
-            Stmt::Set { place: e, value }
-        } else {
-            // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
-            Stmt::Eval(e)
+        let s = match self.peek() {
+            Equals => {
+                self.pop();
+                let value = self.parse_expr()?;
+                Stmt::Set { place: e, value }
+            }
+            EqOp(op) => {
+                self.pop();
+                self.start_subexpr();
+                self.start_subexpr();
+                let target = Box::new(self.parse_expr()?);
+                let handler = Box::new(self.expr(Expr::GetNamed(op.ident())));
+                let e = self.expr(Expr::PrefixMacro {
+                    handler,
+                    arg: Box::new(e),
+                    target,
+                });
+                Stmt::Eval(e)
+            }
+            _ => {
+                // Note: don't eat the semicolon so it shows up as noop for last stmt in block loop.
+                Stmt::Eval(e)
+            }
         };
         if !matches!(self.peek(), Semicolon | RightSquiggle) {
             return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));

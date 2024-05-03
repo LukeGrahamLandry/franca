@@ -1,4 +1,5 @@
 use codemap::{CodeMap, File};
+use franca::find_std_lib;
 use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{DidChangeTextDocument, DidOpenTextDocument};
 use lsp_types::request::{Completion, SemanticTokensFullRequest};
@@ -48,6 +49,7 @@ macro_rules! request {
 pub fn run_lsp_blocking() -> Result<(), Box<dyn Error + Sync + Send>> {
     // Note that  we must have our logging only write out to stderr.
     eprintln!("starting generic LSP server");
+    find_std_lib();
 
     // Create the transport. Includes the stdio (stdin and stdout) versions but this could
     // also be implemented to use sockets or HTTP.

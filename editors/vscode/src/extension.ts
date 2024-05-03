@@ -30,7 +30,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(disposable);
 
   let opts = {
-    command: "/Users/luke/Documents/mods/infered/target/debug/franca",
+    command: "/Users/luke/Documents/mods/infered/target/debug/lsp",
     args: ["lsp"],
   };
   let serverOptions: ServerOptions = {

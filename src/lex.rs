@@ -2,6 +2,7 @@
 // TODO: ignore shabang line and make sure compiler supports running scripts that way. thats a good side affect of the "all info needed in program" goal.
 // TODO: this could be a good thing to start with for trying self hosting.
 
+use crate::ast::Flag;
 use crate::ast::TypeId;
 use crate::ast::VarType;
 use crate::ffi::InterpSend;
@@ -53,8 +54,6 @@ pub enum TokenType<'p> {
     Question,
     Dollar,
     DoubleSquare,
-    PlusEq,
-    MinusEq,
     DoubleColon,
     Pipe,
     // Bit count means leading zeros are observable.
@@ -65,6 +64,7 @@ pub enum TokenType<'p> {
     LeftAngle,
     RightAngle,
     Hash,
+    EqOp(Flag),
     Error(LexErr),
 }
 
@@ -212,15 +212,15 @@ impl<'a, 'p> Lexer<'a, 'p> {
             ']' => self.one(RightSquare),
             ';' => self.one(Semicolon),
             '=' => self.one(Equals),
-            '*' => self.one(Star),
+            '*' => self.pair('=', Star, EqOp(Flag::Operator_Star_Equal)),
             '^' => self.one(UpArrow),
             '&' => self.one(Amp),
             '?' => self.one(Question),
             '$' => self.one(Dollar),
             '|' => self.one(Pipe),
-            '/' => self.one(Slash),
-            '+' => self.pair('=', Error(LexErr::Unexpected('+')), PlusEq),
-            '-' => self.pair('=', Error(LexErr::Unexpected('-')), MinusEq),
+            '/' => self.pair('=', Slash, EqOp(Flag::Operator_Slash_Equal)),
+            '+' => self.pair('=', Error(LexErr::Unexpected('+')), EqOp(Flag::Operator_Plus_Equal)),
+            '-' => self.pair('=', Error(LexErr::Unexpected('-')), EqOp(Flag::Operator_Minus_Equal)),
             '<' => self.pair('-', LeftAngle, LeftArrow),
             '>' => self.pair('-', RightAngle, RightArrow),
             '\'' => self.one(Quote),

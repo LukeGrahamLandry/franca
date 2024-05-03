@@ -1,5 +1,4 @@
-// TODO: some are hard to use because need brackets or treated as annotation on noop stmt. need to give warning at least. 
-//       should replace #macro with @macro(Prefix) @macro(Bang) @macro(Func)
+// TODO: should replace #macro with @macro(Prefix) @macro(Bang) @macro(Func)
 
 // TODO: make calling literal_ast less painful. The problem is can't use generics in compiler ffi 
 //       so have to pass by void ptr but currently can't just make lvalue refernce like rust. 
@@ -11,7 +10,7 @@ fun literal(arg: AstExpr, target: AstExpr) AstExpr = '{
 }';
 
 // Same as the two argument version but infers the type. 
-    // TODO: assert that arg isn't 'Unit' because then its ambigous with the two argument version. -- Apr 21
+// TODO: assert that arg isn't 'Unit' because then its ambigous with the two argument version. -- Apr 21
 #macro #outputs(AstExpr)
 fun literal(arg: AstExpr) AstExpr = '{
     var value = <arg>;
@@ -164,8 +163,41 @@ fun enum(body: FatExpr) FatExpr = '<body>!enum';
 #macro #outputs(Type)
 fun struct(body: FatExpr) FatExpr = '<body>!struct';
 
-// Seems like a fairly crippling design problem the range at which adding new code can mess you up. 
-// But that should get better with a stricter module system that lets you import into a namespace. 
-// Prior art: 
-// - https://journal.stuffwithstuff.com/2012/06/12/multimethods-global-scope-and-monkey-patching/
-// - https://journal.stuffwithstuff.com/2011/04/21/multimethods-multiple-inheritance-multiawesome/
+
+/// The parser desugars stuff into calls to these blessed functions. 
+/// But it just refers to them by name. If you cause that to resolve to your own function, you can change the operator's behaviour. 
+#macro #outputs(Unit) fn operator_plus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, add);
+#macro #outputs(Unit) fn operator_minus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, sub);
+#macro #outputs(Unit) fn operator_star_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, mul);
+#macro #outputs(Unit) fn operator_slash_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, div);
+
+/// All the  'a _= b' operators logically expand to 'a = _(a, b)'.
+/// Like normal assignment, the left hand side can be a variable name or a pointer dereference. 
+/// However, in the latter case, the expression that produces the pointer is only evaluated once. 
+/// Most of the time it doesn't matter but it's legal to put a function call with side effects in that position and this behaviour feels more intuitive. 
+// NOTE: don't use these operators in the dependency chain of this function or life gets real confusing, real fast!
+// TODO: should allow a mutating fn add_assign(*Self, v) if you have one. like it would be nice for owned strings. 
+#inline 
+fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr = {
+    kind := place&.expr!tag[];
+    // TODO: generate a typed enum for the tag so this could be kind.eq(.GetVar).or(kind.eq(.GetNamed))
+    is_var_access := eq(kind, tag_value(Expr, GetVar!symbol)).or(eq(kind, tag_value(Expr, GetNamed!symbol)));
+    
+    ::if(FatExpr); // TODO: auto template instantiation. 
+    
+    if(is_var_access){|
+        // This type of macro can't return a stmt, so it has to be wrapped in a block. Maybe we should use the other kind once that exists. 
+        '{ <place> = <@literal(f)>(<place>, <value>); }'
+    } {|
+        // TODO: nice report_compile_error api that lets you attatch the Span so you get useful error message rendering. 
+        assert(kind.ne(tag_value(Expr, PrefixMacro!symbol)), "TODO: support macro expansion in place expr");
+        is_deref := kind.eq(tag_value(Expr, SuffixMacro!symbol)).and {()bool|
+            name := place&.expr.SuffixMacro[0][];
+            name.eq(deref!symbol)
+        };
+        assert(is_deref, "_= operator left hand side must be a place expr.");
+        // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
+        ptr_expr := place&.expr.SuffixMacro[1][][];
+        '{ let ptr = <ptr_expr>; ptr[] = <@literal(f)>(ptr[], <value>); }'
+    }
+}
