@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, FloatMask, Structured, Value, Values},
+    bc::{Bc, FloatMask, Value, Values},
     compiler::{CErr, CompileError, FnWip, Res},
     err,
     export_ffi::RsResolvedSymbol,
@@ -355,10 +355,10 @@ impl<'p> FatExpr<'p> {
         self.done = true;
     }
 
-    pub fn as_structured(&self) -> Res<'p, Structured> {
+    pub fn as_structured(&self) -> Res<'p, TypeId> {
         debug_assert!(!self.ty.is_unknown());
         if let Expr::Value { .. } = &self.expr {
-            Ok(Structured::Const(self.ty))
+            Ok(self.ty)
         } else {
             err!("not Expr::Value",)
         }

@@ -149,21 +149,6 @@ pub enum Values {
     Many(Vec<i64>),
 }
 
-#[derive(Debug, Clone)]
-pub enum Structured {
-    Const(TypeId),
-    TupleDifferent(TypeId, Vec<Structured>),
-    RuntimeOnly(TypeId),
-}
-
-impl Structured {
-    pub fn ty(&self) -> TypeId {
-        match self {
-            Structured::Const(ty) | Structured::TupleDifferent(ty, _) | Structured::RuntimeOnly(ty) => *ty,
-        }
-    }
-}
-
 impl Values {
     pub fn as_overload_set<'p>(&self) -> Res<'p, OverloadSetId> {
         if let Value::OverloadSet(i) = self.clone().single()? {
