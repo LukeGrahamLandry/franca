@@ -12,6 +12,9 @@ Fixed aliasing result location shit so some tests changed:
 
 TODO: fn index doesn't work if not inline thats like something cripplingly wrong in the calling convention stuff!!!!!
 
+I think my prize for getting this working will be `+=, -=, \*=, /=`.
+Then maybe llvm ir text will get me normal operatiors.
+
 ## stack based ir (May 1)
 
 I think my current bc format is dumb.

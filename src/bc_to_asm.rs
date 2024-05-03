@@ -402,6 +402,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 },
                 #[cfg(not(debug_assertions))]
                 &Bc::EndIf { .. } => {}
+                // TODO: don't do it this way but you need everything in the same places whether you go one or zero times through the loop. should really do some sort of basic blocks thing.
+                //       the problem is what happens if you spilled some of your registers in the loop body. so my hack is just always spill them all at the very beginning and then it doesn't matter so much.
+                Bc::StartLoop => {
+                    self.spill_abi_stompable();
+                }
             }
 
             debugln!("{i} {inst:?} => {:?} | free: {:?}", self.stack, self.free_reg);

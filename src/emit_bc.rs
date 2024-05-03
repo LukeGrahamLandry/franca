@@ -440,11 +440,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
 
         debug_assert_eq!(body_fn.ty, TypeId::unit());
-        result.push(Bc::PushConstant { value: 0 }); // TODO: caller expects a unit on the stack
 
         let index = result.if_debug_count;
         result.if_debug_count += 1;
 
+        result.push(Bc::StartLoop);
+        result.push(Bc::EndIf { index, slots: 0 });
         let cond_ip = result.insts.len() as u16;
         debug_assert_eq!(cond_fn.ty, TypeId::bool());
         self.compile_expr(result, cond_fn)?;
@@ -453,6 +454,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.compile_expr(result, body_fn)?;
         let slots = self.slot_count(body_fn.ty);
         result.push(Bc::Pop { slots });
+        result.push(Bc::EndIf { index, slots: 0 });
 
         result.push(Bc::Goto { ip: cond_ip });
         let end_ip = result.insts.len() as u16;
@@ -466,6 +468,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.jump_targets.set(branch_ip);
         result.jump_targets.set(body_ip as usize);
         result.jump_targets.set(end_ip as usize);
+
+        result.push(Bc::PushConstant { value: 0 }); // TODO: caller expects a unit on the stack
 
         Ok(())
     }

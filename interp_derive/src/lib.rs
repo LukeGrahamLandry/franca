@@ -201,12 +201,17 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                 }
             });
 
+            let varient_count = data.variants.len();
+
             let t = quote!(usize::deserialize_from_ints(values)?);
             quote! {
                 let tag = #t;
                 let (result, varient_size): (Option<Self>, usize) = match tag {
                     #(#recurse)*
-                    _ => return None
+                    t => {
+                        println!("err: bad enum tag {} for {} expected 0..={}", t, stringify!(#name), #varient_count);
+                        return None
+                    }
                 };
 
                 let payload_size = Self::size() - 1;

@@ -35,7 +35,7 @@ macro_rules! bounce_flat_call {
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     debugln!("bounce ARG: {argslice:?}");
-                    let arg: $Arg = <$Arg>::deserialize_from_ints(&mut argslice.iter().copied()).expect("deserialize arg");
+                    let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(&mut argslice.iter().copied()), "deserialize arg")));
                     let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_to_ints_one();
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
@@ -223,6 +223,10 @@ pub fn get_include_std(name: &str) -> Option<String> {
 // TODO: can do some nicer reporting here? maybe this goes away once i can actually do error handling in my language.
 fn hope<'p, T>(res: impl FnOnce() -> Res<'p, T>) -> T {
     res().unwrap_or_else(|e| panic!("{e:?}"))
+}
+
+fn hopec<'p, T>(comp: &Compile<'_, 'p>, res: impl FnOnce() -> Res<'p, T>) -> T {
+    comp.tag_err(res()).unwrap_or_else(|e| panic!("{e:?}"))
 }
 
 extern "C-unwind" fn tag_value<'p>(program: &&Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
@@ -529,22 +533,24 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
 }
 
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().expect("ffi ctx").expect("fn result ctx");
+    hope(|| {
+        let result = unwrap!(unwrap!(compile.pending_ffi.pop(), "ffi ctx"), "fn result ctx");
 
-    let mut template = args.pop().expect("template arg");
-    let mut walk = Unquote {
-        compiler: compile,
-        placeholders: args.into_iter().map(Some).collect(),
-        result: unsafe { &mut *result },
-    };
-    // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
-    walk.expr(&mut template);
-    let placeholders = walk.placeholders;
-    assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
-    compile.program.next_var = template.renumber_vars(compile.program.next_var);
+        let mut template = unwrap!(args.pop(), "template arg");
+        let mut walk = Unquote {
+            compiler: compile,
+            placeholders: args.into_iter().map(Some).collect(),
+            result: unsafe { &mut *result },
+        };
+        // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
+        walk.expr(&mut template);
+        let placeholders = walk.placeholders;
+        assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
+        compile.program.next_var = template.renumber_vars(compile.program.next_var);
 
-    compile.pending_ffi.push(Some(result));
-    template
+        compile.pending_ffi.push(Some(result));
+        Ok(template)
+    })
 }
 
 fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntTypeInfo {

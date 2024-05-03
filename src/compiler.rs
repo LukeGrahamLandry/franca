@@ -289,12 +289,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.pending_ffi.pop().unwrap();
         let result = self.tag_err(result);
-        if let Ok(vals) = &result {
+        if result.is_ok() {
             self.pop_state(state2);
-
-            // TODO: rmeove this. just want to force do a check  of type goodness-- May 1
-            let mut out = vec![];
-            values_from_ints(self, ty.ret, &mut vals.clone().vec().into_iter(), &mut out)?;
         }
         result
     }
@@ -355,7 +351,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // This is much less painful than threading it through the macros
-    fn tag_err<T>(&self, mut res: Res<'p, T>) -> Res<'p, T> {
+    pub fn tag_err<T>(&self, mut res: Res<'p, T>) -> Res<'p, T> {
         if let Err(err) = &mut res {
             err.trace = self.log_trace();
             err.loc = self.last_loc;

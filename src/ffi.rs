@@ -288,7 +288,9 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let ptr = values.next()?;
+        debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let len = usize::deserialize_from_ints(values)?;
+
         let entries = T::size() * len;
         let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, entries) };
         let mut values = s.iter().copied();
