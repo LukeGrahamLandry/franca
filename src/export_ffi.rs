@@ -80,6 +80,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ),
     ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
     ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
+    ("fn read(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::read as *const u8),
 ];
 
 // thank you rust very cool. TODO: non-macos

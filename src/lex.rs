@@ -404,9 +404,14 @@ impl<'a, 'p> Lexer<'a, 'p> {
     fn eat_whitespace(&mut self) {
         loop {
             // TODO count blank as comment
+            let mut first = true;
             while self.peek_c().is_whitespace() {
                 if self.pop() == '\n' {
                     self.raw_lines += 1;
+                    if !first {
+                        self.skipped_lines += 1;
+                        first = false;
+                    }
                 }
             }
             if self.peek_c() == '/' {

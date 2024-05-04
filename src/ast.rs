@@ -1741,7 +1741,7 @@ pub enum Flag {
 macro_rules! flag_subset {
     ($ty:ty, $before:expr, $after:expr) => {
         impl<'p> TryFrom<Ident<'p>> for $ty {
-            type Error = CompileError<'p>;
+            type Error = Box<CompileError<'p>>;
 
             #[track_caller]
             fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {

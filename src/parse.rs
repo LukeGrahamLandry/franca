@@ -76,6 +76,7 @@ impl<'p> ParseTasks<'p> {
                 match res {
                     Ok(stmts) => {
                         unsafe { STATS.parser_did += 1 };
+                        // println!("{:?}\n=====", stmts.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>());
                         self.tasks[name] = ParseFile::Wip; // stmts are single use it seems.
                         Ok(stmts)
                     }
@@ -85,7 +86,7 @@ impl<'p> ParseTasks<'p> {
                     }
                 }
             }
-            ParseFile::ParsedStmts(v) => Ok(v.clone()), // unreachable
+            ParseFile::ParsedStmts(_) => unreachable!(),
             ParseFile::Err(e) => Err(e.clone()),
             _ => todo!(),
         }
@@ -99,6 +100,7 @@ impl<'p> ParseTasks<'p> {
                 match res {
                     Ok(stmts) => {
                         unsafe { STATS.parser_did += 1 };
+                        // println!("{}\n=====", stmts.log(self.pool));
                         self.tasks[name] = ParseFile::ParsedExpr(stmts.clone());
                         Ok(stmts)
                     }

@@ -20,12 +20,12 @@ macro_rules! err {
         let e = $payload;
         $crate::logging::break_here(&e);
 
-        return Err($crate::compiler::CompileError {
+        return Err(Box::new($crate::compiler::CompileError {
             internal_loc: if cfg!(feature="trace_errors") {Some(std::panic::Location::caller())} else {None},
             loc: None,
             reason: e,
             trace: String::new(),
-        })
+        }))
     }};
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);

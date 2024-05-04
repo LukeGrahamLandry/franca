@@ -96,7 +96,7 @@ macro_rules! mut_replace {
     ($value:expr, $f:expr) => {{
         let temp = mem::take(&mut $value);
         #[allow(clippy::redundant_closure_call)]
-        let res = $f(temp);
+        let res: Result<_, Box<CompileError>> = $f(temp);
         if res.is_err() {
             println!("WARNING: mut_replace hit err. something will be lost!! {}. {res:?}", Location::caller());
         }
@@ -295,12 +295,12 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
     let parsed = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
         Ok(s) => s,
         Err(e) => {
-            return Err(CompileError {
+            return Err(Box::new(CompileError {
                 internal_loc: e.loc,
                 loc: Some(e.diagnostic[0].spans[0].span),
                 reason: CErr::Diagnostic(e.diagnostic),
                 trace: String::new(),
-            })
+            }))
         }
     };
 
@@ -326,7 +326,7 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
 
     match result {
         Err(e) => {
-            log_err(&comp, e, save);
+            log_err(&comp, *e, save);
             return false;
         }
         Ok(_) => {
@@ -339,12 +339,12 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
                 Some(f) => {
                     match comp.compile(f, ExecTime::Runtime) {
                         Err(e) => {
-                            log_err(&comp, e, save);
+                            log_err(&comp, *e, save);
                             return false;
                         }
                         Ok(_) => {
                             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
-                                log_err(&comp, e, save);
+                                log_err(&comp, *e, save);
                                 return false;
                             }
                             let end = timestamp();

@@ -97,6 +97,8 @@ fn main() {
         }
 
         run_main(pool, src, Some(&name), true);
+
+        // println!("{:#?}", unsafe { &STATS });
     } else {
         run_tests();
     }
@@ -264,7 +266,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
     if let Err(e) = result {
-        log_err(&comp, e, save);
+        log_err(&comp, *e, save);
         exit(1);
     }
     assert_eq!(comp.tests.len(), 1);
@@ -273,7 +275,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let f = comp.tests[0];
     let result = comp.compile(f, ExecTime::Runtime);
     if let Err(e) = result {
-        log_err(&comp, e, save);
+        log_err(&comp, *e, save);
         exit(1);
     }
 
@@ -284,7 +286,7 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     let result: i64 = match arch {
         TargetArch::Aarch64 => {
             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
-                log_err(&comp, e, save);
+                log_err(&comp, *e, save);
                 exit(1);
             }
             comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.

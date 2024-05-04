@@ -158,11 +158,10 @@ fun bits(var arg: AstExpr) AstExpr = {
 }
 
 #macro #outputs(Type)
-fun enum(body: FatExpr) FatExpr = '<body>!enum';
+fun tagged(body: FatExpr) FatExpr = '<body>!enum';
 
 #macro #outputs(Type)
 fun struct(body: FatExpr) FatExpr = '<body>!struct';
-
 
 /// The parser desugars stuff into calls to these blessed functions. 
 /// But it just refers to them by name. If you cause that to resolve to your own function, you can change the operator's behaviour. 
@@ -200,4 +199,46 @@ fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatEx
         ptr_expr := place&.expr.SuffixMacro[1][][];
         '{ let ptr = <ptr_expr>; ptr[] = <@literal(f)>(ptr[], <value>); }'
     }
+}
+
+/// The compiler defines the two argument version where you specify a type and values. 
+/// This version can be used when you just want sequential integers. 
+#macro #outputs(Type)
+fun enum(var names: FatExpr) FatExpr = {
+    kind := names&.expr!tag[];
+    assert(eq(kind, tag_value(Expr, Tuple!symbol)), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
+    
+    Binding :: Binding!builtin;
+    fn binding(name: Symbol, value: i64) Binding = {
+        template := '(a = 0)';
+        all : Slice$Binding = template&.expr.StructLiteralP.bindings[]; 
+        out := all.get(0);
+        out&.name[] = (Ident: name);
+        out&.default[0][] = 0; // Some 
+        out&.default[1][] = @literal(value);
+        out
+    }
+    
+    cases : List$Binding = list();
+    parts : Slice$FatExpr = names&.expr.Tuple[];
+    enumerate(parts) {(i: i64, part: *FatExpr)|
+        // TODO: really need @default on match cause this is annoying. 
+        @switch(part.expr!tag[]) {
+            @case(tag_value(Expr, GetNamed!symbol)) fn = {
+                name : Symbol = part.expr.GetNamed[];
+                cases&.push(binding(name, i));
+            };
+            @case(tag_value(Expr, GetVar!symbol)) fn = {
+                name : Symbol = part.expr.GetVar[0][];
+                cases&.push(binding(name, i));
+            };
+            @default() fn(_: i64) = panic("Expected symbol in @enum");
+        };
+    };
+
+    varients := '(a = 1)';
+    cases := cases.items();
+    varients&.expr.StructLiteralP.bindings[] = cases;
+    
+    '@enum(i64) <varients>'
 }
