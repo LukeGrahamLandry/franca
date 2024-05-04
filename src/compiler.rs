@@ -1278,7 +1278,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.ty = ptr_ty;
                         ptr_ty
                     }
-                    Flag::C_Call => err!("!c_call has been removed. calling convention is part of the type now.",),
                     Flag::Deref => {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(result, arg, requested)?;
@@ -1306,12 +1305,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         };
                         expr.set(value.clone(), ty);
                         ty
-                    }
-                    Flag::Size_Of => {
-                        let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
-                        let size = self.ready.sizes.slot_count(self.program, ty);
-                        self.set_literal(expr, size as i64)?;
-                        expr.ty
                     }
                     Flag::Assert_Compile_Error => {
                         // TODO: this can still have side-effects on the compiler state tho :(
@@ -1346,16 +1339,21 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     Flag::Symbol => {
                         // TODO: use match
-                        let value = if let Expr::GetNamed(i) = arg.deref_mut().deref_mut() {
-                            *i
-                        } else if let Expr::GetVar(v) = arg.deref_mut().deref_mut() {
-                            v.0
-                        } else if let Expr::String(i) = arg.deref_mut().deref_mut() {
-                            *i
-                        } else {
-                            ice!("Expected identifier found {arg:?}")
+                        let value = match &mut arg.expr {
+                            &mut Expr::GetNamed(i) => i,
+                            &mut Expr::GetVar(v) => v.0,
+                            &mut Expr::String(i) => i,
+                            Expr::PrefixMacro { handler, target, .. } => {
+                                // TODO: check that handler is @as
+                                if let Expr::String(i) = target.expr {
+                                    i
+                                } else {
+                                    // ice!("Expected identifier found {arg:?}")
+                                    todo!()
+                                }
+                            }
+                            _ => ice!("Expected identifier found {arg:?}"),
                         };
-
                         self.set_literal(expr, value)?;
                         expr.ty
                     }
@@ -1495,6 +1493,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 let bytes = self.pool.get(i).to_string();
                 self.set_literal(expr, bytes)?;
+                expr.ty = requested.unwrap(); // hack? :StrVarType
                 expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
@@ -2775,6 +2774,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: annotations to say which target you're expecting.
             let llvm_ir: Option<Vec<Ident<'p>>> = parts
                 .iter()
+                // TODO: this will be broken by string rework wrapping everything in @as(Str) -- May 4
                 .map(|op| if let Expr::String(op) = op.expr { Some(op) } else { None })
                 .collect();
             if llvm_ir.is_some() {

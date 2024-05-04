@@ -662,6 +662,17 @@ pub mod c {
                 b = b.arg(program.program.as_c_type(*ty)?);
             }
             args.iter().map(Arg::new).collect()
+        } else if let &TypeInfo::Struct { as_tuple, .. } = &program.program[f_ty.arg] {
+            // TODO: hack, copy-paste. also wrong abi!
+
+            if let TypeInfo::Tuple(fields) = &program.program[as_tuple] {
+                for ty in fields {
+                    b = b.arg(program.program.as_c_type(*ty)?);
+                }
+                args.iter().map(Arg::new).collect()
+            } else {
+                unreachable!()
+            }
         } else {
             b = b.arg(program.program.as_c_type(f_ty.arg)?);
             args.iter().map(Arg::new).collect()

@@ -1720,12 +1720,12 @@ pub enum Flag {
     Const_Eval,
     Contextual_Field,
     Type,
-    Size_Of,
     Assert_Compile_Error,
     Symbol,
     Outputs,
     When,
     One_Ret_Pic,
+    __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     _Reserved_Count_,
 }

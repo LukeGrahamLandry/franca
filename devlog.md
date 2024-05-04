@@ -1,5 +1,7 @@
 ## improving enums (May 4)
 
+all these are not big expressiveness wins, really just trying to raise morale.
+
 - renamed rust @enum to @tagged cause it seems kinda dumb to overload the name enum.
 - did @enum(name1, name2) as a lib macro so don't have to write the sequential values cause that's annoying.
 - remove #enum (for generating init constructor). it was used in 1 place and didn't integrate well with treating types as values.
@@ -13,6 +15,11 @@
   (maybe should rethink my & syntax then too...). only sad thing is now if you define one inline as a function return,
   you have to wrap in brackets because the lhs of an assignment could be a macro call so the parser complains.
   i think its not actaully ambigous but threading the context through seems a bit yucky. idk.
+- made !size_of just be a compiler ffi function, i was already using it through a function wrapper anyway but now that doesn't have to be pointlessly specialized.
+  it does mean you have to explicitly '::' it if you want it to be const known because I don't have auto folding yet.
+- hack fix to ""!type not being Slice$i64, since constants are lazy now, just have the parser emit casts to a fixed identifier.
+  sad that its 4 ast nodes for a string constant now (5k extra nodes in full test, ~2%, yikes) but its much less cringe than the old system where you had to manually do the cast or write a bunch of overloads.
+  there was something weird about @as not resetting the type when I set the values to the expr which made it the unique type from rust String ffi.
 
 (PLAN)
 eventually want to unify the different ways of doing @enum and maybe make the sytax be a block isntead of a pattern.

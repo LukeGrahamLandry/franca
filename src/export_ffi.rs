@@ -137,7 +137,13 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ),
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
     ("fn IntType(bits: i64, signed: bool) Type;", make_int_type as *const u8),
+    // measured in bytes
+    ("fun size_of(T: Type) i64", get_size_of as *const u8),
 ];
+
+extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
+    compiler.ready.sizes.slot_count(compiler.program, ty) as i64 * 8
+}
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 

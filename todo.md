@@ -57,7 +57,6 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 - const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
   safety(Bounds, fn= lt(i, len(self));
 - enum bitset
-- c style flags: fn Enum(Arr(Symbol)) Type; so Enum(A, B, C) === @enum(i64) (A = 0, B = 1, C = 2). could be macro so don't have to deal with passing symbols.
 - quick union types: fn Enum(Arr(Type)) Type; so Enum(A, B, C) === (A: A, B: B, C: C)!enum;
   - if you had all the tags unique (use TypeId) instead of starting at 0, you could make it free to convert to a super set.
     that probably gives up u8 or niche tags but even u16 is enough that its fine.
