@@ -1,23 +1,15 @@
-// TODO: im doing overloads dumbly so now calling init means filtering through every struct type ever made even when you already know what type you're looking for. 
+// TODO: im doing overloads dumbly so now calling  means filtering through every struct type ever made even when you already know what type you're looking for. 
 
 #test(aarch64)
 fn main(_canary: i64) i64 = {
 
-#struct fn Person(age: i64, gender: i64);
-// The above is a macro that expands to: 
-// const Person = (age: i64, gender: i64)!struct;
-// fn init(age: i64, gender: i64) Person = (age: age, gender: gender)!construct;
-// Note, this is not a ~constructor~, its just a function that happens to construct a value of the new type. 
-// There's nothing actually special about the init function, its just a convention that seems nice. 
-// I think constructors in java/c++ are a bit weird because you have access to a 'this' pointer before you've actually produced a value in a valid state. 
-// Instead, here you are forced the figure out all the fields you want and put them in place all at once. 
-// TODO: currently (a: b) === (a: b)!construct and there's nothing forcing someone to actually call your nice factory function (private fields, etc.). 
+const Person = @struct(age: i64, gender: i64);
 
 assert_eq(Person!type, Type);
 
-// Create a struct by calling the initializer. 
+// Create a struct by calling the ializer. 
 // We need to specify the type so it can resolve the overload even if there are multiple with the same field names and types. (If they're unique, it can infer).
-var bob: Person = init(age: 24, gender: 42);
+var bob: Person = (age: 24, gender: 42);
 assert_eq(bob!type, Person);
 
 // dot syntax for computing field offsets. 
@@ -31,10 +23,10 @@ assert_eq(bob&.age[], 25);
 assert_eq(bob&.gender[], 42);
 
 // Composition
-#struct fn Animal(owner: Person, whiskers: bool);
+const Animal = @struct(owner: Person, whiskers: bool);
 assert_eq(Animal!type, Type);
 
-var cat: Animal = init(
+var cat: Animal = (
     owner: bob,  // This is a copy of bob.
     whiskers: true,
 );
@@ -56,14 +48,14 @@ assert_eq(bob_part_three&.age[], 5);
 assert_eq(cat&.owner.age[], 99);
 
 // Structs can contain pointers. 
-#struct fn House(
+House :: @struct(
     tax_payer: Ptr(Person),
     pet: Ptr(Animal),
 );
 assert_eq(Animal!type, Type);
 
 // Note: this example aliases bob_again. Good luck compiling to rust :)
-var tent: House = init(
+var tent: House = (
     tax_payer: cat&.owner,
     pet: cat!addr
 );
@@ -75,8 +67,8 @@ assert_eq(tent&.tax_payer[].age[], 55);
 assert_eq(bob_again.age[], 55);
 assert_eq(bob&.age[], 25);  // OG bob is still just chillin
 
-var mouse: Animal = init(
-    owner: init(
+var mouse: Animal = (
+    owner: (
         age: 17,
         gender: 314,
     ),
@@ -84,7 +76,7 @@ var mouse: Animal = init(
 );
 // struct 'var's can be reassigned
 // No type annotation needed because it remembers. 
-tent = init(
+tent = (
     tax_payer: bob!addr,
     pet: mouse!addr,
 );
@@ -98,7 +90,7 @@ tent.hello!assert_compile_error;
 
 // TODO: same lexical sanity check for assert_compile_error as asser t_eq (just use the word assert). 
 // TODO: Struct declarations are always const.
-// { let Thing: Type = (legs: i64)!struct; }!assert_compile_error;
+// { let Thing: Type = @struct(legs: i64); }!assert_compile_error;
 
 // TODO: assert_compile_error of consts doesnt work because they get hoisted out of the block. 
 // A raw map literal is illegal if the compiler can't infer a type. 
@@ -127,7 +119,7 @@ assert_eq(bob&.age[], 11);
 mutate_real(bob)!assert_compile_error;
 
 // Return a struct
-fn make_someone(years: i64) Person = init(
+fn make_someone(years: i64) Person = (
      age: years,
      gender: 192741892,
 );
@@ -137,23 +129,12 @@ assert_eq(bill&.age[], 17);
 
 // TODO: move this to generics test and do a normal version here. 
 #comptime
-fn Option2(const T: Type) Type = {
-    Self :: @tagged(Some: T, None: Unit);
-    
-    fun init(Some: T) Self = (Some: Some); 
-    fun init(None: Unit) Self = (None: None); 
-    Self
-    
-    /* // TODO: old version should work too. broken with scan ahead consts. something with renumbering the generated functions wrong? -- Apr 22
-    #enum fn Option2(Some: T, None: Unit);
-    Option2
-    */
-}
+fn Option2(const T: Type) Type = @tagged(Some: T, None: Unit);
 
 const Maybe_i64 = Option2(i64);
 
-var yes: Maybe_i64 = init(Some: 12);
-var no: Maybe_i64 = init(None: unit);
+var yes: Maybe_i64 = (Some: 12);
+var no: Maybe_i64 = (None: unit);
 
 assert_eq(yes!type, no!type);  // same type even with different payloads
 
@@ -184,24 +165,23 @@ assert_eq(out, 10);
 
 //////
 /// Tricky result slot aliasing
+// (no longer a problem)
 
-#struct fn A(a: i64, b: i64);
+A :: @struct(a: i64, b: i64);
 
 var s: A = (a: 1, b: 2);
 assert_eq(s&.a[], 1);
-// This initilization happens in place... 
 s = (a: s&.b[], b: s&.a[]);
 assert_eq(s&.a[], 2);
-// BUG. Oh shit, you done did aliased! This is kinda a massive problem. 
 assert_eq(s&.b[], 1); 
 
-var s: A = init(a: 1, b: 2);
+var s: A = (a: 1, b: 2);
 assert_eq(s&.a[], 1); assert_eq(s&.b[], 2);
 // The argument to the function call are evaluated up front so this behaves as expected. 
-s = init(a: s&.b[], b: s&.a[]);
+s = (a: s&.b[], b: s&.a[]);
 assert_eq(s&.a[], 2); assert_eq(s&.b[], 1);
 
-var s: A = init(a: 1, b: 2);
+var s: A = (a: 1, b: 2);
 s = {
     let a = 5;
     let b = s&.a[].add(s&.b[]);
@@ -210,7 +190,7 @@ s = {
 // 'b' would be 7 if it forwarded to the final output location.   
 assert_eq(s&.a[], 5); assert_eq(s&.b[], 3);
 
-var s: A = init(a: 1, b: 2);
+var s: A = (a: 1, b: 2);
 s = {
     (a: 5, b: s&.a[].add(s&.b[]))
 };
@@ -218,14 +198,14 @@ s = {
 assert_eq(s&.a[], 5); assert_eq(s&.b[], 3);
 
 // This is what you're really doing
-var s: A = init(a: 1, b: 2);
+var s: A = (a: 1, b: 2);
 s&.a[] = 5;
 s&.b[] = s&.a[].add(s&.b[]);
 assert_eq(s&.a[], 5); assert_eq(s&.b[], 7);  // Here it makes sense
 
-var s: A = init(a: 1, b: 2);
+var s: A = (a: 1, b: 2);
 s = {
-    init(a: 5, b: s&.a[].add(s&.b[]))
+    (a: 5, b: s&.a[].add(s&.b[]))
 };
 // Again this is fine because I don't do it for function calls. 
 assert_eq(s&.a[], 5); assert_eq(s&.b[], 3);

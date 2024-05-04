@@ -244,15 +244,15 @@ impl<'p> Program<'p> {
                             .iter()
                             .map(|f| format!("{}: {}", self.pool.get(f.name), self.log_type(f.ty)))
                             .collect();
-                        format!("{{ {}}}!struct", v.join(", "))
+                        format!("@struct({})", v.join(", "))
                     }
-                    TypeInfo::Enum { cases, .. } => {
+                    TypeInfo::Tagged { cases, .. } => {
                         // TODO: factor out iter().join(str), how does that not already exist
                         let v: Vec<_> = cases
                             .iter()
                             .map(|(name, ty)| format!("{}: {}", self.pool.get(*name), self.log_type(*ty)))
                             .collect();
-                        format!("{{ {}}}!enum", v.join(", "))
+                        format!("@tagged({})", v.join(", "))
                     }
                     TypeInfo::Unique(inner, _) => self.log_type(*inner),
                     TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
@@ -302,7 +302,7 @@ impl<'p> Program<'p> {
                             return None;
                         }
                         found = Some(ty);
-                    } else if let TypeInfo::Enum { cases, .. } = &self[ty] {
+                    } else if let TypeInfo::Tagged { cases, .. } = &self[ty] {
                         for (_, ty) in cases {
                             if let &TypeInfo::Named(inner, case_name) = &self[*ty] {
                                 // TODO: ffi cases that are akreayd named types
@@ -328,8 +328,8 @@ impl<'p> Program<'p> {
         for info in &self.types {
             if let TypeInfo::Unique(ty, _) = info {
                 if let &TypeInfo::Named(ty, name) = &self[*ty] {
-                    if let TypeInfo::Enum { cases, .. } = &self[ty] {
-                        writeln!(out, "const {} = Unique({{", self.pool.get(name),).unwrap();
+                    if let TypeInfo::Tagged { cases, .. } = &self[ty] {
+                        writeln!(out, "const {} = Unique$ @tagged(", self.pool.get(name),).unwrap();
                         for (name, mut ty) in cases {
                             if let &TypeInfo::Named(inner, _) = &self[ty] {
                                 // Not unique, name is probably just name of the case.
@@ -337,7 +337,7 @@ impl<'p> Program<'p> {
                             }
                             writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty)).unwrap();
                         }
-                        out += "}!enum);\n"
+                        out += ");\n"
                     } else {
                         writeln!(out, "const {} = Unique({});", self.pool.get(name), self.log_type(ty)).unwrap();
                     }

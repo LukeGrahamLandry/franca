@@ -58,7 +58,8 @@ pub enum TypeInfo<'p> {
         fields: Vec<Field<'p>>,
         as_tuple: TypeId,
     },
-    Enum {
+    // What rust calls an enum
+    Tagged {
         cases: Vec<(Ident<'p>, TypeId)>,
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
@@ -353,15 +354,6 @@ impl<'p> FatExpr<'p> {
         self.expr = Expr::Value { value };
         self.ty = ty;
         self.done = true;
-    }
-
-    pub fn as_structured(&self) -> Res<'p, TypeId> {
-        debug_assert!(!self.ty.is_unknown());
-        if let Expr::Value { .. } = &self.expr {
-            Ok(self.ty)
-        } else {
-            err!("not Expr::Value",)
-        }
     }
 
     pub fn as_int(&self) -> Option<i64> {
@@ -1105,7 +1097,7 @@ impl<'p> Program<'p> {
 
     pub fn get_enum(&self, enum_ty: TypeId) -> Option<&[(Ident<'p>, TypeId)]> {
         let enum_ty = self.raw_type(enum_ty);
-        if let TypeInfo::Enum { cases, .. } = &self[enum_ty] {
+        if let TypeInfo::Tagged { cases, .. } = &self[enum_ty] {
             Some(cases)
         } else {
             None
@@ -1174,7 +1166,9 @@ impl<'p> Program<'p> {
             TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
-            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Enum { .. } => todo!(),
+            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => {
+                todo!()
+            }
             &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
         }
     }
@@ -1326,12 +1320,12 @@ impl<'p> Program<'p> {
 
     pub fn to_enum(&mut self, ty: TypeInfo<'p>) -> TypeId {
         if let TypeInfo::Struct { fields, .. } = ty {
-            let ty = TypeInfo::Enum {
+            let ty = TypeInfo::Tagged {
                 cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
             };
             self.intern_type(ty)
         } else if let TypeInfo::Tuple(fields) = ty {
-            let ty = TypeInfo::Enum {
+            let ty = TypeInfo::Tagged {
                 cases: fields.into_iter().map(|ty| (self.synth_name(ty), ty)).collect(),
             };
             self.intern_type(ty)
@@ -1383,7 +1377,7 @@ impl<'p> Program<'p> {
             }
             TypeInfo::Unknown | TypeInfo::Any => todo!(),
             &TypeInfo::Struct { as_tuple, .. } => self.float_mask_one(as_tuple),
-            TypeInfo::Enum { .. } => 0, // the varients can be different, never use float reg.
+            TypeInfo::Tagged { .. } => 0, // the varients can be different, never use float reg.
             TypeInfo::Never
             | TypeInfo::Ptr(_)
             | TypeInfo::Int(_)
@@ -1678,8 +1672,6 @@ pub enum Flag {
     As,
     Inline,
     NoInline,
-    Struct,
-    Enum,
     Asm,
     C_Call,
     Macro,

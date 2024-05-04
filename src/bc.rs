@@ -280,7 +280,7 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
                 values_from_ints(compile, ty, ints, out)?;
             }
         }
-        TypeInfo::Enum { cases } => {
+        TypeInfo::Tagged { cases } => {
             let start = out.len();
             let payload_size = compile.ready.sizes.slot_count(compile.program, ty) - 1;
             let tag = unwrap!(ints.next(), "");

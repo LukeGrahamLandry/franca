@@ -1,3 +1,28 @@
+## improving enums (May 4)
+
+- renamed rust @enum to @tagged cause it seems kinda dumb to overload the name enum.
+- did @enum(name1, name2) as a lib macro so don't have to write the sequential values cause that's annoying.
+- remove #enum (for generating init constructor). it was used in 1 place and didn't integrate well with treating types as values.
+  still have mixed feelings, maybe i want it to be easy to add constructor without changing callsites but meh.
+- remove #struct. that was used in a few more places but still felt like low value add.
+  if I want that, I should just implement it in the library, it doesn't need to live in the compiler.
+  so need to implement hash macros that transform functions soon.
+- remove !enum, just define it as @tagged in the compiler.
+- remove !struct, like above. that was used more often but i like the prefix syntax more
+  and started using as soon as i had the forwarding macro anyway. it means you don't have to look all the way to the end to see whats going on.
+  (maybe should rethink my & syntax then too...). only sad thing is now if you define one inline as a function return,
+  you have to wrap in brackets because the lhs of an assignment could be a macro call so the parser complains.
+  i think its not actaully ambigous but threading the context through seems a bit yucky. idk.
+
+(PLAN)
+eventually want to unify the different ways of doing @enum and maybe make the sytax be a block isntead of a pattern.
+so you could mix implicit values and specific ones and specifiying the type.
+Also switching to zig sytax where struct def looks like a block and then initilizing fields uses = instead of : would
+be pleasing I think. have named arguments use = as well so there's symmetry.
+(END PLAN)
+
+## Finished new bc_to_asm (May 2/3)
+
 - calling assert_eq wasn't leaving the v-stack empty at the end. lol Bc::Pop wasn't doing the right count, always 1.
 - thats enough to get through 5/29, but I can't turn on COUNT_ASSERT so I don't trust that its actually working.
   yeah assert_eq(1, 2) passes :( i was replacing any eval that gave structured::const with Noop, but might still have runtime side effects.
@@ -14,7 +39,8 @@ TODO: fn index doesn't work if not inline thats like something cripplingly wrong
 
 - force spill before every loop fixed all except ones with floats (which i dont have yet) and parse_asm
 
-I think my prize for getting this working will be `+=, -=, \*=, /=`.
+I think my prize for getting this working will be `+=, -=, \*=, /=`. (did that, its just a macro).
+
 Then maybe llvm ir text will get me normal operatiors.
 
 ## stack based ir (May 1)
@@ -455,6 +481,17 @@ I probably want that for other backends anyway so perhaps I'll make that a pass 
   It works less than Kate so the problem must be in my extension not my lsp.
 - problem was not telling it which TextDocumentSyncCapability i wanted. kate just picked one i guess.
   But now it works and I do get colours, so that part at least was just a kate problem.
+
+## struct init as function (Mar 16)
+
+// The above is a macro that expands to:
+// const Person = (age: i64, gender: i64)!struct;
+// fn (age: i64, gender: i64) Person = (age: age, gender: gender)!construct;
+// Note, this is not a ~constructor~, its just a function that happens to construct a value of the new type.
+// There's nothing actually special about the function, its just a convention that seems nice.
+// I think constructors in java/c++ are a bit weird because you have access to a 'this' pointer before you've actually produced a value in a valid state.
+// Instead, here you are forced the figure out all the fields you want and put them in place all at once.
+// TODO: currently (a: b) === (a: b)!construct and there's nothing forcing someone to actually call your nice factory function (private fields, etc.).
 
 ## Dot call syntax (Mar 15)
 

@@ -482,6 +482,14 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "#macro fun namespace(block: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, namespace_macro),
     ),
+    (
+        "#macro #outputs(Type) fun tagged(cases: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, tagged_macro),
+    ),
+    (
+        "#macro #outputs(Type) fun struct(fields: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, struct_macro),
+    ),
 ];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
@@ -616,4 +624,34 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     compile.pending_ffi.push(Some(result));
 
     FatExpr::value(Values::Many(vec![s.as_raw(), block as i64]), TypeId::scope(), loc)
+}
+
+fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
+    hope(|| {
+        if let Expr::StructLiteralP(pattern) = &mut cases.expr {
+            let ty = compile.struct_type(pattern)?;
+            let ty = compile.program.to_enum(ty);
+            compile.set_literal(&mut cases, ty)?;
+        } else {
+            err!("expected map literal: .{{ name: Type, ... }} but found {:?}", cases);
+        }
+        Ok(())
+    });
+
+    cases
+}
+
+fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
+    hope(|| {
+        if let Expr::StructLiteralP(pattern) = &mut fields.expr {
+            let ty = compile.struct_type(pattern)?;
+            let ty = compile.program.intern_type(ty);
+            compile.set_literal(&mut fields, ty)?;
+        } else {
+            err!("expected map literal: .{{ name: Type, ... }} but found {:?}", fields);
+        }
+        Ok(())
+    });
+
+    fields
 }

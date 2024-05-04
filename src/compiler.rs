@@ -942,78 +942,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         let var = func.var_name;
         let for_bootstrap = func.has_tag(Flag::Bs);
         let any_reg_template = func.has_tag(Flag::Any_Reg);
-        let is_struct = func.has_tag(Flag::Struct);
-        let is_enum = func.has_tag(Flag::Enum);
         if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
             func.add_tag(Flag::Ct);
             func.add_tag(Flag::Flat_Call);
         }
 
-        assert!(!(is_struct && is_enum));
-        if is_struct {
-            ResolveScope::resolve_sign(&mut func, self)?;
-            ResolveScope::resolve_body(&mut func, self)?;
-            // TODO: HACK: this doesn't respect shadowing.
-            let init_overloadset = OverloadSetId::from_index(self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap());
-            let ty = self.struct_type(&mut func.arg)?;
-            let ty = self.program.intern_type(ty);
-            assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
-            func.ret = LazyType::Finished(ty);
-            func.finished_ret = Some(ty);
-            if let Some(name) = func.var_name {
-                self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
-            }
-            // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
-            //       with new commitment to doing it without idents for modules, the answer is yes.
-            func.name = Flag::Init.ident();
-            if func.body.is_none() {
-                let loc = func.loc;
-                let mut init_pattern = func.arg.clone();
-                for b in &mut init_pattern.bindings {
-                    let name = if let Name::Var(name) = b.name { name } else { todo!() };
-                    b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
-                }
-
-                func.body = Some(FatExpr::synthetic(Expr::StructLiteralP(init_pattern), loc));
-            }
-            let id = self.add_func(func)?;
-            self.program[init_overloadset].pending.push(id);
-            return Ok((Some(id), Some(init_overloadset)));
-        }
-        if is_enum {
-            ResolveScope::resolve_sign(&mut func, self)?;
-            ResolveScope::resolve_body(&mut func, self)?;
-            let init_overloadset = self.program.overload_sets.iter().position(|a| a.name == Flag::Init.ident()).unwrap();
-            let ty = self.struct_type(&mut func.arg)?;
-            let ty = self.program.to_enum(ty);
-            assert!(matches!(func.ret, LazyType::Infer), "remove type annotation on struct initilizer");
-            func.ret = LazyType::Finished(ty);
-            func.finished_ret = Some(ty);
-            if let Some(name) = func.var_name {
-                self.save_const_values(name, Value::Type(ty).into(), TypeId::ty())?;
-            }
-            // TODO: do i need to set func.var_name? its hard because need to find an init? or can it be a new one?
-            func.name = Flag::Init.ident();
-            if func.body.is_none() {
-                let loc = func.loc;
-                let init_pattern = func.arg.clone();
-                for mut b in init_pattern.bindings {
-                    let mut new_func = func.clone();
-                    debug_assert!(new_func.local_constants.is_empty());
-                    new_func.arg.bindings = vec![b.clone()];
-                    let name = if let Name::Var(name) = b.name { name } else { todo!() };
-                    b.ty = LazyType::PendingEval(FatExpr::synthetic(Expr::GetVar(name), loc));
-                    new_func.body = Some(FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![b], loc }), loc));
-                    new_func.annotations.retain(|a| a.name != Flag::Enum.ident());
-                    let id = self.add_func(new_func)?;
-                    self.program.overload_sets[init_overloadset].pending.push(id);
-                }
-            } // TODO: new consts system -- apr 25
-              // TODO: unfortunate that I have to short circuit, not handle extra annotations, and leave the garbage function there because i split them
-
-            return Ok((None, None));
-        }
         if for_bootstrap {
             func.add_tag(Flag::Aarch64); // TODO: could do for llvm too once i support eval body
             func.referencable_name = false;
@@ -1034,7 +968,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
         // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
         if let Some(var) = var {
-            if referencable_name && !is_enum && !is_struct {
+            if referencable_name {
                 // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
                 // TODO: distinguish between overload sets that you add to and those that you re-export
                 debug_assert!(!self.program[id].resolved_sign);
@@ -1358,7 +1292,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // TODO: warning if it has side effects. especially if it does const stuff.
                         let ty = self.compile_expr(result, arg, None)?;
                         self.set_literal(expr, ty)?;
-                        expr.as_structured()?
+                        expr.ty
                     }
                     Flag::Const_Eval => {
                         let res = self.compile_expr(result, arg, requested)?;
@@ -1377,7 +1311,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ty: TypeId = self.immediate_eval_expr_known(mem::take(arg))?;
                         let size = self.ready.sizes.slot_count(self.program, ty);
                         self.set_literal(expr, size as i64)?;
-                        expr.as_structured()?
+                        expr.ty
                     }
                     Flag::Assert_Compile_Error => {
                         // TODO: this can still have side-effects on the compiler state tho :(
@@ -1397,28 +1331,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
 
                         self.set_literal(expr, ())?;
-                        expr.as_structured()?
-                    }
-                    Flag::Struct => {
-                        if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
-                            let ty = self.struct_type(pattern)?;
-                            let ty = self.program.intern_type(ty);
-
-                            self.set_literal(expr, ty)?;
-                            expr.as_structured()?
-                        } else {
-                            err!("expected map literal: .{{ name: Type, ... }} but found {:?}", arg);
-                        }
-                    }
-                    Flag::Enum => {
-                        if let Expr::StructLiteralP(pattern) = arg.deref_mut().deref_mut() {
-                            let ty = self.struct_type(pattern)?;
-                            let ty = self.program.to_enum(ty);
-                            self.set_literal(expr, ty)?;
-                            expr.as_structured()?
-                        } else {
-                            err!("expected map literal: .{{ name: Type, ... }} but found {:?}", arg);
-                        }
+                        expr.ty
                     }
                     Flag::Tag => {
                         // TODO: auto deref and typecheking
@@ -1444,7 +1357,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         };
 
                         self.set_literal(expr, value)?;
-                        expr.as_structured()?
+                        expr.ty
                     }
                     Flag::Fn_Ptr => {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
@@ -1582,7 +1495,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 let bytes = self.pool.get(i).to_string();
                 self.set_literal(expr, bytes)?;
-                expr.as_structured()?
+                expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
                 outln!(
@@ -1897,7 +1810,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         _ => err!("took address of r-value {}", arg.log(self.pool)),
                     },
-                    Flag::Struct | Flag::Enum | Flag::Type => self.program.intern_type(TypeInfo::Type),
+                    Flag::Type => self.program.intern_type(TypeInfo::Type),
                     Flag::Deref => {
                         let ptr_ty = self.type_of(result, arg)?;
                         if let Some(ptr_ty) = ptr_ty {
@@ -2515,7 +2428,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
+    pub fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
         // TODO: maybe const keyword before name in func/struct lets you be generic.
         let types = self.infer_pattern(&mut pattern.bindings)?;
         let raw_fields = pattern.flatten();
@@ -2584,7 +2497,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
             }
-            TypeInfo::Enum { cases, .. } => {
+            TypeInfo::Tagged { cases, .. } => {
                 for (i, (f_name, _)) in cases.iter().enumerate() {
                     if *f_name == name {
                         return Ok(i);
@@ -2620,7 +2533,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             raw_container_ty = *as_tuple;
         }
 
-        if let TypeInfo::Enum { cases } = &self.program[raw_container_ty] {
+        if let TypeInfo::Tagged { cases } = &self.program[raw_container_ty] {
             let ty = cases[index].1;
             let ty = self.program.ptr_type(ty);
             return Ok(ty);
@@ -2646,7 +2559,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         match &self.program[raw_container_ty] {
             TypeInfo::Tuple(types) => Ok(self.program.ptr_type(types[index])),
             TypeInfo::Struct { fields, .. } => Ok(self.program.ptr_type(fields[index].ty)),
-            TypeInfo::Enum { cases, .. } => Ok(self.program.ptr_type(cases[index].1)),
+            TypeInfo::Tagged { cases, .. } => Ok(self.program.ptr_type(cases[index].1)),
             TypeInfo::Unique(_, _) => unreachable!(),
             _ => err!(
                 "only tuple/struct/enum/ support field access but found {}",
@@ -2920,7 +2833,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                     requested
                 }
-                TypeInfo::Enum { cases, .. } => {
+                TypeInfo::Tagged { cases, .. } => {
                     assert_eq!(
                         1,
                         values.len(),

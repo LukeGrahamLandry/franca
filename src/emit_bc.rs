@@ -562,7 +562,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 };
                 result.push(Bc::IncPtr { offset });
             }
-            TypeInfo::Enum { .. } => {
+            TypeInfo::Tagged { .. } => {
                 result.push(Bc::TagCheck { expected: index as u16 });
                 result.push(Bc::IncPtr { offset: 1 });
             }
@@ -611,12 +611,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 assert_eq!(offset, self.slot_count(raw_container_ty), "Didn't fill whole struct");
             }
-            TypeInfo::Enum { cases } => {
+            TypeInfo::Tagged { cases } => {
                 let size = self.slot_count(raw_container_ty);
                 assert_eq!(
                     1,
                     values.len(),
-                    "{} is an enum, value should have one active varient not {values:?}",
+                    "{} is @tagged, value should have one active varient not {values:?}",
                     self.program.log_type(requested)
                 );
                 let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
@@ -667,7 +667,7 @@ impl SizeCache {
             TypeInfo::Unknown => 9999,
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(program, *t)).sum(),
             TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(program, f.ty)).sum(),
-            TypeInfo::Enum { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(program, *ty)).max().expect("no empty enum"),
+            TypeInfo::Tagged { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(program, *ty)).max().expect("no empty enum"),
             TypeInfo::Scope => 2,
             TypeInfo::Int(_)
             | TypeInfo::Any
