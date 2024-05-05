@@ -1,0 +1,40 @@
+// this might just be the same as memcpy_wide_values? 
+// but i dont think so cause that was fixed by inlining, 
+// and switching to !if instead of fn if doesn't fix this even tho it always inlines. 
+// and its a closure so would have to inline regardless. 
+// gets a random pointer as the enum tag for a VarType. 
+
+#test(aarch64)
+fn main(canary: i64) i64 = {
+    E :: @tagged(aaa: i64, bbb: Str);
+    
+    e : E = (aaa: 123);
+    // note: the closure-ness here is not the problem, just to make the cases more clear
+    broken :: fn() i64 = @get_tag(e);
+    working :: fn() i64 = @get_tag(e&);
+    assert_eq(broken(), 0);
+    
+    #macro 
+    fun get_tag(var arg: FatExpr) FatExpr = {
+        arg = compile_ast(arg);
+        enum_type := arg&.ty[];
+        info := get_type_info(enum_type);
+        is_ptr := false;
+        if(eq(info&!tag[], tag_value(TypeInfo, Ptr!symbol))){|
+            enum_type = @as(Type) info&.Ptr[];
+            info = get_type_info(enum_type);
+            is_ptr = true;
+        };
+        ptr_ty := *enum_type;
+        
+        ::if(FatExpr);
+        '{
+            var arg_val = <if(is_ptr, fn='@as(Unit)unit', fn=arg)>;
+            var arg_ptr = <if(is_ptr, fn=arg, fn= 'arg_val&')>;
+            let tag_val = arg_ptr!tag[];
+            @as(i64) tag_val
+        }'
+    }
+
+    canary
+}

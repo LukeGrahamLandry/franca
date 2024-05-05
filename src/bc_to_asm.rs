@@ -280,6 +280,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     } else {
                         assert!(f.as_index() < 4096);
                         let reg = self.get_free_reg();
+                        // you don't really need to do this but i dont trust it cause im not following the calling convention
+                        self.load_imm(x21, self.compile.aarch64.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
                         self.compile.aarch64.push(ldr_uo(X64, reg, x21, f.as_index() as i64));
                         self.stack.push(Val::Increment { reg, offset_bytes: 0 })
                     }
@@ -957,6 +959,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
             // TODO: have a mapping. funcs take up slots even if never indirect called.
             assert!(f.as_index() < 4096);
+            // you don't really need to do this but i dont trust it cause im not following the calling convention
+            self.load_imm(x21, self.compile.aarch64.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
             self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.as_index() as i64));
         }
 
@@ -1053,7 +1057,7 @@ pub mod jit {
                 old: map.as_mut_ptr(),
                 map_mut: Some(map),
                 map_exec: None,
-                dispatch: vec![],
+                dispatch: Vec::with_capacity(99999), // Dont ever resize!
                 ranges: vec![],
                 ip_to_inst: vec![],
             }

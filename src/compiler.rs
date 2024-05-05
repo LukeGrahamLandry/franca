@@ -1331,7 +1331,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let container_ptr = self.compile_expr(result, arg, None)?;
                         let container_ptr_ty = self.program.raw_type(container_ptr);
                         let depth = self.program.ptr_depth(container_ptr_ty);
-                        assert_eq!(depth, 1, "!tag ptr must be one level of indirection. {:?}", container_ptr_ty);
+                        assert_eq!(
+                            depth,
+                            1,
+                            "!tag ptr must be one level of indirection. {:?}",
+                            self.program.log_type(container_ptr_ty)
+                        );
                         let ty = self.program.intern_type(TypeInfo::Ptr(TypeId::i64()));
                         expr.done = true;
                         expr.ty = ty;
@@ -1493,7 +1498,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 let bytes = self.pool.get(i).to_string();
                 self.set_literal(expr, bytes)?;
-                expr.ty = requested.unwrap(); // hack? :StrVarType
+                if let Some(requested) = requested {
+                    expr.ty = requested; // hack? :StrVarType
+                }
                 expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
@@ -2529,7 +2536,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ty = self.program.ptr_type(fields[0].ty);
                 return Ok(ty);
             }
-            raw_container_ty = *as_tuple;
+            raw_container_ty = self.program.raw_type(*as_tuple);
         }
 
         if let TypeInfo::Tagged { cases } = &self.program[raw_container_ty] {

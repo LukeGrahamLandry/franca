@@ -1,6 +1,3 @@
-- !!!!!! something makes some asm tests fail intermittently.
-  (signed_truncate range check is only in debug so aslr or whatever messes you up somehow and then in release you just get garbage instructions?)
-
 ## Deeply annoying
 
 - no u32/u16/u8
@@ -132,13 +129,13 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 - bitshifting too far
 - constructing a slice with a bad length
 - escaping pointer to stack
+- holding a pointer to a variable that goes out of scope (stack slot might get reused)
 - double free, use after free
 - holding pointer accross a collection resize (common case of ^)
-- alias block result location when returning a struct without calling a function
 - void pointer cast
 - hacky rust pointer ffi
 - inline asm
-- reading from @uninitialized()
+- reading from ()!uninitialized
 
 ## Testing
 

@@ -26,9 +26,26 @@ fun as(T: Type, expr: FatExpr) FatExpr = '@(<@literal(as)>)(<@literal(T)>) <expr
 // TODO: allow a catch all default if last func has no name. 
 #macro 
 fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
-    let stmts: Slice(FatStmt) = target&.expr.Block.body[];
+    stmts: Slice(FatStmt) = target&.expr.Block.body[];
     arg = compile_ast(arg);
-    let enum_type = arg&.ty[];
+    enum_type := arg&.ty[];
+    info := get_type_info(enum_type);
+    
+    kind := info&!tag[];
+    is_ptr := false;
+    if(eq(kind, tag_value(TypeInfo, Ptr!symbol))){|
+        enum_type = @as(Type) info&.Ptr[];
+        info = get_type_info(enum_type);
+        is_ptr = true;
+    };
+    ptr_ty := *enum_type;
+    
+    info : Tagged!builtin = info&.Tagged[];
+    
+    // TODO: single element structs suck ass
+    info := (@as(VoidPtr) info&).ptr_to_int();
+    info := info.int_to_ptr();
+    varients : *Slice(Ty(Symbol, Type)) = info;
     
     // TODO: compile error to not handle all and not have a default branch
     // TODO: why can't i call 'as'? ffi unique? 
@@ -43,24 +60,48 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
     //       but allow no arg if you just want to use it as a switch. 
     // TODO: use default arguments as value eq guards. 
     
+    ::if(FatExpr);
     '{
-        var arg_var = <arg>;
-        let tag_val = arg_var&!tag[];
+        var arg_val = <{
+            res := arg;
+            if(is_ptr) {|
+                res = '@as(Unit)unit';
+            }; // TODO: why the fuck can't i just call if.
+            res
+        }>;
+        var arg_ptr = <{
+            res := arg;
+            if(is_ptr.not()) {|
+                res = 'arg_val&';
+            }; // TODO: why the fuck can't i just call if.
+            res
+        }>;
+        let tag_val = arg_ptr!tag[];
         <{
             for(stmts) { (stmt: *FatStmt) | 
                 if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|  // (1)
                     var handler_body = stmt.stmt.Eval[];
-                    var name = handler_body&.expr.Closure[].name[]; // (2)
-                    var case_access = 'arg_var&.___';
+                    name: Symbol = handler_body&.expr.Closure[].name[]; // (2)
+                    index := tag_value(enum_type, name); // they're always sequential
+                    name_ty := varients[].get(index);
+                    assert(name_ty&[0][].eq(name), "ICE: bad enum index");
+                    
+                    
+                    var case_access = 'arg_ptr.___';
                     case_access&.expr.FieldAccess[1][] = name;  // (3)
                     let tag = 'tag_value(<@literal(Type) enum_type>, <@literal(name)>)';
-                    body = '(eq(tag_val, <tag>), fn = <handler_body>(<case_access>[]), fn = <body>)!if';
+                    if(not$is_ptr){|
+                        case_access = '<case_access>[]';
+                    };
+                    body = '(eq(tag_val, <tag>), fn = <handler_body>(<case_access>), fn = <body>)!if';
                 };
             };
             body
         }>
     }'
 }
+
+
 
 /// Similar to @match but operates on values instead of enum payloads. 
 /// @switch(value) { @<specifier> fn= <body> }
