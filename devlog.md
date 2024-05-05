@@ -1,3 +1,13 @@
+## (May 5)
+
+- removed some places where it pre-interned a fnptr type since all exprs have thier type now, emit_bc shouldn't need to mutate program to make a new one.
+
+trying to remove uses of type_of and mut_replace because they're clunky ways of doing things.
+A) its a massive problem if you error in a mut_replace and try to recover cause you lose something.
+b) type_of is kinda all or nothing on getting the type so its not really what you want for overload resolution.
+you just need more compile errors to be recoverable so it can iteratively narrow down the types of each arg seperately.
+now only type_of is for overloading so I can spare some code to fix that cause it means getting rid of the type_of junk.
+
 ## improving enums (May 4)
 
 all these are not big expressiveness wins, really just trying to raise morale.

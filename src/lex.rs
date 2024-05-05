@@ -162,11 +162,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
         }
 
         todo!("untested"); // i guess i always happen to peek first in the parser.
-        let t = self.do_next();
-        if let Some(t) = self.hack.take() {
-            self.peeked.push_back(t);
-        }
-        t
     }
 
     fn do_next(&mut self) -> Token<'p> {
@@ -405,15 +400,15 @@ impl<'a, 'p> Lexer<'a, 'p> {
     fn eat_whitespace(&mut self) {
         loop {
             // TODO count blank as comment
-            let mut first = true;
+            // let mut first = true;
             while self.peek_c().is_whitespace() {
                 if self.pop() == '\n' {
                     self.raw_lines += 1;
-                    if !first {
-                        todo!("untested");
-                        self.skipped_lines += 1;
-                        first = false;
-                    }
+                    // if !first {
+                    // todo!("untested");
+                    // self.skipped_lines += 1;
+                    // first = false;
+                    // }
                 }
             }
             if self.peek_c() == '/' {

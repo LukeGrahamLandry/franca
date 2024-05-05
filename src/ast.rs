@@ -1204,6 +1204,11 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Fn(ty))
     }
 
+    #[track_caller]
+    pub fn fn_type(&mut self, id: FuncId) -> Option<TypeId> {
+        self[id].finished_ty().map(|ty| self.intern_type(TypeInfo::Fn(ty)))
+    }
+
     pub extern "C" fn ptr_type(&mut self, value_ty: TypeId) -> TypeId {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }

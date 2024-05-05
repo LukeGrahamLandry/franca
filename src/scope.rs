@@ -4,13 +4,13 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, OverloadSet, OverloadSetId, ScopeId, Stmt, TypeId, Var, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{add_unique, BlockScope, CErr, Compile, Res},
     err, ice,
     logging::{LogTag::Scope, PoolLog},
     outln,
     pool::Ident,
-    unwrap, STATS,
+    STATS,
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {

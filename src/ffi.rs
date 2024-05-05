@@ -513,41 +513,6 @@ impl<'p> InterpSend<'p> for String {
     }
 }
 
-macro_rules! send_arr {
-    ($ty:tt, $len:expr) => {
-        impl<'p> InterpSend<'p> for [$ty; $len] {
-            fn get_type_key() -> u128 {
-                unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-            }
-            fn create_type(_: &mut Program<'p>) -> TypeId {
-                TypeId::i64()
-            }
-
-            fn serialize_to_ints(self, values: &mut Vec<i64>) {
-                for v in self.into_iter() {
-                    v.serialize_to_ints(values);
-                }
-            }
-
-            fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-                let mut s: Self = Default::default();
-                for i in 0..$len {
-                    s[i] = <$ty>::deserialize_from_ints(values)?;
-                }
-                Some(s)
-            }
-
-            fn size() -> usize {
-                1
-            }
-
-            fn name() -> String {
-                stringify!($ty).to_string()
-            }
-        }
-    };
-}
-
 fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
     A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)
 }

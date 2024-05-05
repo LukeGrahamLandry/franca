@@ -53,6 +53,7 @@ pub enum CErr<'p> {
     TypeCheck(TypeId, TypeId, &'static str),
     AmbiguousCall,
     Diagnostic(Vec<Diagnostic>),
+    NeedsTypeHint(&'static str),
     Fatal(String),
 }
 
@@ -149,7 +150,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ready.sizes.slot_count(self.program, ty) as u16
     }
 
-    pub(crate) fn as_value_expr<T: InterpSend<'p>>(&mut self, val: &FatExpr<'p>) -> Option<T> {
+    pub(crate) fn _as_value_expr<T: InterpSend<'p>>(&mut self, val: &FatExpr<'p>) -> Option<T> {
         if let Expr::Value { value } = &val.expr {
             debug_assert!(!val.ty.is_unknown());
             let want = T::get_type(self.program);
@@ -473,40 +474,34 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
-        mut_replace!(self.program[f], |func: Func<'p>| {
-            debug_assert!(func.local_constants.is_empty());
-            assert!(result.when == ExecTime::Comptime || !func.has_tag(Flag::Comptime));
-            let arguments = func.arg.flatten();
-            for (name, ty, kind) in arguments {
-                // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
-                debug_assert!(kind != VarType::Const, "Tried to emit before binding const args.");
-                if let Some(name) = name {
-                    debug_assert!(kind == name.3);
-                    let prev = result.vars.insert(name, ty);
-                    assert!(prev.is_none(), "overwrite arg?");
-                }
+
+        debug_assert!(self.program[f].local_constants.is_empty());
+        assert!(!self.program[f].has_tag(Flag::Comptime));
+        let arguments = self.program[f].arg.flatten();
+        for (name, ty, kind) in arguments {
+            // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
+            debug_assert!(kind != VarType::Const, "Tried to emit before binding const args.");
+            if let Some(name) = name {
+                debug_assert!(kind == name.3);
+                let prev = result.vars.insert(name, ty);
+                assert!(prev.is_none(), "overwrite arg?");
             }
-            Ok((func, ()))
-        });
+        }
+
         if !has_body {
-            let ret = mut_replace!(self.program[f], |mut func: Func<'p>| {
-                // Functions without a body are always builtins.
-                // It's convient to give them a FuncId so you can put them in a variable,
-                if let Some(tag) = func.annotations.iter().find(|c| c.name == Flag::Comptime_Addr.ident()) {
-                    let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
-                    func.comptime_addr = Some(addr.to_bytes());
-                    let _ = self.program.intern_type(TypeInfo::FnPtr(func.unwrap_ty()));
-                    // make sure emit_ can get the type without mutating the Program.
-                }
-                let ret_ty = func.ret.unwrap();
-                // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
-                //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
-                //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
-                assert!(func.referencable_name, "fn no body needs name");
-                Ok((func, (ret_ty)))
-            });
+            // Functions without a body are probably an exten-ed ffi thing.
+            // It's convient to give them a FuncId so you can put them in a variable.
+            let ty = unwrap!(self.program[f].finished_ty(), "fn without body needs type annotations.");
+            if let Some(tag) = self.program[f].annotations.iter().find(|c| c.name == Flag::Comptime_Addr.ident()) {
+                let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
+                self.program[f].comptime_addr = Some(addr.to_bytes());
+            }
+            // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
+            //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
+            //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
+            assert!(self.program[f].referencable_name, "fn no body needs name");
             self.pop_state(state);
-            return Ok(ret);
+            return Ok(ty.ret);
         }
 
         let mut body_expr = self.program[f].body.clone().unwrap(); // TODO: no clone. make errors recoverable. no mut_replace -- Apr 24
@@ -515,7 +510,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.inline_asm_body(f, arg)?;
             let fn_ty = self.program[f].unwrap_ty();
             let ret_ty = fn_ty.ret;
-            let _ = self.program.intern_type(TypeInfo::FnPtr(fn_ty)); // make sure emit_ can get the type without mutating the Program.
             self.program[f].body = None;
             ret_ty
         } else {
@@ -1075,7 +1069,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program[f].why_resolved_body = Some(Location::caller().to_string()); // self.log_trace()
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            ResolveScope::resolve_body(&mut func, self)?;
+            ResolveScope::resolve_body(&mut func, self).unwrap(); // TODO
             Ok((func, ()))
         });
         Ok(())
@@ -1144,6 +1138,20 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(res)
     }
 
+    fn break_fn_type(&mut self, requested: Option<TypeId>) -> (Option<TypeId>, Option<TypeId>) {
+        if let Some(ty) = requested {
+            if let TypeInfo::Fn(ty) = self.program[ty] {
+                let ret = if ty.ret.is_unknown() { None } else { Some(ty.ret) };
+                let arg = if ty.arg.is_unknown() { None } else { Some(ty.arg) };
+                (arg, ret)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    }
+
     // TODO: make the indices always work out so you could just do it with a normal stack machine.
     //       and just use the slow linear types for debugging.
     fn compile_expr_inner(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
@@ -1155,36 +1163,40 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Closure(_) => {
-                let id = self.promote_closure(result, expr)?;
-                let ty = self.program.func_type(id);
+                let (arg, ret) = self.break_fn_type(requested);
+                let id = self.promote_closure(result, expr, arg, ret)?;
+                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_type(self.program));
                 expr.set(Value::GetFn(id).into(), ty);
                 ty
             }
             &mut Expr::WipFunc(id) => {
                 self.infer_types(id)?;
-                let ty = self.program.func_type(id);
+                // When Expr::Call compiles its 'f', the closure might not know its types yet, so just say its some const known Fn and figure it out later.
+                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_type(self.program));
                 expr.set(Value::GetFn(id).into(), ty);
                 ty
             }
             Expr::Call(f, arg) => {
-                // self.compile_expr(result, arg, None)?; // TODO: infer arg type from fn??
+                // Compile 'f' as normal, its fine if its a macro that expands to a callable or a closure we don't know the types for yet.
+                self.compile_expr(result, f, None)?;
 
-                if let Some(ty) = self.type_of(result, f)? {
-                    if let TypeInfo::FnPtr(f_ty) = self.program[ty] {
-                        self.compile_expr(result, f, Some(ty))?;
-                        self.compile_expr(result, arg, Some(f_ty.arg))?;
-                        expr.done = true;
-                        return Ok(f_ty.ret);
-                    }
+                if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
+                    self.compile_expr(result, arg, Some(f_ty.arg))?;
+                    expr.done = f.done && arg.done;
+                    expr.ty = f_ty.ret;
+                    return Ok(f_ty.ret);
                 }
 
+                // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     match f_id {
                         FuncRef::Exact(f_id) => return Ok(self.compile_call(result, expr, f_id, requested)?.0),
                         FuncRef::Split { ct, rt } => return self.compile_split_call(result, expr, ct, rt),
                     }
                 }
-                ice!("function not declared or \nTODO: dynamic call: {}\n\n{expr:?}", expr.log(self.pool))
+
+                self.last_loc = Some(f.loc);
+                ice!("tried to call non-function",)
             }
             Expr::Block { body, result: value, .. } => {
                 body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
@@ -1290,7 +1302,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             container
                         };
                         let ptr_ty = self.program.slice_type(expect);
-                        expr.done = true;
+                        expr.done = arg.done;
                         expr.ty = ptr_ty;
                         ptr_ty
                     }
@@ -1298,7 +1310,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
-                        expr.done = true;
+                        expr.done = arg.done;
                         expr.ty = ty;
                         ty
                     }
@@ -1354,7 +1366,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.program.log_type(container_ptr_ty)
                         );
                         let ty = self.program.intern_type(TypeInfo::Ptr(TypeId::i64()));
-                        expr.done = true;
+                        expr.done = arg.done;
                         expr.ty = ty;
                         ty
                     }
@@ -1364,7 +1376,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             &mut Expr::GetNamed(i) => i,
                             &mut Expr::GetVar(v) => v.0,
                             &mut Expr::String(i) => i,
-                            Expr::PrefixMacro { handler, target, .. } => {
+                            Expr::PrefixMacro { target, .. } => {
                                 // TODO: check that handler is @as
                                 if let Expr::String(i) = target.expr {
                                     i
@@ -1433,7 +1445,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(ty);
                     }
                     Flag::Contextual_Field => {
-                        let ty = unwrap!(requested, "!contextual_field (leading dot) requires name");
+                        let ty = if let Some(r) = requested {
+                            r
+                        } else {
+                            err!(CErr::NeedsTypeHint("!contextual_field (leading dot) requires type hint"))
+                        };
                         if let Some(name) = arg.as_ident() {
                             let fields = unwrap!(
                                 self.program.contextual_fields[ty.as_index()].as_ref(),
@@ -1451,6 +1467,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
+
             Expr::FieldAccess(e, name) => {
                 let container = self.compile_expr(result, e, None)?;
 
@@ -1493,20 +1510,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_expr(result, expr, requested)? // TODO: dont dispatch again
             }
             Expr::Index { ptr, index } => {
-                let ptr = self.compile_expr(result, ptr, None)?;
+                let ptr_ty = self.compile_expr(result, ptr, None)?;
                 self.compile_expr(result, index, Some(TypeId::i64()))?;
                 let i: usize = self.immediate_eval_expr_known(*index.clone())?;
                 self.set_literal(index, i as i64)?;
-                let res = self.index_expr(ptr, i)?;
+                expr.done = ptr.done;
+                let res = self.index_expr(ptr_ty, i)?;
                 expr.ty = res;
-                expr.done = true;
                 res
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => {
                 let res = self.construct_struct(result, requested, pattern)?;
                 expr.ty = res;
-                expr.done = true;
                 res
             }
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
@@ -1717,16 +1733,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(self.program.funcs[id.as_index()].finished_ret);
                 }
 
-                if let Some(i) = self.as_value_expr(f) {
-                    if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
-                        if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
-                            // Need to save this because resolving overloads eats named arguments
-                            f.set(fid.as_value().into(), self.program.func_type(fid.at_rt()));
-                            return Ok(Some(f_ty.ret));
-                        }
-                    }
-                }
-
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if i.3 == VarType::Const {
                         if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
@@ -1777,7 +1783,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::Closure(_) => {
-                if let Ok(id) = self.promote_closure(result, expr) {
+                if let Ok(id) = self.promote_closure(result, expr, None, None) {
                     if self.program[id].finished_ty().is_some() {
                         return Ok(Some(self.program.func_type(id)));
                     }
@@ -1827,7 +1833,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.program.intern_type(TypeInfo::Ptr(value_ty))
                         }
                         &mut Expr::GetNamed(i) => {
-                            logln!("UNDECLARED IDENT: {} (in SuffixMacro::addr)", self.pool.get(i));
                             err!(CErr::UndeclaredIdent(i))
                         }
                         _ => err!("took address of r-value {}", arg.log(self.pool)),
@@ -2206,28 +2211,42 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: calling this in infer is wrong because it might fail and lose the function
-    pub fn promote_closure(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
+    pub fn promote_closure(
+        &mut self,
+        result: &mut FnWip<'p>,
+        expr: &mut FatExpr<'p>,
+        req_arg: Option<TypeId>,
+        req_ret: Option<TypeId>,
+    ) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
+            // TODO: use :ClosureRequestType
             let scope = func.scope.unwrap();
             let f = self.add_func(mem::take(func))?;
             self[scope].funcs.push(f);
             self.ensure_resolved_sign(f)?;
 
+            // If the closure doesn't have type annotations but our caller asked for something specific,
+            // insert that as a type annotation and don't bother looking at the body to infer.
+            // It will get typechecked later when the callsite actually gets compiled.
+            // TODO: this is wrong because it means overloading can't call this function! -- May 5
+            if matches!(self.program[f].ret, LazyType::Infer) {
+                if let Some(ret) = req_ret {
+                    self.program[f].ret = LazyType::Finished(ret);
+                }
+            }
+
             if self.infer_types(f)?.is_none() {
                 // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
-                mut_replace!(self.program[f], |mut func: Func<'p>| {
-                    if let Some(body) = &mut func.body {
-                        // closures aren't lazy currently.
-                        debug_assert!(func.resolved_body);
-                        // TODO: this is very suspisious! what if it has captures
-                        let res = self.type_of(result, body);
-                        debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
-                        if let Some(ret_ty) = res? {
-                            func.finished_ret = Some(ret_ty);
-                        }
+                if let Some(body) = &mut self.program[f].body.clone() {
+                    // closures aren't lazy currently.
+                    debug_assert!(self.program[f].resolved_body);
+                    // TODO: this is very suspisious! what if it has captures
+                    let res = self.type_of(result, body);
+                    debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
+                    if let Some(ret_ty) = res? {
+                        self.program[f].finished_ret = Some(ret_ty);
                     }
-                    Ok((func, ()))
-                });
+                }
             }
 
             let (e, ty) = self.func_expr(f);
@@ -2670,7 +2689,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert_eq!(kind, VarType::Const);
             let name = unwrap!(name, "arg needs name (unreachable?)");
             let ty = arg_expr.ty;
-            let arg_value = if let Expr::Value { value } = mem::take(arg_expr).expr {
+            let arg_value = if let Expr::Value { value } = arg_expr.expr.clone() {
                 value
             } else {
                 unreachable!()
@@ -2830,7 +2849,11 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn construct_struct(&mut self, result: &mut FnWip<'p>, requested: Option<TypeId>, pattern: &mut Pattern<'p>) -> Res<'p, TypeId> {
-        let requested = unwrap!(requested, "struct literal needs type hint");
+        let requested = if let Some(requested) = requested {
+            requested
+        } else {
+            err!(CErr::NeedsTypeHint("struct literal"))
+        };
         let names: Vec<_> = pattern.flatten_names();
         Ok(mut_replace!(*pattern, |mut pattern: Pattern<'p>| {
             // TODO: why must this suck so bad

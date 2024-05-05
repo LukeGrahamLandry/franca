@@ -51,11 +51,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Value {
                 value: Values::Many(vals), ..
             } => {
+                // TODO: revisit when SplitFunc can't fit in one slot anymore.
                 debug_assert!(vals.len() != 1);
                 None
             }
             Expr::Closure(_) => {
-                let id = self.promote_closure(result, f)?;
+                // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
+                let arg_ty = self.compile_expr(result, arg, ret)?;
+                let id = self.promote_closure(result, f, Some(arg_ty), ret)?;
                 self.named_args_to_tuple(result, arg, id)?;
                 Some(id.into())
             }
@@ -78,39 +81,37 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
-        let value = if let Some((value, _)) = self.find_const(name)? {
-            if let Values::One(Value::GetFn(f)) = value {
-                self.named_args_to_tuple(result, arg, f)?;
-                self.pop_state(state);
-                return Ok(f.into());
-            }
-            if let Values::One(Value::SplitFunc { rt, ct }) = value {
-                assert_ne!(ct, rt);
-                self.pop_state(state);
-                return Ok(FuncRef::Split { ct, rt });
-            }
-            if let Values::One(Value::GetNativeFnPtr(_)) = value {
-                err!("TODO: const GetNativeFnPtr?",)
-            }
-            value
-        } else {
-            // TODO: use self.program.vars[name.1].loc to show the declaration site.
-            err!("Missing constant {} (forgot to make a Fn(A, R) 'const'?)", name.log(self.pool))
-        };
-
         // TODO: get rid of any
         if let Some(ty) = requested_ret {
             assert!(!ty.is_any());
             assert!(!ty.is_unknown());
         }
 
-        // TODO: combine this with the match up there so its less ugly.
-        if let Values::One(Value::OverloadSet(i)) = value {
-            let out = self.resolve_in_overload_set(result, arg, requested_ret, i)?;
-            self.pop_state(state);
-            Ok(out)
+        if let Some((value, _)) = self.find_const(name)? {
+            match value {
+                Values::One(Value::GetFn(f)) => {
+                    self.named_args_to_tuple(result, arg, f)?;
+                    self.pop_state(state);
+                    Ok(f.into())
+                }
+                Values::One(Value::SplitFunc { rt, ct }) => {
+                    assert_ne!(ct, rt);
+                    self.pop_state(state);
+                    Ok(FuncRef::Split { ct, rt })
+                }
+                Values::One(Value::GetNativeFnPtr(_)) => {
+                    err!("TODO: const GetNativeFnPtr?",)
+                }
+                Values::One(Value::OverloadSet(i)) => {
+                    let out = self.resolve_in_overload_set(result, arg, requested_ret, i)?;
+                    self.pop_state(state);
+                    Ok(out)
+                }
+                _ => err!("Expected function for {} but found {:?}", name.log(self.pool), value),
+            }
         } else {
-            err!("Expected function for {} but found {:?}", name.log(self.pool), value);
+            // TODO: use self.program.vars[name.1].loc to show the declaration site.
+            err!("Missing constant {} (forgot to make a Fn(A, R) 'const'?)", name.log(self.pool))
         }
     }
 
