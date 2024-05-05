@@ -20,6 +20,8 @@ all these are not big expressiveness wins, really just trying to raise morale.
 - hack fix to ""!type not being Slice$i64, since constants are lazy now, just have the parser emit casts to a fixed identifier.
   sad that its 4 ast nodes for a string constant now (5k extra nodes in full test, ~2%, yikes) but its much less cringe than the old system where you had to manually do the cast or write a bunch of overloads.
   there was something weird about @as not resetting the type when I set the values to the expr which made it the unique type from rust String ffi.
+- removed `program.intern_type(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true })); // HACK: for ffi find_interned after moving IntType to export_ffi -- Apr 17`
+  seems to work fine without now.
 
 (PLAN)
 eventually want to unify the different ways of doing @enum and maybe make the sytax be a block isntead of a pattern.

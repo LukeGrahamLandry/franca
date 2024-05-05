@@ -71,18 +71,8 @@ const HEADER: &str = r##"
 #![allow(clippy::no_effect)]
 #![allow(clippy::explicit_auto_deref)]
 #![allow(clippy::deref_addrof)]
-
-struct ShiftTy {
-    LSL: i64,
-    LSR: i64,
-    ASR: i64
-}
-
-const Shift: &ShiftTy = &ShiftTy {
-    LSL: 0b00,
-    LSR: 0b01,
-    ASR: 0b10,
-};
+#![allow(clippy::double_parens)]
+#![allow(clippy::identity_op)]
 "##;
 
 impl<'z, 'p: 'z> EmitRs<'z, 'p> {
@@ -268,6 +258,26 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                     let func = &self.comp.program[f_id];
                     assert!(!func.has_tag(Flag::Comptime));
                     let name = self.make_fn_name(f_id);
+                    if func.body.is_none() {
+                        if let Expr::Tuple(parts) = &arg.expr {
+                            if parts.len() == 2 {
+                                let i = func.name;
+                                let lhs = self.compile_expr(&parts[0])?;
+                                let rhs = self.compile_expr(&parts[1])?;
+                                match self.comp.pool.get(i) {
+                                    "shift_left" => return Ok(format!("({lhs} << {rhs})")),
+                                    "bit_or" => return Ok(format!("({lhs} | {rhs})")),
+                                    "bit_and" => return Ok(format!("({lhs} & {rhs})")),
+                                    "sub" => return Ok(format!("({lhs} - {rhs})")),
+                                    "mul" => return Ok(format!("({lhs} * {rhs})")),
+                                    "le" => return Ok(format!("({lhs} <= {rhs})")),
+                                    "add" => return Ok(format!("({lhs} + {rhs})")),
+                                    _ => {}
+                                };
+                            }
+                        }
+                    }
+
                     let args = self.compile_expr(arg)?;
                     format!("{name}({args})")
                 } else {

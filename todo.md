@@ -3,7 +3,7 @@
 - no u32/u16/u8
 - no typechecking through fn arg/ret so if/loop body closures need annotations
 - can't output an exe, only jit
-- no way to say trait bounds on generics (it just tries to compile like c++ templates)
+- no way to say trait bounds on generics (it just tries to compile like c++ templates). at least have fn require_overload(Ident, Type, Type);
 - need to explicitly instantiate generics
 - asm no print stack traces
 - stdlib isn't in seperate modules. need to allow nested modules.
@@ -12,6 +12,11 @@
 - no string escape codes like "\n"
 - sometimes it can't show the codemap. should never use garbage_loc.
 - typing my_struct&.field_name[] every time feels like working at the nightmares factory even tho weird place expressions in other languages annoy me
+- no default branch in @match
+- can't have multiple test entry points in one file
+- can't import a file as a namespace.
+- can't write a macro that expands to statements
+- errors don't show multiple locations (like conflicting overloads should show the problem)
 
 ## Feature Ideas
 

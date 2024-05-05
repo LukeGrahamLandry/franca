@@ -1122,7 +1122,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         expr.ty = res;
         if !old.is_unknown() {
-            // TODO: cant just assert_eq because it does change for VoidPtr.
+            // TODO: cant just assert_eq because it does change for rawptr.
             self.type_check_arg(expr.ty, old, "sanity ICE")?;
         }
         Ok(res)
@@ -1884,7 +1884,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "bool" => Some(Bool),
             "UnknownType" => Some(TypeInfo::Unknown),
             "Never" => Some(TypeInfo::Never),
-            "VoidPtr" => Some(VoidPtr),
+            "rawptr" => Some(VoidPtr),
             "OverloadSet" => Some(TypeInfo::OverloadSet),
             "ScopedBlock" => Some(TypeInfo::Scope),
             _ => None,
@@ -2674,7 +2674,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
                     pattern,
                     arg_expr.log(self.pool),
-                    func.synth_name(self.pool)
+                    self.pool.get(func.name)
                 );
                 Ok(())
             };
@@ -2959,7 +2959,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 val = Value::Type(self.to_type(val)?).into()
             } else {
                 // TODO: you want the type check but doing it against type_of_raw is kinda worthless
-                // like const a: *i64 = @as(VoidPtr) malloc(8); should be fine? but i have to serialize that as an int and then type_of_raw is wrong.
+                // like const a: *i64 = @as(rawptr) malloc(8); should be fine? but i have to serialize that as an int and then type_of_raw is wrong.
                 // but i do need to think about how memory makes its way into your exe.
                 // self.type_check_arg(found_ty, expected_ty, "const decl")?;
             }

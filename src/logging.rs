@@ -266,7 +266,7 @@ impl<'p> Program<'p> {
                     }
                     TypeInfo::Type => "Type".to_owned(),
                     TypeInfo::Unit => "Unit".to_owned(),
-                    TypeInfo::VoidPtr => "VoidPtr".to_owned(),
+                    TypeInfo::VoidPtr => "rawptr".to_owned(),
                     TypeInfo::Int(int) => {
                         format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
                     }
@@ -449,7 +449,7 @@ impl<'p> Expr<'p> {
                 v => format!("{v:?}"),
             },
             Expr::GetVar(v) => v.log(pool),
-            Expr::Closure(f) => format!("closure(fn {:?})", f.synth_name(pool)),
+            Expr::Closure(f) => format!("closure(fn {:?})", pool.get(f.name)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.logd(pool, depth), pool.get(*i)),
             Expr::StructLiteralP(pattern) => {
                 let body: String = pattern
@@ -478,7 +478,7 @@ impl<'p> Stmt<'p> {
             Stmt::DeclNamed { name, ty, value, kind } => format!("{kind:?} {}: {} = {};", pool.get(*name), ty.log(pool), value.logd(pool, depth)),
             Stmt::DeclVar { name, ty, value, kind, .. } => format!("{:?} {}: {} = {};", kind, name.log(pool), ty.log(pool), value.logd(pool, depth)),
             Stmt::Eval(e) => e.logd(pool, depth),
-            Stmt::DeclFunc(func) => format!("declare(fn {})", func.synth_name(pool)),
+            Stmt::DeclFunc(func) => format!("declare(fn {})", pool.get(func.name)),
             Stmt::Noop => "".to_owned(),
             Stmt::Set { place, value } => {
                 format!("{} = {};", place.logd(pool, depth), value.logd(pool, depth))
@@ -525,8 +525,8 @@ impl<'p> PoolLog<'p> for Func<'p> {
         }
         format!(
             "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}llvm={}, aarch64={}\nCONSTS:\n{:?}",
-            self.synth_name(pool),
-            self.get_name(pool),
+            pool.get(self.name),
+            self.name,
             self.ret.log(pool),
             self.body.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
             self.arg.log(pool), // TODO: better formatting.
@@ -651,7 +651,7 @@ impl<'p> FatStmt<'p> {
 impl<'p> Func<'p> {
     pub fn log_captures(&self, pool: &StringPool<'p>) -> String {
         let mut s = String::new();
-        writeln!(s, "fn {:?}", self.synth_name(pool));
+        writeln!(s, "fn {:?}", pool.get(self.name));
         if !self.capture_vars.is_empty() {
             writeln!(
                 s,

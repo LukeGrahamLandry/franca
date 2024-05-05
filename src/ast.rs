@@ -11,7 +11,7 @@ use crate::{
     unwrap, Map, STATS,
 };
 use codemap::Span;
-use interp_derive::{InterpSend, Reflect};
+use interp_derive::InterpSend;
 use std::{
     cell::RefCell,
     hash::Hash,
@@ -596,26 +596,6 @@ impl<'p> FatExpr<'p> {
     pub fn null(loc: Span) -> Self {
         FatExpr::synthetic(Expr::Poison, loc)
     }
-
-    pub fn parse_dot_chain(&self) -> Res<'p, Vec<Ident<'p>>> {
-        match &self.expr {
-            Expr::FieldAccess(parent, child) => {
-                let mut parent = parent.parse_dot_chain()?;
-                parent.push(*child);
-                Ok(parent)
-            }
-            Expr::GetVar(v) => Ok(vec![v.0]),
-            &Expr::GetNamed(i) => Ok(vec![i]),
-            _ => err!("expected a.b.c.d.e",),
-        }
-    }
-
-    pub fn as_func(self) -> Res<'p, Func<'p>> {
-        match self.expr {
-            Expr::Closure(f) => Ok(*f),
-            _ => err!("expected function expression",),
-        }
-    }
 }
 #[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
@@ -753,16 +733,6 @@ impl<'p> Func<'p> {
         }
     }
 
-    // TODO: remove
-    pub fn synth_name(&self, pool: &StringPool<'p>) -> &'p str {
-        pool.get(self.get_name(pool))
-    }
-
-    // TODO: remove
-    pub fn get_name(&self, _: &StringPool<'p>) -> Ident<'p> {
-        self.name
-    }
-
     /// Find annotation ignoring arguments
     pub fn has_tag(&self, flag: Flag) -> bool {
         self.annotations.iter().any(|a| a.name == flag.ident())
@@ -810,7 +780,6 @@ impl<'p> Func<'p> {
     }
 
     pub fn any_const_args(&self) -> bool {
-        // TODO: include comptime only types
         self.arg.bindings.iter().any(|b| b.kind == VarType::Const)
     }
 
@@ -878,12 +847,6 @@ pub struct OverloadOption {
     pub arg: TypeId,
     pub ret: Option<TypeId>, // For @comptime, we might not know without the args
     pub func: FuncId,
-}
-
-#[derive(Debug, Reflect)]
-pub struct SuperSimple {
-    pub a: i64,
-    pub b: i64,
 }
 
 impl<'p> Stmt<'p> {
@@ -986,9 +949,8 @@ impl<'p> Program<'p> {
 
         init_interp_send!(&mut program, FatStmt, TypeInfo);
         init_interp_send!(&mut program, Bc, IntTypeInfo); // TODO: aaaa
-        program.get_rs_type(SuperSimple::get_ty());
+
         program.get_rs_type(RsResolvedSymbol::get_ty());
-        program.intern_type(TypeInfo::Int(IntTypeInfo { bit_count: 32, signed: true })); // HACK: for ffi find_interned after moving IntType to export_ffi -- Apr 17
 
         program
     }

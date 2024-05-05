@@ -57,25 +57,25 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn getchar() i32", libc::getchar as *const u8),
     ("fn putchar(c: i64) i32", libc::putchar as *const u8),  // TODO: c: i32
     ("fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
-    ("fn malloc(size: usize) VoidPtr", libc::malloc as *const u8),
-    ("fn free(ptr: VoidPtr) Unit", libc::free as *const u8),
+    ("fn malloc(size: usize) rawptr", libc::malloc as *const u8),
+    ("fn free(ptr: rawptr) Unit", libc::free as *const u8),
     ("fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
     ("fn open(null_terminated_path: Ptr(u8), flags: i32) Fd", libc::open as *const u8),
     ("fn close(fd: Fd) i32", libc::close as *const u8),
     ("fn rand() i32", libc::rand as *const u8),
     ("fn get_errno() i32", get_errno as *const u8),
     ("fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
-    ("fn dlsym(lib: DlHandle, name: CStr) VoidPtr", libc::dlsym as *const u8),
+    ("fn dlsym(lib: DlHandle, name: CStr) rawptr", libc::dlsym as *const u8),
     ("fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
     (
-        "fn mmap(addr: VoidPtr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) VoidPtr",
+        "fn mmap(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr",
         libc::mmap as *const u8,
     ),
-    ("fn munmap(addr: VoidPtr, len: i64) i64", libc::munmap as *const u8),
-    ("fn mprotect(addr: VoidPtr, len: i64, prot: i64) i64", libc::mprotect as *const u8),
-    ("fn __clear_cache(beg: VoidPtr, beg: VoidPtr) Unit", __clear_cache as *const u8),
+    ("fn munmap(addr: rawptr, len: i64) i64", libc::munmap as *const u8),
+    ("fn mprotect(addr: rawptr, len: i64, prot: i64) i64", libc::mprotect as *const u8),
+    ("fn __clear_cache(beg: rawptr, beg: rawptr) Unit", __clear_cache as *const u8),
     (
-        "fn clock_gettime(clock_id: i64, time_spec: VoidPtr) Unit",
+        "fn clock_gettime(clock_id: i64, time_spec: rawptr) Unit",
         libc::clock_gettime as *const u8,
     ),
     ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
@@ -179,7 +179,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "const DlHandle = VoidPtr; const CStr = Unique$Ptr(u8);").unwrap();
+            writeln!(out, "const DlHandle = rawptr; const CStr = Unique$Ptr(u8);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#pub #comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }
@@ -439,7 +439,7 @@ type Unit = ();
 // TODO: documenet which ones can only be used in macros because they need the 'result: &mut FnWip'
 pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
-    ("fn test_flat_call_callback(addr: VoidPtr) i64;", test_flat_call_callback),
+    ("fn test_flat_call_callback(addr: rawptr) i64;", test_flat_call_callback),
     (
         "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
         bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
@@ -448,7 +448,7 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
     (
-        "fn const_eval(expr: FatExpr, ty: Type, result: VoidPtr) Unit;",
+        "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) Unit;",
         bounce_flat_call!(((FatExpr, TypeId), usize), Unit, const_eval_any),
     ),
     // Calls Compiler::compile_expr
@@ -469,7 +469,7 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     // Convert a pointer to a value into an ast that will produce that value when evaluated.
     // It is illegal to pass a <ty> that does not match the value behind <ptr>.
     (
-        "fn literal_ast(ty: Type, ptr: VoidPtr) FatExpr;",
+        "fn literal_ast(ty: Type, ptr: rawptr) FatExpr;",
         bounce_flat_call!((TypeId, usize), FatExpr, literal_ast),
     ),
     (

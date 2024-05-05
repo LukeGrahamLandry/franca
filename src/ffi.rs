@@ -374,7 +374,7 @@ impl<'p> InterpSend<'p> for Value {
     }
 
     fn name() -> String {
-        "VoidPtr".to_string()
+        "rawptr".to_string()
     }
 }
 

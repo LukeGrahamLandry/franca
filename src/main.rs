@@ -87,9 +87,13 @@ fn main() {
 
         let pool = Box::leak(Box::<StringPool>::default());
         let path = PathBuf::from(format!("tests/{name}.fr"));
-        let mut src = match fs::read_to_string(path) {
-            Ok(src) => src,
-            Err(_) => fs::read_to_string(&name).unwrap(),
+        let mut src = if name == "_" {
+            "".to_string()
+        } else {
+            match fs::read_to_string(path) {
+                Ok(src) => src,
+                Err(_) => fs::read_to_string(&name).unwrap(),
+            }
         };
 
         for a in args {
@@ -121,44 +125,54 @@ fn run_tests() {
     let mut passed = 0;
     let mut failed = 0;
     let mut jobs = vec![];
-    let mut files: Vec<_> = fs::read_dir("tests").unwrap().collect();
+    let mut files: Vec<_> = fs::read_dir("tests").unwrap().map(|f| (f, true)).collect();
 
     while !files.is_empty() || !jobs.is_empty() {
         if jobs.len() < max_jobs && !files.is_empty() {
-            let case = files.pop().unwrap().unwrap();
+            let (case, expect_success) = files.pop().unwrap();
+            let case = case.unwrap();
             let name = case.file_name();
             let name = name.to_str().unwrap();
             if !".fr".is_suffix_of(name) {
                 if case.file_type().unwrap().is_dir() {
-                    files.extend(fs::read_dir(case.path()).unwrap().collect::<Vec<_>>())
+                    let expect_success = expect_success && case.file_name() != "broken";
+                    let add = fs::read_dir(case.path()).unwrap().map(|f| (f, expect_success)).collect::<Vec<_>>();
+                    files.extend(add)
                 }
                 continue;
             }
             let name = name.strip_suffix(".fr").unwrap();
             let src = fs::read_to_string(case.path()).unwrap();
-            add_test_cases(name.to_string(), src, &mut jobs);
+            add_test_cases(name.to_string(), src, &mut jobs, expect_success);
         } else {
             assert!(!jobs.is_empty());
             let mut status = 0i32;
             let pid = unsafe { libc::wait(&mut status) };
 
             let the_job = jobs.iter().position(|j| j.2 == pid).expect("wait returned unexpected pid");
-            let (name, arch, _) = jobs.remove(the_job);
+            let (name, arch, _, expect_success) = jobs.remove(the_job);
 
-            if status == 0 {
-                // TODO: have it return 'assertion_count' somehow so the tested program calling exit(0) doesn't get seen as a pass.
-
-                // TODO: should have this colour stuff as a library in my language.
-                //       https://en.wikipedia.org/wiki/ANSI_escape_code#24-bit
+            // TODO: have it return 'assertion_count' somehow so the tested program calling exit(0) doesn't get seen as a pass.
+            // TODO: should have this colour stuff as a library in my language.
+            //       https://en.wikipedia.org/wiki/ANSI_escape_code#24-bit
+            if expect_success && status == 0 {
                 set_colour(0, 255, 0);
                 println!("[PASSED: {} {:?}]", name, arch);
                 unset_colour();
                 passed += 1;
-            } else {
+            } else if expect_success {
                 set_colour(255, 0, 0);
                 println!("[FAILED: {} {:?}]^^^", name, arch);
                 unset_colour();
                 failed += 1;
+            } else if status == 0 {
+                set_colour(255, 0, 255);
+                println!("[FIXED : {} {:?}]", name, arch);
+                unset_colour();
+            } else {
+                set_colour(255, 255, 0);
+                println!("[BROKEN: {} {:?}]^^^", name, arch);
+                unset_colour();
             }
         }
     }
@@ -185,7 +199,7 @@ fn run_tests_serial_for_profile() {
         let name = case.file_name();
         let name = name.to_str().unwrap();
         if !".fr".is_suffix_of(name) {
-            if case.file_type().unwrap().is_dir() {
+            if case.file_type().unwrap().is_dir() && case.file_name() != "broken" {
                 files.extend(fs::read_dir(case.path()).unwrap().collect::<Vec<_>>())
             }
             continue;
@@ -224,7 +238,7 @@ fn unset_colour() {
     print!("[0m");
 }
 
-fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32)>) {
+fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32, bool)>, expect_success: bool) {
     let start = src.find("#test(").expect("@test in test file") + 6;
     let s = &src[start..];
     let end = s.find(')').unwrap();
@@ -246,7 +260,7 @@ fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch,
                 exit(0);
             }
             pid => {
-                jobs.push((name.clone(), arch, pid));
+                jobs.push((name.clone(), arch, pid, expect_success));
             }
         }
     }
