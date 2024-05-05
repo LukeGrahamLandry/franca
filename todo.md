@@ -37,6 +37,7 @@ ArmText = 4, // requires 'llvm-mc' CLI installed.
 
 fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 
+- loops piss me off, why isn't it just expressed as tail recursion.
 - https://llvm.org/docs/CoverageMappingFormat.html https://llvm.org/docs/LangRef.html#llvm-instrprof-increment-intrinsic
 - good error message for accidently using ' as character literal.
 - embeding other languages would be a good demo of the comptime/meta programming stuff.

@@ -2,15 +2,21 @@
 #![feature(pattern)]
 
 use franca::{
-    ast::{Flag, Program, TargetArch, TypeId},
+    ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc_to_asm::emit_aarch64,
-    compiler::{Compile, ExecTime},
+    compiler::{CErr, Compile, CompileError, ExecTime},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
-    find_std_lib, load_program, log_err,
+    find_std_lib,
+    lex::Lexer,
+    load_program, log_err,
     logging::{init_logs, LogTag},
+    make_toplevel,
+    parse::Parser,
     pool::StringPool,
-    run_main, timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
+    run_main,
+    scope::ResolveScope,
+    timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
     arch::asm,
@@ -78,10 +84,7 @@ fn main() {
         }
 
         if name == "--no-fork" {
-            let beg = MEM.get();
-            run_tests_serial_for_profile();
-            let end = MEM.get();
-            println!("Used {} KB of memory.", (end as usize - beg as usize) / 1000);
+            run_tests_serial();
             return;
         }
 
@@ -186,14 +189,25 @@ fn run_tests() {
     assert_eq!(failed, 0);
 }
 
-fn run_tests_serial_for_profile() {
+// forking a bunch confuses the profiler.
+// also it seems like a good idea to make sure nothing gets weird when you compile a bunch of stuff on the same compiler instance.
+fn run_tests_serial() {
+    let beg = MEM.get();
     if !PathBuf::from("tests").exists() {
         eprint!("Directory 'tests' does not exist in cwd");
         exit(1);
     }
+    let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
+    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+    let mut comp = Compile::new(pool, &mut program);
+
     let mut files: Vec<_> = fs::read_dir("tests").unwrap().collect();
 
+    let mut test_count = 0;
+    let mut assertion_count = 0;
+    let mut file_count = 0;
+    let mut parsed = vec![];
     while let Some(case) = files.pop() {
         let case = case.unwrap();
         let name = case.file_name();
@@ -206,26 +220,82 @@ fn run_tests_serial_for_profile() {
         }
         let name = name.strip_suffix(".fr").unwrap();
         let src = fs::read_to_string(case.path()).unwrap();
-        let start = src.find("#test(").expect("@test in test file") + 6;
-        let s = &src[start..];
-        let end = s.find(')').unwrap();
-        let assertion_count = src.split("assert_eq(").count() - 1;
-        for backend in s[..end].split(", ") {
-            let arch = match backend {
-                "aarch64" => TargetArch::Aarch64,
-                "llvm" => continue,
-                "skip" => break,
-                other => panic!("Unknown backend {other}"),
-            };
+        assertion_count += src.split("assert_eq(").count() - 1;
+        test_count += src.split("#test").count() - 1;
+        file_count += 1;
 
-            actually_run_it(name.to_string(), src.clone(), assertion_count, arch);
-        }
+        let file = comp
+            .parsing
+            .codemap
+            .add_file(name.to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+        let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
+        match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
+            Ok(s) => parsed.extend(s),
+            Err(e) => {
+                let e = CompileError {
+                    internal_loc: e.loc,
+                    loc: Some(e.diagnostic[0].spans[0].span),
+                    reason: CErr::Diagnostic(e.diagnostic),
+                    trace: String::new(),
+                };
+                log_err(&comp, e);
+                exit(1);
+            }
+        };
     }
 
+    let mut global = make_toplevel(comp.pool, garbage_loc(), parsed);
+    if let Err(e) = ResolveScope::run(&mut global, &mut comp, ScopeId::from_index(0)) {
+        log_err(&comp, *e);
+        exit(1);
+    }
+
+    if let Err(e) = comp.compile_top_level(global) {
+        log_err(&comp, *e);
+        exit(1);
+    }
+
+    // assert_eq!(test_count, comp.tests.len());
+    let mut last = String::new();
+    for f in comp.tests.clone() {
+        run_one(&mut comp, f);
+
+        let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
+
+        let fname = comp.pool.get(comp.program[f].name);
+        if file != last {
+            println!();
+            set_colour(0, 255, 0);
+            print!("[{}] ", file.to_uppercase());
+            unset_colour();
+            last = file;
+        }
+        print!("{}, ", fname);
+    }
+
+    if let Some(f) = comp.program.find_unique_func(Flag::__Get_Assertions_Passed.ident()) {
+        let actual: usize = comp.call_jitted(f, ExecTime::Comptime, None, ()).unwrap();
+        assert_eq!(actual, assertion_count, "vm missed assertions?");
+    } else {
+        println!("__Get_Assertions_Passed not found. COUNT_ASSERT :: false?");
+    }
     let end = timestamp();
     let seconds = end - start;
-    println!("Done in {} ms.", (seconds * 1000.0) as i64);
-    println!("{:#?}", unsafe { &STATS });
+    println!("\n");
+    set_colour(250, 150, 200);
+
+    let end = MEM.get();
+    println!(
+        "ALL TESTS PASSED! {} files. {} tests. {} assertions. {} ms. {} KB.",
+        file_count,
+        test_count,
+        assertion_count,
+        (seconds * 1000.0) as i64,
+        (end as usize - beg as usize) / 1000,
+    );
+    unset_colour();
+
+    // println!("{:#?}", unsafe { &STATS });
 }
 
 fn set_colour(r: u8, g: u8, b: u8) {
@@ -239,29 +309,17 @@ fn unset_colour() {
 }
 
 fn add_test_cases(name: String, src: String, jobs: &mut Vec<(String, TargetArch, i32, bool)>, expect_success: bool) {
-    let start = src.find("#test(").expect("@test in test file") + 6;
-    let s = &src[start..];
-    let end = s.find(')').unwrap();
     let assertion_count = src.split("assert_eq(").count() - 1;
-    for backend in s[..end].split(", ") {
-        let arch = match backend {
-            "interp" => continue, // TargetArch::Interp,
-            "aarch64" => TargetArch::Aarch64,
-            "llvm" => continue,
-            "skip" => break,
-            other => panic!("Unknown backend {other}"),
-        };
-
-        // TODO: use dup2/pipe to capture stdout/err and print in a mutex so the colours don't get fucked up.
-        match unsafe { libc::fork() } {
-            -1 => panic!("Fork Failed"),
-            0 => {
-                actually_run_it(name, src, assertion_count, arch);
-                exit(0);
-            }
-            pid => {
-                jobs.push((name.clone(), arch, pid, expect_success));
-            }
+    let arch = TargetArch::Aarch64;
+    // TODO: use dup2/pipe to capture stdout/err and print in a mutex so the colours don't get fucked up.
+    match unsafe { libc::fork() } {
+        -1 => panic!("Fork Failed"),
+        0 => {
+            actually_run_it(name, src, assertion_count, arch);
+            exit(0);
+        }
+        pid => {
+            jobs.push((name.clone(), arch, pid, expect_success));
         }
     }
 }
@@ -272,63 +330,27 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     // init_logs_flag(0xFFFFFFFF);
     // let save = format!("{name}_{arch:?}/");
     // let save = Some(save.as_str());
-    let save = None;
 
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
     let mut program = Program::new(pool, TargetArch::Aarch64, arch);
     let mut comp = Compile::new(pool, &mut program);
     let result = load_program(&mut comp, &src);
+
     if let Err(e) = result {
-        log_err(&comp, *e, save);
-        exit(1);
-    }
-    assert_eq!(comp.tests.len(), 1);
-    // TODO: run multiple and check thier arches.
-    //       But how to not run the lib tests a billion times
-    let f = comp.tests[0];
-    let result = comp.compile(f, ExecTime::Runtime);
-    if let Err(e) = result {
-        log_err(&comp, *e, save);
+        log_err(&comp, *e);
         exit(1);
     }
 
-    assert_eq!(comp.program[f].finished_ret, Some(TypeId::i64()));
-    assert_eq!(comp.program[f].finished_arg, Some(TypeId::i64()));
-    let arg = 982164;
+    let expected_tests = src.split("#test").count() - 1;
+    assert_eq!(expected_tests, comp.tests.len());
 
-    let result: i64 = match arch {
-        TargetArch::Aarch64 => {
-            if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
-                log_err(&comp, *e, save);
-                exit(1);
-            }
-            comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
-            comp.aarch64.make_exec();
-            comp.flush_cpu_instruction_cache();
-            let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
-
-            let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
-            let indirect_fns = comp.aarch64.get_dispatch();
-            unsafe {
-                asm!(
-                "mov x21, {fns}",
-                fns = in(reg) indirect_fns,
-                // I'm hoping this is how I declare that I intend to clobber the register.
-                // https://doc.rust-lang.org/reference/inline-assembly.html
-                // "[...] the contents of the register to be discarded at the end of the asm code"
-                // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
-                out("x21") _
-                );
-            }
-            code(arg)
-        }
-        TargetArch::Llvm => unreachable!(),
-    };
+    // TODO: But how to not run the lib tests a billion times
+    for f in comp.tests.clone() {
+        run_one(&mut comp, f);
+    }
     let end = timestamp();
     let _seconds = end - start;
-    debug_assert_eq!(result, arg);
-
     // TODO: have a call_jitted that takes name and resolves on Arg/Ret generics.
     if let Some(f) = comp.program.find_unique_func(Flag::__Get_Assertions_Passed.ident()) {
         let actual: usize = comp.call_jitted(f, ExecTime::Comptime, None, ()).unwrap();
@@ -338,6 +360,41 @@ fn actually_run_it(_name: String, src: String, assertion_count: usize, arch: Tar
     }
     mem::forget(comp);
     mem::forget(program);
+}
+
+fn run_one(comp: &mut Compile, f: FuncId) {
+    let result = comp.compile(f, ExecTime::Runtime);
+    if let Err(e) = result {
+        log_err(comp, *e);
+        exit(1);
+    }
+
+    let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
+
+    if let Err(e) = emit_aarch64(comp, f, ExecTime::Runtime) {
+        log_err(comp, *e);
+        exit(1);
+    }
+    comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
+    comp.aarch64.make_exec();
+    comp.flush_cpu_instruction_cache();
+    let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
+
+    let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
+    let indirect_fns = comp.aarch64.get_dispatch();
+    unsafe {
+        asm!(
+        "mov x21, {fns}",
+        fns = in(reg) indirect_fns,
+        // I'm hoping this is how I declare that I intend to clobber the register.
+        // https://doc.rust-lang.org/reference/inline-assembly.html
+        // "[...] the contents of the register to be discarded at the end of the asm code"
+        // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
+        out("x21") _
+        );
+    }
+    let result = code(arg);
+    debug_assert_eq!(result, arg);
 }
 
 #[test]

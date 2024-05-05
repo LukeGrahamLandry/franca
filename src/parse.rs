@@ -1,4 +1,5 @@
 //! Convert a stream of tokens into ASTs.
+use std::collections::HashSet;
 use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
 
 use codemap::{CodeMap, File, Span};
@@ -54,6 +55,7 @@ pub struct ParseTasks<'p> {
     pub pool: &'p StringPool<'p>,
     pub codemap: CodeMap,
     tasks: Vec<ParseFile<'p>>,
+    already_loaded: HashSet<Ident<'p>>,
 }
 
 unsafe impl<'p> Sync for ParseTasks<'p> {}
@@ -67,6 +69,7 @@ impl<'p> ParseTasks<'p> {
             pool,
             codemap: CodeMap::new(),
             tasks: Default::default(),
+            already_loaded: Default::default(),
         }
     }
 
@@ -694,13 +697,18 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.pop();
                         self.eat(RightParen)?;
                         self.eat(Semicolon)?;
-                        let name = self.pool.get(name);
-                        if let Some(src) = get_include_std(name) {
-                            let file = self.ctx.codemap.add_file(name.to_string(), src);
-                            let s = file.span;
-                            Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
+                        if self.ctx.already_loaded.insert(name) {
+                            let name = self.pool.get(name);
+                            if let Some(src) = get_include_std(name) {
+                                let file = self.ctx.codemap.add_file(name.to_string(), src);
+                                let s = file.span;
+                                Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
+                            } else {
+                                return Err(self.expected("known path for #include_std"));
+                            }
                         } else {
-                            return Err(self.expected("known path for #include_std"));
+                            // don't load the same file twice.
+                            Stmt::Noop
                         }
                     } else {
                         return Err(self.expected("quoted path"));

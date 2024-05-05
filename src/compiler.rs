@@ -1008,8 +1008,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program[id];
 
         if func.has_tag(Flag::Test) {
-            // TODO: actually use this.
-            // TODO: probably want referencable_name=false?
+            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests.push(id);
         }
         Ok(out)

@@ -324,27 +324,28 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
 
     // damn turns out defer would maybe be a good idea
 
+    // TODO: run tests
     match result {
         Err(e) => {
-            log_err(&comp, *e, save);
+            log_err(&comp, *e);
             return false;
         }
         Ok(_) => {
             match comp.program.find_unique_func(Flag::Main.ident()) {
                 None => {
-                    outln!(ShowErr, "'fn main' NOT FOUND");
+                    println!("'fn main' NOT FOUND");
                     log_dbg(&comp, save);
                     return false;
                 }
                 Some(f) => {
                     match comp.compile(f, ExecTime::Runtime) {
                         Err(e) => {
-                            log_err(&comp, *e, save);
+                            log_err(&comp, *e);
                             return false;
                         }
                         Ok(_) => {
                             if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
-                                log_err(&comp, *e, save);
+                                log_err(&comp, *e);
                                 return false;
                             }
                             let end = timestamp();
@@ -458,7 +459,7 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
     outln!(Perf, "===============================");
 }
 
-pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&str>) {
+pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     outln!(ShowPrint, "ERROR");
 
     if cfg!(feature = "trace_errors") {
@@ -483,7 +484,6 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>, save: Option<&
     }
 
     outln!(ShowErr, "{}", e.trace);
-    log_dbg(interp, save);
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {

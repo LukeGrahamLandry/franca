@@ -1,172 +1,151 @@
 //! May 1/2: debugging new asm. 
 
-#test(aarch64)
-fn main(canary: i64) i64 = {
-    /// Looking for corrupted_types bug /// 
+//////
+/// Looking for corrupted_types bugs
 
-    // The problem here was after switching to stack based ir, I would try to load a pointer into seperate stack slots
-    // but i assigned the register outside the loop so each part of the typeinfo struct would stomp each other 
-    // and then the last one would get spread to all slots when tried to put it on the real stack. 
-    // and it would segfault on something. this was in fact not the problem I was actually looking for. -- May 1
-    fn thing1() Unit = {
-        #comptime
-        fn my_int() Type = {
-            info := get_type_info(i64);
-            i64
-        }
-        T :: my_int();
-        debug_log_type(T);
+// The problem here was after switching to stack based ir, I would try to load a pointer into seperate stack slots
+// but i assigned the register outside the loop so each part of the typeinfo struct would stomp each other 
+// and then the last one would get spread to all slots when tried to put it on the real stack. 
+// and it would segfault on something. this was in fact not the problem I was actually looking for. -- May 1
+#test fn thing1_() = {
+    #comptime
+    fn my_int() Type = {
+        info := get_type_info(i64);
+        i64
     }
-    thing1();
+    T :: my_int();
+    //debug_log_type(T); // TODO: assert good without spamming log
+}
 
-    // - Attempt to subtract with overflow, not enough args on the stack for a directcall. 
-    // GetVar in emit_bc was just getting the address without doing a Load. 
-    // - Next problem here was lack of spilling with trying to setup for c_call,
-    // but just checking if the thing was already in the right register was enough to fix it. 
-    fn thing2() Unit = {
-        #comptime
-        fn my_int_2() Type = {
-            info := get_type_info(i64);
-            intern_type(info)
-        }
-        K :: my_int_2();
-        debug_log_type(K);
+// - Attempt to subtract with overflow, not enough args on the stack for a directcall. 
+// GetVar in emit_bc was just getting the address without doing a Load. 
+// - Next problem here was lack of spilling with trying to setup for c_call,
+// but just checking if the thing was already in the right register was enough to fix it. 
+#test fn thing2_() = {
+    #comptime
+    fn my_int_2() Type = {
+        info := get_type_info(i64);
+        intern_type(info)
     }
-    thing2();
-    
-    // - this forces the spilling issue. it needs to flip the result of the first add into x0 because it doesn't know fn add is commutable. 
-    // - then i wasn't releasing x1 after the first call. that was enough to fix this. 
-    // - however, now the above debug_log_type says i1 instead of i64. i was double dropping, not checking unique. 
+    K :: my_int_2();
+    //debug_log_type(K); // TODO: assert good without spamming log
+}
+
+// - this forces the spilling issue. it needs to flip the result of the first add into x0 because it doesn't know fn add is commutable. 
+// - then i wasn't releasing x1 after the first call. that was enough to fix this. 
+// - however, now the above debug_log_type says i1 instead of i64. i was double dropping, not checking unique. 
+#test fn flip_x0() = {
     fn nested() i64 = add(1, add(2, 3));
-    
     assert_eq(6, nested());
-    
-    // - JumpIf not dropping cond reg. 
-    // - TODO: the first EndIf needs reg_free to be the same as it was at the if branch. 
-    //   also needs to reset the stack as if results were popped off. the hack solution to that is just emit a pop of the right size
-    //   after the jump away for the first branch. it wont exist at runtime but emit_asm will fall through and reset the stack. 
-    fn thing3() Unit = {
-        // cond is in x0. branch on c. 
-        c := if(eq(add(0, 1), 0), fn()bool = {
-            a := false;
-            a
-        }, fn()bool = {
-            a := true;
-            a
-        });
-    }
-    thing3();
-    
-    // - constant folded !if still leaves the unreachable branch, but that doesn't leave enough on the v-stack to pop. 
-    //   didn't actually fix the unreachable thing but just correctly full folding ifs makes it come up less often. 
-    fn thing4() Unit = {
-        a := 0;
-        b := 1;
-        c := (::true, fn = a, fn = b)!if;
-    }
-    thing4();
-    
+}
+
+// - JumpIf not dropping cond reg. 
+// - TODO: the first EndIf needs reg_free to be the same as it was at the if branch. 
+//   also needs to reset the stack as if results were popped off. the hack solution to that is just emit a pop of the right size
+//   after the jump away for the first branch. it wont exist at runtime but emit_asm will fall through and reset the stack. 
+#test fn thing3() = {
+    // cond is in x0. branch on c. 
+    c := if(eq(add(0, 1), 0), fn()bool = {
+        a := false;
+        a
+    }, fn()bool = {
+        a := true;
+        a
+    });
+}
+
+// - constant folded !if still leaves the unreachable branch, but that doesn't leave enough on the v-stack to pop. 
+//   didn't actually fix the unreachable thing but just correctly full folding ifs makes it come up less often. 
+#test fn thing4() = {
+    a := 0;
+    b := 1;
+    c := (::true, fn = a, fn = b)!if;
+}
+
+#test fn math_still_works() = {
     assert_eq(1, 1);
-    
-    
-    // - c calling '#ct fn Ptr' wasn't putting the arg in x1 because offset_bytes was zero and i dumbly skipped the add because i was like "well why add zero",
-    //   but for zero you're just using add as mov because it doesn't care if the input reg is sp. 
-    //   so the symptom was do_ptr_type getting a garbage value as its x1 arg, and it was an address because it was coming from operator_star_prefix,
-    //   which decided to be a flat call for some reason so the junk in the reg was always the args_ptr. 
-    //   this was the actaul problem i was looking for in the first place with this file. 
-    fn thing5() Unit = {
-        A :: i64;
-        debug_log_type(A);
-        B :: *A;
-        debug_log_type(B);
-    }
-    thing5();
-    
-    // - branches of if need to have same v-stack when they rejoin so literals need to spill to registers. 
-    fn literal_if() Unit = {
-        c := true;
-        b := if(c, fn = 1, fn = 2);
-        assert_eq(b, 1);
-    }
-    literal_if();
-    
-    
-    /// Looking for deser_args_literal bug /// 
-    
-    // this ones not my actual problem but can't be good. from specific.fr. 
-    // - i was spill_abi_stompable after doing the call. thats why you had to call a random c function like malloc so it actually used x6 or whatever reg i was trying to keep. 
-    fn spilling_stompable() Unit = {
-        fn identity(cc: i64) i64 = {
-            malloc(8);
-            cc
-        }
-        c := 17;
-        assert_eq(c, identity(c));
-    }
-    
-    spilling_stompable();
-    
-    // - the value for str_uo can't be the stack pointer, so if you're trying to store the address of a variable, you need to use an extra register. 
-    //   fixing this was enough to get basic.fr working. still not the problem i was looking for tho. 
-    fn try_store_sp() Unit = {
-        fn identity2(var arg: i64) i64 = {
-            let arg_ptr = arg&;
-            arg_ptr[]
-        }
-        
-        assert_eq(6, identity2(6));
-    }
-    
-    try_store_sp();
-    
-    
+}
 
-    // - this is the problem i was looking for. its just the slice bug below. 
-    fn deser_arg() Unit = {
-        #macro
-        fn identity(n: FatExpr) FatExpr = '<n>';
-        @identity(i64);
-    }
-    
-    deser_arg();
-    
-    // - think i just fucked up my !slice. its doing len as number of slots not number of items. 
-    //   and then trying to deserialize the unquote args slice doesn't work cause it wants way too many.  at 14/30
-    fn use_slice() Unit = {
-        fat_slice : Slice$Str = ("a", "b")!slice;
-        assert_eq(fat_slice.len(), 2); // it thought len was 4. 
-    }
-    use_slice();
-    
-    // found problem in specific.fr
-    // - Bc::TagCheck was doing pop_to_reg_with_offset instead of peek. 
-    // - then enum construct was wrong way around so tag was after payload.
-    fn do_tag_check() Unit = {
-        A :: @tagged(a: i64, b: i64);
-        c := 17;
-        var a: A = (a: c);
-        assert_eq(a&.a[], c);
-    }
-    do_tag_check();
-    
-    
-    // - this was because spill_abi_stompable on flat calls washappening after putting ct ctx, etc in x0-4
-    fn flat_call_stomps() Unit = {
-        a := "hi"; // TODO: why does this need type annotation since below it correctly infers Str from the generated @as
-        same := eq(a, "hi");
-        assert_eq(same, true);
-    }
-    flat_call_stomps();
-    
-    // - Bc::TagCheck peeks but then it was returning the register to free list. 
-    // that was enough for backtrace.fr to work. 20/30. 
-    fn tag_check_double_drop() Unit = {
-        A :: @tagged(a: i64, b: i64);
-        var a: A = (a: 17);
-        b := a&;
-        b.a[];
-    }
-    tag_check_double_drop();
+// - c calling '#ct fn Ptr' wasn't putting the arg in x1 because offset_bytes was zero and i dumbly skipped the add because i was like "well why add zero",
+//   but for zero you're just using add as mov because it doesn't care if the input reg is sp. 
+//   so the symptom was do_ptr_type getting a garbage value as its x1 arg, and it was an address because it was coming from operator_star_prefix,
+//   which decided to be a flat call for some reason so the junk in the reg was always the args_ptr. 
+//   this was the actaul problem i was looking for in the first place with this file. 
+#test fn thing5() = {
+    A :: i64;
+    // debug_log_type(A); // TODO: assert good without spamming log
+    B :: *A;
+    // debug_log_type(B); // TODO: assert good without spamming log
+}
 
-    canary
+// - branches of if need to have same v-stack when they rejoin so literals need to spill to registers. 
+#test fn literal_if() = {
+    c := true;
+    b := if(c, fn = 1, fn = 2);
+    assert_eq(b, 1);
+}
+
+////// 
+/// Looking for deser_args_literal bug 
+
+// this ones not my actual problem but can't be good. from specific.fr. 
+// - i was spill_abi_stompable after doing the call. thats why you had to call a random c function like malloc so it actually used x6 or whatever reg i was trying to keep. 
+#test fn spilling_stompable() = {
+    fn identity(cc: i64) i64 = {
+        malloc(8);
+        cc
+    }
+    c := 17;
+    assert_eq(c, identity(c));
+}
+
+// - the value for str_uo can't be the stack pointer, so if you're trying to store the address of a variable, you need to use an extra register. 
+//   fixing this was enough to get basic.fr working. still not the problem i was looking for tho. 
+#test fn try_store_sp() = {
+    fn identity2(var arg: i64) i64 = {
+        let arg_ptr = arg&;
+        arg_ptr[]
+    }
+    
+    assert_eq(6, identity2(6));
+}
+
+// - this is the problem i was looking for. its just the slice bug below. 
+#test fn deser_arg() = {
+    #macro
+    fn identity(n: FatExpr) FatExpr = '<n>';
+    @identity(i64);
+}
+
+// - think i just fucked up my !slice. its doing len as number of slots not number of items. 
+//   and then trying to deserialize the unquote args slice doesn't work cause it wants way too many.  at 14/30
+#test fn use_slice() = {
+    fat_slice : Slice$Str = ("a", "b")!slice;
+    assert_eq(fat_slice.len(), 2); // it thought len was 4. 
+}
+
+// found problem in specific.fr
+// - Bc::TagCheck was doing pop_to_reg_with_offset instead of peek. 
+// - then enum construct was wrong way around so tag was after payload.
+#test fn do_tag_check() = {
+    A :: @tagged(a: i64, b: i64);
+    c := 17;
+    var a: A = (a: c);
+    assert_eq(a&.a[], c);
+}
+
+// - this was because spill_abi_stompable on flat calls washappening after putting ct ctx, etc in x0-4
+#test fn flat_call_stomps() = {
+    a := "hi"; // TODO: why does this need type annotation since below it correctly infers Str from the generated @as
+    same := eq(a, "hi");
+    assert_eq(same, true);
+}
+
+// - Bc::TagCheck peeks but then it was returning the register to free list. 
+// that was enough for backtrace.fr to work. 20/30. 
+#test fn tag_check_double_drop() = {
+    A :: @tagged(a: i64, b: i64);
+    var a: A = (a: 17);
+    b := a&;
+    b.a[];
 }
