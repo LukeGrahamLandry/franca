@@ -1687,6 +1687,7 @@ pub enum Flag {
     Outputs,
     When,
     One_Ret_Pic,
+    Anon,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     _Reserved_Count_,

@@ -299,7 +299,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             debug_assert!(pattern.bindings.is_empty());
             match parts.len() {
-                0 => arg.set(Value::Unit.into(), TypeId::unit()),
+                0 => todo!("untested"), // arg.set(Value::Unit.into(), TypeId::unit()),
                 // NOTE: not just taking arg.expr because need to preserve the .ty for int/float literals now that I don't track redundantly in Expr::Value! -- Apr 30
                 1 => *arg = parts.into_iter().next().unwrap(),
                 _ => arg.expr = Expr::Tuple(parts),

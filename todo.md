@@ -2,6 +2,7 @@
 
 - no u32/u16/u8
 - no typechecking through fn arg/ret so if/loop body closures need annotations
+- no narrowing overloads with partial argument typecheck.
 - can't output an exe, only jit
 - no way to say trait bounds on generics (it just tries to compile like c++ templates). at least have fn require_overload(Ident, Type, Type);
 - need to explicitly instantiate generics
@@ -36,6 +37,7 @@ ArmText = 4, // requires 'llvm-mc' CLI installed.
 
 fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 
+- https://llvm.org/docs/CoverageMappingFormat.html https://llvm.org/docs/LangRef.html#llvm-instrprof-increment-intrinsic
 - good error message for accidently using ' as character literal.
 - embeding other languages would be a good demo of the comptime/meta programming stuff.
   - need a raw string syntax that passes it to a macro (like nim?)

@@ -148,6 +148,20 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub(crate) fn slot_count(&mut self, ty: TypeId) -> u16 {
         self.ready.sizes.slot_count(self.program, ty) as u16
     }
+
+    pub(crate) fn as_value_expr<T: InterpSend<'p>>(&mut self, val: &FatExpr<'p>) -> Option<T> {
+        if let Expr::Value { value } = &val.expr {
+            debug_assert!(!val.ty.is_unknown());
+            let want = T::get_type(self.program);
+            if self.type_check_arg(val.ty, want, "").is_err() {
+                return None;
+            }
+            println!("{:?}", value);
+            Some(T::deserialize_from_ints(&mut value.clone().vec().into_iter()).unwrap())
+        } else {
+            None
+        }
+    }
 }
 impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
@@ -397,13 +411,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.decl_func(func)?;
                 }
             } else if let Some(os) = val.as_overload_set() {
-                const_info.0.set(Value::OverloadSet(os).into(), TypeId::overload_set());
-                const_info.1 = LazyType::Finished(TypeId::overload_set());
+                // TODO: can't use the generic as_value_expr because .ty is unknown for some reason. who made this expr
+                let os: OverloadSetId = os;
+                let v = (val, LazyType::Finished(TypeId::overload_set()));
+                self[name.2].constants.insert(name, v);
                 for func in mem::take(&mut self.program[os].just_resolved) {
                     self.decl_func(func)?;
                 }
             } else {
-                *const_info = (val, ty); // TODO: dont take
+                self[name.2].constants.insert(name, (val, ty)); // TODO: dont take
             }
         }
 
@@ -1701,7 +1717,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(self.program.funcs[id.as_index()].finished_ret);
                 }
 
-                if let Some(i) = f.as_overload_set() {
+                if let Some(i) = self.as_value_expr(f) {
                     if let Ok(fid) = self.resolve_in_overload_set(result, arg, None, i) {
                         if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
                             // Need to save this because resolving overloads eats named arguments

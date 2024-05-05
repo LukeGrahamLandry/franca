@@ -4,13 +4,13 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, TypeId, Var, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, OverloadSet, OverloadSetId, ScopeId, Stmt, TypeId, Var, VarType},
     compiler::{add_unique, BlockScope, CErr, Compile, Res},
     err, ice,
     logging::{LogTag::Scope, PoolLog},
     outln,
     pool::Ident,
-    STATS,
+    unwrap, STATS,
 };
 
 pub struct ResolveScope<'z, 'a, 'p> {
@@ -175,8 +175,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     if let Expr::AddToOverloadSet(prev) = &mut prev_val.expr {
                         prev.extend(mem::take(new));
                         continue;
-                    } else if let Expr::Value { value, .. } = &mut prev_val.expr {
-                        debug_assert_eq!(prev_ty.ty(), Some(TypeId::overload_set()));
+                    } else if let Expr::Value { value } = &mut prev_val.expr {
+                        // let v = &prev_val.clone();
+                        // let os: Option<OverloadSetId> = self.compiler.as_value_expr(v);
+                        // let os = unwrap!(os, "");
+                        debug_assert!(!prev_val.ty.is_unknown());
                         let os = value.as_overload_set()?;
                         self.compiler.program[os].just_resolved.extend(mem::take(new));
                         continue;
@@ -413,6 +416,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             let mut vars = &scope.vars[block];
             loop {
+                // 13M
                 if let Some(found) = vars.vars.iter().rev().position(|v| v.0 == *name) {
                     // Reverse so you get the shadowing first.
                     let v = vars.vars[vars.vars.len() - found - 1];
@@ -470,6 +474,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // TODO: when this was a hashmap ident->(_,_) of justs constants this was faster, but its a tiny difference in release mode so its probably fine for now.
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
         let wip = &self.compiler[s].vars[self.block].vars;
+        // 1.6M
         let shadow_const = |v: &Var<'_>| v.0 == *name && v.3 == VarType::Const;
         if wip.iter().any(shadow_const) {
             err!(

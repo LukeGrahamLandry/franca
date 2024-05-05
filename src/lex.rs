@@ -161,6 +161,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             return prev;
         }
 
+        todo!("untested"); // i guess i always happen to peek first in the parser.
         let t = self.do_next();
         if let Some(t) = self.hack.take() {
             self.peeked.push_back(t);
@@ -409,6 +410,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 if self.pop() == '\n' {
                     self.raw_lines += 1;
                     if !first {
+                        todo!("untested");
                         self.skipped_lines += 1;
                         first = false;
                     }

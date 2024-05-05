@@ -1,13 +1,4 @@
-use std::{
-    cell::SyncUnsafeCell,
-    fmt::Debug,
-    hash::Hash,
-    io::Write,
-    marker::PhantomData,
-    mem,
-    sync::atomic::{AtomicBool, Ordering},
-    thread::yield_now,
-};
+use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::PhantomData, mem};
 
 use crate::{ast::Flag, ffi::InterpSend, Map, MY_CONST_DATA};
 
@@ -43,20 +34,6 @@ pub struct StringPool<'pool> {
 
 unsafe impl Send for StringPool<'_> {}
 unsafe impl Sync for StringPool<'_> {}
-
-pub fn locked<T>(lock: &AtomicBool, f: impl FnOnce() -> T) -> T {
-    loop {
-        let res = lock.compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Acquire);
-        if res.is_ok() {
-            break;
-        }
-        yield_now();
-    }
-    let res = f();
-
-    lock.store(false, Ordering::Release);
-    res
-}
 
 impl<'pool> StringPool<'pool> {
     pub fn use_constants<T>(&self, f: impl FnOnce(&mut ConstantData) -> T) -> T {

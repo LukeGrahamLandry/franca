@@ -17,6 +17,9 @@ use std::fs;
 use std::mem::transmute;
 use std::process::Command;
 
+const ZERO_DROPPED_REG: bool = false;
+const ZERO_DROPPED_SLOTS: bool = false;
+
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct SpOffset(u16);
@@ -261,7 +264,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let slot = slot.unwrap();
                     let ty = self.compile.ready[f].as_ref().unwrap().vars[id as usize];
                     let count = self.compile.slot_count(ty);
-                    self.open_slots.push((slot, count * 8)); // TODO: keep this sorted by count?
+                    self.drop_slot(slot, count * 8);
                 }
                 Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
                 &Bc::CallSplit { rt, ct } => {
@@ -394,7 +397,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         match self.stack.pop().unwrap() {
                             Val::Increment { reg, .. } => self.drop_reg(reg),
                             Val::Literal(_) => {}
-                            Val::Spill(slot) => self.open_slots.push((slot, 8)),
+                            Val::Spill(slot) => self.drop_slot(slot, 8),
                             Val::FloatReg(_) => todo!(),
                         }
                     }
@@ -499,7 +502,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
                 if let Val::Spill(slot) = self.stack[stack_index] {
                     self.compile.aarch64.push(f_ldr_uo(X64, next_float as i64, sp, slot.0 as i64 / 8));
-                    self.open_slots.push((slot, 8));
+                    self.drop_slot(slot, 8);
                 } else {
                     unreachable!()
                 }
@@ -719,6 +722,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         if reg != sp {
             debug_assert!(!self.free_reg.contains(&reg), "drop r{reg} -> {:?}", self.free_reg);
             self.free_reg.push(reg);
+            if ZERO_DROPPED_REG {
+                self.load_imm(reg, 0);
+            }
         }
     }
 
@@ -741,7 +747,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             Val::Spill(slot) => {
                 let r = self.get_free_reg();
                 self.load_u64(r, sp, slot.0);
-                self.open_slots.push((slot, 8));
+                self.drop_slot(slot, 8);
                 r
             }
             Val::FloatReg(_) => todo!(),
@@ -965,6 +971,16 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
 
         self.compile.aarch64.push(br(x16, 1))
+    }
+
+    fn drop_slot(&mut self, slot: SpOffset, bytes: u16) {
+        self.open_slots.push((slot, bytes)); // TODO: keep this sorted by count?
+        if ZERO_DROPPED_SLOTS {
+            self.load_imm(x17, 0);
+            for i in 0..(bytes / 8) {
+                self.store_u64(x17, sp, slot.0 + (i * 8));
+            }
+        }
     }
 }
 

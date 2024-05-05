@@ -548,8 +548,6 @@ macro_rules! send_arr {
     };
 }
 
-send_arr!(i64, 6);
-
 fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
     A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)
 }
@@ -662,17 +660,8 @@ pub mod c {
                 b = b.arg(program.program.as_c_type(*ty)?);
             }
             args.iter().map(Arg::new).collect()
-        } else if let &TypeInfo::Struct { as_tuple, .. } = &program.program[f_ty.arg] {
-            // TODO: hack, copy-paste. also wrong abi!
-
-            if let TypeInfo::Tuple(fields) = &program.program[as_tuple] {
-                for ty in fields {
-                    b = b.arg(program.program.as_c_type(*ty)?);
-                }
-                args.iter().map(Arg::new).collect()
-            } else {
-                unreachable!()
-            }
+        } else if let &TypeInfo::Struct { .. } = &program.program[f_ty.arg] {
+            unreachable!("args should be seen as a tuple. this briefly broke when i fixed the type of string literals");
         } else {
             b = b.arg(program.program.as_c_type(f_ty.arg)?);
             args.iter().map(Arg::new).collect()

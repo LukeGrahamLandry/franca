@@ -59,6 +59,8 @@ pub struct ParseTasks<'p> {
 unsafe impl<'p> Sync for ParseTasks<'p> {}
 unsafe impl<'p> Send for ParseTasks<'p> {}
 
+const ANON_BODY_AS_NAME: bool = false;
+
 impl<'p> ParseTasks<'p> {
     pub fn new(pool: &'p StringPool<'p>) -> Self {
         Self {
@@ -224,6 +226,16 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok((name, arg, ret))
     }
 
+    fn anon_fn_name(&self, expr: &FatExpr<'p>) -> Ident<'p> {
+        if ANON_BODY_AS_NAME {
+            let mut name = expr.log(self.pool);
+            name.truncate(25);
+            self.pool.intern(&name)
+        } else {
+            Flag::Anon.ident()
+        }
+    }
+
     fn parse_expr_inner(&mut self) -> Res<FatExpr<'p>> {
         match self.peek() {
             // TODO: use no body as type expr?
@@ -236,11 +248,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let body = self.parse_expr()?;
 
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
-                let name = name.unwrap_or_else(|| {
-                    let mut name = body.expr.log(self.pool);
-                    name.truncate(25);
-                    self.pool.intern(&name)
-                });
+                let name = name.unwrap_or_else(|| self.anon_fn_name(&body));
 
                 let func = Func::new(name, arg, ret, Some(body), loc, false, true);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
@@ -388,6 +396,15 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let e = self.parse_expr()?;
                 Ok(self.expr(Expr::SuffixMacro(Flag::Const_Eval.ident(), Box::new(e))))
             }
+            Bang => {
+                // !name === ()!name
+                self.start_subexpr();
+                self.start_subexpr();
+                self.eat(Bang)?;
+                let name = self.ident()?;
+                let prefix = Box::new(self.raw_unit());
+                Ok(self.expr(Expr::SuffixMacro(name, prefix)))
+            }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }
     }
@@ -417,12 +434,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let callback = self.parse_block_until_squiggle()?;
                     self.eat(RightSquiggle)?;
 
-                    let name = name.unwrap_or_else(|| {
-                        let mut name = callback.expr.log(self.pool);
-                        name.truncate(25);
-                        name = name.replace('\n', "~");
-                        self.pool.intern(&name)
-                    });
+                    let name = name.unwrap_or_else(|| self.anon_fn_name(&callback));
                     let callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false, true);
                     let callback = self.expr(Expr::Closure(Box::new(callback)));
 
@@ -655,9 +667,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.start_subexpr();
                         let callback = self.parse_block_until_squiggle()?;
                         // Note: we leave the closing squiggle because the outer code is expecting to be inside a block.
-                        let mut name = callback.expr.log(self.pool);
-                        name.truncate(25);
-                        let name = self.pool.intern(&name);
+                        let name = self.anon_fn_name(&callback);
                         let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false, true);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 
