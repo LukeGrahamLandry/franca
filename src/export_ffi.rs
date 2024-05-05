@@ -5,17 +5,18 @@ use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{values_from_ints, Values};
-use crate::compiler::{bit_literal, Compile, Res, Unquote};
-use crate::err;
+use crate::compiler::{bit_literal, Compile, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
+use crate::{err, ice};
 use std::arch::asm;
 use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::transmute;
 use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::{fs, io};
 
@@ -481,10 +482,6 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
     ),
     (
-        "#macro fun as(T: FatExpr, value: FatExpr) FatExpr;",
-        bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
-    ),
-    (
         "#macro fun namespace(block: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, namespace_macro),
     ),
@@ -496,18 +493,23 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "#macro #outputs(Type) fun struct(fields: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, struct_macro),
     ),
+    (
+        "#macro #outputs(Symbol) fun symbol(fields: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, symbol_macro),
+    ),
+    (
+        "#macro #outputs(Unit) fun assert_compile_error(fields: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, assert_compile_error_macro),
+    ),
+    (
+        "#macro #outputs(Type) fun type(e: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, type_macro),
+    ),
 ];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
     let result = compile.pending_ffi.pop().unwrap().unwrap();
     let res = compile.enum_constant_macro(arg, target);
-    compile.pending_ffi.push(Some(result));
-    res.unwrap()
-}
-
-fn as_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let res = compile.as_cast_macro(unsafe { &mut *result }, arg, target);
     compile.pending_ffi.push(Some(result));
     res.unwrap()
 }
@@ -660,4 +662,73 @@ fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> F
     });
 
     fields
+}
+
+fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+    hope(|| {
+        // TODO: use match
+        let value = match &mut arg.expr {
+            &mut Expr::GetNamed(i) => i,
+            &mut Expr::GetVar(v) => v.0,
+            &mut Expr::String(i) => i,
+            Expr::PrefixMacro { target, .. } => {
+                // TODO: check that handler is @as
+                if let Expr::String(i) = target.expr {
+                    i
+                } else {
+                    // ice!("Expected identifier found {arg:?}")
+                    todo!()
+                }
+            }
+            _ => ice!("Expected identifier found {arg:?}"),
+        };
+        compile.set_literal(&mut arg, value)?;
+        Ok(())
+    });
+
+    arg
+}
+
+fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    hope(|| {
+        let result = unsafe { &mut *result };
+        // TODO: this can still have side-effects on the compiler state tho :(
+        let saved_res = result.clone();
+        let before = compile.debug_trace.len();
+        unsafe {
+            EXPECT_ERR_DEPTH.fetch_add(1, Ordering::SeqCst);
+        }
+        let res = compile.compile_expr(result, &mut arg, None);
+        unsafe {
+            EXPECT_ERR_DEPTH.fetch_sub(1, Ordering::SeqCst);
+        }
+        assert!(res.is_err());
+        *result = saved_res;
+        while compile.debug_trace.len() > before {
+            compile.debug_trace.pop();
+        }
+
+        compile.set_literal(&mut arg, ())?;
+        Ok(())
+    });
+
+    compile.pending_ffi.push(Some(result));
+    arg
+}
+
+fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
+    hope(|| {
+        let result = unsafe { &mut *result };
+
+        // Note: this does not evaluate the expression.
+        // TODO: warning if it has side effects. especially if it does const stuff.
+        let ty = compile.compile_expr(result, &mut arg, None)?;
+        compile.set_literal(&mut arg, ty)?;
+        Ok(())
+    });
+
+    compile.pending_ffi.push(Some(result));
+    arg
 }

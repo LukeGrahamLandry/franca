@@ -14,7 +14,7 @@ fun literal(arg: AstExpr, target: AstExpr) AstExpr = '{
 #macro #outputs(AstExpr)
 fun literal(arg: AstExpr) AstExpr = '{
     var value = <arg>;
-    literal_ast(value!type, @as(rawptr) value&)
+    literal_ast(@type value, @as(rawptr) value&)
 }';
 
 /// Ast<?> -> Ast<T>
@@ -33,7 +33,7 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
     
     kind := info&!tag[];
     is_ptr := false;
-    if(eq(kind, tag_value(TypeInfo, Ptr!symbol))){|
+    if(eq(kind, tag_value(TypeInfo, @symbol(Ptr)))){|
         enum_type = @as(Type) info&.Ptr[];
         info = get_type_info(enum_type);
         is_ptr = true;
@@ -79,7 +79,7 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
         let tag_val = arg_ptr!tag[];
         <{
             for(stmts) { (stmt: *FatStmt) | 
-                if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|  // (1)
+                if(eq(stmt.stmt!tag[], tag_value(Stmt, @symbol(Eval)))) {|  // (1)
                     var handler_body = stmt.stmt.Eval[];
                     name: Symbol = handler_body&.expr.Closure[].name[]; // (2)
                     index := tag_value(enum_type, name); // they're always sequential
@@ -123,7 +123,7 @@ fun switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
             while(fn = i.ge(0)) {|
                 stmt: *FatStmt = handlers.index(i); 
                 // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
-                if(eq(stmt.stmt!tag[], tag_value(Stmt, Eval!symbol))) {|
+                if(eq(stmt.stmt!tag[], tag_value(Stmt, @symbol(Eval)))) {|
                     var handler_body = stmt.stmt.Eval[];
                     branch := handler_body&.expr.PrefixMacro;
                     macro := branch.handler[];
@@ -134,12 +134,12 @@ fun switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
                     action := branch.target[][];
                     
                     // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
-                    if(name.eq(case!symbol), fn = {
+                    if(name.eq(@symbol(case)), fn = {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
                         cond := 'eq(arg_var, <as(inspected_ty, arg[])>)';
                         body = '(<cond>, fn=<action>(), fn=<body>)!if';
-                    }, fn=if(name.eq(default!symbol), fn = {
+                    }, fn=if(name.eq(@symbol(default)), fn = {
                         if(first) {|
                             // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
                             body = '<action>(arg_var)';
@@ -216,7 +216,7 @@ fun bits(var arg: AstExpr) AstExpr = {
 fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr = {
     kind := place&.expr!tag[];
     // TODO: generate a typed enum for the tag so this could be kind.eq(.GetVar).or(kind.eq(.GetNamed))
-    is_var_access := eq(kind, tag_value(Expr, GetVar!symbol)).or(eq(kind, tag_value(Expr, GetNamed!symbol)));
+    is_var_access := eq(kind, tag_value(Expr, @symbol(GetVar))).or(eq(kind, tag_value(Expr, @symbol(GetNamed))));
     
     ::if(FatExpr); // TODO: auto template instantiation. 
     
@@ -225,10 +225,10 @@ fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatEx
         '{ <place> = <@literal(f)>(<place>, <value>); }'
     } {|
         // TODO: nice report_compile_error api that lets you attatch the Span so you get useful error message rendering. 
-        assert(kind.ne(tag_value(Expr, PrefixMacro!symbol)), "TODO: support macro expansion in place expr");
-        is_deref := kind.eq(tag_value(Expr, SuffixMacro!symbol)).and {()bool|
+        assert(kind.ne(tag_value(Expr, @symbol(PrefixMacro))), "TODO: support macro expansion in place expr");
+        is_deref := kind.eq(tag_value(Expr, @symbol(SuffixMacro))).and {()bool|
             name := place&.expr.SuffixMacro[0][];
-            name.eq(deref!symbol)
+            name.eq(@symbol(deref))
         };
         assert(is_deref, "_= operator left hand side must be a place expr.");
         // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
@@ -242,7 +242,7 @@ fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatEx
 #macro #outputs(Type)
 fun enum(var names: FatExpr) FatExpr = {
     kind := names&.expr!tag[];
-    assert(eq(kind, tag_value(Expr, Tuple!symbol)), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
+    assert(eq(kind, tag_value(Expr, @symbol(Tuple))), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
 
     Binding :: Binding!builtin;
     fn binding(name: Symbol, value: i64) Binding = {
@@ -260,11 +260,11 @@ fun enum(var names: FatExpr) FatExpr = {
     enumerate(parts) {(i: i64, part: *FatExpr)|
         // TODO: really need @default on match cause this is annoying. 
         @switch(part.expr!tag[]) {
-            @case(tag_value(Expr, GetNamed!symbol)) fn = {
+            @case(tag_value(Expr, @symbol GetNamed)) fn = {
                 name : Symbol = part.expr.GetNamed[];
                 cases&.push(binding(name, i));
             };
-            @case(tag_value(Expr, GetVar!symbol)) fn = {
+            @case(tag_value(Expr, @symbol GetVar)) fn = {
                 name : Symbol = part.expr.GetVar[0][];
                 cases&.push(binding(name, i));
             };
@@ -278,3 +278,6 @@ fun enum(var names: FatExpr) FatExpr = {
     
     '@enum(i64) <varients>'
 }
+
+// TODO: this is still a massive hack. it still looks for @as specifically by name. -- May 5
+#macro fun as(T: FatExpr, e: FatExpr) FatExpr = '(<T>, <e>)!as';

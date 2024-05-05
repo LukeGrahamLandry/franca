@@ -11,7 +11,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
@@ -1314,13 +1314,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.ty = ty;
                         ty
                     }
-                    Flag::Type => {
-                        // Note: this does not evaluate the expression.
-                        // TODO: warning if it has side effects. especially if it does const stuff.
-                        let ty = self.compile_expr(result, arg, None)?;
-                        self.set_literal(expr, ty)?;
-                        expr.ty
-                    }
                     Flag::Const_Eval => {
                         let res = self.compile_expr(result, arg, requested)?;
                         let ty = res;
@@ -1333,26 +1326,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         };
                         expr.set(value.clone(), ty);
                         ty
-                    }
-                    Flag::Assert_Compile_Error => {
-                        // TODO: this can still have side-effects on the compiler state tho :(
-                        let saved_res = result.clone();
-                        let before = self.debug_trace.len();
-                        unsafe {
-                            EXPECT_ERR_DEPTH.fetch_add(1, Ordering::SeqCst);
-                        }
-                        let res = self.compile_expr(result, arg, None);
-                        unsafe {
-                            EXPECT_ERR_DEPTH.fetch_sub(1, Ordering::SeqCst);
-                        }
-                        assert!(res.is_err());
-                        *result = saved_res;
-                        while self.debug_trace.len() > before {
-                            self.debug_trace.pop();
-                        }
-
-                        self.set_literal(expr, ())?;
-                        expr.ty
                     }
                     Flag::Tag => {
                         // TODO: auto deref and typecheking
@@ -1369,26 +1342,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         expr.done = arg.done;
                         expr.ty = ty;
                         ty
-                    }
-                    Flag::Symbol => {
-                        // TODO: use match
-                        let value = match &mut arg.expr {
-                            &mut Expr::GetNamed(i) => i,
-                            &mut Expr::GetVar(v) => v.0,
-                            &mut Expr::String(i) => i,
-                            Expr::PrefixMacro { target, .. } => {
-                                // TODO: check that handler is @as
-                                if let Expr::String(i) = target.expr {
-                                    i
-                                } else {
-                                    // ice!("Expected identifier found {arg:?}")
-                                    todo!()
-                                }
-                            }
-                            _ => ice!("Expected identifier found {arg:?}"),
-                        };
-                        self.set_literal(expr, value)?;
-                        expr.ty
                     }
                     Flag::Fn_Ptr => {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
@@ -1461,6 +1414,25 @@ impl<'a, 'p> Compile<'a, 'p> {
                         } else {
                             err!("!contextual_field (leading dot) requires name",)
                         }
+                    }
+                    Flag::As => {
+                        // TODO: sad day
+                        if let Expr::Value { value } = &mut arg.expr {
+                            let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
+                            let mut parts = vec![];
+                            let ty = ty.to_vec(); // sad
+                            let values = values_from_ints_one(self, arg.ty, value.clone().vec())?;
+                            for (v, ty) in values.into_iter().zip(ty.into_iter()) {
+                                parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg.loc, ty))
+                            }
+                            arg.expr = Expr::Tuple(parts);
+                        }
+                        if let Expr::Tuple(parts) = &mut arg.expr {
+                            assert!(parts.len() == 2);
+                            *expr = self.as_cast_macro(result, mem::take(&mut parts[0]), mem::take(&mut parts[1]))?;
+                            return Ok(expr.ty);
+                        }
+                        err!("bad !as: {}", arg.log(self.pool))
                     }
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
@@ -1795,11 +1767,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::PrefixMacro { handler, arg, .. } => {
                 // TODO: short-circuit on #outputs
                 // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
-                if handler.as_ident() == Some(Flag::As.ident()) && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
-                    // HACK: sad that 'as' is special
-                    let ty: TypeId = self.immediate_eval_expr_known(*arg.clone())?;
-                    return Ok(Some(ty));
-                }
 
                 // TODO: hack yuck. now that i rely on expr working so it can be passed into quoted things, this is extra ugly.
                 match self.compile_expr(result, handler, Some(TypeId::overload_set())) {
@@ -1815,6 +1782,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Err(e) => ice!("TODO: PrefixMacro handler inference failed. need to make it non-destructive?\n{e:?}",),
                 }
 
+                // TODO: seperate applying macros from full commit to compiling it all.
                 // TODO: if this fails you might have changed the state.
                 match self.compile_expr(result, expr, None) {
                     Ok(res) => res,
@@ -1837,7 +1805,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         _ => err!("took address of r-value {}", arg.log(self.pool)),
                     },
-                    Flag::Type => self.program.intern_type(TypeInfo::Type),
                     Flag::Deref => {
                         let ptr_ty = self.type_of(result, arg)?;
                         if let Some(ptr_ty) = ptr_ty {
@@ -1845,7 +1812,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(None);
                     }
-                    Flag::Symbol => Ident::get_type(self.program),
                     Flag::Tag => self.program.ptr_type(TypeId::i64()),
                     Flag::Fn_Ptr => {
                         if let Some(f_ty) = self.type_of(result, arg)? {
@@ -1859,6 +1825,29 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::While => TypeId::unit(),
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
                     Flag::If => return Ok(None),
+                    Flag::As => {
+                        // TODO: sad day
+                        if let Expr::Value { value } = &mut arg.expr {
+                            let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
+                            let mut parts = vec![];
+                            let ty = ty.to_vec(); // sad
+                            let values = values_from_ints_one(self, arg.ty, value.clone().vec())?;
+                            for (v, ty) in values.into_iter().zip(ty.into_iter()) {
+                                parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg.loc, ty))
+                            }
+                            arg.expr = Expr::Tuple(parts);
+                        }
+
+                        if let Expr::Tuple(parts) = &mut arg.expr {
+                            assert!(parts.len() == 2);
+                            if self.compile_expr(result, &mut parts[0], Some(TypeId::ty())).is_ok() {
+                                // HACK: sad that 'as' is special
+                                let ty: TypeId = self.immediate_eval_expr_known(parts[0].clone())?;
+                                return Ok(Some(ty));
+                            }
+                        }
+                        err!("bad !as",)
+                    }
                     _ => match self.compile_expr(result, expr, None) {
                         Ok(res) => res,
                         Err(e) => ice!("TODO: SuffixMacro inference failed. need to make it non-destructive?\n{e:?}",),
@@ -2215,7 +2204,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         &mut self,
         result: &mut FnWip<'p>,
         expr: &mut FatExpr<'p>,
-        req_arg: Option<TypeId>,
+        _req_arg: Option<TypeId>,
         req_ret: Option<TypeId>,
     ) -> Res<'p, FuncId> {
         if let Expr::Closure(func) = expr.deref_mut() {
