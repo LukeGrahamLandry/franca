@@ -1,12 +1,13 @@
 //! Convert a stream of tokens into ASTs.
 use std::collections::HashSet;
-use std::{fmt::Debug, mem, ops::Deref, panic::Location, sync::Arc};
+use std::{fmt::Debug, mem, ops::Deref, sync::Arc};
 
 use codemap::{CodeMap, File, Span};
 use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Binding, Flag, Name, TypeId, VarType};
 use crate::bc::Values;
+use crate::compiler::{CErr, CompileError, Res};
 use crate::export_ffi::get_include_std;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
@@ -25,22 +26,13 @@ pub struct Parser<'a, 'p> {
     ctx: &'a mut ParseTasks<'p>,
 }
 
-type Res<T> = Result<T, ParseErr>;
-
-#[derive(Debug, Clone)]
-pub struct ParseErr {
-    pub loc: Option<&'static Location<'static>>,
-    pub file: Arc<File>,
-    pub diagnostic: Vec<Diagnostic>,
-}
-
 #[derive(Debug, Clone)]
 pub enum ParseFile<'p> {
     PendingStmts(Arc<File>, Span),
     PendingExpr(Arc<File>, Span),
     ParsedStmts(Vec<FatStmt<'p>>),
     ParsedExpr(FatExpr<'p>),
-    Err(ParseErr),
+    Err(Box<CompileError<'p>>),
     DoneExpr,
     DoneStmt,
     Wip,
@@ -73,7 +65,7 @@ impl<'p> ParseTasks<'p> {
         }
     }
 
-    pub fn wait_for_stmts(&mut self, name: usize) -> Res<Vec<FatStmt<'p>>> {
+    pub fn wait_for_stmts(&mut self, name: usize) -> Res<'p, Vec<FatStmt<'p>>> {
         match &mut self.tasks[name] {
             ParseFile::PendingStmts(file, span) => {
                 let lex = Lexer::new(file.clone(), self.pool, *span);
@@ -97,7 +89,7 @@ impl<'p> ParseTasks<'p> {
         }
     }
 
-    pub fn wait_for_expr(&mut self, name: usize) -> Res<FatExpr<'p>> {
+    pub fn wait_for_expr(&mut self, name: usize) -> Res<'p, FatExpr<'p>> {
         match &mut self.tasks[name] {
             ParseFile::PendingExpr(file, span) => {
                 let lex = Lexer::new(file.clone(), self.pool, *span);
@@ -133,7 +125,7 @@ impl<'p> ParseTasks<'p> {
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
-    pub fn parse_stmts(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<Vec<FatStmt<'p>>> {
+    pub fn parse_stmts(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<'p, Vec<FatStmt<'p>>> {
         let mut p = Parser {
             pool,
             lexer,
@@ -155,7 +147,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(stmts)
     }
 
-    pub fn parse_expr_outer(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<FatExpr<'p>> {
+    pub fn parse_expr_outer(ctx: &'a mut ParseTasks<'p>, lexer: Lexer<'a, 'p>, pool: &'p StringPool<'p>) -> Res<'p, FatExpr<'p>> {
         let mut p = Parser {
             pool,
             lexer,
@@ -175,7 +167,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(expr)
     }
 
-    fn parse_expr(&mut self) -> Res<FatExpr<'p>> {
+    fn parse_expr(&mut self) -> Res<'p, FatExpr<'p>> {
         match self.peek() {
             Star => self.prefix_operator(Star, Flag::Operator_Star_Prefix),
             Question => self.prefix_operator(Question, Flag::Operator_Question_Prefix),
@@ -188,7 +180,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn prefix_operator(&mut self, tok: TokenType, op: Flag) -> Res<FatExpr<'p>> {
+    fn prefix_operator(&mut self, tok: TokenType, op: Flag) -> Res<'p, FatExpr<'p>> {
         self.eat(tok)?;
         self.start_subexpr();
         self.start_subexpr();
@@ -197,7 +189,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
     }
 
-    fn fn_def_signeture(&mut self, loc: Span) -> Res<(Option<Ident<'p>>, Pattern<'p>, LazyType<'p>)> {
+    fn fn_def_signeture(&mut self, loc: Span) -> Res<'p, (Option<Ident<'p>>, Pattern<'p>, LazyType<'p>)> {
         let name = if let Symbol(i) = self.peek() {
             self.pop();
             // return Err(self.error_next("Fn expr must not have name".into()));
@@ -239,7 +231,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn parse_expr_inner(&mut self) -> Res<FatExpr<'p>> {
+    fn parse_expr_inner(&mut self) -> Res<'p, FatExpr<'p>> {
         match self.peek() {
             // TODO: use no body as type expr?
             // Optional name, require body, optional (args).
@@ -412,7 +404,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>) -> Res<FatExpr<'p>> {
+    fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         loop {
             prefix = match self.peek() {
                 LeftParen => {
@@ -482,7 +474,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn parse_tuple(&mut self) -> Res<FatExpr<'p>> {
+    fn parse_tuple(&mut self) -> Res<'p, FatExpr<'p>> {
         self.start_subexpr();
         self.eat(LeftParen)?;
         if self.maybe(RightParen) {
@@ -559,7 +551,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         })
     }
 
-    fn parse_stmt(&mut self) -> Res<FatStmt<'p>> {
+    fn parse_stmt(&mut self) -> Res<'p, FatStmt<'p>> {
         let stmt = self.parse_stmt_inner()?;
         // TODO: if you're sad that this check is slow... fix the ambiguity problem...
         if !stmt.annotations.is_empty() && !matches!(stmt.stmt, Stmt::DeclFunc(_)) {
@@ -578,7 +570,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(stmt)
     }
 
-    fn fn_stmt(&mut self) -> Res<Stmt<'p>> {
+    fn fn_stmt(&mut self) -> Res<'p, Stmt<'p>> {
         let loc = self.next_span();
         match self.pop().kind {
             Fn | Fun => {}
@@ -617,7 +609,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(Stmt::DeclFunc(func))
     }
 
-    fn parse_stmt_inner(&mut self) -> Res<FatStmt<'p>> {
+    fn parse_stmt_inner(&mut self) -> Res<'p, FatStmt<'p>> {
         self.start_subexpr();
         let mut annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
@@ -768,7 +760,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(self.stmt(annotations, stmt))
     }
 
-    fn after_expr_stmt(&mut self, e: FatExpr<'p>) -> Res<Stmt<'p>> {
+    fn after_expr_stmt(&mut self, e: FatExpr<'p>) -> Res<'p, Stmt<'p>> {
         let s = match self.peek() {
             Equals => {
                 self.pop();
@@ -800,7 +792,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     // | @name(args) |
-    fn parse_annotations(&mut self) -> Res<Vec<Annotation<'p>>> {
+    fn parse_annotations(&mut self) -> Res<'p, Vec<Annotation<'p>>> {
         let mut annotations = vec![];
         while let Hash = self.peek() {
             if let Symbol(name) = self.lexer.nth(1).kind {
@@ -823,7 +815,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     //       do i like letting you do pattern matchy things in struct decls? That's kinda a cool side effect.
     /// Used for fn sig args and also struct literals.
     /// `Names: Expr, Names: Expr` ends with ')' or '}' or missing comma
-    fn parse_args(&mut self) -> Res<Pattern<'p>> {
+    fn parse_args(&mut self) -> Res<'p, Pattern<'p>> {
         let mut args = Pattern::empty(self.next_span());
 
         loop {
@@ -848,7 +840,7 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     // TODO: rn just one ident but support tuple for pattern matching
     /// `Names ':' ?Expr`
-    fn parse_type_binding(&mut self, allow_default: bool) -> Res<Binding<'p>> {
+    fn parse_type_binding(&mut self, allow_default: bool) -> Res<'p, Binding<'p>> {
         let kind = if let Qualifier(kind) = self.peek() {
             self.pop();
             kind
@@ -878,7 +870,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     #[track_caller]
-    fn ident(&mut self) -> Res<Ident<'p>> {
+    fn ident(&mut self) -> Res<'p, Ident<'p>> {
         if let TokenType::Symbol(i) = self.peek() {
             self.pop();
             Ok(i)
@@ -898,7 +890,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     #[track_caller]
-    fn eat(&mut self, ty: TokenType) -> Res<Span> {
+    fn eat(&mut self, ty: TokenType) -> Res<'p, Span> {
         if self.peek() == ty {
             let t = self.pop();
             Ok(t.span)
@@ -980,48 +972,52 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     #[track_caller]
-    fn error_next(&mut self, message: String) -> ParseErr {
+    fn error_next(&mut self, message: String) -> Box<CompileError<'p>> {
         let token = self.lexer.next();
         let last = if self.spans.len() < 2 {
             *self.spans.last().unwrap()
         } else {
             self.spans[self.spans.len() - 1]
         };
-        ParseErr {
-            loc: if cfg!(feature = "trace_errors") {
-                Some(std::panic::Location::caller())
-            } else {
-                None
-            },
-            diagnostic: vec![Diagnostic {
-                level: Level::Error,
-                message,
-                code: None,
-                spans: vec![
-                    SpanLabel {
-                        span: last,
-                        label: None,
-                        style: SpanStyle::Secondary,
-                    },
-                    SpanLabel {
-                        span: token.span,
-                        label: Some(String::from("next")),
-                        style: SpanStyle::Primary,
-                    },
-                ],
-            }],
-            file: self.lexer.src.clone(),
-        }
+
+        let internal_loc = if cfg!(feature = "trace_errors") {
+            Some(std::panic::Location::caller())
+        } else {
+            None
+        };
+        let diagnostic = vec![Diagnostic {
+            level: Level::Error,
+            message,
+            code: None,
+            spans: vec![
+                SpanLabel {
+                    span: last,
+                    label: None,
+                    style: SpanStyle::Secondary,
+                },
+                SpanLabel {
+                    span: token.span,
+                    label: Some(String::from("next")),
+                    style: SpanStyle::Primary,
+                },
+            ],
+        }];
+        Box::new(CompileError {
+            internal_loc,
+            loc: Some(last),
+            reason: CErr::Diagnostic(diagnostic),
+            trace: String::new(),
+        })
     }
 
     #[track_caller]
-    fn expected(&mut self, msg: &str) -> ParseErr {
+    fn expected(&mut self, msg: &str) -> Box<CompileError<'p>> {
         let s = format!("Expected: {msg} but found {:?}", self.peek());
         self.error_next(s)
     }
 
     /// does NOT consume the closing squiggle
-    fn parse_block_until_squiggle(&mut self) -> Res<FatExpr<'p>> {
+    fn parse_block_until_squiggle(&mut self) -> Res<'p, FatExpr<'p>> {
         let mut body = vec![];
         while self.peek() != RightSquiggle {
             body.push(self.parse_stmt()?);
@@ -1079,7 +1075,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn push_arg(&mut self, call: &mut FatExpr<'p>, callback: FatExpr<'p>) -> Res<()> {
+    fn push_arg(&mut self, call: &mut FatExpr<'p>, callback: FatExpr<'p>) -> Res<'p, ()> {
         if let Expr::Call(_, old_arg) = &mut call.expr {
             match &mut old_arg.expr {
                 Expr::Tuple(parts) => parts.push(callback),

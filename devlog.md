@@ -11,6 +11,7 @@ now only type_of is for overloading so I can spare some code to fix that cause i
 - convert to @At macros: !symbol, !assert_compile_error, !type.
   tried to convert @as to !as but its still a massive hack because i use the @as syntax but wrapper macro isn't enough,
   because type_of can't just apply one layer of macro and get the type, it always tries to compile the whole thing, so theres still a speciall case.
+- changed serial tests to reuse the same compiler instance and now that's faster than the fork one.
 
 ## improving enums (May 4)
 

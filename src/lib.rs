@@ -292,17 +292,7 @@ pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId
         .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
     let user_span = file.span;
     let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    let parsed = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(Box::new(CompileError {
-                internal_loc: e.loc,
-                loc: Some(e.diagnostic[0].spans[0].span),
-                reason: CErr::Diagnostic(e.diagnostic),
-                trace: String::new(),
-            }))
-        }
-    };
+    let parsed = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool)?;
 
     let mut global = make_toplevel(comp.pool, user_span, parsed);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;

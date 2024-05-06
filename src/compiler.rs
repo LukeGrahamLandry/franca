@@ -71,6 +71,7 @@ pub struct Compile<'a, 'p> {
     pub last_loc: Option<Span>,
     pub save_bootstrap: Vec<FuncId>,
     pub tests: Vec<FuncId>,
+    pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
     pub ready: BcReady<'p>,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
@@ -141,6 +142,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             pending_ffi: vec![],
             scopes: vec![],
             parsing,
+            tests_broken: vec![],
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
@@ -1011,6 +1013,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests.push(id);
         }
+        if func.has_tag(Flag::Test_Broken) {
+            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
+            self.tests_broken.push(id);
+        }
         Ok(out)
     }
 
@@ -1053,7 +1059,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_sign of evil_uninit {}", self.log_trace());
         self.program[f].why_resolved_sign = Some(Location::caller().to_string()); // self.log_trace()
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            ResolveScope::resolve_sign(&mut func, self).unwrap(); // TODO
+            ResolveScope::resolve_sign(&mut func, self)?; // TODO
             Ok((func, ()))
         });
         Ok(())
@@ -1068,7 +1074,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program[f].why_resolved_body = Some(Location::caller().to_string()); // self.log_trace()
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
-            ResolveScope::resolve_body(&mut func, self).unwrap(); // TODO
+            ResolveScope::resolve_body(&mut func, self)?; // TODO
             Ok((func, ()))
         });
         Ok(())

@@ -5,7 +5,7 @@ use codemap::Span;
 use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
-    compiler::{add_unique, BlockScope, CErr, Compile, Res},
+    compiler::{add_unique, BlockScope, Compile, Res},
     err, ice,
     logging::{LogTag::Scope, PoolLog},
     outln,
@@ -315,10 +315,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.last_loc = loc;
         match expr.deref_mut() {
             Expr::GetParsed(index) => {
-                *expr = match self.compiler.parsing.wait_for_expr(*index) {
-                    Ok(expr) => expr,
-                    Err(e) => err!(CErr::Diagnostic(e.diagnostic)),
-                };
+                *expr = self.compiler.parsing.wait_for_expr(*index)?;
                 debug_assert!(!matches!(expr.expr, Expr::GetParsed(_)));
                 self.resolve_expr(expr)?;
             }
@@ -343,13 +340,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     for stmt in mem::take(body) {
                         if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
                             dirty = true;
-                            match self.compiler.parsing.wait_for_stmts(name) {
-                                Ok(stmts) => {
-                                    for s in stmts {
-                                        new_body.push(s);
-                                    }
-                                }
-                                Err(e) => err!(CErr::Diagnostic(e.diagnostic)),
+                            for s in self.compiler.parsing.wait_for_stmts(name)? {
+                                new_body.push(s);
                             }
                         } else {
                             new_body.push(stmt);

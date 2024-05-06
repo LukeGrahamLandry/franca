@@ -1692,6 +1692,7 @@ pub enum Flag {
     Anon,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
+    Test_Broken,
     _Reserved_Count_,
 }
 
