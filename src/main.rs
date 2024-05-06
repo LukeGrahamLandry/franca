@@ -107,7 +107,8 @@ fn main() {
 
         // println!("{:#?}", unsafe { &STATS });
     } else {
-        run_tests_find_faliures()
+        run_tests_find_faliures();
+        check_broken();
     }
 }
 
@@ -243,6 +244,39 @@ fn forked_swallow_passes() {
     unset_colour();
 }
 
+fn check_broken() {
+    let pool = Box::leak(Box::<StringPool>::default());
+    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+    let mut comp = Compile::new(pool, &mut program);
+
+    let files = collect_test_files();
+    load_all_toplevel(&mut comp, &files).unwrap_or_else(|e| {
+        log_err(&comp, *e);
+        exit(1);
+    });
+
+    set_colour(255, 0, 0);
+    print!("[KNOWN BUGS] ");
+    unset_colour();
+    let tests = comp.tests_broken.clone();
+    for f in tests {
+        let fname = comp.pool.get(comp.program[f].name);
+        let (success, _, _) = fork_and_catch(|| {
+            println!(" ");
+            println!(" ");
+            run_one(&mut comp, f);
+        });
+        if success {
+            set_colour(255, 0, 255);
+        } else {
+            set_colour(255, 255, 0);
+        }
+        print!("{fname}, ");
+        unset_colour();
+    }
+    println!();
+}
+
 fn collect_test_files() -> Vec<(String, String)> {
     let mut files: Vec<_> = fs::read_dir("tests").unwrap().collect();
 
@@ -344,7 +378,7 @@ fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
             fn read_all(fd: i32) -> String {
                 let mut f = unsafe { File::from_raw_fd(fd) };
                 // can't use read_to_string, it blocks waiting for eof?
-                let mut s = vec![0; 9999999];
+                let mut s = vec![0; 99999];
                 let len = f.read(&mut s).unwrap();
                 unsafe { s.set_len(len) };
                 String::from_utf8(s).unwrap()
