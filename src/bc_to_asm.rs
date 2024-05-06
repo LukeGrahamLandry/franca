@@ -132,6 +132,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(op);
                 }
                 self.compile.aarch64.save_current(f);
+                if func.has_tag(Flag::One_Ret_Pic) {
+                    self.compile.ready[f].as_mut().unwrap().aarch64_stack_bytes = Some(0);
+                }
             } else {
                 self.bc_to_asm(f)?;
                 self.compile.aarch64.save_current(f);
@@ -441,6 +444,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.compile.aarch64.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
             self.compile.aarch64.patch(thd, add_im(X64, sp, sp, 16, 0));
         }
+        self.compile.ready[f].as_mut().unwrap().aarch64_stack_bytes = Some(slots);
         Ok(())
     }
 

@@ -56,6 +56,7 @@ pub struct FnBody<'p> {
     pub jump_targets: BitSet,
     pub if_debug_count: u16,
     pub(crate) _p: PhantomData<&'p ()>,
+    pub aarch64_stack_bytes: Option<u16>,
 }
 
 impl<'p> FnBody<'p> {

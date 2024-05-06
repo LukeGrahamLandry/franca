@@ -76,6 +76,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             slot_types: vec![],
             if_debug_count: 0,
             _p: PhantomData,
+            aarch64_stack_bytes: None,
         }
     }
 

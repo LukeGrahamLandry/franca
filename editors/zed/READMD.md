@@ -1,0 +1,3 @@
+- rustup target add wasm32-wasi
+- Zed > Extensions > Add Dev Extension > (select this folder)
+- Go > Command Palete > zed: open log
