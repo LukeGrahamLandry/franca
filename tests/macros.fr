@@ -1,222 +1,204 @@
-#test(aarch64)
-fn main(canary: i64) i64 = {
-
-//////////////////////
-/// Trivial Macros ///
-//////////////////////
-
-#macro
-fn first_expr(arg: FatExpr, target: FatExpr) FatExpr = arg;
-
-#macro
-fn second_expr(arg: FatExpr, target: FatExpr) FatExpr = target;
-
-assert_eq(177, @first_expr(177) 277);
-assert_eq(288, @second_expr(188) 288);
-
-// you can use @(_) to put more complex expressions that resolve to a macro. 
-assert_eq(5, @(second_expr)(2) 5);  // this one is redundant
-// TODO: this shouldn't need to be explicit #generic since its used in a const context. even :: doesnt help which is annoying.  
-//       im guessing its a problem with fn type_of because it worked briefly before i had to change that to fix @as       -- Apr 21
-#comptime fn get_second_expr() OverloadSet = second_expr; 
-assert_eq(5, @(get_second_expr())(2) 5);  // this one does a comptime call to decide which macro to call. 
-
-#macro
-fn last_thing(var target: FatExpr) FatExpr = {
-    let parts: Slice(FatExpr) = target&.expr.Tuple[];
-    let i = parts.len().sub(1);
-    get(parts, i)
-}
-
-// TODO: !! at the very least, warn when it gets put on a stmt instead of treated as an expression until i implement that. 
-
-let x = @last_thing() (a, b, c, d, 18);
-assert_eq(x, 18);
-
-#macro
-fn is_declared(var target: FatExpr) FatExpr = {
-    loc := target&.loc[];
-    (eq(target&.expr!tag[], tag_value(Expr, @symbol GetVar)), fn= {
-        target = 'true';
-    }, fn= 
-        (eq(target&.expr!tag[], tag_value(Expr, @symbol GetNamed)), fn= {
-            target = 'false';
-            target&.loc[] = loc; // report errors at the caller not here. 
-        }, fn= {
-            debug_log_ast(target);
-            panic("@is_declared expected identifier");
-        })!if
-    )!if;
-    target
-}
-
-assert_eq(true, @is_declared() x);
-assert_eq(false, @is_declared() not_an_ident);
-assert_eq(false, @is_declared() hello);
-let hello = 4;
-assert_eq(true, @is_declared hello); // brackets are optional
-// Since this is a panic, it no longer works in assert_compile_error now that comptime happens in asm. 
-// @assert_compile_error { let _ = @is_declared() 12; };  
-
-assert_eq(false, @is_declared() in_a_block);
-{ let in_a_block = 0; assert_eq(true, @is_declared() in_a_block); };
-assert_eq(false, @is_declared() in_a_block);
-assert_eq(true, @is_declared() AstExpr);
-assert_eq(true, @is_declared() i64);
-
-////////////////////
-/// Placeholders ///
-////////////////////
-
-// The body here is equivalent to rust's `quote!{ #func(5, #number) }`.
-// Ask the compiler to give us the ast for the expression "<something>(5, <something>)",
-// but then take the values of <number> and <func> from our scope and slot them in to fill the holes.
-#macro
-fn apply_func_with_five(number: FatExpr, func: FatExpr) FatExpr = '<func>(5, <number>)';
-
-let seven = @apply_func_with_five(2) add;
-assert_eq(seven, 7);
-
-//////////////////
-/// Match Test ///
-//////////////////
-
-#comptime
-fn Option4(const T: Type) Type = @tagged(Some: T, None: Unit);
-
-const StupidEnum = @tagged(Only: i64);
-
-let useless: StupidEnum = (Only: 18);
-let y: i64 = @match(useless) {
-    (fn Only(inner: i64) i64 = inner);  // TODO: error if you dont put it in a closure
-};
-assert_eq(18, y);
-
-fn unwrap_or_99(m: Option4(i64)) i64 = @match(m) {
-    (fn Some(payload: i64) i64 = payload);
-    (fn None() i64 = 99);
-};
-
-let yes: Option4(i64) = (Some: 12);
-let no: Option4(i64) = (None: unit);
-assert_eq(unwrap_or_99(yes), 12);
-assert_eq(unwrap_or_99(no), 99);
-
-// @match can return any type. 
-fn is_some4(m: Option4(i64)) bool =     // // compared to rust:
-    @match(m) {                        // match m {
-        (fn Some(_: i64) = true);      //   Some(_) => true
-        (fn None() = false);           //   None => flase
-    };                                 // }
-
-assert_eq(is_some4(yes), true);
-assert_eq(is_some4(no), false);
-
-/*
-same as (rust)
-match m {
-    Some(_) => true
-    None => flase
-}
-
-*/
-
-////////////////////
-/// Bit Patterns ///
-////////////////////
-
-/// @bits is a macro defined by the standard library and used heavily by the assembler. 
-assert_eq(@bits(0b00, 0x00000, 0b101, 0b100, 0b00, 0b11), @as(i64) 0b1011000011);
-
-//////////////////////
-/// Enum Constants ///
-//////////////////////
-
-// TODO: @enum is built into the compiler which is sad. 
-//       Even if I fix that, maybe it makes more sense for this to be in the structs section. 
-// TODO: make constant structs less hacky. 
-// TODO: actual typechecking. it does know that _.T is a Unique type, but I had to turn off non-structural type checking to make something else work. 
-//       However, if every function with this as an argument has an overload for the base type that does something else, 
-//       it will take prority as expected. 
-//       You would not believe how awkward it was to make this work at all, don't complain. 
-/// `@enum(T) S` is what Java calls an enum (`@tagged(S)` is what Rust calls an enum). 
-const MyBool = @enum(i64) (True = 42, False = 999);
-
-// TODO: subtyping
-fn to_bool(b: MyBool) bool = {
-    if(eq(b, MyBool.True), fn = true) {|
-        if(eq(b, MyBool.False), fn = false, 
-            fn() bool = panic("Unrechable: Invalid Enum Value")
-        )
+#test fn trivial_macros() = {
+    #macro
+    fn first_expr(arg: FatExpr, target: FatExpr) FatExpr = arg;
+    
+    #macro
+    fn second_expr(arg: FatExpr, target: FatExpr) FatExpr = target;
+    
+    assert_eq(177, @first_expr(177) 277);
+    assert_eq(288, @second_expr(188) 288);
+    
+    // you can use @(_) to put more complex expressions that resolve to a macro. 
+    assert_eq(5, @(second_expr)(2) 5);  // this one is redundant
+    // TODO: this shouldn't need to be explicit #generic since its used in a const context. even :: doesnt help which is annoying.  
+    //       im guessing its a problem with fn type_of because it worked briefly before i had to change that to fix @as       -- Apr 21
+    #comptime fn get_second_expr() OverloadSet = second_expr; 
+    assert_eq(5, @(get_second_expr())(2) 5);  // this one does a comptime call to decide which macro to call. 
+    
+    #macro
+    fn last_thing(var target: FatExpr) FatExpr = {
+        let parts: Slice(FatExpr) = target&.expr.Tuple[];
+        let i = parts.len().sub(1);
+        get(parts, i)
     }
+    
+    // TODO: !! at the very least, warn when it gets put on a stmt instead of treated as an expression until i implement that. 
+    
+    let x = @last_thing() (a, b, c, d, 18);
+    assert_eq(x, 18);
+    
+    #macro
+    fn is_declared(var target: FatExpr) FatExpr = {
+        loc := target&.loc[];
+        (eq(target&.expr!tag[], tag_value(Expr, @symbol GetVar)), fn= {
+            target = 'true';
+        }, fn= 
+            (eq(target&.expr!tag[], tag_value(Expr, @symbol GetNamed)), fn= {
+                target = 'false';
+                target&.loc[] = loc; // report errors at the caller not here. 
+            }, fn= {
+                debug_log_ast(target);
+                panic("@is_declared expected identifier");
+            })!if
+        )!if;
+        target
+    }
+    
+    assert_eq(true, @is_declared() x);
+    assert_eq(false, @is_declared() not_an_ident);
+    assert_eq(false, @is_declared() hello);
+    let hello = 4;
+    assert_eq(true, @is_declared hello); // brackets are optional
+    // Since this is a panic, it no longer works in assert_compile_error now that comptime happens in asm. 
+    // @assert_compile_error { let _ = @is_declared() 12; };  
+    
+    assert_eq(false, @is_declared() in_a_block);
+    { let in_a_block = 0; assert_eq(true, @is_declared() in_a_block); };
+    assert_eq(false, @is_declared() in_a_block);
+    assert_eq(true, @is_declared() AstExpr);
+    assert_eq(true, @is_declared() i64);
 }
 
-assert_eq(to_bool(MyBool.True), true);
-assert_eq(to_bool(MyBool.False), false);
-
-// The values of the enum are really just constants of its backing type.
-// This upcast binding is required because there's no overload for assert _eq(MyBool.T[], i64)
-let x: i64 = MyBool.False;
-assert_eq(x, 999);
-
-// These take the other overload because integer literals are of type i64 not MyBool.
-assert_eq(to_bool(999), true);  // Even when the actual value collides.
-assert_eq(to_bool(0), false);
-assert_eq(to_bool(21904701), true);
-
-// let x: MyBool = 999;  // TODO: this needs to be a compile error (especially if invalid value). 
-
-// This is for @switch to use. TODO: subtyping. 
-fun eq(a: MyBool, b: MyBool) bool = eq(@as(i64) a, @as(i64) b);
-
-fn to_bool_again(b: MyBool) bool = @switch(b) {
-    @case(.True) fn = true;
-    @case(.False) fn = false;
+#test fn macro_placeholders() = {
+    // The body here is equivalent to rust's `quote!{ #func(5, #number) }`.
+    // Ask the compiler to give us the ast for the expression "<something>(5, <something>)",
+    // but then take the values of <number> and <func> from our scope and slot them in to fill the holes.
+    #macro
+    fn apply_func_with_five(number: FatExpr, func: FatExpr) FatExpr = '<func>(5, <number>)';
+    
+    let seven = @apply_func_with_five(2) add;
+    assert_eq(seven, 7);
 }
 
-assert_eq(true, to_bool_again(MyBool.True));
-assert_eq(false, to_bool_again(MyBool.False));
+#test fn match_macro() = {
+    #comptime
+    fn Option4(const T: Type) Type = @tagged(Some: T, None: Unit);
+    
+    const StupidEnum = @tagged(Only: i64);
+    
+    let useless: StupidEnum = (Only: 18);
+    let y: i64 = @match(useless) {
+        (fn Only(inner: i64) i64 = inner);  // TODO: error if you dont put it in a closure
+    };
+    assert_eq(18, y);
+    
+    fn unwrap_or_99(m: Option4(i64)) i64 = @match(m) {
+        (fn Some(payload: i64) i64 = payload);
+        (fn None() i64 = 99);
+    };
+    
+    let yes: Option4(i64) = (Some: 12);
+    let no: Option4(i64) = (None: unit);
+    assert_eq(unwrap_or_99(yes), 12);
+    assert_eq(unwrap_or_99(no), 99);
+    
+    // @match can return any type. 
+    fn is_some4(m: Option4(i64)) bool =    // // compared to rust:
+        @match(m) {                        // match m {
+            (fn Some(_: i64) = true);      //   Some(_) => true
+            (fn None() = false);           //   None => flase
+        };                                 // }
+    
+    assert_eq(is_some4(yes), true);
+    assert_eq(is_some4(no), false);
+}
 
-const Up3 = @enum(i64) (a = 1, b = 2, c = 3);
+#test fn bit_pattern() = {
+    /// @bits is a macro defined by the standard library and used heavily by the assembler. 
+    assert_eq(@bits(0b00, 0x00000, 0b101, 0b100, 0b00, 0b11), @as(i64) 0b1011000011);
+    
+    @assert_compile_error { let a: u5 = 0b10101010101010; };
+    @assert_compile_error((fn(a: u1) u1 = 0x1)(0b11));
+    // @assert_compile_error add_sr(Bits.X64, x0, x1, x0, Shift.LSL, 0b000000);  // TODO: why does this one work but not the above? 
+}
 
-// This is for @switch to use. TODO: subtyping. 
-fun eq(a: Up3, b: Up3) bool = eq(@as(i64) a, @as(i64) b);
-
-fn is_a(b: Up3) bool = @switch(b) {
-    @case(.a) fn = true;
-    @default() fn(_: Up3) = false;
-};
-
-assert_eq(true, is_a(Up3.a));
-assert_eq(false, is_a(Up3.b));
-assert_eq(false, is_a(Up3.c));
-
-// You can use infered values when you don't care. 
-// Type is i64 and values start at 0. 
-Up3Again :: @enum(a, b, c);
-aa := Up3Again.a;  // TODO: if this var is named 'a', it things is_a is capturing it?? cause of the .a i guess -- May 4
-assert_eq(@as(i64) aa, 0);
-aa = .b;
-assert_eq(@as(i64) aa, 1);
-
-var hello: MyBool = .True;
-assert_eq(hello.to_bool(), true);
-hello = .False;
-assert_eq(hello.to_bool(), false);
-
-let i = 1234;
-var v = MyBool.True;
-// v = i;  // TODO: this needs to be a compile error. 
-
-// You can also match through a pointer. 
-// TODO: if you try to :: run at comptime this block in macros.fr it segfault! -- May 4
-E :: @tagged(aaa: i64, bbb: Str);
-e : E = (aaa: 123);
-u := @match(e&) {
-    (fn aaa(arg: *i64) i64 = arg[]);
-    (fn bbb(arg: *Str) i64 = 2);
-};
-assert_eq(u, 123);
+#test fn enum_constants() = {    
+    // TODO: @enum is built into the compiler which is sad. 
+    //       Even if I fix that, maybe it makes more sense for this to be in the structs section. 
+    // TODO: make constant structs less hacky. 
+    // TODO: actual typechecking. it does know that _.T is a Unique type, but I had to turn off non-structural type checking to make something else work. 
+    //       However, if every function with this as an argument has an overload for the base type that does something else, 
+    //       it will take prority as expected. 
+    //       You would not believe how awkward it was to make this work at all, don't complain. 
+    /// `@enum(T) S` is what Java calls an enum (`@tagged(S)` is what Rust calls an enum). 
+    const MyBool = @enum(i64) (True = 42, False = 999);
+    
+    // TODO: subtyping
+    fn to_bool(b: MyBool) bool = {
+        if(eq(b, MyBool.True), fn = true) {|
+            if(eq(b, MyBool.False), fn = false, 
+                fn() bool = panic("Unrechable: Invalid Enum Value")
+            )
+        }
+    }
+    
+    assert_eq(to_bool(MyBool.True), true);
+    assert_eq(to_bool(MyBool.False), false);
+    
+    // The values of the enum are really just constants of its backing type.
+    // This upcast binding is required because there's no overload for assert _eq(MyBool.T[], i64)
+    let x: i64 = MyBool.False;
+    assert_eq(x, 999);
+    
+    // These take the other overload because integer literals are of type i64 not MyBool.
+    assert_eq(to_bool(999), true);  // Even when the actual value collides.
+    assert_eq(to_bool(0), false);
+    assert_eq(to_bool(21904701), true);
+    
+    // let x: MyBool = 999;  // TODO: this needs to be a compile error (especially if invalid value). 
+    
+    // This is for @switch to use. TODO: subtyping. 
+    fun eq(a: MyBool, b: MyBool) bool = eq(@as(i64) a, @as(i64) b);
+    
+    fn to_bool_again(b: MyBool) bool = @switch(b) {
+        @case(.True) fn = true;
+        @case(.False) fn = false;
+    }
+    
+    assert_eq(true, to_bool_again(MyBool.True));
+    assert_eq(false, to_bool_again(MyBool.False));
+    
+    const Up3 = @enum(i64) (a = 1, b = 2, c = 3);
+    
+    // This is for @switch to use. TODO: subtyping. 
+    fun eq(a: Up3, b: Up3) bool = eq(@as(i64) a, @as(i64) b);
+    
+    fn is_a(b: Up3) bool = @switch(b) {
+        @case(.a) fn = true;
+        @default() fn(_: Up3) = false;
+    };
+    
+    assert_eq(true, is_a(Up3.a));
+    assert_eq(false, is_a(Up3.b));
+    assert_eq(false, is_a(Up3.c));
+    
+    // You can use infered values when you don't care. 
+    // Type is i64 and values start at 0. 
+    Up3Again :: @enum(a, b, c);
+    aa := Up3Again.a;  // TODO: if this var is named 'a', it things is_a is capturing it?? cause of the .a i guess -- May 4
+    assert_eq(@as(i64) aa, 0);
+    aa = .b;
+    assert_eq(@as(i64) aa, 1);
+    
+    var hello: MyBool = .True;
+    assert_eq(hello.to_bool(), true);
+    hello = .False;
+    assert_eq(hello.to_bool(), false);
+    
+    let i = 1234;
+    var v = MyBool.True;
+    // v = i;  // TODO: this needs to be a compile error. 
+    
+    // You can also match through a pointer. 
+    // TODO: if you try to :: run at comptime this block in macros.fr it segfault! -- May 4
+    E :: @tagged(aaa: i64, bbb: Str);
+    e : E = (aaa: 123);
+    u := @match(e&) {
+        (fn aaa(arg: *i64) i64 = arg[]);
+        (fn bbb(arg: *Str) i64 = 2);
+    };
+    assert_eq(u, 123);
+}
 
 /* 
 // TODO: this would be very nice for writing the lexer
@@ -241,76 +223,83 @@ assert_ eq(4, use_range(50));
 // Note: the const_eval means you can access the compiler context, which is required for the placeholder expansion, dispite assigning to a let. 
 // let aatttt = :: '<tttt>';  
 
-//////
-/// Hygiene 
-
-#macro
-fn decl_something(arg: AstExpr) AstExpr = {
-    // the caller declared their own 'my_value', but we can't see it here. this is just a normal function.  
-    //assert(not(@is_declared() my_value), "");  // TODO: fix this getting seen as a capture because now it resolves the whole outside first? -- Apr 25
-    // TODO: we also wouldn't see it in the quoted expression (before the new declaration),
-    //       but I can't pass @is_declared into it in an @literal because you can't invoke an expression as a macro. 
-    //       apr 28: now could pass it in but capturing tracking would get confused like above. 
-    '{
-        let my_value = 123;
-        assert(eq(my_value, 123), "stomp!");
-        <arg>
-    }'
-}
-
-let my_value = 456;
-let my_value2 = @decl_something(my_value);
-assert_eq(my_value2, 456);  // the macro declared a new var called 'my_value', but we still get our value. 
-
-fn test_it() = {
-    let my_value = 789;
+#test fn macro_hygiene() = {
+    #macro
+    fn decl_something(arg: AstExpr) AstExpr = {
+        // the caller declared their own 'my_value', but we can't see it here. this is just a normal function.  
+        //assert(not(@is_declared() my_value), "");  // TODO: fix this getting seen as a capture because now it resolves the whole outside first? -- Apr 25
+        // TODO: we also wouldn't see it in the quoted expression (before the new declaration),
+        //       but I can't pass @is_declared into it in an @literal because you can't invoke an expression as a macro. 
+        //       apr 28: now could pass it in but capturing tracking would get confused like above. 
+        '{
+            let my_value = 123;
+            assert(eq(my_value, 123), "stomp!");
+            <arg>
+        }'
+    }
+    
+    let my_value = 456;
     let my_value2 = @decl_something(my_value);
-    assert_eq(my_value2, 789); 
+    assert_eq(my_value2, 456);  // the macro declared a new var called 'my_value', but we still get our value. 
+    
+    fn test_it() = {
+        let my_value = 789;
+        let my_value2 = @decl_something(my_value);
+        assert_eq(my_value2, 789); 
+    }
+    test_it();
 }
-test_it();
 
-////// 
-/// Fancy update assignment operators. 
-
-// lhs can be a variable. 
-v := 0;
-v += 1;
-assert_eq(v, 1);
-
-// lhs can be a pointer dereference 
-vv := v&;
-vv[] += 2;
-assert_eq(v, 3);
-
-// lhs is not duplicated
-moons_remaining := 1;
-blow_up_moon :: fn() *i64 = {  // this is only evaluated once. 
-    moons_remaining -= 1;
-    v&
-};
-blow_up_moon()[] += 1;  // you probably never want to do this...
-assert_eq(v, 4);
-assert_eq(moons_remaining, 0);
-
-// so the += syntax is not the same as this, which calls the function twice. 
-blow_up_moon()[] = add(blow_up_moon()[], 1);
-assert_eq(v, 5);
-assert_eq(moons_remaining, 2.neg());
-
-rust_example :: """
-fn main() {
-    let mut a = 5;
-    let b = &mut a;
-    let z = || {
-        println!("called z()!");  // this only prints once. 
-        b
+#test fn update_assignment_operators() = {
+    // lhs can be a variable. 
+    v := 0;
+    v += 1;
+    assert_eq(v, 1);
+    
+    // lhs can be a pointer dereference 
+    vv := v&;
+    vv[] += 2;
+    assert_eq(v, 3);
+    
+    // lhs is not duplicated
+    moons_remaining := 1;
+    blow_up_moon :: fn() *i64 = {  // this is only evaluated once. 
+        moons_remaining -= 1;
+        v&
     };
-    *z() += 1;
-    println!("5 + 1 = {a}");
+    blow_up_moon()[] += 1;  // you probably never want to do this...
+    assert_eq(v, 4);
+    assert_eq(moons_remaining, 0);
+    
+    // so the += syntax is not the same as this, which calls the function twice. 
+    blow_up_moon()[] = add(blow_up_moon()[], 1);
+    assert_eq(v, 5);
+    assert_eq(moons_remaining, 2.neg());
+    
+    rust_example :: """
+    fn main() {
+        let mut a = 5;
+        let b = &mut a;
+        let z = || {
+            println!("called z()!");  // this only prints once. 
+            b
+        };
+        *z() += 1;
+        println!("5 + 1 = {a}");
+    }
+    """;
 }
-""";
 
-
-
-canary
+#test fn format_string(canary: i64) i64 = {
+    var output: List$i64 = list();
+    // TODO: without brackets it parses as anotation on stmt and doesnt call the macro
+    (@fmt(output&, "Hello %! % %", "World", "abc", 1));
+    var words = output&.items();
+    let expected = "Hello World! abc 1";
+    assert_eq(true, eq(words, expected));
+    
+    assert_eq(true, eq(@concat("Hello ", "World!", " abc 1"), expected));
+    assert_eq(true, eq(@concat("h", "i"), "hi"));
+    
+    canary
 }

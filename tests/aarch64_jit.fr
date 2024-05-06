@@ -46,12 +46,7 @@ fn heap(var ops: Ty(*u32, i64)) = {
     out
 }
 
-#test(aarch64)
-fn main(canary: i64) i64 = {
-    @assert_compile_error { let a: u5 = 0b10101010101010; };
-    @assert_compile_error((fn(a: u1) u1 = 0x1)(0b11));
-    // @assert_compile_error add_sr(Bits.X64, x0, x1, x0, Shift.LSL, 0b000000);  // TODO: why does this one work but not the above? 
-    
+#test fn manual_mmap(canary: i64) i64 = {
     let code = (
         movz(Bits.X64, x1, 0b0000000000001010, Hw.Left0),
         add_sr(Bits.X64, x0, x1, x0, Shift.LSL, 0b000000), 
@@ -68,6 +63,10 @@ fn main(canary: i64) i64 = {
     )!slice;
     assert_eq(call_jit(80, code), 200);
     
+    canary
+}
+
+#test fn math_ops(canary: i64) i64 = {
     #c_call
     fn add_by_asm(a: i64, b: i64) i64 = heap((
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000),
@@ -90,6 +89,65 @@ fn main(canary: i64) i64 = {
         ret(),
     )!slice)!asm;
     assert_eq(sub_one(10), 9);
+    
+    #c_call
+    fn bool_to_int(b: bool) i64 = heap((
+        ret(),
+    )!slice)!asm;
+    assert_eq(bool_to_int(true), 1);
+    assert_eq(bool_to_int(false), 0);
+    
+    canary
+}
+
+#test fn branching(canary: i64) i64 = {
+    #c_call
+    fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = heap((
+        cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
+        b_cond(@as(i19) 3, Cond.EQ),
+        sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+    )!slice)!asm;
+    assert_eq(add_or_sub(30, 20, 7), 50);
+    assert_eq(add_or_sub(30, 20, 8), 10);
+
+    #c_call
+    fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = heap((
+        cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
+        b_cond(@as(i19) 3, Cond.NE),
+        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+        sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+        ret(),
+    )!slice)!asm;
+    assert_eq(add_or_sub2(30, 20, 7), 50);
+    assert_eq(add_or_sub2(30, 20, 8), 10);
+    
+    #c_call
+    fn is_seven(n: i64) i64 = heap((
+        cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
+        cset(Bits.X64, x0, Cond.NE),
+        ret(),
+    )!slice)!asm;
+    assert_eq(is_seven(7), 1);
+    assert_eq(is_seven(8), 0);
+
+    canary
+}
+
+#test fn using_stack(canary: i64) i64 = {
+    #c_call
+    fn truncate_to_byte(in: *i64, out: *i64) Unit = heap((
+        ldrb_uo(x2, x0, @as(u12) 0),
+        strb_uo(x2, x1, @as(u12) 0),
+        ret(),
+    )!slice)!asm;
+    var in = 257;
+    var out = 0;
+    truncate_to_byte(in&, out&);
+    assert_eq(out, 1);
     
     #c_call
     fn use_stack(a: i64) i64 = heap((
@@ -142,57 +200,5 @@ fn main(canary: i64) i64 = {
     )!slice)!asm;
     assert_eq(both_pair(30, 20), 10);
 
-    #c_call
-    fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = heap((
-        cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
-        b_cond(@as(i19) 3, Cond.EQ),
-        sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-        ret(),
-        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-        ret(),
-    )!slice)!asm;
-    assert_eq(add_or_sub(30, 20, 7), 50);
-    assert_eq(add_or_sub(30, 20, 8), 10);
-
-    #c_call
-    fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = heap((
-        cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
-        b_cond(@as(i19) 3, Cond.NE),
-        add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-        ret(),
-        sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-        ret(),
-    )!slice)!asm;
-    assert_eq(add_or_sub2(30, 20, 7), 50);
-    assert_eq(add_or_sub2(30, 20, 8), 10);
-
-    #c_call
-    fn bool_to_int(b: bool) i64 = heap((
-        ret(),
-    )!slice)!asm;
-    assert_eq(bool_to_int(true), 1);
-    assert_eq(bool_to_int(false), 0);
-    
-    #c_call
-    fn is_seven(n: i64) i64 = heap((
-        cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
-        cset(Bits.X64, x0, Cond.NE),
-        ret(),
-    )!slice)!asm;
-    assert_eq(is_seven(7), 1);
-    assert_eq(is_seven(8), 0);
-    
-    
-    #c_call
-    fn truncate_to_byte(in: *i64, out: *i64) Unit = heap((
-        ldrb_uo(x2, x0, @as(u12) 0),
-        strb_uo(x2, x1, @as(u12) 0),
-        ret(),
-    )!slice)!asm;
-    var in = 257;
-    var out = 0;
-    truncate_to_byte(in&, out&);
-    assert_eq(out, 1);
-    
     canary
 }

@@ -19,6 +19,7 @@
   It is the job of the source code to contain exactly the information required to compile the program.
   You should be able to download the compiler, point at a file, and produce a program.
 - macros that derive implimentations of common operations on your types (like rust).
+- nonlocal returns (like kotlin)
 - the goal is to pull as much as possible out of the compiler and into the library. but I do like being able to build from source easily without a complicated bootstrapping problem.
 - parse declarations from other languages and generate ffi bindings.
 - checked mode with less undefined behaviour.

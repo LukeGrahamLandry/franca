@@ -1,5 +1,39 @@
-#test(aarch64)
-fn main(_canary: i64) i64 = {
+#test fn simple_allocation() = {
+    // Use `alloc` to create space that outlives the current stack frame. 
+    fn dont_leak(size: i64) rawptr = alloc(i64, size);
+    
+    let on_the_heap = dont_leak(10);
+    let first: rawptr = raw_slice(on_the_heap, 0, size_of(i64));
+    let first: Ptr(i64) = first;
+    first[] = 15;
+    assert_eq(first[], 15);
+    
+    let three_heap = raw_slice(on_the_heap, 0, mul(3, size_of(i64)));
+    let three_stack = (7, 8, 9);
+    // set(three_heap, three_stack);
+    
+    dealloc(i64, on_the_heap, 10);
+}
+
+#test fn tuple_ptr() = {
+    var arr = (1, 2, 3);
+    let arr_ptr = arr&; 
+    
+    // you can create a pointer to an element of a tuple (constant index only)
+    let second_ptr: *i64 = arr_ptr[1]; 
+    assert_eq(2, second_ptr[]); // we can dereference as normal.
+    second_ptr[] = 123;
+    // TODO: comptime variadic functions so !deref is just get.
+    // The type annotation for a tuple is written as a tuple of types. 
+    var have: (i64, i64, i64) = arr_ptr[];
+    var expected: (i64, i64, i64) = (1, 123, 3);
+    
+    assert_eq(have&[0][], expected&[0][]);
+    assert_eq(have&[1][], expected&[1][]);
+    assert_eq(have&[2][], expected&[2][]);
+}
+
+#test fn indexing() = {
     let s: Str = "hello";
     assert_eq(len(s), 5);
     
@@ -17,17 +51,21 @@ fn main(_canary: i64) i64 = {
     assert_eq(index(v&, 2)[], 9);
     drop(v&);
     
+    let s: Slice$Str = ("1", "2", "3")!slice;
+    // multi_println(s);  // This is annoying cause it prints
+}
+
+#test fn comparing_strings() = {
     assert_eq(true, eq("abcd", "abcd"));
     assert_eq(false, eq("abcd", "dcba"));
     assert_eq(false, eq("abcd", "abcde"));
     assert_eq(false, eq("aaab", "aaac"));
     assert_eq(true, eq("", ""));
     
-    
     assert_eq(true, eq(str(5), "5"));
     assert_eq(true, eq(str(12), "12"));
     assert_eq(true, eq(str(345), "345"));
-
+    
     assert_eq(true, startswith("abcd", "ab"));
     assert_eq(true, startswith("abcd", "abcd"));
     assert_eq(false, startswith("abcd", "cd"));
@@ -38,6 +76,13 @@ fn main(_canary: i64) i64 = {
     assert_eq(false, endswith("abcd", "ab"));
     assert_eq(false, endswith("ab", "abcd"));
     
+    let multiline = """aaa
+    bbb""";
+    assert_eq(true, startswith(multiline, "aaa"));
+    assert_eq(true, endswith(multiline, "bbb"));
+}
+
+#test fn splitting_strings() = {
     var parts: List$Str = split("Hello world. This is words.", " ");
     assert_eq(5, parts&.len[]);
     assert_eq(true, eq(get(parts, 0), "Hello"));
@@ -56,19 +101,11 @@ fn main(_canary: i64) i64 = {
     assert_eq(true, eq(get(parts, 3), ""));
     
     parts&.drop();
-    
+}
+
+#test fn parsing_hex() = {
     assert_eq(4294983856, hex("00000001000040b0"));
     assert_eq(4294983856, hex("00000001000040B0"));
     var lst = concat("00000001", "000040B0");
     assert_eq(4294983856, hex(lst&.items()));
-    
-    let s: Slice$Str = ("1", "2", "3")!slice;
-    // multi_println(s);  // This is annoying cause it prints
-    
-    let multiline = """aaa
-    bbb""";
-    assert_eq(true, startswith(multiline, "aaa"));
-    assert_eq(true, endswith(multiline, "bbb"));
-    
-    _canary
 }

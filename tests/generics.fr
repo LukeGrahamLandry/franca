@@ -2,92 +2,120 @@
 //! That allows a simple (but verbose) form of generics without relying on the overloading system. 
 //! This is not how the standard library generally defines its generic types. 
 
-#test(aarch64)
-fn main(_canary: i64) i64 = {
-
-// TODO: better error message if you forget to put the #generic
-// TODO: fix needing to call Ty(_, _) to group the args. 
-#comptime #generic
-fn dup(const T: Type) Fn(T, Ty(T, T)) = {
-    // TODO: without the leading '(' it treats it as a statement and gets mad that there's no name. 
-    (fn(value: T) Ty(T, T) = (value, value))
+#test fn tuple_return() = {
+    // TODO: better error message if you forget to put the #generic
+    // TODO: fix needing to call Ty(_, _) to group the args. 
+    #comptime #generic
+    fn dup(const T: Type) Fn(T, Ty(T, T)) = {
+        // TODO: without the leading '(' it treats it as a statement and gets mad that there's no name. 
+        (fn(value: T) Ty(T, T) = (value, value))
+    }
+    
+    // dont do this! i probably want tuples to have undefined layout. 
+    #comptime #generic
+    fn get_index(const T: Type) Fn(Ty(*Ty(T, T), i64), T) = {
+        // TODO: without the leading '(' it treats it as a statement and gets mad that there's no name. 
+        (fn(tuple: *Ty(T, T), i: i64) T = {
+            let tuple: rawptr = tuple;
+            let start = mul(i, size_of(T));
+            let ptr: rawptr = raw_slice(tuple, start, add(start, size_of(T)));
+            let ptr: Ptr(T) = ptr;
+            ptr[]
+        })
+    }
+    
+    const get_i = get_index(i64);
+    const get_t = get_index(Type);
+    
+    const dup_i64 = dup(i64);
+    var one_one = dup_i64(1);
+    assert_eq(1, get_i(one_one!addr, 0));
+    assert_eq(1, get_i(one_one!addr, 1));
+    
+    const dup_ty = dup(Type);
+    var tt = dup_ty(Unit);
+    assert_eq(Unit, get_t(tt!addr, 0));
+    assert_eq(Unit, get_t(tt!addr, 1));
+    
+    @assert_compile_error dup_ty(1);
+    @assert_compile_error dup_i64(Unit);
 }
 
-// dont do this! i probably want tuples to have undefined layout. 
-#comptime #generic
-fn get_index(const T: Type) Fn(Ty(*Ty(T, T), i64), T) = {
-    // TODO: without the leading '(' it treats it as a statement and gets mad that there's no name. 
-    (fn(tuple: *Ty(T, T), i: i64) T = {
-        let tuple: rawptr = tuple;
-        let start = mul(i, size_of(T));
-        let ptr: rawptr = raw_slice(tuple, start, add(start, size_of(T)));
-        let ptr: Ptr(T) = ptr;
-        ptr[]
-    })
+#test fn poly_struct() = {
+    #comptime
+    fn MySlice(const T: Type) Type = @struct(ptr: Ptr(T), len: i64);
+    
+    #comptime #generic
+    fn get_first(const T: Type) Fn(MySlice(T), T) = 
+        (fn(var s: MySlice(T)) T = {
+            let ptr: rawptr = s&.ptr[];
+            let first_thing: rawptr = raw_slice(ptr, 0, size_of(T));
+            let first_thing: Ptr(T) = first_thing;
+            first_thing[]
+        });
+    
+    const i64_s = MySlice(i64);
+    let things = alloc(i64, 5);
+    var a: i64_s = (ptr: things, len: 5);
+    let ptr: rawptr = a&.ptr[];
+    let first_thing: rawptr = raw_slice(ptr, 0, size_of(i64));
+    let first_thing: Ptr(i64) = first_thing;
+    first_thing[] = 12;
+    const get_first_i64 = get_first(i64);
+    assert_eq(get_first_i64(a), 12);
 }
 
-const get_i = get_index(i64);
-const get_t = get_index(Type);
+#test fn memo_instantiations(_canary: i64) i64 = {
+    #comptime 
+    fn Either(const Left: Type, const Right: Type) Type = 
+        @tagged(left: Left, right: Right);
+    
+    #comptime #generic
+    fn is_left(const Self: Type) Fn(Self, bool) = 
+        (fn(var self: Self) bool = eq(self&!tag[], tag_value(Self, @symbol left)));
+    
+    const E1 = Either(i64, Ptr(i64));
+    let e1: E1 = (left: 15);
+    const il1 = is_left(E1); // TODO: should be able to inline this and call any expr without the extra binding, even if its comptime.
+    assert_eq(true, il1(e1));
+    
+    // types are memoized 
+    assert_eq(Either(i64, Ptr(i64)), Either(i64, Ptr(i64)));
+    assert_eq(E1, Either(i64, Ptr(i64)));  
+    assert_eq(@type e1, Either(i64, Ptr(i64)));  
+    assert_eq(@type e1, E1);  
+    
+    const E2 = Either(bool, i64);
+    let e2: E2 = (left: false);
+    const il2 = is_left(E2);
+    assert_eq(true, il2(e2));
+    assert_eq(@type e2, E2);
+    
+    _canary
+}
 
-const dup_i64 = dup(i64);
-var one_one = dup_i64(1);
-assert_eq(1, get_i(one_one!addr, 0));
-assert_eq(1, get_i(one_one!addr, 1));
+#test fn nested_specialize(canary: i64) i64 = {
+    fn two() Unit = unit;
+    fn sum_size() Unit = unit;
 
-const dup_ty = dup(Type);
-var tt = dup_ty(Unit);
-assert_eq(Unit, get_t(tt!addr, 0));
-assert_eq(Unit, get_t(tt!addr, 1));
-
-@assert_compile_error dup_ty(1);
-@assert_compile_error dup_i64(Unit);
-
-#comptime
-fn MySlice(const T: Type) Type = @struct(ptr: Ptr(T), len: i64);
-
-#comptime #generic
-fn get_first(const T: Type) Fn(MySlice(T), T) = 
-    (fn(var s: MySlice(T)) T = {
-        let ptr: rawptr = s&.ptr[];
-        let first_thing: rawptr = raw_slice(ptr, 0, size_of(T));
-        let first_thing: Ptr(T) = first_thing;
-        first_thing[]
-    });
-
-const i64_s = MySlice(i64);
-let things = alloc(i64, 5);
-var a: i64_s = (ptr: things, len: 5);
-let ptr: rawptr = a&.ptr[];
-let first_thing: rawptr = raw_slice(ptr, 0, size_of(i64));
-let first_thing: Ptr(i64) = first_thing;
-first_thing[] = 12;
-const get_first_i64 = get_first(i64);
-assert_eq(get_first_i64(a), 12);
-
-#comptime 
-fn Either(const Left: Type, const Right: Type) Type = 
-    @tagged(left: Left, right: Right);
-
-#comptime #generic
-fn is_left(const Self: Type) Fn(Self, bool) = 
-    (fn(var self: Self) bool = eq(self&!tag[], tag_value(Self, @symbol left)));
-
-const E1 = Either(i64, Ptr(i64));
-let e1: E1 = (left: 15);
-const il1 = is_left(E1); // TODO: should be able to inline this and call any expr without the extra binding, even if its comptime.
-assert_eq(true, il1(e1));
-
-// types are memoized 
-assert_eq(Either(i64, Ptr(i64)), Either(i64, Ptr(i64)));
-assert_eq(E1, Either(i64, Ptr(i64)));  
-assert_eq(@type e1, Either(i64, Ptr(i64)));  
-assert_eq(@type e1, E1);  
-
-const E2 = Either(bool, i64);
-let e2: E2 = (left: false);
-const il2 = is_left(E2);
-assert_eq(true, il2(e2));
-assert_eq(@type e2, E2);
-
-_canary
+    fn one(const A: Type) Unit = {
+        // this needs the extra argument to disambiguate which version of 'one' you meant to call. 
+        fn two(const B: Type, a: A) Unit = {
+            fn sum_size(a: A, b: B) i64 = A.size_of().add(B.size_of());
+        }
+    }
+    
+    fn use() Unit = assert_eq(16, sum_size(i64, 1));
+    
+    // currently you need to make sure these instantiations get compiled before the uses of them. -- Apr 26
+    // but it's not lexical so the 'fn use' above is fine because it doesn't get compiled until later. 
+    ::one(i64);
+    ::two(Type, 0);
+    ::one(Type);
+    ::two(i64, i64);
+    
+    assert_eq(16, sum_size(1, i64));
+    use();
+    
+    canary
 }

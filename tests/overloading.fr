@@ -1,73 +1,62 @@
-#test(aarch64)
-fn main(_canary: i64) i64 = {
-
-fn who_is(value: i64) i64 = 3;
-fn who_is(value: Ptr(i64)) i64 = 7;
-fn who_is(value: (i64, i64)) i64 = 9;
-
-assert_eq(3, who_is(10));
-var an_int = 1;
-assert_eq(7, who_is(an_int!addr));
-assert_eq(9, who_is(1, 2));
-assert_eq(3, who_is(10));  // just to make sure im not cheating and doing them in order or something 
-
-Bin :: @struct(a: i64, b: i64);
-const DoAdd = Unique(Bin);
-const DoMul = Unique(Bin);
-// asser t_eq(false, eq(DoAdd, DoMul));  // TODO: allow eq(Type, Type)
-
-// Dispite DoAdd and DoMul having the same sturucture, they are unique types so can have different overloads. 
-fn eval(var e: DoAdd) i64 = add(e&.a[], e&.b[]);
-fn eval(var e: DoMul) i64 = mul(e&.a[], e&.b[]);
-
-let three: DoAdd = (a: 1, b: 2);
-assert_eq(3, eval(three));
-let two: DoMul = (a: 1, b: 2);
-assert_eq(2, eval(two));
-
-DoMath1 :: @tagged(DoAdd: DoAdd, DoMul: DoMul); 
-
-// This is kinda sad to write...
-fn eval(var e: DoMath1) i64 = { 
-    let is_add = eq(e&!tag[], tag_value(DoMath1, @symbol DoAdd));
-    // TODO: fix fn vs fn().
-    (is_add, fn=eval(e&.DoAdd[]), fn=eval(e&.DoMul[]))!if
+#test fn basic_overload() = {
+    fn who_is(value: i64) i64 = 3;
+    fn who_is(value: Ptr(i64)) i64 = 7;
+    fn who_is(value: (i64, i64)) i64 = 9;
+    
+    assert_eq(3, who_is(10));
+    var an_int = 1;
+    assert_eq(7, who_is(an_int!addr));
+    assert_eq(9, who_is(1, 2));
+    assert_eq(3, who_is(10));  // just to make sure im not cheating and doing them in order or something 
 }
 
-let three: DoMath1 = (DoAdd: (a: 1, b: 2));
-assert_eq(3, eval(three));
-let two: DoMath1 = (DoMul: (a: 1, b: 2));
-assert_eq(2, eval(two));
+#test fn enum_dispatch(_canary: i64) i64 = {
+    Bin :: @struct(a: i64, b: i64);
+    const DoAdd = Unique(Bin);
+    const DoMul = Unique(Bin);
+    // asser t_eq(false, eq(DoAdd, DoMul));  // TODO: allow eq(Type, Type)
+    
+    // Dispite DoAdd and DoMul having the same sturucture, they are unique types so can have different overloads. 
+    fn eval(var e: DoAdd) i64 = add(e&.a[], e&.b[]);
+    fn eval(var e: DoMul) i64 = mul(e&.a[], e&.b[]);
+    
+    let three: DoAdd = (a: 1, b: 2);
+    assert_eq(3, eval(three));
+    let two: DoMul = (a: 1, b: 2);
+    assert_eq(2, eval(two));
+    
+    DoMath1 :: @tagged(DoAdd: DoAdd, DoMul: DoMul); 
+    
+    // This is kinda sad to write...
+    fn eval(var e: DoMath1) i64 = { 
+        let is_add = eq(e&!tag[], tag_value(DoMath1, @symbol DoAdd));
+        // TODO: fix fn vs fn().
+        (is_add, fn=eval(e&.DoAdd[]), fn=eval(e&.DoMul[]))!if
+    }
+    
+    let three: DoMath1 = (DoAdd: (a: 1, b: 2));
+    assert_eq(3, eval(three));
+    let two: DoMath1 = (DoMul: (a: 1, b: 2));
+    assert_eq(2, eval(two));
+    
+    _canary
+}
 
-/*
-// This is an annotation so it can get the identifiers. 
-// TODO: once types reliably have names it could just be a function. 
-const DoMath2 = @tagged(DoAdd, DoMul);
-// TODO: I think this would be a good first macro. 
-//       Maybe once I have implicit casts it should be more like "derive enum cast to cases" instead of specific functions. 
-//       But doing casts requires overloading on return type which I can't do yet. 
-// @derive_polymorph(DoMath2, eval);
-*/
+#test fn by_return_type() = {
+    fn get_something() Unit = ();
+    fn get_something() i64 = 17;
+    
+    let a: Unit = get_something();
+    let b: i64 = get_something();
+    assert_eq(b, 17);
+}
 
-//////
-/// Overloading by return type ///
-
-fn get_something() Unit = ();
-fn get_something() i64 = 17;
-
-let a: Unit = get_something();
-let b: i64 = get_something();
-assert_eq(b, 17);
-
-//////
-/// You can use named arguments to resolve ambiguous overloads ///
-
-fn seconds(hours: i64) i64 = mul(hours, mul(60, 60));
-fn seconds(minutes: i64) i64 = mul(minutes, 60);
-
-// You can't just call 'seconds(5)' because there's no way to tell which version you meant to call. // TODO: make sure its an error
-assert_eq(seconds(minutes: 5), 300);
-assert_eq(seconds(hours: 5), 18000);
-
-_canary
+// You can use named arguments to resolve ambiguous overloads
+#test fn named_arg_disambiguate() = {
+    fn seconds(hours: i64) i64 = mul(hours, mul(60, 60));
+    fn seconds(minutes: i64) i64 = mul(minutes, 60);
+    
+    // You can't just call 'seconds(5)' because there's no way to tell which version you meant to call. // TODO: make sure its an error
+    assert_eq(seconds(minutes: 5), 300);
+    assert_eq(seconds(hours: 5), 18000);
 }

@@ -107,7 +107,25 @@ fn main() {
 
         // println!("{:#?}", unsafe { &STATS });
     } else {
-        run_tests();
+        match unsafe { libc::fork() } {
+            -1 => panic!("Fork Failed"),
+            0 => {
+                run_tests_serial();
+                exit(0);
+            }
+            pid => {
+                let mut status = 0i32;
+                let pid2 = unsafe { libc::wait(&mut status) };
+                assert_eq!(pid, pid2);
+                if status != 0 {
+                    println!("TESTS FAILED");
+                    println!("Running seperately...");
+                    println!("=================================");
+                    // fork for each individual one, dont print passes.
+                    run_tests();
+                }
+            }
+        }
     }
 }
 

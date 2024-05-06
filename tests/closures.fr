@@ -1,108 +1,281 @@
-#test(aarch64, llvm)
-fn main(_canary: i64) i64 = {
- 
-// Branches of a call to if can access variables from the outer scope. 
-var a = 10;
-(true, fn() Unit = { a = 1; }, fn() Unit = { a = 2; })!if;
-assert_eq(a, 1);
-
-var b = 1;
-capturing :: fn(n: i64) Unit = {
-    b = n;
-};
-assert_eq(b, 1);
-capturing(15);
-assert_eq(b, 15);
-
-// Shadowed vars are still local. 
-var c = 1;
-not_capturing :: fn(n: i64) Unit = {
-    var c = n;
-};
-assert_eq(c, 1);
-not_capturing(15);
-assert_eq(c, 1);
-
-var c = 7;
-capturing_with_const :: fn(n: i64) Unit = {
-    const a = 1;
-    c = add(n, a);
-};
-assert_eq(c, 7);
-capturing_with_const(18);
-assert_eq(c, 19);
-
-// This function takes a function as an argument, pretty meta bro...
-fn call_it(n: i64, const f: Fn(i64, i64)) i64 = add(f(n), 1);
-
-// TODO: it doesn't work if you try to pass a function by name. 
-const temp = fn(m: i64) i64 = mul(2, m);
-assert_eq(9, call_it(4, temp));
-
-// You can pass a capturing closure as an argument
-var a = 77;
-assert_eq(3, call_it(0, fn(m: i64) i64 = {
-    a = 88;
-    add(2, m)
-}));
-assert_eq(a, 88);
-
-var a = 99999;
-const set_0 = fn() Unit = { a = 0 };
-const set_1 = fn() Unit = { a = 1 };
-let c = true;
-(c, set_1, set_0)!if;
-assert_eq(a, 1);
-
-// TODO: args infer through capturing closure reference. 
-// a = 99999;
-// if(c, set_1, set_0);
-// a ssert_eq(a, 1);
-
-// Nested capture
-var a = 123;
-l1 :: fn() Unit = {
-    l2 :: fn() Unit = {
-        a = 7;
-    };
-    l2();
-};
-l1();
-assert_eq(a, 7);
-fn call_arg(const arg: Fn(Unit, Unit)) Unit = {
-    arg();
-}
-// TODO: make this work if its a normal function. needs to not pass the overload set. 
-const set6 = fn() Unit = {
-    a = 6;
-};
-call_arg(set6);
-assert_eq(a, 6);
-
-//////
-/// argument order of evaluation is defined
-
-var shared = 0;
-get_and_inc :: fn() i64 = {
-    shared = shared.add(1);
-    shared
-};
-
-fn one_two_three(a: i64, b: i64, c: i64) Unit = {
+#test fn just_capturing() = {
+    // Branches of a call to if can access variables from the outer scope. 
+    var a = 10;
+    (true, fn() Unit = { a = 1; }, fn() Unit = { a = 2; })!if;
     assert_eq(a, 1);
-    assert_eq(b, 2);
-    assert_eq(c, 3);
+    
+    var b = 1;
+    capturing :: fn(n: i64) Unit = {
+        b = n;
+    };
+    assert_eq(b, 1);
+    capturing(15);
+    assert_eq(b, 15);
+    
+    // Shadowed vars are still local. 
+    var c = 1;
+    not_capturing :: fn(n: i64) Unit = {
+        var c = n;
+    };
+    assert_eq(c, 1);
+    not_capturing(15);
+    assert_eq(c, 1);
+    
+    var c = 7;
+    capturing_with_const :: fn(n: i64) Unit = {
+        const a = 1;
+        c = add(n, a);
+    };
+    assert_eq(c, 7);
+    capturing_with_const(18);
+    assert_eq(c, 19);
+    
+    var n = 10; 
+    add_n :: fn(a: i64) i64 = {
+        N :: 5;  // inner constant
+        a.add(n).add(N)
+    };
+    assert_eq(30, add_n(15));
+    assert_eq(20, add_n(5));
 }
 
-one_two_three(get_and_inc(), get_and_inc(), get_and_inc());
+#test fn first_class_functions(_canary: i64) i64 = {
+    // This function takes a function as an argument, pretty meta bro...
+    fn call_it(n: i64, const f: Fn(i64, i64)) i64 = add(f(n), 1);
+    
+    // TODO: it doesn't work if you try to pass a function by name. 
+    const temp = fn(m: i64) i64 = mul(2, m);
+    assert_eq(9, call_it(4, temp));
+    
+    // You can pass a capturing closure as an argument
+    var a = 77;
+    assert_eq(3, call_it(0, fn(m: i64) i64 = {
+        a = 88;
+        add(2, m)
+    }));
+    assert_eq(a, 88);
+    
+    var a = 99999;
+    const set_0 = fn() Unit = { a = 0 };
+    const set_1 = fn() Unit = { a = 1 };
+    let c = true;
+    (c, set_1, set_0)!if;
+    assert_eq(a, 1);
+    
+    // TODO: args infer through capturing closure reference. 
+    // a = 99999;
+    // if(c, set_1, set_0);
+    // a ssert_eq(a, 1);
+    
+    // Nested capture
+    var a = 123;
+    l1 :: fn() Unit = {
+        l2 :: fn() Unit = {
+            a = 7;
+        };
+        l2();
+    };
+    l1();
+    assert_eq(a, 7);
+    fn call_arg(const arg: Fn(Unit, Unit)) Unit = {
+        arg();
+    }
+    // TODO: make this work if its a normal function. needs to not pass the overload set. 
+    const set6 = fn() Unit = {
+        a = 6;
+    };
+    call_arg(set6);
+    assert_eq(a, 6);
 
-var n = 10; 
-add_n :: fn(a: i64) i64 = {
-    N :: 5;  // inner constant
-    a.add(n).add(N)
-};
-assert_eq(30, add_n(15));
-assert_eq(20, add_n(5));
+    _canary
+}
 
-_canary
+/// argument order of evaluation is defined
+#test fn arg_eval_order() = {
+    var shared = 0;
+    get_and_inc :: fn() i64 = {
+        shared = shared.add(1);
+        shared
+    };
+    
+    fn one_two_three(a: i64, b: i64, c: i64) Unit = {
+        assert_eq(a, 1);
+        assert_eq(b, 2);
+        assert_eq(c, 3);
+    }
+    
+    one_two_three(get_and_inc(), get_and_inc(), get_and_inc());
+}
+
+// TODO: make the var kind specifier carry forward to the arg
+#test fn backpassing_lambda_syntax(canary: i64) i64 = {
+    // Here we pass a closure as an argument to a function.
+    var sum = 0;
+    range(0, 4, fn(i: i64) = {
+        sum = add(sum, i);
+    });
+    assert_eq(sum, 6);
+    
+    // You can write the same thing using back-passing syntax.
+    var sum = 0;
+    {
+        // This means take the whole rest of the block as the body of a closure with the variable 'i' as its argument,
+        // and pass that as the last argument to the 'range' call.
+        let i: i64 <- range(0, 4);
+        sum = add(sum, i);
+    };
+    assert_eq(sum, 6);
+    
+    // TODO: this didn't work either (liek below) but if you put Unit ret annotionaon on the outer closure it works 
+    //       so the problem is that its trying to typechek too soon to decide which fn range to call (even tho theres only one). 
+    //       maybe i need overloading based on partial argument types. if you can narrow it down, you can pick what to call and just typecehck later. 
+    
+    // Same as below but in normal syntax.
+    var acc = 0;
+    range(0, 4, fn(n: i64) Unit = {
+        range(0, 4, fn(m: i64) Unit = {
+            acc = add(acc, mul(n, m));
+        })
+    });
+    assert_eq(acc, 36);
+    
+    /* !!! BROKEN !!!
+    // TODO: this broke when I changed overload resolution because it can't figure out the return type of the closures. 
+    // So you can do nested loops in an unindented style.
+    var acc = 0;
+    {
+        let n: i64 <- range(0, 4);
+        let m: i64 <- range(0, 4);
+        acc = add(acc, mul(n, m));
+    };
+    a ssert_eq(acc, 36);
+    */
+    
+    fn try() Unit = unit;
+    
+    #comptime
+    fn Option3(const T: Type) Type = {
+        const Self: Type = @tagged(Some: T, None: Unit);
+    
+        fn try(var maybe: Self, const yield: Fn(T, Unit)) Unit = {
+            (eq(maybe&!tag[], tag_value(Self, @symbol Some)),
+                fn= yield(maybe&.Some[]),
+                fn= (),
+            )!if;
+            // TODO: its too easy to forget the !if. I want prefix anyway.
+            //       but why did it compile? that tuple (bool, fn(()) (), fn(()) ()) isn't unit.
+            //       and I wasn't referencing the field access.
+        }
+    
+        Self
+    }
+    
+    :: Option3(i64);  // TODO
+    
+    // TODO: pass required type from fn ret through if branches.
+    fn if_multiple(i: i64, divisor: i64) Option3(i64) =
+        (eq(mod(i, divisor), 0),
+            fn() Option3(i64) = (Some: i),
+            fn() Option3(i64) = (None: ())
+    )!if;
+    
+    {
+        let n: i64 <- try(if_multiple(12, 2));
+        assert_eq(n, 12);
+    };
+    
+    {
+        let n: i64 <- try(if_multiple(5, 2));
+        panic("unreachable");
+    };
+    
+    /* !!! BROKEN !!!
+    // TODO: broken with new overloading becuase it cant figure out the return type
+    // You can use back-passing for early returns.
+    var passed = false;
+    {
+        // TODO: choose an overload based on partially known argument types, so you can infer other argument types,
+        //       so it would know 'i' is the argument to yield so must be i64.
+        let n: i64 <- try(if_multiple(12, 2));
+        a ssert_eq(n, 12);
+        let n: i64 <- try(if_multiple(n, 3));
+        a ssert_eq(n, 12);
+        let n: i64 <- try(if_multiple(n, 4));
+        a ssert_eq(n, 12);
+        passed = true;
+        let n: i64 <- try(if_multiple(n, 5));
+        passed = false;
+    };
+    a ssert_eq(passed, true);
+    */
+    
+    canary
+}
+
+/// Like Kotlin and Swift, we have syntax sugar for trailing lambda arguments. 
+/// An alternative to the backpassing syntax. 
+#test fn trailing_lambda_syntax(canary: i64) i64 = {
+    let cond = true;
+    var a = 0;
+    
+    // Normal function call 
+    if(cond, fn = {
+        a = a.add(1);
+    });
+    assert_eq(a, 1);
+    
+    // Call with trailing lambda. 
+    if(cond) {|
+        a = a.add(1);
+    };
+    assert_eq(a, 2);
+    
+    // Dot call with trailing lambda. 
+    cond.if {|
+        a = a.add(1);
+    };
+    assert_eq(a, 3);
+    
+    // TODO: test with arg and ret types. 
+    
+    var i = 1;
+    while(fn() = i.gt(0), fn() = { i = i.sub(1)});
+    assert_eq(i, 0);
+    i = 1;
+    while(fn() = i.gt(0)){| i = i.sub(1) };
+    assert_eq(i, 0);
+    i = 1;
+    while {| i.gt(0) }{| i = i.sub(1) };
+    assert_eq(i, 0);
+    
+    canary
+}
+
+// :ChainedCaptures
+// The problem is that it binds the closures into the args of local_if, 
+// and then decides that new local_if has no runtime captures, 
+// because it hasn't actually tried to compile the closures yet. 
+// the closures don't have runtime captures until you try to compile them and it does the capturing_call of 'value'. 
+// So since it thinks the specialized 'local_if' has no captures, it gets a new 'result: FnWip', 
+// which doesn't have the captures that were added to the specialized 'c_get''s FnWip. 
+// So a hack fix here is just marking 'local_if' as @inline, but then you have to do that for any function with closure arguments, which the compiler should be doing for you. 
+// The reason it worked before when bindings were always resolved as Var even if Const, 
+// was the 'then' branch in the body of 'c_get' would show up as having a runtime capture of 'value' instead of a const one, 
+// so local_if would be inlined, and then it would successfully find the real lost capture of 'number' from the outer scope.
+// currently just applying that hack fix in the compiler but should do better eventually. expecially since that means if you pass a normal function as a const arg _every_ later callsite will be inlined. 
+#test fn chained_captures(canary: i64) i64 = {
+    // same as normal if, just want to make the whole test case self contained. 
+    fn local_if(cond: bool, const then: Fn(Unit, i64), const else: Fn(Unit, i64)) i64 =
+        (cond, then, else)!if;
+
+    fn c_get(cond: bool, const value: Fn(i64, i64)) i64 = {  // inherits runtime captures of 'value'
+        // body calls 'value', so should also inherit its runtime captures, which means local_if should inherit them too. 
+        local_if(cond, fn() i64 = value(4), fn=0)
+    }
+    
+    let number = 7;
+    let result = c_get(true, fn(_: i64) i64 = number);
+    assert_eq(result, 7);
+    
+    canary
 }
