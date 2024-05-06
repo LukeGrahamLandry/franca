@@ -52,7 +52,7 @@ static GLOBAL: MyAllocator = MyAllocator;
 
 pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
-pub const TRACE_ASM: bool = false;
+pub const TRACE_ASM: bool = true;
 
 #[macro_export]
 macro_rules! debug {

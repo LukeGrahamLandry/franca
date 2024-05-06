@@ -103,7 +103,19 @@ fn main() {
             src += &a;
         }
 
-        run_main(pool, src, Some(&name), true);
+        if !run_main(pool, src.clone(), Some(&name), true) {
+            let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+            let mut comp = Compile::new(pool, &mut program);
+
+            load_all_toplevel(&mut comp, &[(name, src)]).unwrap_or_else(|e| {
+                log_err(&comp, *e);
+                exit(1);
+            });
+
+            for f in comp.tests.clone() {
+                run_one(&mut comp, f);
+            }
+        }
 
         // println!("{:#?}", unsafe { &STATS });
     } else {

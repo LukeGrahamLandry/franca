@@ -1690,6 +1690,8 @@ pub enum Flag {
     When,
     One_Ret_Pic,
     Anon,
+    Log_Bc,
+    Log_Asm,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     Test_Broken,

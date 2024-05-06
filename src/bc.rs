@@ -21,32 +21,40 @@ pub struct FloatMask {
     pub ret: u32,
 }
 
-#[derive(Clone, InterpSend, Debug)]
+#[derive(Copy, Clone, InterpSend, Debug)]
+pub struct BbId(pub u16);
+
+#[derive(Clone, InterpSend, Debug, Copy)]
 pub enum Bc {
-    CallDirect { f: FuncId },                 // <args:m> -> <ret:n>
-    CallSplit { ct: FuncId, rt: FuncId },     // <args:m> -> <ret:n>
-    CallFnPtr { ty: FnType, comp_ctx: bool }, // <ptr:1> <args:m> -> <ret:n>
-    PushConstant { value: i64 },              // _ -> <v:1>
-    JumpIf { true_ip: u16, false_ip: u16 },   // <cond:1> -> _
-    Goto { ip: u16 },                         // _ -> _
-    Ret,                                      //
-    GetNativeFnPtr(FuncId),                   // _ -> <ptr:1>
-    Load { slots: u16 },                      // <ptr:1> -> <?:n>
-    Store { slots: u16 },                     // <?:n> <ptr:1> -> _
-    AddrVar { id: u16 },                      // _ -> <ptr:1>
-    IncPtr { offset: u16 },                   // <ptr:1> -> <ptr:1>
-    Pop { slots: u16 },                       // <?:n> -> _
-    TagCheck { expected: u16 },               // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
+    CallDirect { f: FuncId },                             // <args:m> -> <ret:n>
+    CallSplit { ct: FuncId, rt: FuncId },                 // <args:m> -> <ret:n>
+    CallFnPtr { ty: FnType, comp_ctx: bool },             // <ptr:1> <args:m> -> <ret:n>
+    PushConstant { value: i64 },                          // _ -> <v:1>
+    JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <cond:1> -> _
+    Goto { ip: BbId, slots: u16 },                        // _ -> _
+    Ret,                                                  //
+    GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>
+    Load { slots: u16 },                                  // <ptr:1> -> <?:n>
+    Store { slots: u16 },                                 // <?:n> <ptr:1> -> _
+    AddrVar { id: u16 },                                  // _ -> <ptr:1>
+    IncPtr { offset: u16 },                               // <ptr:1> -> <ptr:1>
+    Pop { slots: u16 },                                   // <?:n> -> _
+    TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     Unreachable,
     NoCompile,
     LastUse { id: u16 },
-    EndIf { index: u16, slots: u16 },
-    StartLoop,
+}
+
+#[derive(Clone)]
+pub struct BasicBlock {
+    pub insts: Vec<Bc>,
+    pub arg_slots: u16,
+    pub arg_float_mask: u32,
 }
 
 #[derive(Clone)]
 pub struct FnBody<'p> {
-    pub insts: Vec<Bc>,
+    pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
     pub when: ExecTime,
     pub slot_types: Vec<TypeId>,
@@ -57,6 +65,7 @@ pub struct FnBody<'p> {
     pub if_debug_count: u16,
     pub(crate) _p: PhantomData<&'p ()>,
     pub aarch64_stack_bytes: Option<u16>,
+    pub current_block: BbId,
 }
 
 impl<'p> FnBody<'p> {

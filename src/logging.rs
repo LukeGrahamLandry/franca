@@ -565,10 +565,11 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
             write!(f, "${i}:{ty:?}, ");
         }
         writeln!(f);
-        for (i, bc) in self.insts.iter().enumerate() {
-            let bc = format!("{i}. {bc:?}");
-            writeln!(f, "{}", bc,);
-        }
+        // TODO
+        // for (i, bc) in self.insts.iter().enumerate() {
+        //     let bc = format!("{i}. {bc:?}");
+        //     writeln!(f, "{}", bc,);
+        // }
         writeln!(f, "{}", self.why);
         f
     }

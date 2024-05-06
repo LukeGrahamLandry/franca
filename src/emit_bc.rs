@@ -72,11 +72,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             func: func.func,
             why: func.why.clone(),
             last_loc: func.last_loc,
-            insts: vec![],
+            blocks: vec![],
             slot_types: vec![],
             if_debug_count: 0,
             _p: PhantomData,
             aarch64_stack_bytes: None,
+            current_block: BbId(0),
         }
     }
 
@@ -123,6 +124,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let func = &self.program[f];
         let has_body = func.body.is_some();
 
+        let arg = func.finished_arg.unwrap();
+        let slots = self.slot_count(arg);
+        let floats = self.program.float_mask_one(arg);
+        let entry = result.push_block(slots, floats);
+        result.current_block = entry;
+
         if !has_body {
             // These are handled at the callsite, they don't need to emit a bytecode body.
             if func.comptime_addr.is_some() || func.llvm_ir.is_some() || func.jitted_code.is_some() {
@@ -135,7 +142,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             err!("called function without body: {f:?} {}", self.program.pool.get(func.name));
         }
 
-        let slots = self.slot_count(func.finished_arg.unwrap());
         // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
         if let Expr::Value { value } = &func.body.as_ref().unwrap().expr {
             result.push(Bc::Pop { slots });
@@ -159,6 +165,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         debug_assert_eq!(self.stack_height, ret_slots, "{}", body.log(self.program.pool));
 
         result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
+
+        if func.has_tag(Flag::Log_Bc) {
+            println!();
+            println!("=== Bytecode for {f:?}: {} ===", self.program.pool.get(func.name));
+            for (b, insts) in result.blocks.iter().enumerate() {
+                println!("[b{b}({})]:", insts.arg_slots);
+                for (i, op) in insts.insts.iter().enumerate() {
+                    println!("    {i}. {op:?}");
+                }
+            }
+            println!("===")
+        }
 
         Ok(())
     }
@@ -419,22 +437,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
         let slots = self.slot_count(if_true.ty);
 
-        let index = result.if_debug_count;
-        result.if_debug_count += 1;
-
-        let id = result.add_var(if_true.ty);
-
-        let branch_ip = result.push(Bc::NoCompile); // patch
-        let true_ip = result.insts.len() as u16;
+        let branch_block = result.current_block;
+        let true_ip = result.push_block(0, 0);
+        result.current_block = true_ip;
         self.compile_expr(result, if_true)?;
         self.stack_height -= slots;
-        result.push(Bc::AddrVar { id });
-        result.push(Bc::Store { slots });
-        result.push(Bc::EndIf { index, slots });
-        let jump_over_false = result.push(Bc::NoCompile);
-        let false_ip = result.insts.len() as u16;
+        let end_true_block = result.current_block;
+        let false_ip = result.push_block(0, 0);
+        result.current_block = false_ip;
         self.compile_expr(result, if_false)?;
-
+        let end_false_block = result.current_block;
         // TODO: 'Never' should work anywhere, not just false branch of ifs. it just so happens thats the only one my tests need currently -- May 3.
         // TODO: HACK: need to know how many slots to pretend we have
         if if_false.ty.is_never() && !if_true.ty.is_never() {
@@ -442,22 +454,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // dont bother storing, we never get there, but the backend can load the temp var set by the other branch.
             result.push(Bc::Pop { slots: 1 });
             self.stack_height += slots - 1;
-        } else {
-            result.push(Bc::AddrVar { id });
-            result.push(Bc::Store { slots });
         }
 
-        result.push(Bc::EndIf { index, slots });
-        result.insts[branch_ip] = Bc::JumpIf { false_ip, true_ip };
-        result.insts[jump_over_false] = Bc::Goto {
-            ip: result.insts.len() as u16,
-        };
-        result.jump_targets.set(result.insts.len());
-        result.jump_targets.set(true_ip as usize);
-        result.jump_targets.set(false_ip as usize);
-        result.push(Bc::AddrVar { id });
-        result.push(Bc::Load { slots });
-        result.push(Bc::LastUse { id });
+        let floats = self.program.float_mask_one(if_true.ty);
+        let ip = result.push_block(slots, floats);
+        result.current_block = ip;
+        result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
+        result.push_to(end_true_block, Bc::Goto { ip, slots });
+        result.push_to(end_false_block, Bc::Goto { ip, slots });
 
         Ok(())
     }
@@ -471,35 +475,44 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         debug_assert_eq!(body_fn.ty, TypeId::unit());
 
-        let index = result.if_debug_count;
-        result.if_debug_count += 1;
+        let prev_block = result.current_block;
+        let start_cond_block = result.push_block(0, 0);
+        result.push_to(
+            prev_block,
+            Bc::Goto {
+                ip: start_cond_block,
+                slots: 0,
+            },
+        );
+        result.current_block = start_cond_block;
 
-        result.push(Bc::StartLoop);
-        result.push(Bc::EndIf { index, slots: 0 });
-        let cond_ip = result.insts.len() as u16;
-        debug_assert_eq!(cond_fn.ty, TypeId::bool());
         self.compile_expr(result, cond_fn)?;
         self.stack_height -= 1;
-        let branch_ip = result.push(Bc::NoCompile); // patch
-        let body_ip = result.insts.len() as u16;
-        self.compile_expr(result, body_fn)?;
+        let end_cond_block = result.current_block;
+
         let slots = self.slot_count(body_fn.ty);
-        result.push(Bc::Pop { slots });
-        result.push(Bc::EndIf { index, slots: 0 });
+        let start_body_block = result.push_block(0, 0);
+        self.compile_expr(result, body_fn)?;
         self.stack_height -= slots;
+        result.push(Bc::Pop { slots });
+        let end_body_block = result.current_block;
 
-        result.push(Bc::Goto { ip: cond_ip });
-        let end_ip = result.insts.len() as u16;
-
-        // TODO: change to conditional so dont have to store the true_ip, but then I'd need to reconstruct it for llvm so meh
-        result.insts[branch_ip] = Bc::JumpIf {
-            true_ip: body_ip,
-            false_ip: end_ip,
-        };
-        result.jump_targets.set(cond_ip as usize);
-        result.jump_targets.set(branch_ip);
-        result.jump_targets.set(body_ip as usize);
-        result.jump_targets.set(end_ip as usize);
+        let exit_block = result.push_block(0, 0);
+        result.push_to(
+            end_cond_block,
+            Bc::JumpIf {
+                true_ip: start_body_block,
+                false_ip: exit_block,
+                slots: 0,
+            },
+        );
+        result.push_to(
+            end_body_block,
+            Bc::Goto {
+                ip: start_cond_block,
+                slots: 0,
+            },
+        );
 
         self.stack_height += 1;
         result.push(Bc::PushConstant { value: 0 }); // TODO: caller expects a unit on the stack
@@ -690,10 +703,24 @@ impl SizeCache {
 }
 
 impl<'p> FnBody<'p> {
+    fn push_block(&mut self, arg_slots: u16, arg_float_mask: u32) -> BbId {
+        self.blocks.push(BasicBlock {
+            insts: vec![],
+            arg_slots,
+            arg_float_mask,
+        });
+        let b = BbId(self.blocks.len() as u16 - 1);
+        self.current_block = b;
+        b
+    }
+
     #[track_caller]
-    fn push(&mut self, inst: Bc) -> usize {
-        let ip = self.insts.len();
-        self.insts.push(inst);
-        ip
+    fn push(&mut self, inst: Bc) {
+        self.push_to(self.current_block, inst);
+    }
+
+    #[track_caller]
+    fn push_to(&mut self, b: BbId, inst: Bc) {
+        self.blocks[b.0 as usize].insts.push(inst);
     }
 }

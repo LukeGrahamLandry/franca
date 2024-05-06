@@ -1,3 +1,29 @@
+The way my bc handles loops and ifs is kinda hacky and convoluted. gonna try adding the concept of basic blocks.
+The general goal of this whole adventure is making it easier to think about how to add tail recursion and nonlocal returns.
+
+The problem is that any time control flow diverges (ifs and loops),
+you need the places where it rejoins to represent each v-stack slot with the same reg/slot.
+Its what llvm phi instructions are for but I like my way of just both branches leave something on the stack cause its so simple to think about.
+
+BEFORE:
+ifs made a variable that each branch wrote to and then read the return value when rejoined.
+while always spilled everything to stack at the beginning so both times you get to the cond block its the same,
+dont have to worry about stuff getting spilled in the body so its in a different place the second time around.
+I don't keep track of basic blocks so you can't really tell whats going on.
+
+AFTER:
+Split bc into basic blocks where you can't jump in/out of the middle (other than calling functions that return to the same place).
+Blocks can take arguments (only used for rejoin after if), where jumping in puts in ccall reg and then the block puts back on stack.
+But mostly stuff still just implicitly flows on the stack (i use that for temporaries).
+I still just spill everything (other than args) at the end of each block.
+TODO: be more consistant about representing block arguments? rn stuff can just flow on the stack behind you kinda.
+real function args should be args to the entry block but currently are hacked in.
+
+- failing math_still_works. JumpIf: flipped true and false branches but still tried to cbz. true needs to be right below.
+  that got 68/87 working
+- three problems now: `unhandled prefix in @switch`, `attempt to subtract with overflow`, `(slots as u32 - float_mask.count_ones()) < 8`
+  the two are ifs returning big values that don't fit in register, need to use variable like before and floats aren't done properly.
+
 ## (May 5)
 
 - removed some places where it pre-interned a fnptr type since all exprs have thier type now, emit_bc shouldn't need to mutate program to make a new one.
@@ -744,6 +770,57 @@ I really like the Zed thing where you get a file of all the errors.
 It's great for mass changes like adding an argument to a function when you're always in a context where you can trivially get the arg anyway.
 Tho sometimes the same place shows up twice which is unfortunate.
 Same err from rustc and rust-analyzer?
+
+## notes.txt (Feb 12)
+
+Value Repr
+
+A tuple is a value type. Some range of memory on the stack/heap.
+Passing a tuple to a function is always conceptually a memcpy from the old location into the callees's stackframe.
+Some types are Move but not Copy so passing by value invalidates the original data (Drop will not be called on the original).
+Move is a semantic construction, it doesn't actually change the calling convention.
+Structs have the same repr as tuples, just with syntax for accessing named fields.
+All scalars (numbers, ptrs) in the interpreter take one Stack Slot, a tuple is a range of stack slots.
+
+Variables
+
+runtime cvar capture is by just inlining the function.
+comptime var capture is by copying it into the function object (always immutable).
+const means constant to the function's compilation.
+comptime functions can still have let/var.
+types and closures fns can only be in consts or in comptime variables.
+
+Other Notes
+
+// opt: pass by &const if not mutated. Have some way to assert that in the function def so you don't accidently cause copies.
+// But I don't like Zig's way of forcing you to writing a whole line assigning to a new variable.
+// LAMO https://github.com/ziglang/zig/issues/16343
+// Maybe like rust where you just write 'mut' on the arg but don't add a keyword.
+// Distinguish between wanting to mutate the caller's value (explicit pass ptr),
+// and wanting to mutate your copy. Make sure you can't make the mistake of taking address to mutate and getting caller's.
+// Distinguish logical mutation (like through a pointer) and reassignment (where you change what's in the stack slot)?
+
+// Goal: I want to not need the linker.
+// If you don't want to interact with other languages you should be able to run my compiler and then have a program.
+// Go's compiler stuff seems pretty good, that might be a good one to steal.
+// https://www.youtube.com/watch?v=KINIAgRpkDA&list=PLtLJO5JKE5YCcdJGpmMqB8L4C4VNFN7gY
+// If I use their stuff, be careful about too many calls between rust and go...
+// But I assume c abi is only slow if you're trying to use goroutines which I don't care about.
+// - https://shane.ai/posts/cgo-performance-in-go1.21/
+// - https://www.reddit.com/r/golang/comments/12nt2le/when_dealing_with_c_when_is_go_slow/
+// I need to be very careful about sharing common work between similar backends if I want to pull off having so many.
+
+// I want to keep the interpreter using fully linear types in debug mode,
+// but have them happen to work out as a normal stack so you can have a fast mode that just skips the redundant stuff.
+// I wonder if I would then be easy to do wasm since that's also stack based.
+// I'd be fine with tweaking my bytecode a bit to make that work better.
+
+// unify function statement and closure expressions?
+// but there's a difference between one you release to the outer scope for overloading and one that's just a value you can pass around.
+// might be a good idea to allow a name on closures just to let it show up in stack traces for debugging purposes.
+// but then its less clear that it's different from a possibly overloading function declaration.
+
+// Overloading and Generics: maybe distinquish between a function template and a bound function.
 
 ## parser rewrite (Feb 10)
 
