@@ -3,7 +3,7 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
-    bc_to_asm::emit_aarch64,
+    bc_to_asm::{emit_aarch64, TRACE_ASM},
     compiler::{Compile, ExecTime, Res},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
@@ -119,6 +119,7 @@ fn main() {
 
         // println!("{:#?}", unsafe { &STATS });
     } else {
+        debug_assert!(!TRACE_ASM, "TRACE_ASM is too slow to be reasonable on all tests");
         run_tests_find_faliures();
         check_broken();
     }

@@ -52,12 +52,10 @@ static GLOBAL: MyAllocator = MyAllocator;
 
 pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
-pub const TRACE_ASM: bool = true;
-
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {{
-        if $crate::TRACE_ASM {
+        if $crate::bc_to_asm::TRACE_ASM {
             print!($($arg)*);
         }
     }};
@@ -66,7 +64,7 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! debugln {
     ($($arg:tt)*) => {{
-        if $crate::TRACE_ASM  {
+        if $crate::bc_to_asm::TRACE_ASM  {
             println!($($arg)*);
         }
     }};

@@ -423,8 +423,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    // TODO: make this not a special case.
-    /// This swaps out the closures for function accesses.
     fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, ()> {
         let (if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
             self.compile_expr(result, &parts[0])?; // cond
@@ -437,31 +435,56 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
         let slots = self.slot_count(if_true.ty);
 
+        let result_var = if slots > 8 { Some(result.add_var(if_true.ty)) } else { None };
+
         let branch_block = result.current_block;
         let true_ip = result.push_block(0, 0);
         result.current_block = true_ip;
         self.compile_expr(result, if_true)?;
         self.stack_height -= slots;
+        if let Some(id) = result_var {
+            result.push(Bc::AddrVar { id });
+            result.push(Bc::Store { slots });
+        }
         let end_true_block = result.current_block;
         let false_ip = result.push_block(0, 0);
         result.current_block = false_ip;
         self.compile_expr(result, if_false)?;
+        if let Some(id) = result_var {
+            result.push(Bc::AddrVar { id });
+            result.push(Bc::Store { slots });
+        }
         let end_false_block = result.current_block;
         // TODO: 'Never' should work anywhere, not just false branch of ifs. it just so happens thats the only one my tests need currently -- May 3.
         // TODO: HACK: need to know how many slots to pretend we have
         if if_false.ty.is_never() && !if_true.ty.is_never() {
             // currently we treat Never as taking 1 slot (for unreachable for example), so pop that off, and then pretend we pushed everything they want.
             // dont bother storing, we never get there, but the backend can load the temp var set by the other branch.
-            result.push(Bc::Pop { slots: 1 });
-            self.stack_height += slots - 1;
+            if result_var.is_some() {
+                result.push(Bc::Pop { slots: 1 });
+                self.stack_height += slots - 1;
+            } else {
+                for _ in 0..slots - 1 {
+                    result.push(Bc::PushConstant { value: 777 });
+                }
+                self.stack_height += slots - 1;
+            }
         }
 
         let floats = self.program.float_mask_one(if_true.ty);
-        let ip = result.push_block(slots, floats);
+
+        let block_slots = if result_var.is_none() { slots } else { 0 };
+        let block_floats = if result_var.is_none() { floats } else { 0 };
+        let ip = result.push_block(block_slots, block_floats);
         result.current_block = ip;
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
-        result.push_to(end_true_block, Bc::Goto { ip, slots });
-        result.push_to(end_false_block, Bc::Goto { ip, slots });
+        result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
+        result.push_to(end_false_block, Bc::Goto { ip, slots: block_slots });
+        if let Some(id) = result_var {
+            result.push(Bc::AddrVar { id });
+            result.push(Bc::Load { slots });
+            // result.push(Bc::LastUse { id });
+        }
 
         Ok(())
     }

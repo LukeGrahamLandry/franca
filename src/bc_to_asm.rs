@@ -9,7 +9,7 @@ use crate::bc::{BbId, Bc, BcReady, FloatMask, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
-use crate::{bootstrap_gen::*, unwrap, TRACE_ASM};
+use crate::{bootstrap_gen::*, unwrap};
 use crate::{err, logging::PoolLog};
 use std::arch::asm;
 use std::cell::UnsafeCell;
@@ -20,6 +20,7 @@ use std::process::Command;
 
 const ZERO_DROPPED_REG: bool = false;
 const ZERO_DROPPED_SLOTS: bool = false;
+pub const TRACE_ASM: bool = true;
 
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -88,6 +89,7 @@ struct BcToAsm<'z, 'p, 'a> {
     release_stack: Vec<(*const u8, *const u8, *const u8)>,
     state: BlockState,
     block_ips: Vec<Option<*const u8>>,
+    stop_at: Vec<BbId>,
 }
 
 #[derive(Default, Clone)]
@@ -112,6 +114,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             release_stack: vec![],
             state: Default::default(),
             block_ips: vec![],
+            stop_at: vec![],
         }
     }
 
@@ -228,6 +231,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.block_ips.clear();
         let block_count = self.compile.ready[f].as_ref().unwrap().blocks.len();
         self.block_ips.extend(vec![None; block_count]);
+        self.stop_at.clear();
 
         self.compile.aarch64.push(sub_im(X64, sp, sp, 16, 0));
         self.compile.aarch64.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
@@ -317,7 +321,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn emit_block(&mut self, b: usize) -> Res<'p, ()> {
-        if self.block_ips[b].is_some() {
+        if self.block_ips[b].is_some() || self.stop_at.contains(&BbId(b as u16)) {
             return Ok(());
         }
         self.block_ips[b] = Some(self.compile.aarch64.next);
@@ -353,11 +357,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn emit_inst(&mut self, b: usize, inst: Bc) -> Res<'p, bool> {
         match inst {
             Bc::LastUse { id } => {
-                let slot = self.vars[id as usize].take();
-                let slot = slot.unwrap();
-                let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
-                let count = self.compile.slot_count(ty);
-                self.drop_slot(slot, count * 8);
+                // TODO: I this doesn't work because if blocks are depth first now, not in order,
+                //       so the var can be done after they rejoin and then the other branch thinks that slot is free
+                //       and puts something else in it. -- May 6
+                // let slot = self.vars[id as usize].take();
+                // let slot = slot.unwrap();
+                // let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
+                // let count = self.compile.slot_count(ty);
+                // self.drop_slot(slot, count * 8);
             }
             Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
             Bc::CallSplit { rt, ct } => {
@@ -397,9 +404,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 // we only do one branch so true block must be directly after the check.
                 // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
                 debug_assert!(self.block_ips[true_ip.0 as usize].is_none());
+
                 self.emit_block(true_ip.0 as usize);
                 self.state = state;
                 self.emit_block(false_ip.0 as usize);
+
                 return Ok(true);
             }
             Bc::Goto { ip, slots } => {
@@ -539,6 +548,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     // TODO: floats -- May 1
     fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
         debug_assert!((slots as u32 - float_mask.count_ones()) < 8);
+        debug_assert!(self.state.stack.len() >= slots as usize);
         let mut next_int = 0;
         let mut next_float = 0;
 

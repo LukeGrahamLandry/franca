@@ -21,7 +21,7 @@ pub struct FloatMask {
     pub ret: u32,
 }
 
-#[derive(Copy, Clone, InterpSend, Debug)]
+#[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 
 #[derive(Clone, InterpSend, Debug, Copy)]

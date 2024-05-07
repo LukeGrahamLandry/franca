@@ -23,6 +23,8 @@ real function args should be args to the entry block but currently are hacked in
   that got 68/87 working
 - three problems now: `unhandled prefix in @switch`, `attempt to subtract with overflow`, `(slots as u32 - float_mask.count_ones()) < 8`
   the two are ifs returning big values that don't fit in register, need to use variable like before and floats aren't done properly.
+- made ifs use var if they return something big. 81/87 but had to turn off reusing stack slots because bbs are done depth first not in emitted order now.
+- 86/87. fixed nevers now that sometimes they need to push junk on stack. TODO: thats a hack. calling a Never should be a terminator like unreachable.
 
 ## (May 5)
 
