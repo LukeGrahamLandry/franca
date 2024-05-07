@@ -140,6 +140,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn IntType(bits: i64, signed: bool) Type;", make_int_type as *const u8),
     // measured in bytes
     ("fun size_of(T: Type) i64", get_size_of as *const u8),
+    ("fn Label(Arg: Type) Type", do_label_type as *const u8),
 ];
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
@@ -362,6 +363,10 @@ extern "C-unwind" fn make_int_type(program: &mut &mut Program<'_>, bit_count: i6
 
 extern "C-unwind" fn do_ptr_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
     program.ptr_type(ty)
+}
+
+extern "C-unwind" fn do_label_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
+    program.intern_type(TypeInfo::Label(ty))
 }
 
 extern "C-unwind" fn do_unique_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {

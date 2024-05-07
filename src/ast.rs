@@ -70,6 +70,7 @@ pub enum TypeInfo<'p> {
     VoidPtr,
     OverloadSet,
     Scope,
+    Label(TypeId),
 }
 #[repr(C)]
 #[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
@@ -104,6 +105,7 @@ pub enum Expr<'p> {
         resolved: Option<(ScopeId, usize)>, // TODO: this is like only used by @namespace. maybe that should take a function somehow instead.
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
+        inlined: Option<FuncId>,
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
@@ -1123,7 +1125,7 @@ impl<'p> Program<'p> {
     pub fn for_llvm_ir(&self, ty: TypeId) -> &str {
         match &self[ty] {
             TypeInfo::F64 => "double",
-            TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never => todo!(),
+            TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
             TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
@@ -1351,6 +1353,7 @@ impl<'p> Program<'p> {
             | TypeInfo::Bool
             | TypeInfo::Fn(_)
             | TypeInfo::FnPtr(_)
+            | TypeInfo::Label(_)
             | TypeInfo::Type
             | TypeInfo::Unit
             | TypeInfo::VoidPtr
@@ -1692,6 +1695,8 @@ pub enum Flag {
     Anon,
     Log_Bc,
     Log_Asm,
+    Log_Ast,
+    Return,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     Test_Broken,

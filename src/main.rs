@@ -9,7 +9,9 @@ use franca::{
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib,
     lex::Lexer,
-    log_err, make_toplevel,
+    log_err,
+    logging::init_logs_flag,
+    make_toplevel,
     parse::Parser,
     pool::StringPool,
     run_main,
@@ -39,6 +41,7 @@ use std::{
 const SHOW_MEM_REGIONS: bool = false;
 
 fn main() {
+    init_logs_flag(0x0);
     let marker = 0;
     unsafe { STACK_START = &marker as *const i32 as usize };
     unsafe { MMAP_ARENA_START = MEM.get() as usize };

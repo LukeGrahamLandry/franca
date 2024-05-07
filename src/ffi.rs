@@ -598,7 +598,7 @@ pub mod c {
                 TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::Never => CTy::i64(),
                 // Not a whole word!
                 TypeInfo::Bool => CTy::c_uchar(),
-                TypeInfo::FnPtr(_) | TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
+                TypeInfo::Label(_) | TypeInfo::FnPtr(_) | TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
                 TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) => self.as_c_type(*ty)?,
                 TypeInfo::Tagged { .. } | TypeInfo::Tuple(_) | TypeInfo::Struct { .. } => {
                     err!("i use wrong c abi for aggragates {}", self.log_type(ty))

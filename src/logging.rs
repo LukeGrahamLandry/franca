@@ -260,6 +260,7 @@ impl<'p> Program<'p> {
                     TypeInfo::FnPtr(f) => {
                         format!("&(fn({}) {})", self.log_type(f.arg), self.log_type(f.ret))
                     }
+                    TypeInfo::Label(e) => format!("Label({})", self.log_type(*e)),
                     TypeInfo::Tuple(v) => {
                         let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
                         format!("({})", v.join(", "))
@@ -698,6 +699,7 @@ impl Debug for Value {
             &Value::Symbol(v) => write!(f, "sym{v}"),
             &Value::OverloadSet(v) => write!(f, "os{v:?}"),
             &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),
+            &Value::Label { return_from } => write!(f, "L{return_from:?}"),
             &Value::SplitFunc { ct, rt } => write!(f, "cr={ct:?}|rt={rt:?}"),
         }
     }

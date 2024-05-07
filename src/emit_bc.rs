@@ -78,10 +78,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             _p: PhantomData,
             aarch64_stack_bytes: None,
             current_block: BbId(0),
+            inlined_return_addr: Default::default(),
         }
     }
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
+        if self.program[f].has_tag(Flag::Log_Ast) {
+            println!("{}", self.program[f].log(self.program.pool));
+        }
+
         self.locals.clear();
         self.locals.push(vec![]);
         let func = &self.program[f];
@@ -127,8 +132,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let arg = func.finished_arg.unwrap();
         let slots = self.slot_count(arg);
         let floats = self.program.float_mask_one(arg);
-        let entry = result.push_block(slots, floats);
-        result.current_block = entry;
+        let entry_block = result.push_block(slots, floats);
 
         if !has_body {
             // These are handled at the callsite, they don't need to emit a bytecode body.
@@ -153,24 +157,33 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
         self.stack_height += slots;
         self.bind_args(result, &func.arg)?;
+        let ret_slots = self.slot_count(func.finished_ret.unwrap());
+        let ret_floats = self.program.float_mask_one(func.finished_ret.unwrap());
         let body = func.body.as_ref().unwrap();
+
+        let return_block = result.push_block(ret_slots, ret_floats);
+        result.inlined_return_addr.insert(f, return_block);
+        result.current_block = entry_block;
         self.compile_expr(result, body)?;
+
+        result.push(Bc::Goto { ip: return_block, slots });
+        result.blocks[return_block.0 as usize].incoming_jumps += 1;
+        result.current_block = return_block;
 
         for _id in self.locals.pop().unwrap() {
             // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
         }
         assert!(self.locals.is_empty());
 
-        let ret_slots = self.slot_count(func.finished_ret.unwrap());
-        debug_assert_eq!(self.stack_height, ret_slots, "{}", body.log(self.program.pool));
-
-        result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
-
+        if !body.ty.is_never() {
+            debug_assert_eq!(self.stack_height, ret_slots, "{}", body.log(self.program.pool));
+            result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
+        }
         if func.has_tag(Flag::Log_Bc) {
             println!();
             println!("=== Bytecode for {f:?}: {} ===", self.program.pool.get(func.name));
             for (b, insts) in result.blocks.iter().enumerate() {
-                println!("[b{b}({})]:", insts.arg_slots);
+                println!("[b{b}({})]: ({} incoming)", insts.arg_slots, insts.incoming_jumps);
                 for (i, op) in insts.insts.iter().enumerate() {
                     println!("    {i}. {op:?}");
                 }
@@ -274,16 +287,62 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     self.stack_height += self.slot_count(f_ty.ret);
                     return Ok(());
                 }
+
+                if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
+                    if let Expr::Value {
+                        value: Values::One(Value::Label { return_from }),
+                        ..
+                    } = f.expr
+                    {
+                        self.compile_expr(result, arg)?;
+                        let ip = *result.inlined_return_addr.get(&return_from).unwrap();
+                        let slots = self.slot_count(ret_ty);
+                        result.push(Bc::Goto { ip, slots });
+                        result.blocks[ip.0 as usize].incoming_jumps += 1;
+                        self.stack_height -= self.slot_count(ret_ty);
+                        self.stack_height += 1; // never
+                        return Ok(());
+                    } else {
+                        todo!()
+                    }
+                }
+
                 unreachable!("{}", f.log(self.program.pool))
             }
-            Expr::Block { body, result: value, .. } => {
+            Expr::Block {
+                body,
+                result: value,
+                inlined,
+                ..
+            } => {
                 self.locals.push(vec![]);
+
+                let return_block = if let Some(inlined) = inlined {
+                    let slots = self.slot_count(expr.ty);
+                    let floats = self.program.float_mask_one(expr.ty);
+                    let entry_block = result.current_block;
+                    let return_block = result.push_block(slots, floats);
+                    result.inlined_return_addr.insert(*inlined, return_block);
+                    result.current_block = entry_block;
+                    Some(return_block)
+                } else {
+                    None
+                };
+
                 for stmt in body {
                     let s = self.stack_height;
                     self.compile_stmt(result, stmt)?;
                     debug_assert_eq!(s, self.stack_height, "{}", stmt.log(self.program.pool));
                 }
+
                 self.compile_expr(result, value)?;
+
+                if let Some(return_block) = return_block {
+                    let slots = self.slot_count(expr.ty);
+                    result.push(Bc::Goto { ip: return_block, slots });
+                    result.blocks[return_block.0 as usize].incoming_jumps += 1;
+                    result.current_block = return_block;
+                }
 
                 // TODO: check if you try to let an address to a variable escape from its scope.
                 let slots = self.locals.pop().unwrap();
@@ -379,6 +438,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             result.push(Bc::PushConstant { value: 0 });
                         }
                         self.stack_height += slots;
+                        return Ok(());
+                    }
+                    Flag::Return => {
+                        let return_from = unwrap!(arg.as_fn(), "expected fn as !return arg");
+                        result.push(Bc::PushConstant { value: return_from.as_raw() });
+                        self.stack_height += 1;
                         return Ok(());
                     }
                     name => err!("{name:?} is known flag but not builtin macro",),
@@ -480,6 +545,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
         result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
         result.push_to(end_false_block, Bc::Goto { ip, slots: block_slots });
+        result.blocks[true_ip.0 as usize].incoming_jumps += 1;
+        result.blocks[false_ip.0 as usize].incoming_jumps += 1;
+        result.blocks[ip.0 as usize].incoming_jumps += 2;
         if let Some(id) = result_var {
             result.push(Bc::AddrVar { id });
             result.push(Bc::Load { slots });
@@ -536,6 +604,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 slots: 0,
             },
         );
+        result.blocks[start_cond_block.0 as usize].incoming_jumps += 2;
+        result.blocks[start_body_block.0 as usize].incoming_jumps += 1;
+        result.blocks[exit_block.0 as usize].incoming_jumps += 1;
 
         self.stack_height += 1;
         result.push(Bc::PushConstant { value: 0 }); // TODO: caller expects a unit on the stack
@@ -708,6 +779,7 @@ impl SizeCache {
             TypeInfo::Scope => 2,
             TypeInfo::Int(_)
             | TypeInfo::Any
+            | TypeInfo::Label(_)
             | TypeInfo::Never
             | TypeInfo::F64
             | TypeInfo::Bool
@@ -731,6 +803,7 @@ impl<'p> FnBody<'p> {
             insts: vec![],
             arg_slots,
             arg_float_mask,
+            incoming_jumps: 0,
         });
         let b = BbId(self.blocks.len() as u16 - 1);
         self.current_block = b;

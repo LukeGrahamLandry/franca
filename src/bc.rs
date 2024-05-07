@@ -11,7 +11,7 @@ use crate::{
     err,
     ffi::InterpSend,
 };
-use crate::{impl_index, unwrap};
+use crate::{impl_index, unwrap, Map};
 use codemap::Span;
 use interp_derive::InterpSend;
 
@@ -50,6 +50,7 @@ pub struct BasicBlock {
     pub insts: Vec<Bc>,
     pub arg_slots: u16,
     pub arg_float_mask: u32,
+    pub incoming_jumps: usize,
 }
 
 #[derive(Clone)]
@@ -66,6 +67,7 @@ pub struct FnBody<'p> {
     pub(crate) _p: PhantomData<&'p ()>,
     pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
+    pub inlined_return_addr: Map<FuncId, BbId>,
 }
 
 impl<'p> FnBody<'p> {
@@ -96,6 +98,9 @@ pub enum Value {
     // Both closures and types don't have values at runtime, all uses must be inlined.
     Type(TypeId),
     GetFn(FuncId),
+    Label {
+        return_from: FuncId,
+    },
     /// The empty tuple.
     Unit,
     // Note: you can't just put these in a function's arena because they get copied by value.
@@ -268,6 +273,12 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         TypeInfo::Fn(_) => {
             let n = unwrap!(ints.next(), "");
             out.push(Value::GetFn(FuncId::from_raw(n)));
+        }
+        TypeInfo::Label(_) => {
+            let n = unwrap!(ints.next(), "");
+            out.push(Value::Label {
+                return_from: FuncId::from_raw(n),
+            });
         }
         TypeInfo::Type => {
             let n = unwrap!(ints.next(), "");

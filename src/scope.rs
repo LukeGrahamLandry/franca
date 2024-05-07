@@ -330,7 +330,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.resolve_expr(arg)?;
                 self.resolve_expr(target)?;
             }
-            Expr::Block { body, result, resolved } => {
+            Expr::Block { body, result, resolved, .. } => {
                 self.push_scope(None);
 
                 let mut new_body = vec![];

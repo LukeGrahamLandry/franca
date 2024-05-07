@@ -156,7 +156,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     println!();
                     println!("=== Bytecode for {f:?}: {} ===", self.compile.program.pool.get(func.name));
                     for (b, insts) in self.compile.ready[f].as_ref().unwrap().blocks.iter().enumerate() {
-                        println!("[b{b}({})]:", insts.arg_slots);
+                        println!("[b{b}({})]: ({} incoming)", insts.arg_slots, insts.incoming_jumps);
                         for (i, op) in insts.insts.iter().enumerate() {
                             println!("    {i}. {op:?}");
                         }
@@ -290,7 +290,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         debugln!("entry: ({:?})", self.state.stack);
         debug_assert_eq!(self.state.stack.len() as u16, arg_size);
-        self.emit_block(0)?;
+        self.emit_block(0, false)?;
 
         for (inst, false_ip, reg) in self.patch_cbz.drain(..) {
             let false_ip = self.block_ips[false_ip.0 as usize].unwrap();
@@ -320,7 +320,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         Ok(())
     }
 
-    fn emit_block(&mut self, b: usize) -> Res<'p, ()> {
+    fn emit_block(&mut self, b: usize, args_not_vstacked: bool) -> Res<'p, ()> {
         if self.block_ips[b].is_some() || self.stop_at.contains(&BbId(b as u16)) {
             return Ok(());
         }
@@ -331,7 +331,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let slots = block.arg_slots;
         let mask = block.arg_float_mask;
         // TODO: handle normal args here as well.
-        if b != 0 {
+        if args_not_vstacked {
             self.state.free_reg.clear();
             let int_count = slots as u32 - mask.count_ones();
             if slots > 0 {
@@ -344,7 +344,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let func = self.compile.ready[f].as_ref().unwrap();
         let mut is_done = false;
         for i in 0..func.blocks[b].insts.len() {
-            debug_assert!(!is_done);
+            // TOOD: hack
+            if is_done {
+                break;
+            }
+            // debug_assert!(!is_done);
             let block = &self.compile.ready[f].as_ref().unwrap().blocks[b];
             let inst = block.insts[i];
             let mask = block.arg_float_mask;
@@ -405,23 +409,28 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
                 debug_assert!(self.block_ips[true_ip.0 as usize].is_none());
 
-                self.emit_block(true_ip.0 as usize);
+                self.emit_block(true_ip.0 as usize, true);
                 self.state = state;
-                self.emit_block(false_ip.0 as usize);
+                self.emit_block(false_ip.0 as usize, true);
 
                 return Ok(true);
             }
             Bc::Goto { ip, slots } => {
-                let mask = self.compile.ready[self.f].as_ref().unwrap().blocks[ip.0 as usize].arg_float_mask;
-                self.stack_to_ccall_reg(slots, mask);
-                self.spill_abi_stompable();
-
-                // If we haven't emitted it yet, it will be right after us, so just fall through.
-                if self.block_ips[ip.0 as usize].is_some() {
-                    self.compile.aarch64.push(brk(0));
-                    self.patch_b.push((self.compile.aarch64.prev(), ip));
+                let block = &self.compile.ready[self.f].as_ref().unwrap().blocks[ip.0 as usize];
+                if block.incoming_jumps == 1 {
+                    debug_assert!(self.block_ips[ip.0 as usize].is_none());
+                    self.emit_block(ip.0 as usize, false);
                 } else {
-                    self.emit_block(ip.0 as usize);
+                    let mask = block.arg_float_mask;
+                    self.stack_to_ccall_reg(slots, mask);
+                    self.spill_abi_stompable();
+                    // If we haven't emitted it yet, it will be right after us, so just fall through.
+                    if self.block_ips[ip.0 as usize].is_some() {
+                        self.compile.aarch64.push(brk(0));
+                        self.patch_b.push((self.compile.aarch64.prev(), ip));
+                    } else {
+                        self.emit_block(ip.0 as usize, true);
+                    }
                 }
                 return Ok(true);
             }
@@ -1130,6 +1139,7 @@ impl Value {
             &Value::GetFn(i) => i.as_raw(),
             &Value::Symbol(i) => i as i64,
             &Value::Type(ty) => ty.as_raw(),
+            &Value::Label { return_from } => return_from.as_raw(),
             Value::Unit => 0, // TODO
             &Value::Heap(ptr) => ptr as usize as i64,
             Value::SplitFunc { ct, rt } => todo!(),

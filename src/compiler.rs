@@ -613,6 +613,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 loc,
             }],
             result: Box::new(func.body.as_ref().unwrap().clone()),
+            inlined: Some(f),
         };
         self.program.next_var = expr_out.renumber_vars(self.program.next_var); // Note: not renumbering on the function. didn't need to clone it.
 
@@ -1192,6 +1193,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(f_ty.ret);
                 }
 
+                if let TypeInfo::Label(arg_ty) = self.program[f.ty] {
+                    self.compile_expr(result, arg, Some(arg_ty))?;
+                    expr.done = f.done && arg.done;
+                    expr.ty = TypeId::never();
+                    return Ok(TypeId::never());
+                }
+
                 // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
                     match f_id {
@@ -1439,12 +1447,26 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         err!("bad !as: {}", arg.log(self.pool))
                     }
+                    Flag::Return => {
+                        let ty = self.compile_expr(result, arg, None)?;
+                        if arg.is_raw_unit() {
+                            todo!()
+                        } else if ty == TypeId::overload_set() {
+                            todo!()
+                        } else {
+                            let f: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
+                            if let Some(f_ret) = self.program[f].finished_ret {
+                                expr.ty = self.program.intern_type(TypeInfo::Label(f_ret));
+                                expr.done = true;
+                            }
+                        }
+                        return Ok(expr.ty);
+                    }
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
                     }
                 }
             }
-
             Expr::FieldAccess(e, name) => {
                 let container = self.compile_expr(result, e, None)?;
 

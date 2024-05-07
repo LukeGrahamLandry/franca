@@ -471,7 +471,7 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
         outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
     }
 
-    outln!(ShowErr, "{}", e.trace);
+    println!("{}", e.trace);
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
@@ -505,6 +505,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
                 user_span,
                 TypeId::unit(),
             )),
+            inlined: None,
         },
         user_span,
     ));

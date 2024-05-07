@@ -1042,6 +1042,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             resolved: None,
             body,
             result: Box::new(result),
+            inlined: None,
         }))
     }
 
