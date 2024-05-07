@@ -20,7 +20,7 @@ use std::process::Command;
 
 const ZERO_DROPPED_REG: bool = false;
 const ZERO_DROPPED_SLOTS: bool = false;
-pub const TRACE_ASM: bool = true;
+pub const TRACE_ASM: bool = false;
 
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -90,6 +90,7 @@ struct BcToAsm<'z, 'p, 'a> {
     state: BlockState,
     block_ips: Vec<Option<*const u8>>,
     clock: u16,
+    markers: Vec<(String, usize)>,
 }
 
 #[derive(Default, Clone)]
@@ -115,6 +116,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             state: Default::default(),
             block_ips: vec![],
             clock: 0,
+            markers: vec![],
         }
     }
 
@@ -183,7 +185,17 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
                     println!();
                     println!("=== Asm for {f:?}: {} ===", self.compile.program.pool.get(func.name));
-                    println!("{dis}");
+
+                    let mut it = dis.split('\n');
+                    it.nth(1);
+                    for (i, line) in it.enumerate() {
+                        for (s, offset) in &self.markers {
+                            if *offset == i {
+                                println!("{s}");
+                            }
+                        }
+                        println!("{line}");
+                    }
                     println!("===")
                 }
                 // }
@@ -229,6 +241,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.patch_b.clear();
         self.release_stack.clear();
         self.block_ips.clear();
+        self.markers.clear();
         self.clock = 0;
         let block_count = self.compile.ready[f].as_ref().unwrap().blocks.len();
         self.block_ips.extend(vec![None; block_count]);
@@ -355,13 +368,22 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             let block = &self.compile.ready[f].as_ref().unwrap().blocks[b];
             let inst = block.insts[i];
             let mask = block.arg_float_mask;
-            is_done = self.emit_inst(b, inst)?;
+            is_done = self.emit_inst(b, inst, i)?;
             debugln!("{b}:{i} {inst:?} => {:?} | free: {:?}", self.state.stack, self.state.free_reg);
         }
         Ok(())
     }
 
-    fn emit_inst(&mut self, b: usize, inst: Bc) -> Res<'p, bool> {
+    fn emit_inst(&mut self, b: usize, inst: Bc, i: usize) -> Res<'p, bool> {
+        if TRACE_ASM {
+            let ins = self
+                .compile
+                .aarch64
+                .offset_words(self.compile.aarch64.current_start, self.compile.aarch64.next)
+                - 1;
+
+            self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
+        }
         match inst {
             Bc::AddrFnResult => {
                 if let Some(slot) = self.flat_result {
@@ -383,11 +405,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
             Bc::CallSplit { rt, ct } => {
-                let f = if self.when == ExecTime::Comptime { ct } else { rt };
-                self.call_direct(f)?;
+                //     let f = if self.when == ExecTime::Comptime { ct } else { rt };
+                //     self.call_direct(f)?;
+                todo!()
             }
             Bc::CallDirect { f } => {
-                self.call_direct(f)?;
+                self.call_direct_c(f)?;
+            }
+            Bc::CallDirectFlat { f } => {
+                self.call_direct_flat(f);
             }
             Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
             Bc::GetNativeFnPtr(f) => {
@@ -457,16 +483,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 let arg_size = self.compile.slot_count(arg_ty);
                 let ret_size = self.compile.slot_count(ret_ty);
                 if is_flat_call {
-                    assert!(!is_c_call);
-                    let working = self.get_free_reg();
-                    // Retrive result address
-                    self.load_u64(working, sp, self.flat_result.unwrap().0);
-                    // We have the values on the virtual stack, they want them at some address, that's the same as my store instruction.
-                    self.state.stack.push(Val::Increment {
-                        reg: working,
-                        offset_bytes: 0,
-                    });
-                    self.emit_store(ret_size);
+                    // We now require the bytecode to deal with putting values in the result address.
+                    // so nothing to do here.
                 } else {
                     // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
                     let floats = self.compile.program.float_mask_one(ret_ty);
@@ -523,7 +541,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             Bc::Load { slots } => self.emit_load(slots),
             Bc::StorePost { slots } => self.emit_store(slots),
             Bc::StorePre { slots } => {
-                let ptr = self.state.stack.swap_remove(self.state.stack.len() - slots as usize - 2);
+                let ptr = self.state.stack.remove(self.state.stack.len() - slots as usize - 1);
                 self.state.stack.push(ptr);
                 self.emit_store(slots);
             }
@@ -801,6 +819,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     /// <?:n> <ptr:1> -> _
+    #[track_caller]
     fn emit_store(&mut self, slots: u16) {
         debug_assert!(self.state.stack.len() > slots as usize, "want store {slots} slots");
         debugln!(
@@ -1038,63 +1057,56 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
     }
 
-    fn call_direct(&mut self, f: FuncId) -> Res<'p, ()> {
+    fn call_direct_c(&mut self, f: FuncId) -> Res<'p, ()> {
+        let target = &self.compile.program[f];
+        debug_assert!(target.any_reg_template.is_none());
+        let target_c_call = target.has_tag(Flag::C_Call);
+        let target_flat_call = target.has_tag(Flag::Flat_Call);
+        assert!(target_c_call && !target_flat_call);
+        let comp_ctx = target.has_tag(Flag::Ct);
+        let f_ty = target.unwrap_ty();
+        self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
+        self.dyn_c_call(f_ty, comp_ctx, |s| s.branch_with_link(f));
+        Ok(())
+    }
+
+    // stack must be [<ret_ptr>, <arg_ptr>]. bc needs to deal with loading/storing stuff from memory.
+    fn call_direct_flat(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.compile.program[f];
         debug_assert!(target.any_reg_template.is_none());
         let target_c_call = target.has_tag(Flag::C_Call);
         let target_flat_call = target.has_tag(Flag::Flat_Call);
         let comp_ctx = target.has_tag(Flag::Ct);
         let f_ty = target.unwrap_ty();
+        assert!(!target_c_call && target_flat_call);
 
-        if target_flat_call {
-            debugln!("flat_call");
-            // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
-            assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
-            assert!(!target_c_call, "multiple calling conventions doesn't make sense");
+        debugln!("flat_call");
+        // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
+        assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
+        assert!(!target_c_call, "multiple calling conventions doesn't make sense");
 
-            let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v.as_ptr() as u64));
+        let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v.as_ptr() as u64));
 
-            let arg_count = self.compile.slot_count(f_ty.arg);
-            let ret_count = self.compile.slot_count(f_ty.ret);
-            let arg_offset = self.create_slots(arg_count);
-            // TODO: super simple data flow lookahead so if you're about to store the whole thing to a var, use that as the address.
-            let ret_offset = self.create_slots(ret_count);
-            debug_assert!(self.state.stack.len() as u16 >= arg_count, "{}", arg_count);
-            self.state.stack.push(Val::Increment {
-                reg: sp,
-                offset_bytes: arg_offset.0,
-            });
-            self.emit_store(arg_count);
+        let arg_ptr = self.state.stack.pop().unwrap();
+        let ret_ptr = self.state.stack.pop().unwrap();
+        let arg_count = self.compile.slot_count(f_ty.arg);
+        let ret_count = self.compile.slot_count(f_ty.ret);
 
-            // Do this way up here before putting things in x0-4
-            self.spill_abi_stompable();
+        let c = self.compile as *const Compile as i64;
+        self.state.stack.push(Val::Literal(c));
+        self.state.stack.push(arg_ptr);
+        self.state.stack.push(Val::Literal(arg_count as i64));
+        self.state.stack.push(ret_ptr);
+        self.state.stack.push(Val::Literal(ret_count as i64));
 
-            let c = self.compile as *const Compile as u64;
-            self.load_imm(x0, c);
-            debug_assert!(arg_offset.0 < 4096 && ret_offset.0 < 4096);
-            self.compile.aarch64.push(add_im(X64, x1, sp, arg_offset.0 as i64, 0));
-            self.load_imm(x2, arg_count as u64);
-            self.compile.aarch64.push(add_im(X64, x3, sp, ret_offset.0 as i64, 0));
-            self.load_imm(x4, ret_count as u64);
-            self.branch_with_link(f);
+        self.stack_to_ccall_reg(5, 0);
+        self.spill_abi_stompable();
+        self.branch_with_link(f);
 
-            for i in 0..7 {
-                add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
-            }
-
-            self.state.stack.push(Val::Increment {
-                reg: sp,
-                offset_bytes: ret_offset.0,
-            });
-            self.emit_load(ret_count);
-
-            // TODO: leaking slots -- May 1
-            // self.release_many(arg); // Note: release after to make sure they don't alias ret which might not be what the callee is expecting (even tho it would be fine for current uses).
-        } else {
-            debugln!("c_call");
-            self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
-            self.dyn_c_call(f_ty, comp_ctx, |s| s.branch_with_link(f));
+        for i in 0..7 {
+            add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
         }
+
         Ok(())
     }
 
@@ -1245,7 +1257,7 @@ pub mod jit {
         /// so I don't want to spend one doubling to skip lengths.
         pub dispatch: Vec<*const u8>,
         ranges: Vec<*const [u8]>,
-        current_start: *const u8,
+        pub current_start: *const u8,
         pub next: *mut u8,
         old: *mut u8,
         pub low: usize,

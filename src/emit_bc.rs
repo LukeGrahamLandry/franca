@@ -219,21 +219,53 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>) -> Res<'p, ()> {
-        let flat_arg_loc = self.compile_for_arg(result, arg_expr)?;
+    fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
+        let force_flat = self.program[f].has_tag(Flag::Flat_Call);
+        if force_flat {
+            debug_assert_eq!(result_location, ResAddr);
+        }
+        let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));
         let f_ty = self.program[f].unwrap_ty();
         // TODO: hack
         if let Some(id) = flat_arg_loc {
-            result.push(Bc::AddrVar { id });
-            let slots = self.slot_count(f_ty.arg);
-            result.push(Bc::Load { slots });
+            match result_location {
+                PushStack => {
+                    let ret_id = result.add_var(f_ty.ret);
+                    result.push(Bc::AddrVar { id: ret_id });
+                    result.push(Bc::AddrVar { id });
+                    result.push(Bc::CallDirectFlat { f });
+                    let slots = self.slot_count(f_ty.arg);
+                    result.push(Bc::Load { slots });
+                    result.push(Bc::LastUse { id: ret_id });
+                }
+                ResAddr => {
+                    // res ptr was already on stack
+                    result.push(Bc::AddrVar { id });
+                    result.push(Bc::CallDirectFlat { f });
+                }
+                Discard => {
+                    let ret_id = result.add_var(f_ty.ret);
+                    result.push(Bc::AddrVar { id: ret_id });
+                    result.push(Bc::AddrVar { id });
+                    result.push(Bc::CallDirectFlat { f });
+                    result.push(Bc::LastUse { id: ret_id });
+                }
+            }
+            result.push(Bc::LastUse { id });
+        } else {
+            result.push(Bc::CallDirect { f });
+            result.sub_height(self.slot_count(f_ty.arg));
+            let slots = self.slot_count(f_ty.ret);
+            result.add_height(slots);
+            match result_location {
+                PushStack => {}
+                ResAddr => result.push(Bc::StorePre { slots }),
+                Discard => result.push(Bc::Pop { slots }),
+            }
         }
-        result.push(Bc::CallDirect { f });
-        result.sub_height(self.slot_count(f_ty.arg));
-        result.add_height(self.slot_count(f_ty.ret));
         Ok(())
     }
 
@@ -270,9 +302,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn compile_for_arg(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, Option<u16>> {
+    fn compile_for_arg(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, force_flat: bool) -> Res<'p, Option<u16>> {
         // TODO: hack
-        if self.slot_count(arg.ty) >= 8 {
+        if force_flat {
             // TODO: fowrad this ot flat call somehow
             let id = result.add_var(arg.ty);
             result.push(Bc::AddrVar { id });
@@ -302,7 +334,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let Some(f_id) = f.as_fn() {
                     let func = &self.program[f_id];
                     assert!(!func.has_tag(Flag::Comptime));
-                    return self.emit_runtime_call(result, f_id, arg);
+                    return self.emit_runtime_call(result, f_id, arg, result_location);
                 }
                 if let Expr::Value {
                     value: Values::One(Value::SplitFunc { ct, rt }),
@@ -313,15 +345,21 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
                     self.compile_expr(result, f, PushStack)?;
-                    let needs_flat_call = self.compile_for_arg(result, arg)?.is_some();
-                    debug_assert!(!needs_flat_call);
+                    self.compile_for_arg(result, arg, false)?; // TODO: im assuming no flat call
                     result.push(Bc::CallFnPtr {
                         ty: f_ty,
                         comp_ctx: false, // TODO
                     });
 
                     result.sub_height(self.slot_count(f_ty.arg) + 1); // for ptr
-                    result.add_height(self.slot_count(f_ty.ret));
+                    let slots = self.slot_count(f_ty.ret);
+                    result.add_height(slots);
+
+                    match result_location {
+                        PushStack => {}
+                        ResAddr => result.push(Bc::StorePre { slots }),
+                        Discard => result.push(Bc::Pop { slots }),
+                    }
                     return Ok(());
                 }
 

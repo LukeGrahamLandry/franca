@@ -28,6 +28,7 @@ pub struct BbId(pub u16);
 #[derive(Clone, InterpSend, Debug, Copy, PartialEq)]
 pub enum Bc {
     CallDirect { f: FuncId },                             // <args:m> -> <ret:n> OR _ ->  <ret:n>
+    CallDirectFlat { f: FuncId },                         // <ret_ptr:1> <arg_ptr:1> -> _
     CallSplit { ct: FuncId, rt: FuncId },                 // <args:m> -> <ret:n>
     CallFnPtr { ty: FnType, comp_ctx: bool },             // <ptr:1> <args:m> -> <ret:n>
     PushConstant { value: i64 },                          // _ -> <v:1>

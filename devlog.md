@@ -12,6 +12,10 @@ ok i have to go back to passing a result ptr because its compeletely impossible 
 cause it does these insane redundant loads where it spills to the wrong place while trying to load the whole thing to do a copy.
 
 - made Never say it takes 0 slots which removed some weird -1s and let asm assert no flow on stack between blocks without failing more tests
+- putting 16 in a register and then dereferencing it. swap_remove for storepre instead of shifting remove. cri.
+- then an off by one in storepre
+- moved most of the flat call abi work to emit_bc so it can emit to its arg loc and use its ret loc without copying.
+  now passing 48/90.
 
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.
