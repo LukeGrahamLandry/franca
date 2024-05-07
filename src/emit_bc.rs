@@ -162,13 +162,21 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let body = func.body.as_ref().unwrap();
 
         let return_block = result.push_block(ret_slots, ret_floats);
-        result.inlined_return_addr.insert(f, return_block);
+        result.inlined_return_addr.insert(f, (return_block, None)); // TODO: by var if big
         result.current_block = entry_block;
         self.compile_expr(result, body)?;
 
-        result.push(Bc::Goto { ip: return_block, slots });
-        result.blocks[return_block.0 as usize].incoming_jumps += 1;
-        result.current_block = return_block;
+        if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
+            result.push(Bc::Goto {
+                ip: return_block,
+                slots: ret_slots,
+            });
+            result.blocks[return_block.0 as usize].incoming_jumps += 1;
+            result.current_block = return_block;
+        } else {
+            result.push_to(return_block, Bc::NoCompile);
+        }
+        result.inlined_return_addr.remove(&f);
 
         for _id in self.locals.pop().unwrap() {
             // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
@@ -295,9 +303,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } = f.expr
                     {
                         self.compile_expr(result, arg)?;
-                        let ip = *result.inlined_return_addr.get(&return_from).unwrap();
+                        let (ip, var) = *result.inlined_return_addr.get(&return_from).unwrap();
                         let slots = self.slot_count(ret_ty);
-                        result.push(Bc::Goto { ip, slots });
+                        if let Some(id) = var {
+                            result.push(Bc::AddrVar { id });
+                            result.push(Bc::Store { slots });
+                            result.push(Bc::Goto { ip, slots: 0 });
+                        } else {
+                            result.push(Bc::Goto { ip, slots });
+                        }
                         result.blocks[ip.0 as usize].incoming_jumps += 1;
                         self.stack_height -= self.slot_count(ret_ty);
                         self.stack_height += 1; // never
@@ -317,16 +331,20 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             } => {
                 self.locals.push(vec![]);
 
-                let return_block = if let Some(inlined) = inlined {
+                let (return_block, result_var) = if let Some(inlined) = inlined {
                     let slots = self.slot_count(expr.ty);
                     let floats = self.program.float_mask_one(expr.ty);
                     let entry_block = result.current_block;
-                    let return_block = result.push_block(slots, floats);
-                    result.inlined_return_addr.insert(*inlined, return_block);
+                    let (return_block, result_var) = if slots > 8 {
+                        (result.push_block(0, 0), Some(result.add_var(expr.ty)))
+                    } else {
+                        (result.push_block(slots, floats), None)
+                    };
+                    result.inlined_return_addr.insert(*inlined, (return_block, result_var));
                     result.current_block = entry_block;
-                    Some(return_block)
+                    (Some(return_block), result_var)
                 } else {
-                    None
+                    (None, None)
                 };
 
                 for stmt in body {
@@ -338,10 +356,24 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 self.compile_expr(result, value)?;
 
                 if let Some(return_block) = return_block {
-                    let slots = self.slot_count(expr.ty);
-                    result.push(Bc::Goto { ip: return_block, slots });
-                    result.blocks[return_block.0 as usize].incoming_jumps += 1;
-                    result.current_block = return_block;
+                    if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
+                        let slots = self.slot_count(expr.ty);
+                        if let Some(id) = result_var {
+                            result.push(Bc::AddrVar { id });
+                            result.push(Bc::Store { slots });
+                            result.push(Bc::Goto { ip: return_block, slots: 0 });
+                            result.push_to(return_block, Bc::AddrVar { id });
+                            result.push_to(return_block, Bc::Load { slots });
+                            result.push_to(return_block, Bc::LastUse { id });
+                        } else {
+                            result.push(Bc::Goto { ip: return_block, slots });
+                        }
+                        result.blocks[return_block.0 as usize].incoming_jumps += 1;
+                        result.current_block = return_block;
+                    } else {
+                        result.push_to(return_block, Bc::NoCompile);
+                    }
+                    result.inlined_return_addr.remove(inlined.as_ref().unwrap());
                 }
 
                 // TODO: check if you try to let an address to a variable escape from its scope.
@@ -441,6 +473,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         return Ok(());
                     }
                     Flag::Return => {
+                        // TODO: do this in compiler.rs -- May 7
                         let return_from = unwrap!(arg.as_fn(), "expected fn as !return arg");
                         result.push(Bc::PushConstant { value: return_from.as_raw() });
                         self.stack_height += 1;

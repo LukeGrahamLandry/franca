@@ -67,7 +67,7 @@ pub struct FnBody<'p> {
     pub(crate) _p: PhantomData<&'p ()>,
     pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
-    pub inlined_return_addr: Map<FuncId, BbId>,
+    pub inlined_return_addr: Map<FuncId, (BbId, Option<u16>)>,
 }
 
 impl<'p> FnBody<'p> {

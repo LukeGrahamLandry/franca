@@ -4,6 +4,9 @@ Doing early returns by having labels as a comptime value.
 
 - keep track of number of incoming jumps so if its only one, you can just fall through,
   without spilling stack, cause you know you dont need to match value positions with anyone else.
+- if a return_block only has no incoming jumps after the last expression, dont bother emitting it, just fall through in bc.
+  i do that check in asm too casue i did that first but seems nicer to not even get there.
+  only fixed call_if_in_unquote.
 
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.

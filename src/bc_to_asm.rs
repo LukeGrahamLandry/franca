@@ -89,7 +89,6 @@ struct BcToAsm<'z, 'p, 'a> {
     release_stack: Vec<(*const u8, *const u8, *const u8)>,
     state: BlockState,
     block_ips: Vec<Option<*const u8>>,
-    stop_at: Vec<BbId>,
 }
 
 #[derive(Default, Clone)]
@@ -114,7 +113,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             release_stack: vec![],
             state: Default::default(),
             block_ips: vec![],
-            stop_at: vec![],
         }
     }
 
@@ -231,7 +229,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.block_ips.clear();
         let block_count = self.compile.ready[f].as_ref().unwrap().blocks.len();
         self.block_ips.extend(vec![None; block_count]);
-        self.stop_at.clear();
+        self.state = Default::default();
 
         self.compile.aarch64.push(sub_im(X64, sp, sp, 16, 0));
         self.compile.aarch64.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
@@ -241,7 +239,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         self.flat_result = None;
 
-        self.state.free_reg.clear();
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
         if is_flat_call {
             // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
@@ -296,6 +293,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             let false_ip = self.block_ips[false_ip.0 as usize].unwrap();
             let offset = self.compile.aarch64.offset_words(inst, false_ip);
             debug_assert!(reg < 32);
+            debug_assert_ne!(offset, 0, "!if ice: while(1);");
             self.compile.aarch64.patch(inst, cbz(X64, signed_truncate(offset, 19), reg));
         }
         for (from_inst, to_ip) in self.patch_b.drain(0..) {
@@ -321,7 +319,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn emit_block(&mut self, b: usize, args_not_vstacked: bool) -> Res<'p, ()> {
-        if self.block_ips[b].is_some() || self.stop_at.contains(&BbId(b as u16)) {
+        if self.block_ips[b].is_some() {
             return Ok(());
         }
         self.block_ips[b] = Some(self.compile.aarch64.next);
@@ -394,21 +392,20 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
             }
             Bc::JumpIf { true_ip, false_ip, slots } => {
-                let mask = self.compile.ready[self.f].as_ref().unwrap().blocks[true_ip.0 as usize].arg_float_mask;
-                self.stack_to_ccall_reg(slots, mask);
-                self.spill_abi_stompable();
-                // TODO: assert empty stack?
                 let cond = self.pop_to_reg();
+                let mask = self.compile.ready[self.f].as_ref().unwrap().blocks[true_ip.0 as usize].arg_float_mask;
+                debug_assert_eq!(slots, 0); // self.stack_to_ccall_reg(slots, mask);
+                self.spill_abi_stompable();
                 self.compile.aarch64.push(brk(0));
 
                 // branch if zero so true before false
                 self.patch_cbz.push((self.compile.aarch64.prev(), false_ip, cond));
-                self.drop_reg(cond);
-                let state = self.state.clone();
                 // we only do one branch so true block must be directly after the check.
                 // this is the only shape of flow graph that its possible to generate with my ifs/whiles.
                 debug_assert!(self.block_ips[true_ip.0 as usize].is_none());
 
+                self.drop_reg(cond);
+                let state = self.state.clone();
                 self.emit_block(true_ip.0 as usize, true);
                 self.state = state;
                 self.emit_block(false_ip.0 as usize, true);
@@ -417,6 +414,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::Goto { ip, slots } => {
                 let block = &self.compile.ready[self.f].as_ref().unwrap().blocks[ip.0 as usize];
+                debug_assert_eq!(slots, block.arg_slots);
                 if block.incoming_jumps == 1 {
                     debug_assert!(self.block_ips[ip.0 as usize].is_none());
                     self.emit_block(ip.0 as usize, false);
@@ -424,11 +422,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let mask = block.arg_float_mask;
                     self.stack_to_ccall_reg(slots, mask);
                     self.spill_abi_stompable();
-                    // If we haven't emitted it yet, it will be right after us, so just fall through.
                     if self.block_ips[ip.0 as usize].is_some() {
                         self.compile.aarch64.push(brk(0));
                         self.patch_b.push((self.compile.aarch64.prev(), ip));
                     } else {
+                        // If we haven't emitted it yet, it will be right after us, so just fall through.
                         self.emit_block(ip.0 as usize, true);
                     }
                 }
@@ -1098,6 +1096,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn drop_slot(&mut self, slot: SpOffset, bytes: u16) {
         self.open_slots.push((slot, bytes)); // TODO: keep this sorted by count?
         if ZERO_DROPPED_SLOTS {
+            // todo this wont work now that i try to use x17
             self.load_imm(x17, 0);
             for i in 0..(bytes / 8) {
                 self.store_u64(x17, sp, slot.0 + (i * 8));
