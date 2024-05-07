@@ -20,7 +20,7 @@ use std::process::Command;
 
 const ZERO_DROPPED_REG: bool = false;
 const ZERO_DROPPED_SLOTS: bool = false;
-pub const TRACE_ASM: bool = false;
+pub const TRACE_ASM: bool = true;
 
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -78,7 +78,7 @@ pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime
 struct BcToAsm<'z, 'p, 'a> {
     compile: &'z mut Compile<'a, 'p>,
     vars: Vec<Option<SpOffset>>,
-    open_slots: Vec<(SpOffset, u16)>,
+    open_slots: Vec<(SpOffset, u16, u16)>,
     next_slot: SpOffset,
     f: FuncId,
     wip: Vec<FuncId>, // make recursion work
@@ -89,6 +89,7 @@ struct BcToAsm<'z, 'p, 'a> {
     release_stack: Vec<(*const u8, *const u8, *const u8)>,
     state: BlockState,
     block_ips: Vec<Option<*const u8>>,
+    clock: u16,
 }
 
 #[derive(Default, Clone)]
@@ -113,6 +114,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             release_stack: vec![],
             state: Default::default(),
             block_ips: vec![],
+            clock: 0,
         }
     }
 
@@ -227,6 +229,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.patch_b.clear();
         self.release_stack.clear();
         self.block_ips.clear();
+        self.clock = 0;
         let block_count = self.compile.ready[f].as_ref().unwrap().blocks.len();
         self.block_ips.extend(vec![None; block_count]);
         self.state = Default::default();
@@ -328,6 +331,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         let slots = block.arg_slots;
         let mask = block.arg_float_mask;
+        self.clock = block.clock;
+        // debug_assert_eq!(block.height, 0);
         // TODO: handle normal args here as well.
         if args_not_vstacked {
             self.state.free_reg.clear();
@@ -358,6 +363,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     fn emit_inst(&mut self, b: usize, inst: Bc) -> Res<'p, bool> {
         match inst {
+            Bc::AddrFnResult => {
+                if let Some(slot) = self.flat_result {
+                    self.state.stack.push(Val::Spill(slot));
+                } else {
+                    todo!() // x8
+                }
+            }
+            Bc::Noop => {}
             Bc::LastUse { id } => {
                 // TODO: I this doesn't work because if blocks are depth first now, not in order,
                 //       so the var can be done after they rejoin and then the other branch thinks that slot is free
@@ -373,7 +386,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 let f = if self.when == ExecTime::Comptime { ct } else { rt };
                 self.call_direct(f)?;
             }
-            Bc::CallDirect { f } => self.call_direct(f)?,
+            Bc::CallDirect { f } => {
+                self.call_direct(f)?;
+            }
             Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
             Bc::GetNativeFnPtr(f) => {
                 // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
@@ -457,7 +472,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let floats = self.compile.program.float_mask_one(ret_ty);
                     self.stack_to_ccall_reg(ret_size, floats)
                 }
-                debug_assert!(self.state.stack.is_empty());
+                // debug_assert!(self.state.stack.is_empty()); // todo
 
                 // Leave holes for stack fixup code.
                 self.compile.aarch64.push(brk(0));
@@ -506,7 +521,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 Val::FloatReg(_) => err!("don't try to gep a float",),
             },
             Bc::Load { slots } => self.emit_load(slots),
-            Bc::Store { slots } => self.emit_store(slots),
+            Bc::StorePost { slots } => self.emit_store(slots),
+            Bc::StorePre { slots } => {
+                let ptr = self.state.stack.swap_remove(self.state.stack.len() - slots as usize - 2);
+                self.state.stack.push(ptr);
+                self.emit_store(slots);
+            }
             Bc::TagCheck { expected } => {
                 // TODO: this leaks a register if it was literal but it probably never will be -- May 1
                 let (reg, offset_bytes) = self.peek_to_reg_with_offset(); // enum_ptr. can't stomp!
@@ -544,6 +564,60 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         Val::Literal(_) => {}
                         Val::Spill(slot) => self.drop_slot(slot, 8),
                         Val::FloatReg(_) => todo!(),
+                    }
+                }
+            }
+            Bc::Pick { back } => {
+                let index = self.state.stack.len() - back as usize - 1;
+                let val = self.state.stack[index];
+                match val {
+                    Val::Increment { reg, .. } => {
+                        if reg == sp {
+                            self.state.stack.push(val);
+                        } else {
+                            todo!()
+                        }
+                    }
+                    Val::Literal(_) | Val::Spill(_) => self.state.stack.push(val),
+                    Val::FloatReg(_) => todo!(),
+                }
+            }
+            Bc::Dup => {
+                let val = *self.state.stack.last().unwrap();
+                match val {
+                    Val::Increment { reg, .. } => {
+                        if reg == sp {
+                            self.state.stack.push(val);
+                        } else {
+                            todo!()
+                        }
+                    }
+                    Val::Literal(_) | Val::Spill(_) => self.state.stack.push(val),
+                    Val::FloatReg(_) => todo!(),
+                }
+            }
+            Bc::CopyToFrom { slots } => {
+                if slots <= 4 {
+                    let (from, from_offset) = self.pop_to_reg_with_offset();
+                    let (to, to_offset) = self.pop_to_reg_with_offset();
+                    let temp = self.get_free_reg();
+                    for i in 0..slots {
+                        self.load_u64(temp, from, from_offset + i * 8);
+                        self.store_u64(temp, to, to_offset + i * 8);
+                    }
+                    self.drop_reg(from);
+                    self.drop_reg(to);
+                    self.drop_reg(temp);
+                } else {
+                    self.state.stack.push(Val::Literal(slots as i64 * 8));
+                    self.stack_to_ccall_reg(3, 0);
+                    self.spill_abi_stompable();
+                    let addr = libc::memcpy as *const u8;
+                    // let offset = self.compile.aarch64.offset_words(self.compile.aarch64.next, addr);
+                    self.load_imm(x17, addr as u64);
+                    self.compile.aarch64.push(br(x17, 1));
+                    for i in 0..8 {
+                        add_unique(&mut self.state.free_reg, i as i64);
                     }
                 }
             }
@@ -774,7 +848,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     fn reset_free_reg(&mut self) {
         self.state.free_reg.clear();
-        self.state.free_reg.extend([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        self.state.free_reg.extend([0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     fn spill_abi_stompable(&mut self) {
@@ -897,9 +971,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn create_slots(&mut self, count: u16) -> SpOffset {
-        // TODO: sad O(n). want .rev() but need to delay reuse cause i dont track dominators so ifs are fishy. -- May 7
-        for (i, &(_, size)) in self.open_slots.iter().enumerate() {
-            if size == count * 8 {
+        for (i, &(_, size, clock)) in self.open_slots.iter().enumerate() {
+            if self.clock >= clock && size == count * 8 {
                 return self.open_slots.remove(i).0;
             }
         }
@@ -1094,7 +1167,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn drop_slot(&mut self, slot: SpOffset, bytes: u16) {
-        self.open_slots.push((slot, bytes)); // TODO: keep this sorted by count?
+        self.open_slots.push((slot, bytes, self.clock)); // TODO: keep this sorted by count?
         if ZERO_DROPPED_SLOTS {
             // todo this wont work now that i try to use x17
             self.load_imm(x17, 0);

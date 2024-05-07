@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use crate::ast::{OverloadSetId, TypeInfo};
 use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
+use crate::emit_bc::ResultLoc;
 use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId},
@@ -24,9 +25,9 @@ pub struct FloatMask {
 #[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 
-#[derive(Clone, InterpSend, Debug, Copy)]
+#[derive(Clone, InterpSend, Debug, Copy, PartialEq)]
 pub enum Bc {
-    CallDirect { f: FuncId },                             // <args:m> -> <ret:n>
+    CallDirect { f: FuncId },                             // <args:m> -> <ret:n> OR _ ->  <ret:n>
     CallSplit { ct: FuncId, rt: FuncId },                 // <args:m> -> <ret:n>
     CallFnPtr { ty: FnType, comp_ctx: bool },             // <ptr:1> <args:m> -> <ret:n>
     PushConstant { value: i64 },                          // _ -> <v:1>
@@ -35,7 +36,8 @@ pub enum Bc {
     Ret,                                                  //
     GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>
     Load { slots: u16 },                                  // <ptr:1> -> <?:n>
-    Store { slots: u16 },                                 // <?:n> <ptr:1> -> _
+    StorePost { slots: u16 },                             // <?:n> <ptr:1> -> _
+    StorePre { slots: u16 },                              // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
     IncPtr { offset: u16 },                               // <ptr:1> -> <ptr:1>
     Pop { slots: u16 },                                   // <?:n> -> _
@@ -43,6 +45,11 @@ pub enum Bc {
     Unreachable,
     NoCompile,
     LastUse { id: u16 },
+    Pick { back: u16 },
+    Noop,
+    AddrFnResult,
+    Dup,
+    CopyToFrom { slots: u16 }, // <to_ptr:1> <from_ptr:1> -> _
 }
 
 #[derive(Clone)]
@@ -51,6 +58,8 @@ pub struct BasicBlock {
     pub arg_slots: u16,
     pub arg_float_mask: u32,
     pub incoming_jumps: usize,
+    pub clock: u16,
+    pub height: u16,
 }
 
 #[derive(Clone)]
@@ -67,7 +76,8 @@ pub struct FnBody<'p> {
     pub(crate) _p: PhantomData<&'p ()>,
     pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
-    pub inlined_return_addr: Map<FuncId, (BbId, Option<u16>)>,
+    pub inlined_return_addr: Map<FuncId, (BbId, ResultLoc)>,
+    pub clock: u16,
 }
 
 impl<'p> FnBody<'p> {

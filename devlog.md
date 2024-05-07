@@ -8,6 +8,11 @@ Doing early returns by having labels as a comptime value.
   i do that check in asm too casue i did that first but seems nicer to not even get there.
   only fixed call_if_in_unquote.
 
+ok i have to go back to passing a result ptr because its compeletely impossible to read the asm,
+cause it does these insane redundant loads where it spills to the wrong place while trying to load the whole thing to do a copy.
+
+- made Never say it takes 0 slots which removed some weird -1s and let asm assert no flow on stack between blocks without failing more tests
+
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.
 !return without fn arg for outermost fn. version of while loop that passes in labels for break and continue.
