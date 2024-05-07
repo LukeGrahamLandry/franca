@@ -551,6 +551,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if let Some(id) = result_var {
             result.push(Bc::AddrVar { id });
             result.push(Bc::Load { slots });
+            // TODO: track dominators
             // result.push(Bc::LastUse { id });
         }
 

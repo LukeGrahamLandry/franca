@@ -230,6 +230,8 @@ fn forked_swallow_passes() {
     let mut failing: Vec<FuncId> = vec![];
     for fns in tests.chunks(10) {
         let (success, _, _) = fork_and_catch(|| {
+            println!();
+            eprintln!();
             for f in fns {
                 run_one(&mut comp, *f);
             }
@@ -242,7 +244,11 @@ fn forked_swallow_passes() {
     for f in failing {
         let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
         let fname = comp.pool.get(comp.program[f].name);
-        let (success, out, err) = fork_and_catch(|| run_one(&mut comp, f));
+        let (success, out, err) = fork_and_catch(|| {
+            println!();
+            eprintln!();
+            run_one(&mut comp, f)
+        });
 
         if !success {
             failed += 1;

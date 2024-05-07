@@ -1,3 +1,15 @@
+## early returns (May 7)
+
+Doing early returns by having labels as a comptime value.
+
+- keep track of number of incoming jumps so if its only one, you can just fall through,
+  without spilling stack, cause you know you dont need to match value positions with anyone else.
+
+TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
+add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.
+!return without fn arg for outermost fn. version of while loop that passes in labels for break and continue.
+same by var ptr for large values for !return as !if. fix whatever debug check is going off.
+
 ## basic blocks (May 6)
 
 The way my bc handles loops and ifs is kinda hacky and convoluted. gonna try adding the concept of basic blocks.

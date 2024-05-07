@@ -364,11 +364,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 // TODO: I this doesn't work because if blocks are depth first now, not in order,
                 //       so the var can be done after they rejoin and then the other branch thinks that slot is free
                 //       and puts something else in it. -- May 6
-                // let slot = self.vars[id as usize].take();
-                // let slot = slot.unwrap();
-                // let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
-                // let count = self.compile.slot_count(ty);
-                // self.drop_slot(slot, count * 8);
+                let slot = self.vars[id as usize].take();
+                let slot = slot.unwrap();
+                let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
+                let count = self.compile.slot_count(ty);
+                self.drop_slot(slot, count * 8);
             }
             Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
             Bc::CallSplit { rt, ct } => {
@@ -849,9 +849,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         match self.state.stack.pop().unwrap() {
             Val::Increment { mut reg, offset_bytes } => {
                 if offset_bytes > 0 {
-                    debug_assert!(offset_bytes < (1 << 12), "TODO: not enough bits");
                     let out = if reg == sp { self.get_free_reg() } else { reg };
-                    self.compile.aarch64.push(add_im(X64, out, reg, offset_bytes as i64, 0));
+                    if offset_bytes < (1 << 12) {
+                        self.compile.aarch64.push(add_im(X64, out, reg, offset_bytes as i64, 0));
+                    } else {
+                        self.compile.aarch64.push(add_im(X64, out, reg, (offset_bytes >> 12) as i64, 1));
+                        self.compile.aarch64.push(add_im(X64, out, reg, offset_bytes as i64 & ((1 << 12) - 1), 0));
+                    }
                     reg = out;
                 }
                 reg
@@ -895,7 +899,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn create_slots(&mut self, count: u16) -> SpOffset {
-        for (i, &(_, size)) in self.open_slots.iter().enumerate().rev() {
+        // TODO: sad O(n). want .rev() but need to delay reuse cause i dont track dominators so ifs are fishy. -- May 7
+        for (i, &(_, size)) in self.open_slots.iter().enumerate() {
             if size == count * 8 {
                 return self.open_slots.remove(i).0;
             }
