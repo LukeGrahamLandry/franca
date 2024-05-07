@@ -20,7 +20,7 @@ use std::process::Command;
 
 const ZERO_DROPPED_REG: bool = false;
 const ZERO_DROPPED_SLOTS: bool = false;
-pub const TRACE_ASM: bool = true;
+pub const TRACE_ASM: bool = false;
 
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]

@@ -1,3 +1,5 @@
+## basic blocks (May 6)
+
 The way my bc handles loops and ifs is kinda hacky and convoluted. gonna try adding the concept of basic blocks.
 The general goal of this whole adventure is making it easier to think about how to add tail recursion and nonlocal returns.
 
@@ -25,6 +27,11 @@ real function args should be args to the entry block but currently are hacked in
   the two are ifs returning big values that don't fit in register, need to use variable like before and floats aren't done properly.
 - made ifs use var if they return something big. 81/87 but had to turn off reusing stack slots because bbs are done depth first not in emitted order now.
 - 86/87. fixed nevers now that sometimes they need to push junk on stack. TODO: thats a hack. calling a Never should be a terminator like unreachable.
+- broke never more so minor code change in derive makes all pass
+  BUT bug call_if_in_unquote is fixed and that was really creepy so i think thats a net win and i'll call it a day.
+  i'll fix Never properly eventually.
+
+its not slower which is nice. stack slot reuse is fucked which is bad. code is more complicated but looking at the bc dump is more legible.
 
 ## (May 5)
 

@@ -119,7 +119,7 @@ fn main() {
 
         // println!("{:#?}", unsafe { &STATS });
     } else {
-        debug_assert!(!TRACE_ASM, "TRACE_ASM is too slow to be reasonable on all tests");
+        assert!(!TRACE_ASM, "TRACE_ASM is too slow to be reasonable on all tests");
         run_tests_find_faliures();
         check_broken();
     }
