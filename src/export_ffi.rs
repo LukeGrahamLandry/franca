@@ -141,6 +141,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // measured in bytes
     ("fun size_of(T: Type) i64", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
+    ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
 ];
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
@@ -371,6 +372,10 @@ extern "C-unwind" fn do_label_type(program: &mut &mut Program<'_>, ty: TypeId) -
 
 extern "C-unwind" fn do_unique_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
     program.unique_ty(ty)
+}
+
+extern "C-unwind" fn debug_log_int(_: &mut &mut Program<'_>, i: i64) {
+    println!("{i}");
 }
 
 extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {

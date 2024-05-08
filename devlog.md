@@ -20,6 +20,7 @@ cause it does these insane redundant loads where it spills to the wrong place wh
 - impl dup non sp reg. pass 56/90
 - fix 'assertion failed: target_c_call && !target_flat_call': move adding flat_call if big arg/ret from bc_to_asm to emit_bc
 - flat_call PushStack tries to load but it doesnt push the ret addr first. and was loading |arg| instead of |ret|.
+- for flat_call header, it was only deciding to use result addr based on ret size, not considering explicitly marked cc like in my test.
 
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.

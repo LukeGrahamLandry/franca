@@ -179,7 +179,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.bind_args(result, &func.arg)?;
         let body = func.body.as_ref().unwrap();
 
-        let result_location = if ret_slots > 1 { ResAddr } else { PushStack };
+        let is_flat_call = func.has_tag(Flag::Flat_Call);
+        let result_location = if is_flat_call { ResAddr } else { PushStack };
         let return_block = result.push_block(ret_slots, ret_floats);
         result.inlined_return_addr.insert(f, (return_block, result_location));
         result.current_block = entry_block;
