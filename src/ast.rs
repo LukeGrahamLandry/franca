@@ -515,6 +515,14 @@ impl<'p> Pattern<'p> {
             .collect()
     }
 
+    pub fn flatten_defaults_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
+        self.bindings.iter_mut().map(|b| b.default.as_mut()).collect()
+    }
+
+    pub fn flatten_defaults_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
+        self.bindings.iter().map(|b| b.default.as_ref()).collect()
+    }
+
     pub fn flatten_exprs_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
         self.bindings
             .iter()

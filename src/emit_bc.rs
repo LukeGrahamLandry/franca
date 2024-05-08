@@ -825,7 +825,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn construct_struct(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>, requested: TypeId, result_location: ResultLoc) -> Res<'p, ()> {
         let names: Vec<_> = pattern.flatten_names();
         // TODO: why must this suck so bad
-        let values: Option<_> = pattern.flatten_exprs_ref();
+        let values: Option<_> = pattern.flatten_defaults_ref();
         let values: Vec<_> = values.unwrap();
         assert_eq!(names.len(), values.len());
         let raw_container_ty = self.program.raw_type(requested);

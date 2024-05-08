@@ -2873,8 +2873,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let names: Vec<_> = pattern.flatten_names();
         Ok(mut_replace!(*pattern, |mut pattern: Pattern<'p>| {
             // TODO: why must this suck so bad
-            let values: Option<_> = pattern.flatten_exprs_mut();
-            let mut values: Vec<_> = values.unwrap();
+            let values: Option<_> = pattern.flatten_defaults_mut();
+            let mut values: Vec<_> = unwrap!(values, "use '=' not ':' for struct literals");
             assert_eq!(names.len(), values.len());
             let raw_container_ty = self.program.raw_type(requested);
 

@@ -12,6 +12,9 @@
   So you can say the calling convention of closures, etc.
 - fixed early_returns. was using the result_location of the ret call instead of the thing you're returning to.
   TODO: have it work when its not pushstack
+- changed struct literal syntax to be equals signs so its like named args / vars.
+  now everywhere in the language, : means type and = means value.
+  except functions i suppose. maybe I should use -> instead of =.
 
 ## early returns / rls bc again (May 7)
 
