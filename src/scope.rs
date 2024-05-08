@@ -200,6 +200,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let loc = stmt.loc;
         match stmt.deref_mut() {
             Stmt::DeclNamed { name, ty, value, kind } => {
+                // kinda hack. just makes it easier to read logs when you do 'name :: fn() ...'
+                if let Expr::Closure(func) = &mut value.expr {
+                    if func.name == Flag::Anon.ident() {
+                        debug_assert!(!func.referencable_name);
+                        func.name = *name;
+                    }
+                }
+
                 if *kind == VarType::Const {
                     let new = self.decl_var(name, *kind, loc)?;
                     let decl = Stmt::DeclVar {
@@ -260,7 +268,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 stmt.stmt = decl;
             }
             Stmt::DeclFunc(func) => {
-                func.annotations = aaa;
+                func.annotations.extend(aaa);
 
                 // Note: not Self::_ because of lifetimes. 'z needs to be different.
                 // let cap = ResolveScope::run(func, self.compiler, self.scope)?;

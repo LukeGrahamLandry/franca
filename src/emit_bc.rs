@@ -400,10 +400,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         ..
                     } = f.expr
                     {
+                        // result_location is the result of the ret() expression, which is Never and we don't care.
                         let (ip, res_loc) = *result.inlined_return_addr.get(&return_from).unwrap();
-                        debug_assert_eq!(res_loc, PushStack);
+                        debug_assert_eq!(res_loc, PushStack); // TODO: need be be able to find the ResAddr cause it might not be on top of the stack
                         let slots = self.slot_count(ret_ty);
-                        self.compile_expr(result, arg, result_location)?; // TOOD: wrong! result_location might not be at the top of stack because of nesting
+                        self.compile_expr(result, arg, res_loc)?;
                         result.push(Bc::Goto { ip, slots });
                         result.blocks[ip.0 as usize].incoming_jumps += 1;
                         return Ok(());
@@ -593,13 +594,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         };
                         return Ok(());
                     }
-                    Flag::Return => {
-                        debug_assert_eq!(result_location, PushStack);
-                        // TODO: do this in compiler.rs -- May 7
-                        let return_from = unwrap!(arg.as_fn(), "expected fn as !return arg");
-                        result.push(Bc::PushConstant { value: return_from.as_raw() });
-                        return Ok(());
-                    }
+                    Flag::Return => ice!("!return is const only",),
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }

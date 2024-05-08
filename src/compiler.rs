@@ -1456,8 +1456,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         } else {
                             let f: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             if let Some(f_ret) = self.program[f].finished_ret {
-                                expr.ty = self.program.intern_type(TypeInfo::Label(f_ret));
-                                expr.done = true;
+                                let ty = self.program.intern_type(TypeInfo::Label(f_ret));
+                                expr.set(Values::One(Value::Label { return_from: f }), ty);
                             }
                         }
                         return Ok(expr.ty);

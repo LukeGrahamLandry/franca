@@ -90,6 +90,7 @@ struct BcToAsm<'z, 'p, 'a> {
     block_ips: Vec<Option<*const u8>>,
     clock: u16,
     markers: Vec<(String, usize)>,
+    log_asm_bc: bool,
 }
 
 #[derive(Default, Clone)]
@@ -116,6 +117,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             block_ips: vec![],
             clock: 0,
             markers: vec![],
+            log_asm_bc: false,
         }
     }
 
@@ -165,13 +167,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     println!("===")
                 }
 
+                self.log_asm_bc = func.has_tag(Flag::Log_Asm_Bc);
                 self.bc_to_asm(f)?;
                 self.compile.aarch64.save_current(f);
                 // if cfg!(feature = "llvm_dis_debug") {
                 let asm = self.compile.aarch64.get_fn(f).unwrap();
 
                 let func = &self.compile.program[f];
-                if TRACE_ASM || func.has_tag(Flag::Log_Asm) {
+                if TRACE_ASM || self.log_asm_bc || func.has_tag(Flag::Log_Asm) {
                     let asm = unsafe { &*asm };
                     let hex: String = asm
                         .iter()
@@ -374,7 +377,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn emit_inst(&mut self, b: usize, inst: Bc, i: usize) -> Res<'p, bool> {
-        if TRACE_ASM {
+        if TRACE_ASM || self.log_asm_bc {
             let ins = self
                 .compile
                 .aarch64

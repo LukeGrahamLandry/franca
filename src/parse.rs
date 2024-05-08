@@ -189,7 +189,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
     }
 
-    fn fn_def_signeture(&mut self, loc: Span) -> Res<'p, (Option<Ident<'p>>, Pattern<'p>, LazyType<'p>)> {
+    fn fn_def_signeture(&mut self, loc: Span) -> Res<'p, (Option<Ident<'p>>, Pattern<'p>, LazyType<'p>, Vec<Annotation<'p>>)> {
         let name = if let Symbol(i) = self.peek() {
             self.pop();
             // return Err(self.error_next("Fn expr must not have name".into()));
@@ -209,7 +209,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         };
         arg.if_empty_add_unit();
 
-        let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() && FatRightArrow != self.peek() {
+        let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() && FatRightArrow != self.peek() && Hash != self.peek() {
             assert!(
                 name.is_some() || !no_paren,
                 "'fn <Expr> =' can't treat Expr as ret type. pls specify name or args."
@@ -218,7 +218,9 @@ impl<'a, 'p> Parser<'a, 'p> {
         } else {
             LazyType::Infer
         };
-        Ok((name, arg, ret))
+        let ann = self.parse_annotations()?;
+
+        Ok((name, arg, ret, ann))
     }
 
     fn anon_fn_name(&self, expr: &FatExpr<'p>) -> Ident<'p> {
@@ -238,7 +240,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             Fn => {
                 self.start_subexpr();
                 let loc = self.eat(Fn)?;
-                let (name, arg, ret) = self.fn_def_signeture(loc)?;
+                let (name, arg, ret, ann) = self.fn_def_signeture(loc)?;
 
                 let capturing = if self.maybe(Equals) {
                     false
@@ -253,7 +255,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
                 let name = name.unwrap_or_else(|| self.anon_fn_name(&body));
 
-                let func = Func::new(name, arg, ret, Some(body), loc, false, capturing);
+                let mut func = Func::new(name, arg, ret, Some(body), loc, false, capturing);
+                func.annotations = ann;
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
             FatRightArrow => {
@@ -440,7 +443,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.start_subexpr();
                     self.pop(); // {
                     let loc = self.next_span();
-                    let (name, arg, ret) = self.fn_def_signeture(loc)?;
+                    let (name, arg, ret, ann) = self.fn_def_signeture(loc)?;
                     self.eat(Pipe)?;
 
                     self.start_subexpr();
@@ -448,7 +451,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.eat(RightSquiggle)?;
 
                     let name = name.unwrap_or_else(|| self.anon_fn_name(&callback));
-                    let callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false, true);
+                    let mut callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false, true);
+                    callback.annotations = ann;
                     let callback = self.expr(Expr::Closure(Box::new(callback)));
 
                     self.push_arg(&mut prefix, callback)?;
@@ -596,7 +600,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             _ => return Err(self.expected("fn or fun")),
         }
 
-        let (name, arg, ret) = self.fn_def_signeture(loc)?;
+        let (name, arg, ret, ann) = self.fn_def_signeture(loc)?;
         if name.is_none() {
             // TODO: msg in wrong place
             return Err(self.expected("fn expr to have name"));
@@ -624,7 +628,8 @@ impl<'a, 'p> Parser<'a, 'p> {
             _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
         };
 
-        let func = Func::new(name.unwrap(), arg, ret, body, loc, true, false);
+        let mut func = Func::new(name.unwrap(), arg, ret, body, loc, true, false);
+        func.annotations = ann;
         Ok(Stmt::DeclFunc(func))
     }
 

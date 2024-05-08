@@ -1,11 +1,17 @@
-Made '=>' instead of '=' in function declaration mean capturing.
-So then I want to use '=> body' instead of 'fn = body' for passing a lambda as an argument.
-Also it makes @switch look more like rust.
-The problem is it means you can't have function names be part of the value which I wanted to use for targeting nonlocal returns.
-But currently its weird that functions aren't just values bound to variables,
-and that if you use that syntax it decides they're a closure so it will parse through them unlike the statement ones.
-Made name(arg = value) mean named arguments (instad of arg:value) so it looks like default argument values.
-Which also means you can tell a decl and a call apart without the fn keyword. is that a good idea?
+## syntax tweaks (May 8)
+
+- Made '=>' instead of '=' in function declaration mean capturing.
+  So then I want to use '=> body' instead of 'fn = body' for passing a lambda as an argument.
+  Also it makes @switch look more like rust.
+  The problem is it means you can't have function names be part of the value which I wanted to use for targeting nonlocal returns.
+  But currently its weird that functions aren't just values bound to variables,
+  and that if you use that syntax it decides they're a closure so it will parse through them unlike the statement ones.
+- Made name(arg = value) mean named arguments (instad of arg:value) so it looks like default argument values.
+  Which also means you can tell a decl and a call apart without the fn keyword. is that a good idea?
+- Allow #markers before the equals sign of the function instead of only above the decl, cause you want to allow them on values too.
+  So you can say the calling convention of closures, etc.
+- fixed early_returns. was using the result_location of the ret call instead of the thing you're returning to.
+  TODO: have it work when its not pushstack
 
 ## early returns / rls bc again (May 7)
 

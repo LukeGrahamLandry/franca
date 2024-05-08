@@ -1696,6 +1696,7 @@ pub enum Flag {
     Log_Bc,
     Log_Asm,
     Log_Ast,
+    Log_Asm_Bc,
     Return,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
