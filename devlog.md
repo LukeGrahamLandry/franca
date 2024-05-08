@@ -22,6 +22,10 @@ cause it does these insane redundant loads where it spills to the wrong place wh
 - flat_call PushStack tries to load but it doesnt push the ret addr first. and was loading |arg| instead of |ret|.
 - for flat_call header, it was only deciding to use result addr based on ret size, not considering explicitly marked cc like in my test.
 - offset from spill wasnt doing the mul 8. would affect anything not inlined with multiple returns. pass 65/90.
+- result aliasing miscompilation is back. whatever. ignore for now.
+- another card on the house of not tracking dominators. now i leak slots because when you do the second if branch,
+  it doesn't know which are safe to reuse anymore. can do that now because result locations mean less wasted slots.
+  but thats 95/101. that was the problem with @bits.
 
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.

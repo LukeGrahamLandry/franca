@@ -167,16 +167,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let ret_floats = self.program.float_mask_one(func.finished_ret.unwrap());
 
         // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
-        if let Expr::Value { value } = &func.body.as_ref().unwrap().expr {
-            result.push(Bc::Pop { slots });
-            for value in value.clone().vec().into_iter() {
-                result.push(Bc::PushConstant { value });
-            }
-            result.sub_height(ret_slots);
-            result.push(Bc::Ret);
-            return Ok(());
+        if let Expr::Value { .. } = &func.body.as_ref().unwrap().expr {
+        } else {
+            self.bind_args(result, &func.arg)?;
         }
-        self.bind_args(result, &func.arg)?;
         let body = func.body.as_ref().unwrap();
 
         let is_flat_call = func.has_tag(Flag::Flat_Call);
@@ -301,12 +295,34 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Stmt::Set { place, value } => self.set_deref(result, place, value)?,
             Stmt::DeclVarPattern { binding, value } => {
-                self.compile_expr(result, value, PushStack)?; // TODO: addr
-                self.bind_args(result, binding)?;
+                // TODO: test for evaluation order
+                if let Expr::Tuple(parts) = &value.expr {
+                    debug_assert_eq!(parts.len(), binding.bindings.len());
+                    for ((name, ty, kind), value) in binding.flatten().into_iter().zip(parts.iter()) {
+                        assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
+                        self.do_binding(result, name, ty, value)?;
+                    }
+                } else {
+                    debug_assert_eq!(1, binding.bindings.len());
+                    let (name, ty, _) = binding.flatten().into_iter().next().unwrap(); // TODO: sad alloc
+                    self.do_binding(result, name, ty, value)?;
+                }
             }
             Stmt::Noop => {}
             // Can't hit DoneDeclFunc because we don't re-eval constants.
             Stmt::ExpandParsedStmts(_) | Stmt::DoneDeclFunc(_, _) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn do_binding(&mut self, result: &mut FnBody<'p>, name: Option<Var<'p>>, ty: TypeId, value: &FatExpr<'p>) -> Res<'p, ()> {
+        let id = result.add_var(ty);
+        result.push(Bc::AddrVar { id });
+        self.compile_expr(result, value, ResAddr)?;
+        self.locals.last_mut().unwrap().push(id);
+        if let Some(name) = name {
+            let prev = self.var_lookup.insert(name, id);
+            assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
         }
         Ok(())
     }
@@ -330,7 +346,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
 
-        debug_assert!(self.slot_count(expr.ty) < 8 || result_location != PushStack);
+        debug_assert!(
+            self.slot_count(expr.ty) < 8 || result_location != PushStack,
+            "{}",
+            expr.log(self.program.pool)
+        );
         result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
 

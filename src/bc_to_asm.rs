@@ -78,7 +78,6 @@ pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime
 struct BcToAsm<'z, 'p, 'a> {
     compile: &'z mut Compile<'a, 'p>,
     vars: Vec<Option<SpOffset>>,
-    open_slots: Vec<(SpOffset, u16, u16)>,
     next_slot: SpOffset,
     f: FuncId,
     wip: Vec<FuncId>, // make recursion work
@@ -97,6 +96,7 @@ struct BcToAsm<'z, 'p, 'a> {
 struct BlockState {
     stack: Vec<Val>,
     free_reg: Vec<i64>,
+    open_slots: Vec<(SpOffset, u16, u16)>,
 }
 
 impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
@@ -104,7 +104,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         Self {
             compile,
             vars: Default::default(),
-            open_slots: vec![],
             next_slot: SpOffset(0),
             f: FuncId::from_index(0), // TODO: bad
             wip: vec![],
@@ -236,7 +235,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.next_slot = SpOffset(0);
         self.vars.clear();
         self.vars.extend(vec![None; func.vars.len()]);
-        self.open_slots.clear();
+        self.state.open_slots.clear();
         self.patch_cbz.clear();
         self.patch_b.clear();
         self.release_stack.clear();
@@ -397,7 +396,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 // TODO: I this doesn't work because if blocks are depth first now, not in order,
                 //       so the var can be done after they rejoin and then the other branch thinks that slot is free
                 //       and puts something else in it. -- May 6
-                let slot = self.vars[id as usize].take();
+                let slot = self.vars[id as usize]; // .take();
                 let slot = slot.unwrap();
                 let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
                 let count = self.compile.slot_count(ty);
@@ -992,9 +991,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn create_slots(&mut self, count: u16) -> SpOffset {
-        for (i, &(_, size, clock)) in self.open_slots.iter().enumerate() {
+        for (i, &(_, size, clock)) in self.state.open_slots.iter().enumerate() {
             if self.clock >= clock && size == count * 8 {
-                return self.open_slots.remove(i).0;
+                return self.state.open_slots.remove(i).0;
             }
         }
 
@@ -1181,7 +1180,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     }
 
     fn drop_slot(&mut self, slot: SpOffset, bytes: u16) {
-        self.open_slots.push((slot, bytes, self.clock)); // TODO: keep this sorted by count?
+        self.state.open_slots.push((slot, bytes, self.clock)); // TODO: keep this sorted by count?
         if ZERO_DROPPED_SLOTS {
             // todo this wont work now that i try to use x17
             self.load_imm(x17, 0);
