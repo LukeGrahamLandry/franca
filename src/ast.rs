@@ -73,11 +73,12 @@ pub enum TypeInfo<'p> {
     Label(TypeId),
 }
 #[repr(C)]
-#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
+#[derive(Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
     pub ffi_byte_offset: Option<usize>,
+    pub default: Option<Values>,
 }
 #[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
@@ -416,6 +417,16 @@ pub struct Binding<'p> {
     pub ty: LazyType<'p>,
     pub default: Option<FatExpr<'p>>,
     pub kind: VarType,
+}
+
+impl<'p> Name<'p> {
+    pub fn ident(&self) -> Option<Ident<'p>> {
+        match self {
+            Name::Ident(n) => Some(*n),
+            Name::Var(n) => Some(n.0),
+            Name::None => None,
+        }
+    }
 }
 
 impl<'p> Binding<'p> {
@@ -1024,6 +1035,7 @@ impl<'p> Program<'p> {
                             ty,
                             name: self.pool.intern(f.name),
                             ffi_byte_offset: Some(f.offset),
+                            default: None,
                         })
                     }
                     let as_tuple = self.tuple_of(types);
@@ -1271,6 +1283,7 @@ impl<'p> Program<'p> {
                 name: self.pool.intern(name),
                 ty: *ty,
                 ffi_byte_offset: None,
+                default: None,
             });
             types.push(*ty);
         }

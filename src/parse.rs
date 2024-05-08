@@ -519,8 +519,13 @@ impl<'a, 'p> Parser<'a, 'p> {
                 Colon | Equals => {
                     // The last thing was actually a name for a named argument
                     let value = if self.maybe(Colon) {
-                        // we're in a function header and that was a type
-                        LazyType::PendingEval(self.parse_expr()?)
+                        if self.peek() == Equals {
+                            // default arg with infered type
+                            LazyType::Infer
+                        } else {
+                            // we're in a function header and that was a type
+                            LazyType::PendingEval(self.parse_expr()?)
+                        }
                     } else {
                         // It's gonna be Name = Value like for @enum(T) S or named arguments
                         LazyType::Infer
@@ -869,12 +874,15 @@ impl<'a, 'p> Parser<'a, 'p> {
             self.pop();
             kind
         } else {
-            VarType::Let // TODO: default to let?
+            VarType::Let
         };
         let name = self.ident()?;
-        let types = if Colon == self.peek() {
-            self.pop();
-            LazyType::PendingEval(self.parse_expr()?)
+        let types = if self.maybe(Colon) {
+            if self.peek() == Equals && allow_default {
+                LazyType::Infer
+            } else {
+                LazyType::PendingEval(self.parse_expr()?)
+            }
         } else {
             LazyType::Infer
         };

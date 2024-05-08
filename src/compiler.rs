@@ -2007,11 +2007,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.infer_types_progress(&mut binding.ty)
     }
 
-    fn infer_pattern(&mut self, bindings: &mut [Binding<'p>]) -> Res<'p, Vec<TypeId>> {
+    fn infer_pattern(&mut self, bindings: &mut [Binding<'p>], mut result: Option<&mut FnWip<'p>>) -> Res<'p, Vec<TypeId>> {
         let mut types = vec![];
         for arg in bindings {
             if let Some(e) = arg.ty.expr_ref() {
                 self.last_loc = Some(e.loc);
+            }
+            if matches!(arg.ty, LazyType::Infer) {
+                if let Some(value) = &mut arg.default {
+                    arg.ty = LazyType::Finished(self.type_of(result.as_mut().unwrap(), value)?.unwrap())
+                } else {
+                    err!("Cannot infer_pattern without type hint",);
+                }
             }
             assert!(self.infer_binding_progress(arg)?, "{arg:?}");
             types.push(arg.unwrap());
@@ -2049,7 +2056,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         if self.program[func].finished_arg.is_none() {
             let mut arg = self.program[func].arg.bindings.clone();
-            let types = self.infer_pattern(&mut arg)?;
+            let types = self.infer_pattern(&mut arg, None)?;
             self.program[func].arg.bindings = arg;
             let arg = self.program.tuple_of(types);
             self.program[func].finished_arg = Some(arg);
@@ -2502,19 +2509,25 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
+    pub fn struct_type(&mut self, pattern: &mut Pattern<'p>, result: Option<&mut FnWip<'p>>) -> Res<'p, TypeInfo<'p>> {
         // TODO: maybe const keyword before name in func/struct lets you be generic.
-        let types = self.infer_pattern(&mut pattern.bindings)?;
-        let raw_fields = pattern.flatten();
-
+        let types = self.infer_pattern(&mut pattern.bindings, result)?;
         let as_tuple = self.program.tuple_of(types);
         let mut fields = vec![];
-        for (name, ty, kind) in raw_fields {
-            assert_ne!(kind, VarType::Const, "todo");
+        for binding in &pattern.bindings {
+            assert_ne!(binding.kind, VarType::Const, "todo");
+            let ty = unwrap!(binding.ty.ty(), "field type not inferred");
+            let default = if let Some(expr) = binding.default.clone() {
+                // TODO: no clone
+                Some(self.immediate_eval_expr(expr, ty)?)
+            } else {
+                None
+            };
             fields.push(Field {
-                name: unwrap!(name, "field name").0,
+                name: unwrap!(binding.name.ident(), "field name"),
                 ty,
                 ffi_byte_offset: None,
+                default,
             });
         }
         Ok(TypeInfo::simple_struct(fields, as_tuple))
@@ -2901,18 +2914,41 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let res = match self.program[raw_container_ty].clone() {
                 TypeInfo::Struct { fields, .. } => {
-                    assert_eq!(
-                        fields.len(),
-                        values.len(),
-                        "Cannot assign {values:?} to type {} = {fields:?}",
-                        self.program.log_type(requested)
-                    );
-                    let all = names.into_iter().zip(values).zip(fields);
-                    for ((name, value), field) in all {
-                        assert_eq!(name, field.name, "{} vs {}", self.pool.get(name), self.pool.get(field.name));
-                        let value = self.compile_expr(result, value, Some(field.ty))?;
-                        self.type_check_arg(value, field.ty, "struct field")?;
+                    for (name, value) in names.iter().zip(&mut values) {
+                        // TODO: could guess that they did them in order if i cared about not looping twice.
+                        if let Some(field) = fields.iter().find(|f| f.name == *name) {
+                            let value = self.compile_expr(result, value, Some(field.ty))?;
+                            self.type_check_arg(value, field.ty, "struct field")?;
+                        } else {
+                            err!("Tried to assign unknown field {}", self.pool.get(*name));
+                        }
                     }
+
+                    // If they're missing some, check for default values.
+                    if pattern.bindings.len() != fields.len() {
+                        for (i, field) in fields.iter().enumerate() {
+                            if names.contains(&field.name) {
+                                continue;
+                            }
+                            if let Some(value) = field.default.clone() {
+                                let expr = FatExpr::synthetic_ty(Expr::Value { value }, pattern.loc, field.ty);
+                                // TODO: HACK. emit_bc expects them in order
+                                pattern.bindings.insert(
+                                    i,
+                                    Binding {
+                                        name: Name::Ident(field.name),
+                                        ty: LazyType::Infer,
+                                        default: Some(expr),
+                                        kind: VarType::Var,
+                                    },
+                                );
+                            } else {
+                                err!("Missing required field {}", self.pool.get(field.name));
+                            }
+                        }
+                    }
+
+                    debug_assert_eq!(pattern.bindings.len(), fields.len());
 
                     requested
                 }

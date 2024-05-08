@@ -774,7 +774,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 for f in fields.iter().take(index) {
                     offset += self.slot_count(f.ty);
                 }
-                let f = fields[index];
+                let f = &fields[index];
                 let offset = if let Some(bytes) = f.ffi_byte_offset {
                     assert_eq!(bytes % 8, 0);
                     (bytes / 8) as u16

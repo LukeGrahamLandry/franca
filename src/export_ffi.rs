@@ -645,9 +645,10 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
 }
 
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
-            let ty = compile.struct_type(pattern)?;
+            let ty = compile.struct_type(pattern, Some(unsafe { &mut *result }))?;
             let ty = compile.program.to_enum(ty);
             compile.set_literal(&mut cases, ty)?;
         } else {
@@ -656,13 +657,15 @@ fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> Fa
         Ok(())
     });
 
+    compile.pending_ffi.push(Some(result));
     cases
 }
 
 fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
+    let result = compile.pending_ffi.pop().unwrap().unwrap();
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut fields.expr {
-            let ty = compile.struct_type(pattern)?;
+            let ty = compile.struct_type(pattern, Some(unsafe { &mut *result }))?;
             let ty = compile.program.intern_type(ty);
             compile.set_literal(&mut fields, ty)?;
         } else {
@@ -671,6 +674,7 @@ fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> F
         Ok(())
     });
 
+    compile.pending_ffi.push(Some(result));
     fields
 }
 
