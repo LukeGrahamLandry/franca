@@ -180,6 +180,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let body = func.body.as_ref().unwrap();
 
         let is_flat_call = func.has_tag(Flag::Flat_Call);
+        debug_assert!(is_flat_call || ret_slots <= 1); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
         let return_block = result.push_block(ret_slots, ret_floats);
         result.inlined_return_addr.insert(f, (return_block, result_location));
@@ -232,13 +233,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
+        // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
+        //       should add test of inferred flatcall mutual recursion.
         let force_flat = self.program[f].has_tag(Flag::Flat_Call);
         let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
         assert!(!func.has_tag(Flag::Inline));
         let f_ty = self.program[f].unwrap_ty();
-        // TODO: hack
         if let Some(id) = flat_arg_loc {
             match result_location {
                 PushStack => {
@@ -661,10 +663,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         result.current_block = ip;
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
         result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
-        result.push_to(end_false_block, Bc::Goto { ip, slots: block_slots });
+        // TODO: hack
+        if !if_false.ty.is_never() {
+            result.push_to(end_false_block, Bc::Goto { ip, slots: block_slots });
+            result.blocks[ip.0 as usize].incoming_jumps += 2;
+        } else {
+            result.push_to(end_false_block, Bc::Unreachable);
+            result.blocks[ip.0 as usize].incoming_jumps += 1;
+        }
         result.blocks[true_ip.0 as usize].incoming_jumps += 1;
         result.blocks[false_ip.0 as usize].incoming_jumps += 1;
-        result.blocks[ip.0 as usize].incoming_jumps += 2;
         result.bump_clock(ip);
 
         Ok(())

@@ -533,7 +533,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     let (reg, offset_bytes) = self.pop_to_reg_with_offset();
                     self.state.stack.push(Val::Increment {
                         reg,
-                        offset_bytes: offset_bytes + offset,
+                        offset_bytes: offset_bytes + (offset * 8),
                     })
                 }
                 Val::FloatReg(_) => err!("don't try to gep a float",),
@@ -646,7 +646,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         Ok(false)
     }
 
-    // TODO: floats -- May 1
+    #[track_caller]
     fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
         debug_assert!((slots as u32 - float_mask.count_ones()) < 8);
         debug_assert!(self.state.stack.len() >= slots as usize);

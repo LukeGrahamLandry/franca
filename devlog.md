@@ -21,6 +21,7 @@ cause it does these insane redundant loads where it spills to the wrong place wh
 - fix 'assertion failed: target_c_call && !target_flat_call': move adding flat_call if big arg/ret from bc_to_asm to emit_bc
 - flat_call PushStack tries to load but it doesnt push the ret addr first. and was loading |arg| instead of |ret|.
 - for flat_call header, it was only deciding to use result addr based on ret size, not considering explicitly marked cc like in my test.
+- offset from spill wasnt doing the mul 8. would affect anything not inlined with multiple returns. pass 65/90.
 
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.
