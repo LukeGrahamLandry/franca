@@ -38,3 +38,49 @@
 
     canary
 }
+
+// need to add flat_call if ret is big early enough that you havent already emitted one before noticing. 
+#test fn mutual_rec_flat() = {
+    fn do_1s(n: i64) Str = if(n.eq(2), => do_2s(n), => "one");
+    fn do_2s(n: i64) Str = if(n.eq(1), => do_1s(n), => "two");
+     
+    do_1s(1);
+}
+
+/// - this started happening with my first rework to use stack bc (before basic blocks)
+/// - Found with collections.fr:split, narrowed down to resizing a list. then to memcpy when something is larger than one slot. then to calling set. 
+///   Worked when my_set is #inline but segfault if not. So its a spilling problem. 
+/// - this was because of stack_to_ccall_reg leaving first registers on the stack as it worked on next so they'd get spilled in a weird way sometimes. 
+///   like you want to assign x0 and its already in place so you move on but x0 is still on the stack, 
+///   so if you need an extra free register later you think its ok to spill x0. -- May 8
+/// - it was the same problem as mmap saying errno=22 after basic blocks change. 
+///   for this example, it happened on wide values because they're passed in multiple registers to my_set. 
+#test fn memcpy_wide_values(canary: i64) i64 = {
+    fn memcpy_wide_values() Unit = {
+        T :: Str;
+        S :: Slice(T);
+        
+        #noinline
+        fun my_set(var self: S, i: i64, v: T) Unit = {
+            self.index(i)[] = v; 
+        }
+        
+        #noinline
+        fn my_memcpy(dest: S, src: S) Unit = {
+            var i = 0;
+            while(=> lt(i, src.len())) {|
+                src_ptr := src.index(i);
+                dest.my_set(i, src_ptr[]);
+                i = i.add(1);
+            };
+        }
+    
+        var a: S = ("a", "a")!slice;
+        var b: S = ("b", "b")!slice;
+        my_memcpy(a, b);
+    }
+    
+    memcpy_wide_values();
+    
+    canary
+}

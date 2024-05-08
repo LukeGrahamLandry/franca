@@ -218,6 +218,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(f)
     }
 
+    fn update_cc(&mut self, f: FuncId) {
+        let a = self.program[f].finished_arg.unwrap();
+        let r = self.program[f].finished_ret.unwrap();
+        if self.program[f].comptime_addr.is_none()
+            && (self.ready.sizes.slot_count(self.program, a) >= 7 || self.ready.sizes.slot_count(self.program, r) > 1)
+        {
+            debug_assert!(!self.program[f].has_tag(Flag::C_Call),);
+            // my cc can do 8 returns in the arg regs but my ffi with compiler can't
+            // TODO: my c_Call can;t handle agragates
+            self.program[f].add_tag(Flag::Flat_Call);
+            self.program[f].add_tag(Flag::Ct);
+        } else if !self.program[f].has_tag(Flag::Flat_Call) {
+            self.program[f].add_tag(Flag::C_Call);
+        }
+    }
+
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         if self.currently_compiling.contains(&f) {
             return Ok(());
@@ -461,6 +477,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.pop_state(state);
         let after = self.debug_trace.len();
         debug_assert_eq!(before, after);
+        self.update_cc(f);
 
         // TODO: error safety ^
         self.currently_compiling.retain(|check| *check != f);
@@ -2824,6 +2841,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         self.ensure_resolved_body(f)?;
+        assert!(
+            self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::Flat_Call),
+            "inline asm msut specify calling convention"
+        );
 
         // TODO: assert f has an arch and a calling convention annotation (I'd rather make people be explicit just guess, even if you can always tell arch).
 

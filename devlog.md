@@ -10,11 +10,18 @@
   Which also means you can tell a decl and a call apart without the fn keyword. is that a good idea?
 - Allow #markers before the equals sign of the function instead of only above the decl, cause you want to allow them on values too.
   So you can say the calling convention of closures, etc.
-- fixed early_returns. was using the result_location of the ret call instead of the thing you're returning to.
-  TODO: have it work when its not pushstack
 - changed struct literal syntax to be equals signs so its like named args / vars.
   now everywhere in the language, : means type and = means value.
   except functions i suppose. maybe I should use -> instead of =.
+
+Fix remaning tests:
+
+- fixed early_returns. was using the result_location of the ret call instead of the thing you're returning to.
+  TODO: have it work when its not pushstack
+- now asserting has c_call marker if you do that so have to add those earlier in compiler.
+  before i just figured it out in asm based on sizes. but now i need to change stuff in emit_bc based on it too, feels cleaner to decide in one place.
+  inline asm now needs you to say #c_call.
+- now only mmap is failing.
 
 ## early returns / rls bc again (May 7)
 

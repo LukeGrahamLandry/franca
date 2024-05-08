@@ -34,17 +34,6 @@ pub struct EmitBc<'z, 'p: 'z> {
 }
 
 pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
-    let a = compile.program[f].finished_arg.unwrap();
-    let r = compile.program[f].finished_ret.unwrap();
-    if compile.program[f].comptime_addr.is_none()
-        && (compile.ready.sizes.slot_count(compile.program, a) >= 7 || compile.ready.sizes.slot_count(compile.program, r) > 1)
-    {
-        debug_assert!(!compile.program[f].has_tag(Flag::C_Call),);
-        // my cc can do 8 returns in the arg regs but my ffi with compiler can't
-        // TODO: my c_Call can;t handle agragates
-        compile.program[f].add_tag(Flag::Flat_Call);
-        compile.program[f].add_tag(Flag::Ct);
-    }
     EmitBc::compile(compile.program, &mut compile.ready, f)
 }
 

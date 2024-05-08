@@ -214,11 +214,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         // TODO: i could change the ret_limit if i knew only called at runtime because internal abi doesn't have to match c but should just add explicit cc stuff less hackily -- May 2
         if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.ready.sizes.slot_count(self.compile.program, r) > 1 {
             debug_assert!(!self.compile.program[f].has_tag(Flag::C_Call),);
+            debug_assert!(self.compile.program[f].has_tag(Flag::Flat_Call),);
+            debug_assert!(self.compile.program[f].has_tag(Flag::Ct),);
             debug_assert!(self.compile.program[f].comptime_addr.is_none());
             // my cc can do 8 returns in the arg regs but my ffi with compiler can't
             // TODO: my c_Call can;t handle agragates
-            self.compile.program[f].add_tag(Flag::Flat_Call);
-            self.compile.program[f].add_tag(Flag::Ct);
         }
         let ff = &self.compile.program[f];
         let is_flat_call = ff.has_tag(Flag::Flat_Call);
@@ -648,6 +648,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         Ok(false)
     }
 
+    // TODO: refactor this. its a problem that im afraid of it! -- May 8
     #[track_caller]
     fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
         debug_assert!((slots as u32 - float_mask.count_ones()) < 8);
@@ -720,11 +721,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             if let Val::Increment { reg, offset_bytes } = self.state.stack[stack_index] {
                 if reg == next_int as i64 {
                     if offset_bytes != 0 {
-                        self.compile.aarch64.push(add_im(X64, next_int as i64, reg, offset_bytes as i64, 0));
+                        self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
                     }
 
                     // if we happen to already be in the right register, cool, don't worry about it.
-                    debug!("|x{} already| ", next_int);
+                    debug!("|x{} already| ", reg);
+                    self.state.free_reg.retain(|r| reg != *r);
+                    self.state.stack[stack_index] = Val::Literal(0); // make sure we dont try to spill it later
                     next_int += 1;
                     continue;
                 }
@@ -763,6 +766,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 Val::Spill(slot) => self.load_u64(next_int as i64, sp, slot.0),
                 Val::FloatReg(_) => todo!(),
             }
+            self.state.free_reg.retain(|r| next_int as i64 != *r);
+            // TODO: why can't i do this ? feels like this has gotta be a lurking bug -- May 8
+            // self.state.stack[stack_index] = Val::Literal(0); // make sure we dont try to spill it later
             next_int += 1;
         }
         debugln!();
@@ -891,7 +897,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
             // Note: this assumes we don't need to preserve the value in the reg other than for this one v-stack slot.
             let slot = self.create_slots(1);
-            debug!("(spill ({reg:?} + {offset_bytes}) -> [sp, {}]) ", slot.0);
+            debug!("(spill (x{reg:?} + {offset_bytes}) -> [sp, {}]) ", slot.0);
             if offset_bytes != 0 {
                 self.compile.aarch64.push(add_im(X64, reg, reg, offset_bytes as i64, 0));
             }
@@ -1066,7 +1072,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         debug_assert!(target.any_reg_template.is_none());
         let target_c_call = target.has_tag(Flag::C_Call);
         let target_flat_call = target.has_tag(Flag::Flat_Call);
-        assert!(target_c_call && !target_flat_call);
+        assert!(target_c_call && !target_flat_call, "{} flatcall", self.compile.pool.get(target.name));
         let comp_ctx = target.has_tag(Flag::Ct);
         let f_ty = target.unwrap_ty();
         self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
