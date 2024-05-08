@@ -515,15 +515,16 @@ impl<'a, 'p> Parser<'a, 'p> {
                 Colon | Equals => {
                     // The last thing was actually a name for a named argument
                     let value = if self.maybe(Colon) {
+                        // we're in a function header and that was a type
                         LazyType::PendingEval(self.parse_expr()?)
                     } else {
-                        // It's gonna be Name = Value like for @enum(T) S
+                        // It's gonna be Name = Value like for @enum(T) S or named arguments
                         LazyType::Infer
                     };
                     let name = if let Expr::GetNamed(name) = args.pop().unwrap().expr {
                         name
                     } else {
-                        return Err(self.expected("Ident before ':' in argument pattern"));
+                        return Err(self.expected("Ident before ':'/'=' in argument pattern"));
                     };
                     let default = if self.maybe(Equals) { Some(self.parse_expr()?) } else { None };
                     let first = Binding {

@@ -1,4 +1,6 @@
-use crate::ast::{Expr, FatExpr, Flag, FuncId, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TargetArch, TypeId, Var, VarType};
+use crate::ast::{
+    Expr, FatExpr, Flag, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TargetArch, TypeId, Var, VarType,
+};
 use crate::bc::{FuncRef, Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::{LogTag, PoolLog};
@@ -296,7 +298,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     "missing named argument {name:?}"
                 );
                 let value = pattern.bindings.remove(index);
-                parts.push(unwrap!(value.ty.expr(), "named arg missing value"));
+                assert!(matches!(value.ty, LazyType::Infer), "use '=' not ':' for named arg");
+                parts.push(unwrap!(value.default, "named arg missing value"));
             }
             debug_assert!(pattern.bindings.is_empty());
             match parts.len() {

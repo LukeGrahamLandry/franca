@@ -130,9 +130,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 '"' => {
                     self.skip_quoted();
                 }
-                '`' => {
-                    self.skip_quoted_multiline();
-                }
                 '{' => {
                     depth += 1;
                     self.pop();
@@ -183,7 +180,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
             }
             '"' => self.lex_quoted(),
-            '`' => self.lex_quoted_multiline(),
             '0' => {
                 self.pop();
                 match self.peek_c() {
@@ -308,29 +304,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 '\n' | '\0' => return None,
                 _ => {}
             }
-        }
-    }
-
-    fn skip_quoted_multiline(&mut self) -> Option<(usize, usize)> {
-        self.pop();
-        loop {
-            match self.pop() {
-                '`' => {
-                    // Payload doesn't include quotes.
-                    return Some((self.start + 1, self.current - 1));
-                }
-                '\0' => return None,
-                _ => {}
-            }
-        }
-    }
-
-    fn lex_quoted_multiline(&mut self) -> Token<'p> {
-        if let Some((start, end)) = self.skip_quoted_multiline() {
-            let text = &self.src.source_slice(self.root)[start..end];
-            return self.token(Quoted(self.pool.intern(text)), self.start, self.current);
-        } else {
-            self.err(LexErr::UnterminatedStr)
         }
     }
 

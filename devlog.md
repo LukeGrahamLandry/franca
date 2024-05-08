@@ -1,10 +1,11 @@
-I want to make '=>' instead of '=' in function declaration mean capturing.
-I want to use name(arg = value) for named arguments so it looks like default argument values.
-so then I want to use '=> body' instead of 'fn = body' for passing a lambda as an argument.
+Made '=>' instead of '=' in function declaration mean capturing.
+So then I want to use '=> body' instead of 'fn = body' for passing a lambda as an argument.
 Also it makes @switch look more like rust.
 The problem is it means you can't have function names be part of the value which I wanted to use for targeting nonlocal returns.
 But currently its weird that functions aren't just values bound to variables,
 and that if you use that syntax it decides they're a closure so it will parse through them unlike the statement ones.
+Made name(arg = value) mean named arguments (instad of arg:value) so it looks like default argument values.
+Which also means you can tell a decl and a call apart without the fn keyword. is that a good idea?
 
 ## early returns / rls bc again (May 7)
 
