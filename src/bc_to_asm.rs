@@ -20,7 +20,7 @@ use std::process::Command;
 
 const ZERO_DROPPED_REG: bool = false;
 const ZERO_DROPPED_SLOTS: bool = false;
-pub const TRACE_ASM: bool = false;
+pub const TRACE_ASM: bool = true;
 
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -603,11 +603,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             Bc::Dup => {
                 let val = *self.state.stack.last().unwrap();
                 match val {
-                    Val::Increment { reg, .. } => {
+                    Val::Increment { reg, offset_bytes } => {
                         if reg == sp {
                             self.state.stack.push(val);
                         } else {
-                            todo!()
+                            let new = self.get_free_reg();
+                            self.compile.aarch64.push(mov(X64, new, reg));
+                            self.state.stack.push(Val::Increment { reg: new, offset_bytes });
                         }
                     }
                     Val::Literal(_) | Val::Spill(_) => self.state.stack.push(val),

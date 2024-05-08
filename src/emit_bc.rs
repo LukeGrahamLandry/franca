@@ -34,6 +34,17 @@ pub struct EmitBc<'z, 'p: 'z> {
 }
 
 pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
+    let a = compile.program[f].finished_arg.unwrap();
+    let r = compile.program[f].finished_ret.unwrap();
+    if compile.program[f].comptime_addr.is_none()
+        && (compile.ready.sizes.slot_count(compile.program, a) >= 7 || compile.ready.sizes.slot_count(compile.program, r) > 1)
+    {
+        debug_assert!(!compile.program[f].has_tag(Flag::C_Call),);
+        // my cc can do 8 returns in the arg regs but my ffi with compiler can't
+        // TODO: my c_Call can;t handle agragates
+        compile.program[f].add_tag(Flag::Flat_Call);
+        compile.program[f].add_tag(Flag::Ct);
+    }
     EmitBc::compile(compile.program, &mut compile.ready, f)
 }
 
@@ -168,7 +179,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.bind_args(result, &func.arg)?;
         let body = func.body.as_ref().unwrap();
 
-        let result_location = if ret_slots > 2 { ResAddr } else { PushStack };
+        let result_location = if ret_slots > 1 { ResAddr } else { PushStack };
         let return_block = result.push_block(ret_slots, ret_floats);
         result.inlined_return_addr.insert(f, (return_block, result_location));
         result.current_block = entry_block;
@@ -221,9 +232,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         let force_flat = self.program[f].has_tag(Flag::Flat_Call);
-        if force_flat {
-            debug_assert_eq!(result_location, ResAddr);
-        }
         let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
@@ -237,7 +245,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::AddrVar { id: ret_id });
                     result.push(Bc::AddrVar { id });
                     result.push(Bc::CallDirectFlat { f });
-                    let slots = self.slot_count(f_ty.arg);
+                    let slots = self.slot_count(f_ty.ret);
+                    result.push(Bc::AddrVar { id: ret_id });
                     result.push(Bc::Load { slots });
                     result.push(Bc::LastUse { id: ret_id });
                 }
@@ -282,10 +291,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let id = result.add_var(ty);
                 result.push(Bc::AddrVar { id });
-                let slots = self.slot_count(ty);
-
                 self.compile_expr(result, value, ResAddr)?;
-
                 let prev = self.var_lookup.insert(*name, id);
                 self.locals.last_mut().unwrap().push(id);
                 assert!(prev.is_none(), "shadow is still new var");
@@ -320,6 +326,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     // otherwise, just push it to the stack.
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
+
+        debug_assert!(self.slot_count(expr.ty) < 8 || result_location != PushStack);
         result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
 
@@ -417,7 +425,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else {
                         result.push_to(return_block, Bc::NoCompile);
                     }
-                    result.inlined_return_addr.remove(&inlined);
+                    result.inlined_return_addr.remove(inlined);
                 } else {
                     for stmt in body {
                         self.compile_stmt(result, stmt)?;
@@ -813,7 +821,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 for ((name, value), field) in all {
                     assert_eq!(name, field.name);
                     let size = self.slot_count(field.ty);
-                    if result_location == PushStack {
+                    if result_location == ResAddr {
                         result.push(Bc::Dup);
                         result.push(Bc::IncPtr { offset });
                     }
@@ -821,7 +829,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     offset += size;
                 }
 
-                if result_location == PushStack {
+                if result_location == ResAddr {
                     result.push(Bc::Pop { slots: 1 }); // res ptr
                 }
                 assert_eq!(offset, slots, "Didn't fill whole struct");

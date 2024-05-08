@@ -16,6 +16,10 @@ cause it does these insane redundant loads where it spills to the wrong place wh
 - then an off by one in storepre
 - moved most of the flat call abi work to emit_bc so it can emit to its arg loc and use its ret loc without copying.
   now passing 48/90.
+- typo construct_struct was duping on PushStack instead of ResAddr. pass 52/90.
+- impl dup non sp reg. pass 56/90
+- fix 'assertion failed: target_c_call && !target_flat_call': move adding flat_call if big arg/ret from bc_to_asm to emit_bc
+- flat_call PushStack tries to load but it doesnt push the ret addr first. and was loading |arg| instead of |ret|.
 
 TODO: use => instead of = for capturing functions. remove need for fn keywork on values, just use that for
 add to overload set stmt. fix stack slot reuse. !return targeting an overload set and it just resolves to the current function.
