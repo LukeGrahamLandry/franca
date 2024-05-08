@@ -2254,8 +2254,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             if self.infer_types(f)?.is_none() {
                 // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
                 if let Some(body) = &mut self.program[f].body.clone() {
-                    // closures aren't lazy currently.
-                    debug_assert!(self.program[f].resolved_body);
+                    // debug_
+                    assert!(self.program[f].resolved_body, "ICE: closures aren't lazy currently. missing =>?");
                     // TODO: this is very suspisious! what if it has captures
                     let res = self.type_of(result, body);
                     debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...

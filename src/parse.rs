@@ -209,7 +209,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         };
         arg.if_empty_add_unit();
 
-        let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() {
+        let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() && FatRightArrow != self.peek() {
             assert!(
                 name.is_some() || !no_paren,
                 "'fn <Expr> =' can't treat Expr as ret type. pls specify name or args."
@@ -239,13 +239,31 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 let loc = self.eat(Fn)?;
                 let (name, arg, ret) = self.fn_def_signeture(loc)?;
-                self.eat(Equals)?;
+
+                let capturing = if self.maybe(Equals) {
+                    false
+                } else if self.maybe(FatRightArrow) {
+                    true
+                } else {
+                    return Err(self.expected("'=' or '=>' to indicate function body"));
+                };
+
                 let body = self.parse_expr()?;
 
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
                 let name = name.unwrap_or_else(|| self.anon_fn_name(&body));
 
-                let func = Func::new(name, arg, ret, Some(body), loc, false, true);
+                let func = Func::new(name, arg, ret, Some(body), loc, false, capturing);
+                Ok(self.expr(Expr::Closure(Box::new(func))))
+            }
+            FatRightArrow => {
+                self.start_subexpr();
+                let loc = self.eat(FatRightArrow)?;
+                let body = self.parse_expr()?;
+
+                let name = self.anon_fn_name(&body);
+
+                let func = Func::new(name, Pattern::empty(loc), LazyType::Infer, Some(body), loc, false, true);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
             Fun => Err(self.error_next("use 'fn' for lambda expression. 'fun' means public which doesn't make sense for an expression".to_string())),

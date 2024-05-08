@@ -62,8 +62,8 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
     
     ::if(FatExpr);
     '{
-        var arg_val = <if(is_ptr, fn ='@as(Unit)unit', fn = arg)>;
-        var arg_ptr = <if(is_ptr, fn=arg, fn='arg_val&')>;
+        var arg_val = <if(is_ptr, =>'@as(Unit)unit', => arg)>;
+        var arg_ptr = <if(is_ptr, =>arg, =>'arg_val&')>;
         let tag_val = arg_ptr!tag[];
         <{
             for(stmts) { (stmt: *FatStmt) | 
@@ -81,7 +81,7 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
                     if(not$is_ptr){|
                         case_access = '<case_access>[]';
                     };
-                    body = '(eq(tag_val, <tag>), fn = <handler_body>(<case_access>), fn = <body>)!if';
+                    body = '(eq(tag_val, <tag>), => <handler_body>(<case_access>), => <body>)!if';
                 };
             };
             body
@@ -92,7 +92,7 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
 
 
 /// Similar to @match but operates on values instead of enum payloads. 
-/// @switch(value) { @<specifier> fn= <body> }
+/// @switch(value) { @<specifier> => <body> }
 /// - @case(v): calls <body> if value.eq(v)
 #macro 
 fun switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
@@ -108,7 +108,7 @@ fun switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
     '{
         var arg_var = <arg>;
         <{
-            while(fn = i.ge(0)) {|
+            while(=> i.ge(0)) {|
                 stmt: *FatStmt = handlers.index(i); 
                 // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
                 if(eq(stmt.stmt!tag[], tag_value(Stmt, @symbol(Eval)))) {|
@@ -122,19 +122,19 @@ fun switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
                     action := branch.target[][];
                     
                     // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
-                    if(name.eq(@symbol(case)), fn = {
+                    if(name.eq(@symbol(case)), => {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
                         cond := 'eq(arg_var, <as(inspected_ty, arg[])>)';
-                        body = '(<cond>, fn=<action>(), fn=<body>)!if';
-                    }, fn=if(name.eq(@symbol(default)), fn = {
+                        body = '(<cond>, =><action>(), =><body>)!if';
+                    }, =>if(name.eq(@symbol(default)), => {
                         if(first) {|
                             // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
                             body = '<action>(arg_var)';
                         }{|
                             panic("@default must be the last handler in @switch");
                         };
-                    }, fn={
+                    }, =>{
                         // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
                         //let n: Str = name.str(); // TODO: this broke when I started renumbering in bind_const_arg -- Apr 23. 
                         // TODO: make concat less painful. 
@@ -158,7 +158,7 @@ fun bits(var arg: AstExpr) AstExpr = {
     var parts: Slice$AstExpr = arg&.expr.Tuple[];
     var expr = '0';
     var shift = 32;
-    for(parts, fn(part: *AstExpr) Unit = {
+    for(parts, fn(part: *AstExpr) Unit => {
         var int = get_type_int(part[]);
         // TODO: fix inference + overloading. 
         //       you only need this annotation if you include instructions.fr so there's another definition of `fn sub`
@@ -169,8 +169,8 @@ fun bits(var arg: AstExpr) AstExpr = {
         assert(ge(shift, 0), "expected 32 bits. TODO: other sizes.");  // TODO: str(i64) for negative numbers
         let part_ast = as(i64, part[]);
         let next = (int&.signed[], 
-            fn = 'signed_truncate(<part_ast>, <@literal(i64) int&.bit_count[]>)',
-            fn = part_ast
+            => 'signed_truncate(<part_ast>, <@literal(i64) int&.bit_count[]>)',
+            => part_ast
         )!if;
         let next = 'shift_left(<next>, <@literal(shift)>)';
         expr = 'bit_or(<expr>, <next>)';
@@ -249,15 +249,15 @@ fun enum(var names: FatExpr) FatExpr = {
     enumerate(parts) {(i: i64, part: *FatExpr)|
         // TODO: really need @default on match cause this is annoying. 
         @switch(part.expr!tag[]) {
-            @case(tag_value(Expr, @symbol GetNamed)) fn = {
+            @case(tag_value(Expr, @symbol GetNamed)) => {
                 name : Symbol = part.expr.GetNamed[];
                 cases&.push(binding(name, i));
             };
-            @case(tag_value(Expr, @symbol GetVar)) fn = {
+            @case(tag_value(Expr, @symbol GetVar)) => {
                 name : Symbol = part.expr.GetVar[0][];
                 cases&.push(binding(name, i));
             };
-            @default() fn(_: i64) = panic("Expected symbol in @enum");
+            @default() fn(_: i64) => panic("Expected symbol in @enum"); // TODO: this should work as not a closure
         };
     };
 

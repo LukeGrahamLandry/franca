@@ -50,10 +50,10 @@
 //   after the jump away for the first branch. it wont exist at runtime but emit_asm will fall through and reset the stack. 
 #test fn thing3() = {
     // cond is in x0. branch on c. 
-    c := if(eq(add(0, 1), 0), fn()bool = {
+    c := if(eq(add(0, 1), 0), fn()bool => {
         a := false;
         a
-    }, fn()bool = {
+    }, fn()bool => {
         a := true;
         a
     });
@@ -64,7 +64,7 @@
 #test fn thing4() = {
     a := 0;
     b := 1;
-    c := (::true, fn = a, fn = b)!if;
+    c := (::true, => a, => b)!if;
 }
 
 // - c calling '#ct fn Ptr' wasn't putting the arg in x1 because offset_bytes was zero and i dumbly skipped the add because i was like "well why add zero",
@@ -82,7 +82,7 @@
 // - branches of if need to have same v-stack when they rejoin so literals need to spill to registers. 
 #test fn literal_if() = {
     c := true;
-    b := if(c, fn = 1, fn = 2);
+    b := if(c, => 1, => 2);
     assert_eq(b, 1);
 }
 
@@ -193,6 +193,8 @@
 }
 
 /// if you don't let it inline, you get 'assertion failed: s.is_valid()'
+/// this was because of my opt where i just pushed all the things to stack if it was a constant value casue i generated so much garbage copies otherwise. 
+/// that used to be fine casue top of stack is what return took but now you have to explicitly store at the end of flat_call. 
 #test fn noinline_with_big_arg() = {
     #noinline fn do_stuff(e: FatExpr) FatExpr = '123';
     #macro fn get_it(e: FatExpr) FatExpr = do_stuff(e);
@@ -201,8 +203,11 @@
     assert_eq(a, 123);
 }
 
-/// this is about removing vars globally on last use but i dont track dominators so the same var gets different addrs on each branch
+/// this is about removing vars globally on last use but i dont track dominators so the same var gets different addrs on each branch. 
+/// this problem should have existed before. I guess i just used so much stack space that it was avoided by luck?  but that doesn't make sense. '
+/// or since i needed to resuse, if it happened it reused the same slot by luck but now its ok to leak some stack 
+/// so im playing it safer with stomping which revealed this bug?
 #test fn push_it_part2() Unit = {
     s: List(i64) = list(1);
-    if(1.lt(0), fn=(), fn=push(s&, 0));
+    if(1.lt(0), =>(), =>push(s&, 0));
 }

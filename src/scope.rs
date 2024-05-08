@@ -62,7 +62,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             debug_assert_eq!(s, self.scope);
             debug_assert_eq!(b, self.block);
         } else {
-            // ResolveScope::resolve_all(func, self.compiler)?;
             self.pop_scope();
             debug_assert_ne!(self.scope, func.scope.unwrap());
         }
@@ -157,7 +156,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             let n = self.compiler.pool.get(func.name);
             assert!(
                 func.capture_vars.is_empty(),
-                "Closure '{}' cannot be public. captures: {:?}",
+                "Must use '=>' for closure '{}' with captures: {:?}",
                 n,
                 func.capture_vars.iter().map(|v| v.log(self.compiler.pool)).collect::<Vec<_>>()
             );

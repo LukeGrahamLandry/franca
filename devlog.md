@@ -1,4 +1,12 @@
-## early returns (May 7)
+I want to make '=>' instead of '=' in function declaration mean capturing.
+I want to use name(arg = value) for named arguments so it looks like default argument values.
+so then I want to use '=> body' instead of 'fn = body' for passing a lambda as an argument.
+Also it makes @switch look more like rust.
+The problem is it means you can't have function names be part of the value which I wanted to use for targeting nonlocal returns.
+But currently its weird that functions aren't just values bound to variables,
+and that if you use that syntax it decides they're a closure so it will parse through them unlike the statement ones.
+
+## early returns / rls bc again (May 7)
 
 Doing early returns by having labels as a comptime value.
 

@@ -64,6 +64,7 @@ pub enum TokenType<'p> {
     LeftAngle,
     RightAngle,
     Hash,
+    FatRightArrow,
     EqOp(Flag),
     Error(LexErr),
 }
@@ -213,7 +214,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
             '[' => self.pair(']', LeftSquare, DoubleSquare),
             ']' => self.one(RightSquare),
             ';' => self.one(Semicolon),
-            '=' => self.one(Equals),
+            '=' => self.pair('>', Equals, FatRightArrow),
             '*' => self.pair('=', Star, EqOp(Flag::Operator_Star_Equal)),
             '^' => self.one(UpArrow),
             '&' => self.one(Amp),
