@@ -72,11 +72,9 @@ macro_rules! debugln {
 
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
-use std::arch::asm;
 use std::cell::Cell;
 use std::env;
 use std::fs;
-use std::mem::{transmute, ManuallyDrop};
 use std::path::PathBuf;
 use std::ptr::null_mut;
 
@@ -85,9 +83,8 @@ use ast::ScopeId;
 use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
-use compiler::{CErr, Res};
+use compiler::CErr;
 use export_ffi::STDLIB_PATH;
-use lex::Lexer;
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -121,16 +118,14 @@ pub mod pool;
 pub mod reflect;
 pub mod scope;
 
-use crate::logging::{init_logs_flag, PoolLog};
+use crate::logging::PoolLog;
 use crate::{
-    ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
-    compiler::{Compile, CompileError, ExecTime},
+    ast::{Expr, FatExpr, FatStmt, Func, TypeId},
+    compiler::{Compile, CompileError},
     logging::{
-        get_logs, log_tag_info, save_logs,
+        get_logs, save_logs,
         LogTag::{ShowErr, *},
     },
-    parse::Parser,
-    scope::ResolveScope,
 };
 
 #[derive(Debug)]
@@ -278,111 +273,6 @@ pub fn find_std_lib() -> bool {
     }
 
     false
-}
-
-pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId> {
-    unsafe { COMPILER_CTX_PTR = comp as *const Compile as usize };
-    // TODO: this will get less dumb when I have first class modules.
-    let file = comp
-        .parsing
-        .codemap
-        .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
-    let user_span = file.span;
-    let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    let parsed = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool)?;
-
-    let mut global = make_toplevel(comp.pool, user_span, parsed);
-    ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
-    let f = comp.compile_top_level(global)?;
-    Ok(f)
-}
-
-// If it's just a cli that's going to immediately exit, you can set leak=true and not bother walking the tree to free everything at the end.
-// I should really just use arenas for everything.
-#[allow(clippy::too_many_arguments)]
-pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<&str>, leak: bool) -> bool {
-    let beg = MEM.get();
-    init_logs_flag(0x0); //init_logs_flag(0xFFFFFFFFF);
-    log_tag_info();
-    let start = timestamp();
-    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
-    let mut comp = Compile::new(pool, &mut program);
-    let result = load_program(&mut comp, &src);
-
-    // damn turns out defer would maybe be a good idea
-
-    // TODO: run tests
-    match result {
-        Err(e) => {
-            log_err(&comp, *e);
-            return false;
-        }
-        Ok(_) => {
-            match comp.program.find_unique_func(Flag::Main.ident()) {
-                None => {
-                    println!("'fn main' NOT FOUND");
-                    log_dbg(&comp, save);
-                    return false;
-                }
-                Some(f) => {
-                    match comp.compile(f, ExecTime::Runtime) {
-                        Err(e) => {
-                            log_err(&comp, *e);
-                            return false;
-                        }
-                        Ok(_) => {
-                            let end = timestamp();
-                            let seconds = end - start;
-                            outln!(Perf, "===============");
-                            println!(
-                                //Perf,
-                                "Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds",
-                            );
-                            outln!(Perf, "===============");
-                            let start = timestamp();
-
-                            comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
-                            comp.aarch64.make_exec();
-                            comp.flush_cpu_instruction_cache();
-                            let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
-
-                            let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
-                            let indirect_fns = comp.aarch64.get_dispatch();
-                            unsafe {
-                                asm!(
-                                "mov x21, {fns}",
-                                fns = in(reg) indirect_fns,
-                                // I'm hoping this is how I declare that I intend to clobber the register.
-                                // https://doc.rust-lang.org/reference/inline-assembly.html
-                                // "[...] the contents of the register to be discarded at the end of the asm code"
-                                // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
-                                out("x21") _
-                                );
-                            }
-                            code(0);
-
-                            let end = timestamp();
-                            let seconds = end - start;
-                            outln!(Perf, "===============");
-                            outln!(Perf, "Finished running main() in {seconds:.5} seconds.");
-                        }
-                    }
-                }
-            }
-        }
-    } // TODO: this is dereanged. put it in a function so you can just use ? to call log_err
-
-    outln!(Perf, "===============");
-    log_dbg(&comp, save);
-    if leak {
-        let _ = ManuallyDrop::new(comp);
-        let _ = ManuallyDrop::new(program);
-    }
-
-    let end = MEM.get();
-    println!("Used {} KB of memory.", (end as usize - beg as usize) / 1000);
-
-    true
 }
 
 pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {

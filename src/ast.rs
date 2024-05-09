@@ -708,6 +708,20 @@ pub struct Func<'p> {
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub asm_done: bool,
     pub aarch64_stack_bytes: Option<u16>,
+    pub cc: Option<CallConv>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq)]
+pub enum CallConv {
+    Arg8Ret1, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
+    Arg8Ret1Ct,
+    // #flat_call
+    Flat,
+    // #one_ret_pic.
+    OneRetPic,
+    /// The front end duplicates the function body ast at each callsite.
+    Inline,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -772,6 +786,17 @@ impl<'p> Func<'p> {
                 args: None,
             });
         }
+    }
+
+    pub fn set_cc(&mut self, cc: CallConv) -> Res<'static, ()> {
+        if cc == CallConv::Inline {
+            assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
+        }
+        match self.cc {
+            Some(old) => assert!(old == cc, "tried to change cc from {old:?} to {cc:?}"),
+            None => self.cc = Some(cc),
+        }
+        Ok(())
     }
 
     #[track_caller]
@@ -1516,6 +1541,7 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            cc: None,
             asm_done: false,
             annotations: vec![],
             name: Ident::null(),

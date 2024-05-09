@@ -2,13 +2,33 @@ use codemap::Span;
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo, VarType};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, ScopeId, Stmt, TargetArch, TypeId, TypeInfo, VarType};
 use crate::ast::{FatStmt, Var};
 use crate::compiler::{Compile, ExecTime, Res};
+use crate::lex::Lexer;
 use crate::logging::PoolLog;
+use crate::parse::Parser;
 use crate::pool::StringPool;
-use crate::{bc::*, ice, load_program};
+use crate::scope::ResolveScope;
+use crate::{bc::*, ice, make_toplevel, COMPILER_CTX_PTR};
 use crate::{err, unwrap};
+
+pub fn load_program<'p>(comp: &mut Compile<'_, 'p>, src: &str) -> Res<'p, FuncId> {
+    unsafe { COMPILER_CTX_PTR = comp as *const Compile as usize };
+    // TODO: this will get less dumb when I have first class modules.
+    let file = comp
+        .parsing
+        .codemap
+        .add_file("main_file".to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+    let user_span = file.span;
+    let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
+    let parsed = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool)?;
+
+    let mut global = make_toplevel(comp.pool, user_span, parsed);
+    ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
+    let f = comp.compile_top_level(global)?;
+    Ok(f)
+}
 
 pub fn bootstrap() -> (String, String) {
     let pool = Box::leak(Box::<StringPool>::default());

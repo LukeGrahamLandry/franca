@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::usize;
 
-use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{CallConv, Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, FnWip, Res};
 use crate::extend_options;
@@ -145,7 +145,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
         let body = func.body.as_ref().unwrap();
 
-        let is_flat_call = func.has_tag(Flag::Flat_Call);
+        let is_flat_call = func.cc.unwrap() == CallConv::Flat;
         debug_assert!(is_flat_call || ret_slots <= 1); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
         let return_block = result.push_block(ret_slots, ret_floats);
@@ -174,7 +174,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(self.locals.is_empty());
 
         if !body.ty.is_never() {
-            result.sub_height(ret_slots);
             result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
         }
         if func.has_tag(Flag::Log_Bc) {
@@ -201,11 +200,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
-        let force_flat = self.program[f].has_tag(Flag::Flat_Call);
+        let force_flat = self.program[f].cc.unwrap() == CallConv::Flat;
         let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
-        assert!(!func.has_tag(Flag::Inline));
+        assert!(
+            func.cc != Some(CallConv::Inline),
+            "tried to call inlined {}",
+            self.program.pool.get(self.program[f].name)
+        );
         let f_ty = self.program[f].unwrap_ty();
         if let Some(id) = flat_arg_loc {
             match result_location {
@@ -235,9 +238,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             result.push(Bc::LastUse { id });
         } else {
             result.push(Bc::CallDirect { f });
-            result.sub_height(self.slot_count(f_ty.arg));
             let slots = self.slot_count(f_ty.ret);
-            result.add_height(slots);
             match result_location {
                 PushStack => {}
                 ResAddr => result.push(Bc::StorePre { slots }),
@@ -353,10 +354,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         ty: f_ty,
                         comp_ctx: false, // TODO
                     });
-
-                    result.sub_height(self.slot_count(f_ty.arg) + 1); // for ptr
                     let slots = self.slot_count(f_ty.ret);
-                    result.add_height(slots);
 
                     match result_location {
                         PushStack => {}
@@ -508,9 +506,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let count = if let Some(types) = ty { types.len() } else { 1 };
 
                         let id = result.add_var(container_ty);
-                        let slots = self.slot_count(container_ty);
                         result.push(Bc::AddrVar { id });
-
                         self.compile_expr(result, arg, ResAddr)?;
 
                         result.push(Bc::AddrVar { id });
@@ -688,7 +684,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.compile_expr(result, cond_fn, PushStack)?;
         let end_cond_block = result.current_block;
 
-        let slots = self.slot_count(body_fn.ty);
         let start_body_block = result.push_block(0, 0);
         self.compile_expr(result, body_fn, Discard)?;
         let end_body_block = result.current_block;
@@ -948,37 +943,7 @@ impl<'p> FnBody<'p> {
     }
 
     #[track_caller]
-    fn add_height(&mut self, delta: u16) {
-        // self.blocks[self.current_block.0 as usize].height += delta;
-    }
-
-    #[track_caller]
-    fn sub_height(&mut self, delta: u16) {
-        // self.blocks[self.current_block.0 as usize].height -= delta;
-    }
-
-    #[track_caller]
     fn push_to(&mut self, b: BbId, inst: Bc) {
         self.blocks[b.0 as usize].insts.push(inst);
-        // match inst {
-        //     Bc::Noop => {}
-        //     // these are handled manually
-        //     Bc::CallDirect { .. } | Bc::CallSplit { .. } | Bc::CallFnPtr { .. } | Bc::Ret => {}
-        //     Bc::Load { slots } => self.blocks[b.0 as usize].height += slots - 1,
-        //     Bc::Store { slots } => self.blocks[b.0 as usize].height -= slots + 1,
-        //     Bc::Goto { slots, .. } => {
-        //         self.blocks[b.0 as usize].height -= slots;
-        //         // debug_assert_eq!(self.blocks[b.0 as usize].height, 0);
-        //     }
-        //     Bc::JumpIf { slots, .. } => {
-        //         self.blocks[b.0 as usize].height -= slots + 1;
-        //         // debug_assert_eq!(self.blocks[b.0 as usize].height, 0);
-        //     }
-        //     Bc::Pop { slots } => self.blocks[b.0 as usize].height -= slots,
-        //     Bc::IncPtr { .. } | Bc::TagCheck { .. } | Bc::Unreachable | Bc::NoCompile | Bc::LastUse { .. } => {}
-        //     Bc::AddrFnResult | Bc::PushConstant { .. } | Bc::GetNativeFnPtr(_) | Bc::AddrVar { .. } | Bc::Pick { .. } => {
-        //         self.blocks[b.0 as usize].height += 1
-        //     }
-        // }
     }
 }

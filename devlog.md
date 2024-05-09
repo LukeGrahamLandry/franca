@@ -1,11 +1,11 @@
-Start: 80.8MB
-
-- using Vec::with_capacity in a few places saved ~9MB
+- using Vec::with_capacity in a few places
 - fixed do_flat_call_values where I was doing Vec(i64) -> Vec(Value) -> Vec(i64)
 - emit asm right after bc always so don't have to do callee loop in asm.
   then it turns out you never look at any function's FnBody other than the one you're currently doing, so there's no point in saving them all.
   very nice to replace every `self.compile.ready[self.f].as_ref().unwrap()` with `self.body`.
   only .7MB but feels less complicated now.
+
+  13.0 kloc -> 12.86 kloc
 
 ## syntax tweaks (May 8)
 

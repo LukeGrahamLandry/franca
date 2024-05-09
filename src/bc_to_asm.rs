@@ -4,7 +4,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
 
-use crate::ast::{Flag, FnType, Func, FuncId, TypeId, TypeInfo};
+use crate::ast::{CallConv, Flag, FnType, Func, FuncId, TypeId, TypeInfo};
 use crate::bc::{BbId, Bc, FloatMask, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
@@ -148,7 +148,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     self.compile.aarch64.push(op);
                 }
                 self.compile.aarch64.save_current(f);
-                if func.has_tag(Flag::One_Ret_Pic) {
+                if func.cc.unwrap() == CallConv::OneRetPic {
                     self.compile.program[f].aarch64_stack_bytes = Some(0);
                 }
             } else {
@@ -208,24 +208,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let a = self.compile.program[f].finished_arg.unwrap();
         let r = self.compile.program[f].finished_ret.unwrap();
-        // TODO: i could change the ret_limit if i knew only called at runtime because internal abi doesn't have to match c but should just add explicit cc stuff less hackily -- May 2
-        if self.compile.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.sizes.slot_count(self.compile.program, r) > 1 {
-            debug_assert!(!self.compile.program[f].has_tag(Flag::C_Call),);
-            debug_assert!(self.compile.program[f].has_tag(Flag::Flat_Call),);
-            debug_assert!(self.compile.program[f].has_tag(Flag::Ct),);
-            debug_assert!(self.compile.program[f].comptime_addr.is_none());
-            // my cc can do 8 returns in the arg regs but my ffi with compiler can't
-            // TODO: my c_Call can;t handle agragates
-        }
+
         let ff = &self.compile.program[f];
-        let is_flat_call = ff.has_tag(Flag::Flat_Call);
+        let is_flat_call = ff.cc == Some(CallConv::Flat);
         debugln!(
             "=== {f:?} {} flat:{is_flat_call} ===",
             self.compile.pool.get(self.compile.program[f].name)
         );
         debugln!("{}", self.compile.program[f].body.as_ref().unwrap().log(self.compile.pool));
-        let is_c_call = ff.has_tag(Flag::C_Call);
-        let has_ct = ff.has_tag(Flag::Ct);
+
         let arg_ty = ff.finished_arg.unwrap();
         let ret_ty = ff.finished_ret.unwrap();
         let arg_size = self.compile.slot_count(arg_ty);
@@ -255,49 +246,49 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.flat_result = None;
 
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
-        if is_flat_call {
-            // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
-            assert!(!is_c_call);
+        let cc = unwrap!(self.compile.program[func.func].cc, "ICE: missing calling convention");
+        match cc {
+            CallConv::Flat => {
+                // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
+                // Runtime check that caller agrees on type sizes.
+                // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
+                assert!(arg_size < (1 << 12));
+                assert!(ret_size < (1 << 12));
+                self.compile.aarch64.push(cmp_im(X64, x2, arg_size as i64, 0));
+                self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                self.compile.aarch64.push(brk(0xbad0));
+                self.compile.aarch64.push(cmp_im(X64, x4, ret_size as i64, 0));
+                self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                self.compile.aarch64.push(brk(0xbad0));
 
-            // Runtime check that caller agrees on type sizes.
-            // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
-            assert!(arg_size < (1 << 12));
-            assert!(ret_size < (1 << 12));
-            self.compile.aarch64.push(cmp_im(X64, x2, arg_size as i64, 0));
-            self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
-            self.compile.aarch64.push(brk(0xbad0));
-            self.compile.aarch64.push(cmp_im(X64, x4, ret_size as i64, 0));
-            self.compile.aarch64.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
-            self.compile.aarch64.push(brk(0xbad0));
+                // Save the result pointer.
+                self.flat_result = Some(self.next_slot);
+                self.store_u64(x3, sp, self.next_slot.0);
+                self.next_slot.0 += 8;
 
-            // Save the result pointer.
-            self.flat_result = Some(self.next_slot);
-            self.store_u64(x3, sp, self.next_slot.0);
-            self.next_slot.0 += 8;
-
-            // Copy arguments into their stack slots.
-            // This is the same as the load instruction. We have a pointer and we want to splat it out onto the virtual stack.
-            // TODO: better would be allowing storing deref offsets on the stack so loads could be suspended. -- May 1
-            self.reset_free_reg();
-            self.state.free_reg.retain(|r| *r != x1);
-            self.state.stack.push(Val::Increment { reg: x1, offset_bytes: 0 });
-            // TODO: this is really dumb. it should just refer to them in mmoery if the arg is big because rn it will spill onto its own stack anyway.
-            self.emit_load(arg_size);
-        } else {
-            assert!(arg_size <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
-            assert!(!has_ct, "compiler context is implicitly passed as first argument for #ct builtins.");
-            self.compile.program[func.func].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
-
-            let floats = self.compile.program.float_mask_one(arg_ty);
-            self.ccall_reg_to_stack(arg_size, floats);
-
-            let float_count = floats.count_ones();
-            let int_count = arg_size as u32 - float_count;
-
-            // Any registers not containing args can be used.
-            for i in int_count..8 {
-                self.state.free_reg.push(i as i64);
+                // Copy arguments into their stack slots.
+                // This is the same as the load instruction. We have a pointer and we want to splat it out onto the virtual stack.
+                // TODO: better would be allowing storing deref offsets on the stack so loads could be suspended. -- May 1
+                self.reset_free_reg();
+                self.state.free_reg.retain(|r| *r != x1);
+                self.state.stack.push(Val::Increment { reg: x1, offset_bytes: 0 });
+                // TODO: this is really dumb. it should just refer to them in mmoery if the arg is big because rn it will spill onto its own stack anyway.
+                self.emit_load(arg_size);
             }
+            CallConv::Arg8Ret1 => {
+                debug_assert!(arg_size <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
+                let floats = self.compile.program.float_mask_one(arg_ty);
+                self.ccall_reg_to_stack(arg_size, floats);
+
+                let float_count = floats.count_ones();
+                let int_count = arg_size as u32 - float_count;
+
+                // Any registers not containing args can be used.
+                for i in int_count..8 {
+                    self.state.free_reg.push(i as i64);
+                }
+            }
+            CallConv::Inline | CallConv::OneRetPic | CallConv::Arg8Ret1Ct => unreachable!("unsupported cc {cc:?}"),
         }
 
         debugln!("entry: ({:?})", self.state.stack);
@@ -474,20 +465,21 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::Ret => {
                 let ff = &self.compile.program[self.f];
-                let is_flat_call = ff.has_tag(Flag::Flat_Call);
-                let is_c_call = ff.has_tag(Flag::C_Call);
-                let has_ct = ff.has_tag(Flag::Ct);
-                let arg_ty = ff.finished_arg.unwrap();
+                let cc = ff.cc.unwrap();
                 let ret_ty = ff.finished_ret.unwrap();
-                let arg_size = self.compile.slot_count(arg_ty);
+                let arg_size = self.compile.slot_count(ff.finished_arg.unwrap());
                 let ret_size = self.compile.slot_count(ret_ty);
-                if is_flat_call {
-                    // We now require the bytecode to deal with putting values in the result address.
-                    // so nothing to do here.
-                } else {
-                    // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
-                    let floats = self.compile.program.float_mask_one(ret_ty);
-                    self.stack_to_ccall_reg(ret_size, floats)
+                match cc {
+                    CallConv::Arg8Ret1 => {
+                        // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
+                        let floats = self.compile.program.float_mask_one(ret_ty);
+                        self.stack_to_ccall_reg(ret_size, floats)
+                    }
+                    CallConv::Flat => {
+                        // We now require the bytecode to deal with putting values in the result address.
+                        // so nothing to do here.
+                    }
+                    CallConv::Inline | CallConv::OneRetPic | CallConv::Arg8Ret1Ct => unreachable!("unsupported cc {cc:?}"),
                 }
                 // debug_assert!(self.state.stack.is_empty()); // todo
 
@@ -1067,12 +1059,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn call_direct_c(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.compile.program[f];
         debug_assert!(target.any_reg_template.is_none());
-        let target_c_call = target.has_tag(Flag::C_Call);
-        let target_flat_call = target.has_tag(Flag::Flat_Call);
-        assert!(target_c_call && !target_flat_call, "{} flatcall", self.compile.pool.get(target.name));
-        let comp_ctx = target.has_tag(Flag::Ct);
+        let comp_ctx = match self.compile.program[f].cc.unwrap() {
+            CallConv::Arg8Ret1Ct => true,
+            CallConv::Arg8Ret1 | CallConv::OneRetPic => false,
+            _ => err!("expected c_call",),
+        };
         let f_ty = target.unwrap_ty();
-        self.compile.program[f].add_tag(Flag::C_Call); // Make sure we don't try to emit as #flat_call later
         self.dyn_c_call(f_ty, comp_ctx, |s| s.branch_with_link(f));
         Ok(())
     }
@@ -1081,16 +1073,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     fn call_direct_flat(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.compile.program[f];
         debug_assert!(target.any_reg_template.is_none());
-        let target_c_call = target.has_tag(Flag::C_Call);
-        let target_flat_call = target.has_tag(Flag::Flat_Call);
-        let comp_ctx = target.has_tag(Flag::Ct);
+        debug_assert_eq!(target.cc, Some(CallConv::Flat));
         let f_ty = target.unwrap_ty();
-        assert!(!target_c_call && target_flat_call);
 
         debugln!("flat_call");
         // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
-        assert!(comp_ctx, "Flat call is only supported for calling into the compiler");
-        assert!(!target_c_call, "multiple calling conventions doesn't make sense");
 
         let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v.as_ptr() as u64));
 
@@ -1123,7 +1110,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         if Self::DO_BASIC_ASM_INLINE {
             // TODO: save result on the function so dont have to recheck every time?
             if let Some(code) = &self.compile.program[f].jitted_code {
-                if self.compile.program[f].has_tag(Flag::One_Ret_Pic) {
+                if self.compile.program[f].cc == Some(CallConv::OneRetPic) {
                     // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
                     if code.len() == 2 && code[0] as i64 == ret(()) && code[1] as i64 == ret(()) {
                         return;

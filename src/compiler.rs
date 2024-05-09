@@ -15,8 +15,8 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, OverloadSetId, Pattern, ScopeId, TargetArch, Var,
-    VarType, WalkAst,
+    garbage_loc, Annotation, Binding, CallConv, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, OverloadSetId, Pattern, ScopeId, TargetArch,
+    Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -218,18 +218,50 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(f)
     }
 
-    fn update_cc(&mut self, f: FuncId) {
-        let a = self.program[f].finished_arg.unwrap();
-        let r = self.program[f].finished_ret.unwrap();
-        if self.program[f].comptime_addr.is_none() && (self.sizes.slot_count(self.program, a) >= 7 || self.sizes.slot_count(self.program, r) > 1) {
-            debug_assert!(!self.program[f].has_tag(Flag::C_Call),);
-            // my cc can do 8 returns in the arg regs but my ffi with compiler can't
-            // TODO: my c_Call can;t handle agragates
-            self.program[f].add_tag(Flag::Flat_Call);
-            self.program[f].add_tag(Flag::Ct);
-        } else if !self.program[f].has_tag(Flag::Flat_Call) {
-            self.program[f].add_tag(Flag::C_Call);
+    // goal is to unify all the places you have to check the stupid tags.
+    // this is safe to call even if you don't fully know the types yet, and you probably have to before trying to call it to check if it needs to be inlined.
+    fn update_cc(&mut self, f: FuncId) -> Res<'p, ()> {
+        if self.program[f].has_tag(Flag::Inline) {
+            self.program[f].set_cc(CallConv::Inline)?;
         }
+        if self.program[f].has_tag(Flag::One_Ret_Pic) {
+            self.program[f].set_cc(CallConv::OneRetPic)?;
+        }
+        if self.program[f].cc == Some(CallConv::Inline) {
+            // TODO: err on other cc tags
+            // skip cause we dont care about big arg checks.
+            return Ok(());
+        }
+
+        if let Some(ty) = self.program[f].finished_ty() {
+            let is_big = self.sizes.slot_count(self.program, ty.arg) >= 7 || self.sizes.slot_count(self.program, ty.ret) > 1;
+            if self.program[f].has_tag(Flag::Flat_Call) || is_big {
+                // my cc can do 8 returns in the arg regs but my ffi with compiler can't
+                // TODO: my c_Call can;t handle agragates
+                self.program[f].set_cc(CallConv::Flat)?;
+                self.program[f].add_tag(Flag::Ct);
+            } else if self.program[f].has_tag(Flag::Ct) {
+                // currently I redundantly add it to #macro but that's always flat_call anyway
+                // assert!(
+                //     self.program[f].comptime_addr.is_some(),
+                //     "compiler context is implicitly passed as first argument for #ct builtins, dont need to put it on your own functions. TODO: inline asm could allow i guess?"
+                // );
+                self.program[f].set_cc(CallConv::Arg8Ret1Ct)?;
+            }
+            if self.program[f].has_tag(Flag::C_Call) {
+                if self.program[f].has_tag(Flag::Ct) {
+                    self.program[f].set_cc(CallConv::Arg8Ret1Ct)?;
+                } else {
+                    self.program[f].set_cc(CallConv::Arg8Ret1)?;
+                }
+            }
+
+            if self.program[f].cc.is_none() {
+                self.program[f].set_cc(CallConv::Arg8Ret1)?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
@@ -254,8 +286,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     i += 1;
                 }
 
-                let body = emit_bc(self, f)?;
-                emit_aarch64(self, f, when, &body)?;
+                if self.program[f].cc.unwrap() != CallConv::Inline {
+                    let body = emit_bc(self, f)?;
+                    emit_aarch64(self, f, when, &body)?;
+                }
             } else {
                 // TODO
                 // result = self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime);
@@ -291,9 +325,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr()
                 };
 
-                let comp_ctx = self.program[f].has_tag(Flag::Ct);
-                let c_call = self.program[f].has_tag(Flag::C_Call);
-                let flat_call = self.program[f].has_tag(Flag::Flat_Call);
+                let cc = self.program[f].cc.unwrap();
+                let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
+                let flat_call = cc == CallConv::Flat;
 
                 // symptom if you forget: bus error
                 self.aarch64.make_exec();
@@ -302,13 +336,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 debugln!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
                 // TODO: not setting x21 !!! -- Apr 30
                 if flat_call {
-                    assert!(comp_ctx && !c_call);
                     do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
                 } else if c_call {
                     assert!(!flat_call);
                     let ints = arg.vec();
                     debugln!("IN: {ints:?}");
-                    let r = ffi::c::call(self, addr as usize, ty, ints, comp_ctx)?;
+                    let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
                     debugln!("OUT: {r}");
                     let mut out = vec![];
                     values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
@@ -348,9 +381,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
 
         let ty = self.program[f].unwrap_ty();
-        let comp_ctx = self.program[f].has_tag(Flag::Ct);
-        let c_call = self.program[f].has_tag(Flag::C_Call);
-        let flat_call = self.program[f].has_tag(Flag::Flat_Call);
+        let cc = self.program[f].cc.unwrap();
+        let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct);
+        let flat_call = cc == CallConv::Flat;
 
         let arg_ty = Arg::get_type(self.program);
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE")?;
@@ -361,14 +394,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.aarch64.make_exec();
         self.flush_cpu_instruction_cache();
         let res = if flat_call {
-            assert!(comp_ctx && !c_call);
             Ok(do_flat_call(self, unsafe { transmute(addr) }, arg))
         } else if c_call {
-            assert!(!flat_call);
             assert!(addr as usize % 4 == 0);
             let arg = arg.serialize_to_ints_one();
             // TODO: not setting x21 !!!
-            let r = ffi::c::call(self, addr as usize, ty, arg, comp_ctx)?;
+            let r = ffi::c::call(self, addr as usize, ty, arg, cc == CallConv::Arg8Ret1Ct)?;
             let r = Ret::deserialize_from_ints(&mut [r].into_iter());
             Ok(unwrap!(r, ""))
         } else {
@@ -473,7 +504,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.pop_state(state);
         let after = self.debug_trace.len();
         debug_assert_eq!(before, after);
-        self.update_cc(f);
+        self.update_cc(f)?;
 
         // TODO: error safety ^
         self.currently_compiling.retain(|check| *check != f);
@@ -561,7 +592,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program[f];
         // TODO: some huristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
-        let force_inline = func.has_tag(Flag::Inline);
+        let force_inline = func.cc == Some(CallConv::Inline);
         assert!(func.capture_vars.is_empty());
         assert!(!force_inline);
         assert!(!func.any_const_args());
@@ -678,8 +709,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             // :ChainedCaptures
             // TODO: HACK: captures aren't tracked properly.
-            self.program[o_f].add_tag(Flag::Inline); // just this is enough to fix chained_captures
-            self.program[*arg_func].add_tag(Flag::Inline); // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
+            self.program[o_f].set_cc(CallConv::Inline)?; // just this is enough to fix chained_captures
+            self.program[*arg_func].set_cc(CallConv::Inline)?; // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
         }
         self.save_const_values(arg_name, arg_value, arg_ty)?;
         self.program[o_f].arg.remove_named(arg_name);
@@ -970,8 +1001,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let any_reg_template = func.has_tag(Flag::Any_Reg);
         if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
-            func.add_tag(Flag::Ct);
-            func.add_tag(Flag::Flat_Call);
+            func.set_cc(CallConv::Flat)?;
         }
 
         if for_bootstrap {
@@ -1379,23 +1409,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 assert!(!self.program[id].any_const_args());
                                 // TODO: for now you just need to not make a mistake lol
                                 //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
-                                // TODO: calling convention in function type so you don't have to keep remembering to check its not both flat_call and c_call.
-                                // self.program[id].add_tag(Flag::C_Call);
-                                // assert!(!self.program[id].has_tag(Flag::Flat_Call), "TODO: cc in ptr ty");
-                                // assert!(!self.program[id].has_tag(Flag::Ct), "TODO: cc in ptr ty");
                                 self.add_callee(result, id, ExecTime::Both);
                                 self.compile(id, result.when)?;
                                 // The backend still needs to do something with this, so just leave it
                                 let fn_ty = self.program.func_type(id);
                                 let ty = self.program.fn_ty(fn_ty).unwrap();
-                                let ty = self.program.intern_type(TypeInfo::FnPtr(ty));
+                                let ty = self.program.intern_type(TypeInfo::FnPtr(ty)); // TODO: callconv as part of type
                                 arg.set(Value::GetFn(id).into(), fn_ty);
                                 expr.ty = ty;
                                 ty
                             }
                             Values::One(Value::GetNativeFnPtr(_)) => {
                                 err!("redundant use of !fn_ptr",)
-                            } // err!("redundant use of !fn_ptr",),
+                            }
                             _ => err!("!fn_ptr expected const fn not {fn_val:?}",),
                         }
                     }
@@ -2201,13 +2227,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         fake_func.finished_ret = Some(ret_ty);
         fake_func.scope = Some(ScopeId::from_index(0));
         self.anon_fn_counter += 1;
-        if self.slot_count(ret_ty) > 1 && self.program.comptime_arch == TargetArch::Aarch64 {
-            // println!("imm_eval as flat_call for ret {}", self.program.log_type(ret_ty));
-            // TODO: my c_call can't handle aggragate returns
-            fake_func.add_tag(Flag::Flat_Call);
-            fake_func.add_tag(Flag::Ct); // not really needed but flat_call always does
-        }
         let func_id = self.program.add_func(fake_func);
+        self.update_cc(func_id)?;
         logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
         self.compile(func_id, ExecTime::Comptime)?;
         Ok(func_id)
@@ -2339,7 +2360,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let branch_body = branch_body.single()?;
                     let branch_arg = self.infer_arg(branch_body)?;
                     self.type_check_arg(branch_arg, unit, sig)?;
-                    self.program[branch_body].add_tag(Flag::Inline);
+                    self.program[branch_body].set_cc(CallConv::Inline)?; // hack
                     self.emit_call_on_unit(result, branch_body, &mut parts[cond_index], requested)?;
                     assert!(self.program[branch_body].finished_ret.is_some());
                     // Now we fully dont emit the branch
@@ -2355,7 +2376,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let (true_ty, expect_fn) = if let Some(if_true) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, requested)? {
                 let if_true = if_true.single()?;
-                self.program[if_true].add_tag(Flag::Inline);
+                self.program[if_true].set_cc(CallConv::Inline)?; // hack
                 let true_arg = self.infer_arg(if_true)?;
                 self.type_check_arg(true_arg, unit, sig)?;
                 (self.emit_call_on_unit(result, if_true, &mut parts[1], requested)?, true)
@@ -2367,7 +2388,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             if expect_fn {
                 if let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? {
                     let if_false = if_false.single()?;
-                    self.program[if_false].add_tag(Flag::Inline);
+                    self.program[if_false].set_cc(CallConv::Inline)?; // hack
                     let false_arg = self.infer_arg(if_false)?;
                     self.type_check_arg(false_arg, unit, sig)?;
                     let false_ty = self.emit_call_on_unit(result, if_false, &mut parts[2], requested)?;
@@ -2398,7 +2419,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Expr::Tuple(parts) = while_macro_arg.deref_mut() {
             if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
                 let cond_fn = cond_fn.single()?;
-                self.program[cond_fn].add_tag(Flag::Inline);
+                self.program[cond_fn].set_cc(CallConv::Inline)?; // hack
                 let cond_arg = self.infer_arg(cond_fn)?;
                 self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
                 let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0], None)?;
@@ -2409,7 +2430,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             if let Some(body_fn) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, Some(TypeId::unit()))? {
                 let body_fn = body_fn.single()?;
-                self.program[body_fn].add_tag(Flag::Inline);
+                self.program[body_fn].set_cc(CallConv::Inline)?; // hack
                 let body_arg = self.infer_arg(body_fn)?;
                 self.type_check_arg(body_arg, TypeId::unit(), sig)?;
                 let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1], None)?;
@@ -2686,9 +2707,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             fid = self.curry_const_args(fid, f_expr, arg_expr)?;
         }
 
+        self.update_cc(fid)?; // kinda hack to check if inlined
         let func = &self.program[fid];
         // TODO: some heuristic based on how many times called and how big the body is.
-        let force_inline = func.has_tag(Flag::Inline);
+        let force_inline = func.cc == Some(CallConv::Inline);
         let deny_inline = func.has_tag(Flag::NoInline);
         assert!(!(force_inline && deny_inline), "{fid:?} is both @inline and @noinline");
         let will_inline = force_inline || !func.capture_vars.is_empty();
@@ -2851,7 +2873,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         self.ensure_resolved_body(f)?;
         assert!(
-            self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::Flat_Call),
+            self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
             "inline asm msut specify calling convention"
         );
 
@@ -3103,7 +3125,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             !self.program[ct].has_tag(Flag::Comptime) && !self.program[rt].has_tag(Flag::Comptime),
             "@comptime fn must support all architectures"
         );
-        assert!(!self.program[ct].has_tag(Flag::Inline) && !self.program[rt].has_tag(Flag::Inline));
+        assert!(self.program[ct].cc != Some(CallConv::Inline) && self.program[rt].cc != Some(CallConv::Inline));
 
         let ct_consts: Vec<_> = self.program[ct].arg.bindings.iter().map(|b| b.kind == VarType::Const).collect();
         let rt_consts: Vec<_> = self.program[rt].arg.bindings.iter().map(|b| b.kind == VarType::Const).collect();

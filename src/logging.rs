@@ -79,7 +79,6 @@ macro_rules! ice {
         $crate::err!($crate::compiler::CErr::Fatal(msg))
     }};
 }
-use codemap::Span;
 pub use ice;
 
 // TODO: compile errors should include the line number of the most recent ast node.

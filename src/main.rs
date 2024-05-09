@@ -14,7 +14,6 @@ use franca::{
     make_toplevel,
     parse::Parser,
     pool::StringPool,
-    run_main,
     scope::ResolveScope,
     timestamp, MEM, MMAP_ARENA_START, STACK_START,
 };
@@ -107,6 +106,7 @@ fn main() {
             src += &a;
         }
 
+        let start = timestamp();
         let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
         let mut comp = Compile::new(pool, &mut program);
 
@@ -122,7 +122,14 @@ fn main() {
 
         if comp.tests.is_empty() {
             let f = comp.program.find_unique_func(comp.pool.intern("main")).expect("fn main");
-            println!("{}();", comp.program.pool.get(comp.program[f].name));
+            let result = comp.compile(f, ExecTime::Runtime);
+            if let Err(e) = result {
+                log_err(&comp, *e);
+                exit(1);
+            }
+            let end = timestamp();
+            let seconds = end - start;
+            println!("Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds; main();",);
             run_one(&mut comp, f);
         }
 
