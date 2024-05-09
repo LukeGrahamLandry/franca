@@ -706,6 +706,8 @@ pub struct Func<'p> {
     pub evil_uninit: bool,
     pub allow_rt_capture: bool,
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
+    pub asm_done: bool,
+    pub aarch64_stack_bytes: Option<u16>,
 }
 
 // TODO: use this instead of having a billion fields.
@@ -1514,6 +1516,7 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            asm_done: false,
             annotations: vec![],
             name: Ident::null(),
             var_name: None,
@@ -1545,6 +1548,7 @@ impl<'p> Default for Func<'p> {
             why_resolved_body: None,
             args_block: None,
             high_jitted_callee: 0,
+            aarch64_stack_bytes: None,
         }
     }
 }

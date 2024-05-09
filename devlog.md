@@ -1,3 +1,12 @@
+Start: 80.8MB
+
+- using Vec::with_capacity in a few places saved ~9MB
+- fixed do_flat_call_values where I was doing Vec(i64) -> Vec(Value) -> Vec(i64)
+- emit asm right after bc always so don't have to do callee loop in asm.
+  then it turns out you never look at any function's FnBody other than the one you're currently doing, so there's no point in saving them all.
+  very nice to replace every `self.compile.ready[self.f].as_ref().unwrap()` with `self.body`.
+  only .7MB but feels less complicated now.
+
 ## syntax tweaks (May 8)
 
 - Made '=>' instead of '=' in function declaration mean capturing.
@@ -22,6 +31,11 @@ Fix remaning tests:
   before i just figured it out in asm based on sizes. but now i need to change stuff in emit_bc based on it too, feels cleaner to decide in one place.
   inline asm now needs you to say #c_call.
 - now only mmap is failing.
+
+Did default values for struct fields.
+Involved some hacky threading result around but really it shouldn't need the result since that just holds var types and default values are always constexpr.
+Vars know thier scope anyway, could just track types there too.
+But it feels a bit cringe to have every tiny thing know whats going on?
 
 ## early returns / rls bc again (May 7)
 

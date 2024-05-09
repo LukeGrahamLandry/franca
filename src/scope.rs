@@ -340,7 +340,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             Expr::Block { body, result, resolved, .. } => {
                 self.push_scope(None);
 
-                let mut new_body = vec![];
+                // TODO: this is dumb, most of the time you're not #include-ing something
+                let mut new_body = Vec::with_capacity(body.len());
                 let mut dirty = true;
                 while dirty {
                     dirty = false;

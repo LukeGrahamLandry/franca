@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{values_from_ints, Values};
+use crate::bc::{int_to_value, values_from_ints, Values};
 use crate::compiler::{bit_literal, Compile, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
@@ -145,7 +145,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 ];
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
-    compiler.ready.sizes.slot_count(compiler.program, ty) as i64 * 8
+    compiler.sizes.slot_count(compiler.program, ty) as i64 * 8
 }
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -417,7 +417,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
-    let ret_count = compile.ready.sizes.slot_count(compile.program, ret_type);
+    let ret_count = compile.sizes.slot_count(compile.program, ret_type);
     let mut arg = arg.vec();
     debugln!("IN: {arg:?}");
     let mut ret = vec![0i64; ret_count];
@@ -431,13 +431,12 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
         );
     }
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
-
     debugln!("OUT: {ret:?}");
-    let mut out = vec![];
-    values_from_ints(compile, ret_type, &mut ret.into_iter(), &mut out)?;
-    assert_eq!(out.len(), ret_count);
-    debugln!("OUT2: {out:?}");
-    Ok(out.into())
+    Ok(if ret_count == 1 {
+        Values::One(int_to_value(compile, ret_type, ret[0])?)
+    } else {
+        Values::Many(ret)
+    })
 }
 
 fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
@@ -542,7 +541,7 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
 
     match compile.immediate_eval_expr(expr, ty) {
         Ok(val) => {
-            let slots = compile.ready.sizes.slot_count(compile.program, ty);
+            let slots = compile.sizes.slot_count(compile.program, ty);
             let val = val.vec();
             debug_assert_eq!(val.len(), slots);
             let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut i64, val.len()) };
@@ -607,10 +606,10 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
 }
 
 fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
-    let slots = compile.ready.sizes.slot_count(compile.program, ty);
+    let slots = compile.sizes.slot_count(compile.program, ty);
     let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
     let mut out = vec![];
-    values_from_ints(compile, ty, &mut value.iter().copied(), &mut out).unwrap();
+    values_from_ints(compile, ty, &mut value.iter().copied().peekable(), &mut out).unwrap();
     let value: Values = out.into();
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
     FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)

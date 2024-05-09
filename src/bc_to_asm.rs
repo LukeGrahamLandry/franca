@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{Flag, FnType, Func, FuncId, TypeId, TypeInfo};
-use crate::bc::{BbId, Bc, BcReady, FloatMask, Value, Values};
+use crate::bc::{BbId, Bc, FloatMask, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
@@ -67,11 +67,13 @@ const sp: i64 = 31;
 // const W32: i64 = 0b0;
 const X64: i64 = 0b1;
 
-pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime, body: &FnBody<'p>) -> Res<'p, ()> {
+    debug_assert!(!compile.program[f].asm_done, "ICE: tried to double compile?");
     compile.aarch64.reserve(compile.program.funcs.len());
-    let mut a = BcToAsm::new(compile, when);
+    let mut a = BcToAsm::new(compile, when, body);
     a.compile(f)?;
     assert!(a.wip.is_empty());
+    compile.program[f].asm_done = true;
     Ok(())
 }
 
@@ -91,6 +93,7 @@ struct BcToAsm<'z, 'p, 'a> {
     clock: u16,
     markers: Vec<(String, usize)>,
     log_asm_bc: bool,
+    body: &'z FnBody<'p>,
 }
 
 #[derive(Default, Clone)]
@@ -101,7 +104,7 @@ struct BlockState {
 }
 
 impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
-    fn new(compile: &'z mut Compile<'a, 'p>, when: ExecTime) -> Self {
+    fn new(compile: &'z mut Compile<'a, 'p>, when: ExecTime, body: &'z FnBody<'p>) -> Self {
         Self {
             compile,
             vars: Default::default(),
@@ -118,6 +121,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             clock: 0,
             markers: vec![],
             log_asm_bc: false,
+            body,
         }
     }
 
@@ -135,13 +139,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         } else if let Some(addr) = self.compile.program[f].comptime_addr {
             self.compile.aarch64.dispatch[f.as_index()] = addr as *const u8;
         } else {
-            let callees = self.compile.program[f].wip.as_ref().unwrap().callees.clone();
-            for c in callees {
-                if c.1 == self.when || c.1 == ExecTime::Both {
-                    self.compile(c.0)?;
-                }
-            }
-
             let func = &self.compile.program[f];
             if let Some(insts) = func.jitted_code.as_ref() {
                 // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
@@ -152,13 +149,13 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 self.compile.aarch64.save_current(f);
                 if func.has_tag(Flag::One_Ret_Pic) {
-                    self.compile.ready[f].as_mut().unwrap().aarch64_stack_bytes = Some(0);
+                    self.compile.program[f].aarch64_stack_bytes = Some(0);
                 }
             } else {
                 if TRACE_ASM {
                     println!();
                     println!("=== Bytecode for {f:?}: {} ===", self.compile.program.pool.get(func.name));
-                    for (b, insts) in self.compile.ready[f].as_ref().unwrap().blocks.iter().enumerate() {
+                    for (b, insts) in self.body.blocks.iter().enumerate() {
                         println!("[b{b}({})]: ({} incoming)", insts.arg_slots, insts.incoming_jumps);
                         for (i, op) in insts.insts.iter().enumerate() {
                             println!("    {i}. {op:?}");
@@ -212,7 +209,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let a = self.compile.program[f].finished_arg.unwrap();
         let r = self.compile.program[f].finished_ret.unwrap();
         // TODO: i could change the ret_limit if i knew only called at runtime because internal abi doesn't have to match c but should just add explicit cc stuff less hackily -- May 2
-        if self.compile.ready.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.ready.sizes.slot_count(self.compile.program, r) > 1 {
+        if self.compile.sizes.slot_count(self.compile.program, a) >= 7 || self.compile.sizes.slot_count(self.compile.program, r) > 1 {
             debug_assert!(!self.compile.program[f].has_tag(Flag::C_Call),);
             debug_assert!(self.compile.program[f].has_tag(Flag::Flat_Call),);
             debug_assert!(self.compile.program[f].has_tag(Flag::Ct),);
@@ -233,7 +230,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         let ret_ty = ff.finished_ret.unwrap();
         let arg_size = self.compile.slot_count(arg_ty);
         let ret_size = self.compile.slot_count(ret_ty);
-        let func = self.compile.ready[f].as_ref().unwrap();
+        let func = self.body;
         self.f = f;
         self.next_slot = SpOffset(0);
         self.vars.clear();
@@ -245,7 +242,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.block_ips.clear();
         self.markers.clear();
         self.clock = 0;
-        let block_count = self.compile.ready[f].as_ref().unwrap().blocks.len();
+        let block_count = self.body.blocks.len();
         self.block_ips.extend(vec![None; block_count]);
         self.state = Default::default();
 
@@ -332,7 +329,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.compile.aarch64.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
             self.compile.aarch64.patch(thd, add_im(X64, sp, sp, 16, 0));
         }
-        self.compile.ready[f].as_mut().unwrap().aarch64_stack_bytes = Some(slots);
+        self.compile.program[f].aarch64_stack_bytes = Some(slots);
         Ok(())
     }
 
@@ -342,7 +339,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
         self.block_ips[b] = Some(self.compile.aarch64.next);
         let f = self.f;
-        let block = &self.compile.ready[f].as_ref().unwrap().blocks[b];
+        let block = &self.body.blocks[b];
 
         let slots = block.arg_slots;
         let mask = block.arg_float_mask;
@@ -359,7 +356,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.drop_reg(i as i64);
             }
         }
-        let func = self.compile.ready[f].as_ref().unwrap();
+        let func = self.body;
         let mut is_done = false;
         for i in 0..func.blocks[b].insts.len() {
             // TOOD: hack
@@ -367,7 +364,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 break;
             }
             // debug_assert!(!is_done);
-            let block = &self.compile.ready[f].as_ref().unwrap().blocks[b];
+            let block = &self.body.blocks[b];
             let inst = block.insts[i];
             let mask = block.arg_float_mask;
             is_done = self.emit_inst(b, inst, i)?;
@@ -401,7 +398,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 //       and puts something else in it. -- May 6
                 let slot = self.vars[id as usize]; // .take();
                 let slot = slot.unwrap();
-                let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
+                let ty = self.body.vars[id as usize];
                 let count = self.compile.slot_count(ty);
                 self.drop_slot(slot, count * 8);
             }
@@ -436,7 +433,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::JumpIf { true_ip, false_ip, slots } => {
                 let cond = self.pop_to_reg();
-                let mask = self.compile.ready[self.f].as_ref().unwrap().blocks[true_ip.0 as usize].arg_float_mask;
+                let mask = self.body.blocks[true_ip.0 as usize].arg_float_mask;
                 debug_assert_eq!(slots, 0); // self.stack_to_ccall_reg(slots, mask);
                 self.spill_abi_stompable();
                 self.compile.aarch64.push(brk(0));
@@ -456,7 +453,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 return Ok(true);
             }
             Bc::Goto { ip, slots } => {
-                let block = &self.compile.ready[self.f].as_ref().unwrap().blocks[ip.0 as usize];
+                let block = &self.body.blocks[ip.0 as usize];
                 debug_assert_eq!(slots, block.arg_slots);
                 if block.incoming_jumps == 1 {
                     debug_assert!(self.block_ips[ip.0 as usize].is_none());
@@ -512,7 +509,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         offset_bytes: slot.0,
                     });
                 } else {
-                    let ty = self.compile.ready[self.f].as_ref().unwrap().vars[id as usize];
+                    let ty = self.body.vars[id as usize];
                     let count = self.compile.slot_count(ty);
                     let slot = self.create_slots(count);
                     self.vars[id as usize] = Some(slot);
@@ -1221,11 +1218,6 @@ pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
         out.push(value.as_raw_int());
     }
     out
-}
-
-pub fn store<'a>(values: impl Iterator<Item = &'a Value>) -> *const u8 {
-    let mut out = store_to_ints(values);
-    out.into_raw_parts().0 as *const u8
 }
 
 impl Value {

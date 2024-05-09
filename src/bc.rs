@@ -12,7 +12,7 @@ use crate::{
     err,
     ffi::InterpSend,
 };
-use crate::{impl_index, unwrap, Map};
+use crate::{unwrap, Map};
 use codemap::Span;
 use interp_derive::InterpSend;
 
@@ -87,14 +87,6 @@ impl<'p> FnBody<'p> {
         self.vars.len() as u16 - 1
     }
 }
-
-#[derive(Clone, Default)]
-pub struct BcReady<'p> {
-    pub ready: Vec<Option<FnBody<'p>>>,
-    pub sizes: SizeCache,
-}
-
-impl_index!(BcReady<'p>, FuncId, Option<FnBody<'p>>, ready);
 
 #[derive(Default, Clone)]
 pub struct SizeCache {
@@ -261,49 +253,44 @@ pub fn values_from_ints_one(compile: &mut Compile, ty: TypeId, ints: Vec<i64>) -
     Ok(vals)
 }
 
+pub fn int_to_value(compile: &mut Compile, ty: TypeId, n: i64) -> Res<'static, Value> {
+    let ty = compile.program.raw_type(ty);
+    Ok(unwrap!(int_to_value_inner(&compile.program[ty], n), "too big for an int"))
+}
+
+pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
+    Some(match info {
+        // TODO: struct and tuple with one field?
+        TypeInfo::Scope | &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
+        TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
+        &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => unreachable!("should be raw type {ty:?}"),
+        TypeInfo::Unit => Value::Unit,
+        TypeInfo::F64 => Value::F64(n as u64), // TODO: high bit?
+        TypeInfo::Bool => Value::Bool(n != 0),
+        TypeInfo::Fn(_) => Value::GetFn(FuncId::from_raw(n)),
+        TypeInfo::Label(_) => Value::Label {
+            return_from: FuncId::from_raw(n),
+        },
+        TypeInfo::Type => Value::Type(TypeId::from_raw(n)),
+        TypeInfo::OverloadSet => Value::OverloadSet(OverloadSetId::from_raw(n)),
+        TypeInfo::FnPtr(_) => {
+            debug_assert!(n % 4 == 0);
+            Value::I64(n)
+        }
+        &TypeInfo::Ptr(_) => Value::Heap(n as *mut i64),
+        // TODO: remove any? its a boxed Value
+        TypeInfo::Int(_) | TypeInfo::VoidPtr | TypeInfo::Any => Value::I64(n),
+    })
+}
+
 pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
     let ty = compile.program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
     match &compile.program[ty] {
-        TypeInfo::Unknown | TypeInfo::Never => err!("bad type {}", compile.program.log_type(ty)),
-        TypeInfo::Unit => {
-            let _ = unwrap!(ints.next(), "");
-            out.push(Value::Unit);
-        }
-        TypeInfo::F64 => {
-            let n = unwrap!(ints.next(), "") as u64;
-            out.push(Value::F64(n));
-        }
-        TypeInfo::Int(_) => {
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::I64(n));
-        }
-        TypeInfo::Bool => {
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::Bool(n != 0));
-        }
-        TypeInfo::Fn(_) => {
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::GetFn(FuncId::from_raw(n)));
-        }
-        TypeInfo::Label(_) => {
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::Label {
-                return_from: FuncId::from_raw(n),
-            });
-        }
-        TypeInfo::Type => {
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::Type(TypeId::from_raw(n)));
-        }
         TypeInfo::Scope => {
             let a = unwrap!(ints.next(), "");
             let b = unwrap!(ints.next(), "");
             out.push(Value::I64(a));
             out.push(Value::I64(b));
-        }
-        TypeInfo::OverloadSet => {
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::OverloadSet(OverloadSetId::from_raw(n)));
         }
         &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
         TypeInfo::Tuple(types) => {
@@ -314,11 +301,11 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         }
         TypeInfo::Tagged { cases } => {
             let start = out.len();
-            let payload_size = compile.ready.sizes.slot_count(compile.program, ty) - 1;
+            let payload_size = compile.sizes.slot_count(compile.program, ty) - 1;
             let tag = unwrap!(ints.next(), "");
             out.push(Value::I64(tag));
             let ty = cases[tag as usize].1;
-            let value_size = compile.ready.sizes.slot_count(compile.program, ty);
+            let value_size = compile.sizes.slot_count(compile.program, ty);
             values_from_ints(compile, ty, ints, out)?;
 
             for _ in 0..payload_size - value_size {
@@ -334,25 +321,10 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
             let end = out.len();
             assert_eq!(end - start, payload_size + 1, "{out:?}");
         }
-        TypeInfo::FnPtr(_) => {
-            let ptr = unwrap!(ints.next(), "");
-            debug_assert!(ptr % 4 == 0);
-            out.push(Value::I64(ptr));
-        }
-        &TypeInfo::Ptr(_) => {
-            let addr = unwrap!(ints.next(), "") as usize as *mut i64;
-            out.push(Value::Heap(addr));
-        }
-        TypeInfo::VoidPtr => {
+        info => {
             let n = unwrap!(ints.next(), "");
-            out.push(Value::I64(n));
-        }
-
-        TypeInfo::Any => {
-            // The actual rust type is 'Value', which is serialized as a box ptr.
-            // We're loading it to values that will deserialized again by the InterpSend impl, so we don't dereference the pointer here.
-            let n = unwrap!(ints.next(), "");
-            out.push(Value::I64(n));
+            let v = unwrap!(int_to_value_inner(info, n), "");
+            out.push(v);
         }
     };
     Ok(())

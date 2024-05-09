@@ -4,7 +4,6 @@ use std::ops::Deref;
 
 use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, Name, Program, Stmt, TargetArch, TypeId, TypeInfo, VarType};
 use crate::ast::{FatStmt, Var};
-use crate::bc_to_asm::emit_aarch64;
 use crate::compiler::{Compile, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::pool::StringPool;
@@ -22,10 +21,6 @@ pub fn bootstrap() -> (String, String) {
     let bs = comp.save_bootstrap.clone();
     for f in &bs {
         comp.compile(*f, ExecTime::Runtime).unwrap();
-    }
-
-    for f in &bs {
-        emit_aarch64(&mut comp, *f, ExecTime::Both).unwrap();
     }
 
     let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.fr\n");

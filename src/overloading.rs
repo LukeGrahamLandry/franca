@@ -291,8 +291,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             let expected = &self.program[f].arg;
             assert_eq!(expected.bindings.len(), pattern.bindings.len());
-            let mut parts = vec![];
-            for name in expected.flatten_names() {
+            let names = expected.flatten_names();
+            let mut parts = Vec::with_capacity(names.len());
+            for name in names {
                 let index = unwrap!(
                     pattern.bindings.iter().position(|p| p.name() == Some(name)),
                     "missing named argument {name:?}"

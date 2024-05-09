@@ -5,7 +5,6 @@
 use codemap::Span;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::panic::Location;
 use std::usize;
 
 use crate::ast::{Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
@@ -18,13 +17,6 @@ use crate::{bc::*, Map};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
-#[derive(Debug, Clone)]
-pub struct DebugInfo<'p> {
-    pub internal_loc: Option<&'static Location<'static>>,
-    pub src_loc: Span,
-    pub p: PhantomData<&'p str>,
-}
-
 pub struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
     sizes: &'z mut SizeCache,
@@ -33,8 +25,10 @@ pub struct EmitBc<'z, 'p: 'z> {
     var_lookup: Map<Var<'p>, u16>,
 }
 
-pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ()> {
-    EmitBc::compile(compile.program, &mut compile.ready, f)
+pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, FnBody<'p>> {
+    let mut emit = EmitBc::new(compile.program, &mut compile.sizes);
+    let body = emit.compile_inner(f)?;
+    Ok(body)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,17 +40,6 @@ pub enum ResultLoc {
 use ResultLoc::*;
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    pub fn compile(program: &'z Program<'p>, interp: &'z mut BcReady<'p>, f: FuncId) -> Res<'p, ()> {
-        extend_options(&mut interp.ready, f.as_index());
-        if interp[f].is_some() {
-            return Ok(());
-        }
-        let mut emit = EmitBc::new(program, &mut interp.sizes);
-        let body = emit.compile_inner(f)?;
-        interp[f] = Some(body);
-        Ok(())
-    }
-
     fn new(program: &'z Program<'p>, sizes: &'z mut SizeCache) -> Self {
         Self {
             last_loc: None,

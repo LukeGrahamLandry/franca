@@ -209,7 +209,6 @@ macro_rules! logln {
 
 use crate::ast::{FatStmt, Pattern};
 use crate::bc::*;
-use crate::emit_bc::DebugInfo;
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
@@ -547,16 +546,6 @@ impl<'p> PoolLog<'p> for Func<'p> {
     }
 }
 
-impl<'p> PoolLog<'p> for DebugInfo<'p> {
-    fn log(&self, _: &StringPool<'p>) -> String {
-        if cfg!(feature = "trace_errors") {
-            format!("// {} ", self.internal_loc.unwrap())
-        } else {
-            String::new()
-        }
-    }
-}
-
 impl<'p> PoolLog<'p> for FnBody<'p> {
     fn log(&self, _: &StringPool<'p>) -> String {
         let mut f = String::new();
@@ -573,19 +562,6 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
         // }
         writeln!(f, "{}", self.why);
         f
-    }
-}
-
-impl Stmt<'_> {
-    pub fn get_loc(&self) -> Option<Span> {
-        match self {
-            Stmt::Noop => None,
-            Stmt::Eval(e) => Some(e.loc),
-            Stmt::DeclFunc(f) => f.body.as_ref().map(|e| e.loc),
-            Stmt::DeclVar { value, .. } => Some(value.loc),
-            Stmt::Set { place, .. } => Some(place.loc),
-            _ => None,
-        }
     }
 }
 

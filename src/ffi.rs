@@ -22,7 +22,7 @@ pub trait InterpSend<'p>: Sized {
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
     fn serialize_to_ints(self, values: &mut Vec<i64>);
     fn serialize_to_ints_one(self) -> Vec<i64> {
-        let mut values = vec![];
+        let mut values = Vec::with_capacity(Self::size());
         self.serialize_to_ints(&mut values);
         debug_assert_eq!(values.len(), Self::size());
         values
@@ -276,7 +276,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         let len = self.len();
-        let mut parts = vec![];
+        let mut parts = Vec::with_capacity(T::size() * len);
         for e in self {
             e.serialize_to_ints(&mut parts);
         }
@@ -295,7 +295,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, entries) };
         let mut values = s.iter().copied();
 
-        let mut res = vec![];
+        let mut res = Vec::with_capacity(len);
         for _ in 0..len {
             res.push(T::deserialize_from_ints(&mut values)?);
         }
@@ -642,7 +642,7 @@ pub mod c {
         }
 
         assert!(
-            program.ready.sizes.slot_count(program.program, f_ty.ret) <= 1,
+            program.sizes.slot_count(program.program, f_ty.ret) <= 1,
             "my c_call doesn't use correct struct calling convention yet"
         );
         let ret: i64 = unsafe { b.into_cif().call(ptr, &args) };

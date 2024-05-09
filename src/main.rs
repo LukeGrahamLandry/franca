@@ -3,7 +3,7 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
-    bc_to_asm::{emit_aarch64, TRACE_ASM},
+    bc_to_asm::TRACE_ASM,
     compiler::{Compile, ExecTime, Res},
     emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
@@ -23,6 +23,7 @@ use std::{
     env,
     fs::{self, File},
     io::{Read, Write},
+    mem,
     mem::transmute,
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
@@ -106,24 +107,33 @@ fn main() {
             src += &a;
         }
 
-        if !run_main(pool, src.clone(), Some(&name), true) {
-            let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
-            let mut comp = Compile::new(pool, &mut program);
+        let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+        let mut comp = Compile::new(pool, &mut program);
 
-            load_all_toplevel(&mut comp, &[(name, src)]).unwrap_or_else(|e| {
-                log_err(&comp, *e);
-                exit(1);
-            });
+        load_all_toplevel(&mut comp, &[(name, src)]).unwrap_or_else(|e| {
+            log_err(&comp, *e);
+            exit(1);
+        });
 
-            for f in comp.tests.clone() {
-                run_one(&mut comp, f);
-            }
+        for f in comp.tests.clone() {
+            println!("{}();", comp.program.pool.get(comp.program[f].name));
+            run_one(&mut comp, f);
+        }
+
+        if comp.tests.is_empty() {
+            let f = comp.program.find_unique_func(comp.pool.intern("main")).expect("fn main");
+            println!("{}();", comp.program.pool.get(comp.program[f].name));
+            run_one(&mut comp, f);
         }
 
         // println!("{:#?}", unsafe { &STATS });
     } else {
+        if !PathBuf::from("tests").exists() {
+            eprint!("Directory 'tests' does not exist in cwd");
+            exit(1);
+        }
         assert!(!TRACE_ASM, "TRACE_ASM is too slow to be reasonable on all tests");
-        run_tests_find_faliures();
+        run_tests_find_failures();
         check_broken();
     }
 }
@@ -135,7 +145,7 @@ fn main() {
 /// (unless they're like trying to use the write files or something, which like... don't do that then I guess).
 /// My way has higher overhead per test but it feels worth it.
 
-fn run_tests_find_faliures() {
+fn run_tests_find_failures() {
     // If we can run all the tests without crashing, cool, we're done.
     let (success, out, err) = fork_and_catch(run_tests_serial);
     if success {
@@ -144,7 +154,7 @@ fn run_tests_find_faliures() {
         return;
     }
 
-    println!("TESTS FAILED. Running seperately...");
+    println!("TESTS FAILED. Running separately...");
     println!("=================================");
     forked_swallow_passes();
 }
@@ -210,6 +220,9 @@ fn run_tests_serial() {
     );
     unset_colour();
 
+    mem::forget(comp);
+    mem::forget(program);
+
     // println!("{:#?}", unsafe { &STATS });
 }
 
@@ -230,8 +243,6 @@ fn forked_swallow_passes() {
     let mut failing: Vec<FuncId> = vec![];
     for fns in tests.chunks(10) {
         let (success, _, _) = fork_and_catch(|| {
-            println!();
-            eprintln!();
             for f in fns {
                 run_one(&mut comp, *f);
             }
@@ -244,11 +255,7 @@ fn forked_swallow_passes() {
     for f in failing {
         let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
         let fname = comp.pool.get(comp.program[f].name);
-        let (success, out, err) = fork_and_catch(|| {
-            println!();
-            eprintln!();
-            run_one(&mut comp, f)
-        });
+        let (success, out, err) = fork_and_catch(|| run_one(&mut comp, f));
 
         if !success {
             failed += 1;
@@ -322,10 +329,6 @@ fn collect_test_files() -> Vec<(String, String)> {
 }
 
 fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)]) -> Res<'p, ()> {
-    if !PathBuf::from("tests").exists() {
-        eprint!("Directory 'tests' does not exist in cwd");
-        exit(1);
-    }
     let mut parsed = vec![];
     for (name, src) in files {
         let file = comp
@@ -351,10 +354,6 @@ fn run_one(comp: &mut Compile, f: FuncId) {
 
     let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
 
-    if let Err(e) = emit_aarch64(comp, f, ExecTime::Runtime) {
-        log_err(comp, *e);
-        exit(1);
-    }
     comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
     comp.aarch64.make_exec();
     comp.flush_cpu_instruction_cache();
@@ -391,8 +390,8 @@ fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
                 libc::dup2(out[1], libc::STDOUT_FILENO);
                 libc::dup2(err[1], libc::STDERR_FILENO);
             }
-            print!(" ");
-            eprint!(" "); // need to make sure there's something on both pipes or it blocks?
+            println!(" ");
+            eprintln!(" "); // need to make sure there's something on both pipes or it blocks?
             f();
             exit(0);
         }

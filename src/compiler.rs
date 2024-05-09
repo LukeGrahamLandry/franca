@@ -73,7 +73,7 @@ pub struct Compile<'a, 'p> {
     pub tests: Vec<FuncId>,
     pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
-    pub ready: BcReady<'p>,
+    pub sizes: SizeCache,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
     pub scopes: Vec<Scope<'p>>,
     pub parsing: ParseTasks<'p>,
@@ -110,10 +110,10 @@ pub enum DebugState<'p> {
     ResolveFnRef(Var<'p>),
     TypeOf,
 }
+
 #[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FnWip<'p> {
-    pub stack_slots: usize,
     pub vars: Map<Var<'p>, TypeId>, // TODO: use a vec
     pub when: ExecTime,
     pub func: FuncId,
@@ -136,7 +136,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             currently_compiling: vec![],
             program,
             aarch64: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
-            ready: BcReady::default(),
+            sizes: SizeCache::default(),
             save_bootstrap: vec![],
             tests: vec![],
             pending_ffi: vec![],
@@ -149,7 +149,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub(crate) fn slot_count(&mut self, ty: TypeId) -> u16 {
-        self.ready.sizes.slot_count(self.program, ty) as u16
+        self.sizes.slot_count(self.program, ty) as u16
     }
 
     pub(crate) fn _as_value_expr<T: InterpSend<'p>>(&mut self, val: &FatExpr<'p>) -> Option<T> {
@@ -221,9 +221,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn update_cc(&mut self, f: FuncId) {
         let a = self.program[f].finished_arg.unwrap();
         let r = self.program[f].finished_ret.unwrap();
-        if self.program[f].comptime_addr.is_none()
-            && (self.ready.sizes.slot_count(self.program, a) >= 7 || self.ready.sizes.slot_count(self.program, r) > 1)
-        {
+        if self.program[f].comptime_addr.is_none() && (self.sizes.slot_count(self.program, a) >= 7 || self.sizes.slot_count(self.program, r) > 1) {
             debug_assert!(!self.program[f].has_tag(Flag::C_Call),);
             // my cc can do 8 returns in the arg regs but my ffi with compiler can't
             // TODO: my c_Call can;t handle agragates
@@ -235,14 +233,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        if self.currently_compiling.contains(&f) {
+        if self.program[f].asm_done || self.currently_compiling.contains(&f) {
             return Ok(());
         }
         let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
         let before = self.debug_trace.len();
         debug_assert!(!self.program[f].evil_uninit);
-        let mut result = self.ensure_compiled(f, when);
+        let result = self.ensure_compiled(f, when);
         if result.is_ok() {
             let func = &self.program[f];
             if func.wip.as_ref().is_some() {
@@ -256,7 +254,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     i += 1;
                 }
 
-                result = emit_bc(self, f);
+                let body = emit_bc(self, f)?;
+                emit_aarch64(self, f, when, &body)?;
             } else {
                 // TODO
                 // result = self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime);
@@ -285,7 +284,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = self.program[f].unwrap_ty();
         let result = match arch {
             TargetArch::Aarch64 => {
-                emit_aarch64(self, f, when)?;
                 let addr = if let Some(addr) = self.program[f].comptime_addr {
                     // we might be doing ffi at comptime, thats fine
                     addr as *const u8
@@ -341,7 +339,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state);
         self.compile(f, when)?;
-        emit_aarch64(self, f, when)?;
         self.pending_ffi.push(result);
         let addr = if let Some(addr) = self.program[f].comptime_addr {
             // it might be a builtin macro that's part of the compiler but is resolved like normal for consistancy (like @enum).
@@ -397,7 +394,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
     fn empty_fn(&mut self, when: ExecTime, func: FuncId, loc: Span) -> FnWip<'p> {
         FnWip {
-            stack_slots: 0,
             vars: Default::default(),
             when,
             func,
@@ -796,7 +792,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         key.1 = arg_value.clone();
         let mut arg_values = arg_value.vec().into_iter();
         for (name, ty, kind) in args {
-            let size = self.ready.sizes.slot_count(self.program, ty); // TODO: better pattern matching
+            let size = self.sizes.slot_count(self.program, ty); // TODO: better pattern matching
             let mut values = vec![];
             for _ in 0..size {
                 values.push(unwrap!(arg_values.next(), "ICE: missing arguments"));
@@ -2171,7 +2167,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         debug_assert!(!self.program[f].evil_uninit);
                         // TODO: try to compile it now.
                         // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
-                        let is_ready = self.program[f].comptime_addr.is_some() || (self.ready.ready.len() > f.as_index() && self.ready[f].is_some());
+                        let is_ready = self.program[f].comptime_addr.is_some() || self.program[f].asm_done;
                         if is_ready && !self.program[f].any_const_args() {
                             // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
                             let arg_ty = self.program[f].finished_arg.unwrap();
@@ -2766,9 +2762,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Expr::Value { value } => {
                     check_len(value.len())?;
                     // TODO: this is super dumb but better than what I did before. -- May 3
-                    let mut parts = vec![];
                     let ty = ty.to_vec(); // sad
                     let values = values_from_ints_one(self, arg_expr.ty, value.clone().vec())?;
+                    let mut parts = Vec::with_capacity(values.len());
                     for (v, ty) in values.into_iter().zip(ty.into_iter()) {
                         parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg_expr.loc, ty))
                     }

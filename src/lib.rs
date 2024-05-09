@@ -121,7 +121,6 @@ pub mod pool;
 pub mod reflect;
 pub mod scope;
 
-use crate::bc_to_asm::emit_aarch64;
 use crate::logging::{init_logs_flag, PoolLog};
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Flag, Func, Program, TargetArch, TypeId},
@@ -332,10 +331,6 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
                             return false;
                         }
                         Ok(_) => {
-                            if let Err(e) = emit_aarch64(&mut comp, f, ExecTime::Runtime) {
-                                log_err(&comp, *e);
-                                return false;
-                            }
                             let end = timestamp();
                             let seconds = end - start;
                             outln!(Perf, "===============");
@@ -391,10 +386,6 @@ pub fn run_main<'a: 'p, 'p>(pool: &'a StringPool<'p>, src: String, save: Option<
 }
 
 pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
-    for b in comp.ready.ready.iter().flatten() {
-        outln!(Bytecode, "{}", b.log(comp.pool));
-    }
-
     outln!(FinalAst, "============= BELOW IS ALL INCLUDING COMPTIME================");
     for (i, f) in comp.program.funcs.iter().enumerate() {
         if !f.evil_uninit {
