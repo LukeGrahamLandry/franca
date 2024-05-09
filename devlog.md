@@ -37,6 +37,8 @@ renumber doesn't do constants cause they're like in the sky hashmap already.
 but you can't just make it runtime because emit_bc needs to be const or it doesn't know where to jump to.
 and i forgot closure args can't be const yet because of that same renumbering thing.
 
+That's a very related problem to constants in macros and I fixed that my delaying when constants get hoisted out of blocks into the global map.
+
 ## syntax tweaks (May 8)
 
 - Made '=>' instead of '=' in function declaration mean capturing.

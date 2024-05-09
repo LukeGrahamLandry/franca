@@ -5,7 +5,7 @@ use codemap::Span;
 use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
-    compiler::{add_unique, BlockScope, Compile, Res},
+    compiler::{BlockScope, Compile, Res},
     err, ice,
     logging::{LogTag::Scope, PoolLog},
     outln,
@@ -165,34 +165,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             assert!(!func.any_const_args() && !func.has_tag(Flag::Comptime), "TODO: closures with const args");
         }
 
-        debug_assert!(func.local_constants.is_empty());
-
-        for (name, ty, mut val) in self.local_constants.pop().unwrap() {
-            let consts = &mut self.compiler[name.2].constants;
-            add_unique(&mut func.local_constants, name);
-            if let Some((prev_val, prev_ty)) = consts.get_mut(&name) {
-                if let Expr::AddToOverloadSet(new) = &mut val.expr {
-                    if let Expr::AddToOverloadSet(prev) = &mut prev_val.expr {
-                        prev.extend(mem::take(new));
-                        continue;
-                    } else if let Expr::Value { value } = &mut prev_val.expr {
-                        // let v = &prev_val.clone();
-                        // let os: Option<OverloadSetId> = self.compiler.as_value_expr(v);
-                        // let os = unwrap!(os, "");
-                        debug_assert!(!prev_val.ty.is_unknown());
-                        let os = value.as_overload_set()?;
-                        self.compiler.program[os].just_resolved.extend(mem::take(new));
-                        continue;
-                    }
-                }
-
-                debug_assert!(matches!(prev_ty, LazyType::Infer));
-                *prev_ty = ty;
-                *prev_val = val;
-            } else {
-                ice!("missing constant pre-decl {}", name.log(self.compiler.program.pool));
-            }
-        }
         outln!(Scope, "{}", func.log_captures(self.compiler.pool));
         Ok(())
     }
@@ -253,7 +225,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let aaa = stmt.annotations.clone();
         match stmt.deref_mut() {
             Stmt::ExpandParsedStmts(_) => todo!(),
-            Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::DeclNamed { name, ty, value, kind } => {
                 debug_assert!(*kind != VarType::Const);
                 self.walk_ty(ty);
@@ -270,32 +241,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Stmt::DeclFunc(func) => {
                 func.annotations.extend(aaa);
-
-                // Note: not Self::_ because of lifetimes. 'z needs to be different.
-                // let cap = ResolveScope::run(func, self.compiler, self.scope)?;
-                // debug_assert!(cap.is_empty());
                 self.resolve_func(func)?;
-
-                let name = func.var_name.unwrap();
-                // TODO: now this is a bit weird. later has to distinguish between const _ = expr and fn _ = stmt by whether it can capture.
-                let expr = Expr::AddToOverloadSet(vec![mem::take(func)]);
-                self.local_constants
-                    .last_mut()
-                    .unwrap()
-                    .push((name, LazyType::Infer, FatExpr::synthetic(expr, loc)));
-                stmt.stmt = Stmt::Noop;
             }
-            Stmt::DeclVar { kind, ty, value, name, .. } => {
+            Stmt::DeclVar { kind, ty, value, .. } => {
                 debug_assert!(*kind == VarType::Const);
                 self.walk_ty(ty);
                 self.resolve_expr(value)?;
-
-                let ty = mem::take(ty);
-                let value = mem::take(value);
-                // TODO: take annotations too somehow.
-                let consts = self.local_constants.last_mut().unwrap();
-                consts.push((*name, ty, value));
-                stmt.stmt = Stmt::Noop;
             }
             Stmt::Set { place, value } => {
                 self.resolve_expr(place)?;

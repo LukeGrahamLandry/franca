@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, FloatMask, Value, Values},
-    compiler::{CErr, CompileError, FnWip, Res},
+    compiler::{CErr, Compile, CompileError, FnWip, Res},
     err,
     export_ffi::RsResolvedSymbol,
     ffi::{init_interp_send, InterpSend},
@@ -107,6 +107,7 @@ pub enum Expr<'p> {
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
         ret_label: Option<LabelId>,
+        hoisted_constants: bool,
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
@@ -221,7 +222,7 @@ pub trait WalkAst<'p> {
                 self.expr(value);
                 self.ty(ty);
             }
-            Stmt::Noop | Stmt::DoneDeclFunc(_, _) => {}
+            Stmt::Noop => {}
             Stmt::Eval(arg) => self.expr(arg),
             Stmt::DeclFunc(func) => self.func(func),
             Stmt::DeclVar { ty, value, .. } => {
@@ -263,12 +264,13 @@ pub trait WalkAst<'p> {
 }
 
 // Used for inlining closures.
-pub(crate) struct RenumberVars<'a, 'p> {
+pub(crate) struct RenumberVars<'a, 'p, 'aa> {
     pub vars: usize,
     pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
+    compile: &'a mut Compile<'aa, 'p>,
 }
 
-impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
+impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
     fn pre_walk_func(&mut self, func: &mut Func<'p>) {
         if let Some(name) = &mut func.var_name {
             if let Some(new) = self.mapping.get(name) {
@@ -306,11 +308,8 @@ impl<'a, 'p> WalkAst<'p> for RenumberVars<'a, 'p> {
     }
 }
 
-impl<'a, 'p> RenumberVars<'a, 'p> {
+impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
     fn decl(&mut self, name: &mut Var<'p>) {
-        if name.3 == VarType::Const {
-            todo!("rn const {name:?}");
-        }
         let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
         self.vars += 1;
         let stomp = self.mapping.insert(*name, new);
@@ -320,8 +319,8 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn renumber_vars(&mut self, vars: usize, mapping: &mut Map<Var<'p>, Var<'p>>) -> usize {
-        let mut ctx = RenumberVars { vars, mapping };
+    pub fn renumber_vars(&mut self, vars: usize, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> usize {
+        let mut ctx = RenumberVars { vars, mapping, compile };
         ctx.expr(self);
         ctx.vars
     }
@@ -654,7 +653,6 @@ pub enum Stmt<'p> {
         place: FatExpr<'p>,
         value: FatExpr<'p>,
     },
-    DoneDeclFunc(FuncId, OverloadSetId), // TODO: OverloadSetId
     ExpandParsedStmts(usize),
 }
 #[repr(C)]

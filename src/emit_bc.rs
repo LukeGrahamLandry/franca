@@ -285,7 +285,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Stmt::Noop => {}
             // Can't hit DoneDeclFunc because we don't re-eval constants.
-            Stmt::ExpandParsedStmts(_) | Stmt::DoneDeclFunc(_, _) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
+            Stmt::ExpandParsedStmts(_) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
         }
         Ok(())
     }

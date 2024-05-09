@@ -249,7 +249,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                 }
             }
             Stmt::Set { .. } => todo!(),
-            Stmt::ExpandParsedStmts(_) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) | Stmt::DoneDeclFunc(_, _) => unreachable!(),
+            Stmt::ExpandParsedStmts(_) | Stmt::DeclNamed { .. } | Stmt::DeclFunc(_) => unreachable!(),
         })
     }
 

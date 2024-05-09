@@ -432,42 +432,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // Any environment constants must already be in the function.
-    // It's fine to call this redundantly, the first one just takes the constants out of the list.
-    fn eval_and_close_local_constants(&mut self, f: FuncId) -> Res<'p, ()> {
-        debug_assert!(!self.program[f].evil_uninit);
-        self.ensure_resolved_body(f)?;
-        if self.program[f].local_constants.is_empty() {
-            // Maybe no consts, or maybe we've already compiled them.
-            return Ok(());
-        }
-        let state = DebugState::EvalConstants(f, self.program[f].name);
-        self.push_state(&state);
-
-        let consts = mem::take(&mut self.program[f].local_constants);
-        for name in consts {
-            let const_info = self[name.2].constants.get_mut(&name).unwrap();
-            let (val, ty) = mem::take(const_info);
-            debug_assert!(!matches!(ty, LazyType::EvilUnit));
-            if let Expr::AddToOverloadSet(funcs) = val.expr {
-                const_info.1 = LazyType::Infer;
-                for func in funcs {
-                    self.decl_func(func)?;
+    fn hoist_constants(&mut self, body: &mut [FatStmt<'p>]) -> Res<'p, ()> {
+        // Function tags (#when) are evaluated during decl_func but may refer to constants.
+        // TODO: they should be allowed to refer to functiobns too so need to delay them.
+        //       plus the double loop looks really dumb.
+        for stmt in body.iter_mut() {
+            if let Stmt::DeclVar { name, ty, value, kind } = &mut stmt.stmt {
+                if *kind == VarType::Const {
+                    self[name.2].constants.insert(*name, (mem::take(value), mem::take(ty)));
+                    stmt.stmt = Stmt::Noop;
                 }
-            } else if let Some(os) = val.as_overload_set() {
-                // TODO: can't use the generic as_value_expr because .ty is unknown for some reason. who made this expr
-                let os: OverloadSetId = os;
-                let v = (val, LazyType::Finished(TypeId::overload_set()));
-                self[name.2].constants.insert(name, v);
-                for func in mem::take(&mut self.program[os].just_resolved) {
-                    self.decl_func(func)?;
-                }
-            } else {
-                self[name.2].constants.insert(name, (val, ty)); // TODO: dont take
             }
         }
-
-        self.pop_state(state);
+        for stmt in body.iter_mut() {
+            if let Stmt::DeclFunc(func) = &mut stmt.stmt {
+                if self.decl_func(mem::take(func)).is_err() {
+                    ice!("hoist_constants mem::take so must not fail",);
+                }
+                stmt.stmt = Stmt::Noop;
+            }
+        }
         Ok(())
     }
 
@@ -488,7 +472,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let before = self.debug_trace.len();
         let state = DebugState::EnsureCompiled(f, self.program[f].name, when);
         self.push_state(&state);
-        self.eval_and_close_local_constants(f)?;
 
         self.infer_types(f)?;
         let func = &self.program[f];
@@ -643,7 +626,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
         self.currently_inlining.push(f);
 
-        self.eval_and_close_local_constants(f)?;
         let func = &self.program.funcs[f.as_index()];
         let ret_ty = func.finished_ret.unwrap(); // TODO: if let this? its for return_var
         let hint = func.finished_ret;
@@ -687,14 +669,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             }],
             result: Box::new(func.body.as_ref().unwrap().clone()),
             ret_label: Some(ret_label),
+            hoisted_constants: false, // TODO
         };
         let mut mapping = Map::<Var, Var>::default();
         mapping.insert(old_ret_var, new_ret_var);
-        self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping); // Note: not renumbering on the function. didn't need to clone it.
+        self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
 
         self.currently_inlining.retain(|check| *check != f);
 
-        println!("{} -> {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
         self.save_const(
             new_ret_var,
             Expr::Value {
@@ -882,9 +864,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let fn_ty = unwrap!(self.infer_types(f)?, "not inferred");
         let ret = fn_ty.ret;
 
-        // TODO: I think this is the only place that relies on it being a whole function.
-        self.eval_and_close_local_constants(f)?;
-
         // Drop the instantiation of the function specialized to this call's arguments.
         // We cache the result and will never need to call it again.
         let mut func = mem::take(&mut self.program[f]);
@@ -910,7 +889,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.last_loc = Some(stmt.loc);
         match &mut stmt.stmt {
             Stmt::ExpandParsedStmts(_) => unreachable!(),
-            Stmt::DoneDeclFunc(_, _) => unreachable!("compiled twice?"),
             Stmt::Eval(expr) => {
                 // Note: can't do this check in parser because you want to allow @match/@switch that moves around the stmts.
                 if matches!(expr.expr, Expr::Closure(_) | Expr::WipFunc(_)) {
@@ -931,21 +909,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::Noop => {
                 // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
             }
-            Stmt::DeclFunc(func) => {
-                if let (Some(_id), Some(_os)) = self.decl_func(mem::take(func))? {
-                    stmt.stmt = Stmt::Noop;
-                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
-                    // stmt.stmt = Stmt::DoneDeclFunc(id, os); // TODO: do i ever need this? -- May 1
-                } else {
-                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident());
-                    stmt.stmt = Stmt::Noop;
-                }
-            }
+            Stmt::DeclFunc(_) => unreachable!("DeclFunc gets hoisted"),
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
             Stmt::DeclVar { name, ty, value, kind, .. } => {
-                // println!("{}", name.log(self.pool));
-                self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?;
                 debug_assert_ne!(*kind, VarType::Const);
+                self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?;
             }
             // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn.
             //       be able to expand this into multiple statements so backend never even sees a DeclVarPattern (and skip constants when doing so)
@@ -1295,7 +1263,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.last_loc = Some(f.loc);
                 ice!("tried to call non-function",)
             }
-            Expr::Block { body, result: value, .. } => {
+            Expr::Block {
+                body,
+                result: value,
+                hoisted_constants,
+                ..
+            } => {
+                if !*hoisted_constants {
+                    self.hoist_constants(body)?;
+                    *hoisted_constants = true;
+                }
+
                 body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
                 for stmt in body.iter_mut() {
                     // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TPPD
@@ -1347,6 +1325,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::If => self.emit_call_if(result, expr, requested)?,
                     Flag::While => self.emit_call_while(result, arg)?,
                     Flag::Addr => self.addr_macro(result, arg)?,
+                    // :UnquotePlaceholders
                     Flag::Quote => {
                         let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
                         let loc = arg.loc;
@@ -3307,6 +3286,7 @@ pub struct Unquote<'z, 'a, 'p> {
     pub result: &'z mut FnWip<'p>,
 }
 
+// :UnquotePlaceholders
 impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
     // TODO: track if we're in unquote mode or placeholder mode.
     fn pre_walk_expr(&mut self, expr: &mut FatExpr<'p>) -> bool {

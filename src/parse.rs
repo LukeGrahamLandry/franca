@@ -1075,6 +1075,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             body,
             result: Box::new(result),
             ret_label: None,
+            hoisted_constants: false,
         }))
     }
 

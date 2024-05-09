@@ -387,6 +387,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
                 TypeId::unit(),
             )),
             ret_label: None,
+            hoisted_constants: false,
         },
         user_span,
     ));

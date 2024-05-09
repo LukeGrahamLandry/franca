@@ -559,6 +559,7 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
     expr
 }
 
+// :UnquotePlaceholders
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
     hope(|| {
         let result = unwrap!(unwrap!(compile.pending_ffi.pop(), "ffi ctx"), "fn result ctx");
@@ -573,7 +574,7 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
         walk.expr(&mut template);
         let placeholders = walk.placeholders;
         assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
-        compile.program.next_var = template.renumber_vars(compile.program.next_var, &mut Default::default());
+        compile.program.next_var = template.renumber_vars(compile.program.next_var, &mut Default::default(), compile);
 
         compile.pending_ffi.push(Some(result));
         Ok(template)

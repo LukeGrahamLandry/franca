@@ -1,7 +1,7 @@
 //! Low level instructions that the interpreter can execute.
 use std::marker::PhantomData;
 
-use crate::ast::{LabelId, OverloadSetId, TypeInfo, Var};
+use crate::ast::{LabelId, OverloadSetId, TypeInfo};
 use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
 use crate::emit_bc::ResultLoc;
