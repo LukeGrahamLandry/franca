@@ -694,6 +694,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.currently_inlining.retain(|check| *check != f);
 
+        println!("{} -> {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
         self.save_const(
             new_ret_var,
             Expr::Value {

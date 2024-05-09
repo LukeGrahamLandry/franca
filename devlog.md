@@ -32,6 +32,11 @@ but then you need to track what block you're in all the time. When really you wa
 could declare a fake `__return` in scope.rs? maybe that's the dumbest option (affectionate).
 (end plan)
 
+So problem with passing it into a closure (like trying to implement break for fn while),
+renumber doesn't do constants cause they're like in the sky hashmap already.
+but you can't just make it runtime because emit_bc needs to be const or it doesn't know where to jump to.
+and i forgot closure args can't be const yet because of that same renumbering thing.
+
 ## syntax tweaks (May 8)
 
 - Made '=>' instead of '=' in function declaration mean capturing.
