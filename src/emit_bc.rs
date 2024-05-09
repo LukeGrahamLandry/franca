@@ -374,8 +374,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     {
                         // result_location is the result of the ret() expression, which is Never and we don't care.
                         let (ip, res_loc) = *result.inlined_return_addr.get(&return_from).unwrap();
-                        debug_assert_eq!(res_loc, PushStack); // TODO: need be be able to find the ResAddr cause it might not be on top of the stack
-                        let slots = self.slot_count(ret_ty);
+                        let slots = match res_loc {
+                            PushStack => self.slot_count(ret_ty),
+                            ResAddr => ice!(" TODO: need be be able to find the ResAddr cause it might not be on top of the stack"),
+                            Discard => 0,
+                        };
                         self.compile_expr(result, arg, res_loc)?;
                         result.push(Bc::Goto { ip, slots });
                         result.blocks[ip.0 as usize].incoming_jumps += 1;

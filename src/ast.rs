@@ -267,7 +267,7 @@ pub trait WalkAst<'p> {
 pub(crate) struct RenumberVars<'a, 'p, 'aa> {
     pub vars: usize,
     pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
-    compile: &'a mut Compile<'aa, 'p>,
+    pub(crate) compile: &'a mut Compile<'aa, 'p>,
 }
 
 impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {

@@ -1,4 +1,4 @@
-# simplify some stuff (May 9)
+# simplify FnBody/cc/returns/constants (May 9)
 
 - using Vec::with_capacity in a few places
 - fixed do_flat_call_values where I was doing Vec(i64) -> Vec(Value) -> Vec(i64)
@@ -38,6 +38,17 @@ but you can't just make it runtime because emit_bc needs to be const or it doesn
 and i forgot closure args can't be const yet because of that same renumbering thing.
 
 That's a very related problem to constants in macros and I fixed that my delaying when constants get hoisted out of blocks into the global map.
+Quite pleasing because the old system had weird logic to pass information between scope and compiler but now you just do things in one place kinda.
+Feels like it would mean compiling more copies of the same constants but that's what allows them to work intuitively.
+You really want each expansion of the macro to have its own version of the constants becuase its reasonable to have different types for them like how it works for generics.
+
+- removed no const arg check on closures and added renumber in bind_const only if its capturing. redundant but its fine fore now.
+- had to fix emit_bc to allow nonlocal return to discard-ed function and then use 0 arg jump. cause while is always discard i guess?
+  thats all it took for fancy_while to work.
+
+TODO: really you dont care about closures being inlined, you just care about them not having thier own stack frame and not escaping thier declaration frame.
+so represent them as labels too and then you don't have to be paranoid about calling the same one multiple times bloating your code.
+Then you can allow tail recursive closures and the you don't need !while as a language builtin anymore.
 
 ## syntax tweaks (May 8)
 

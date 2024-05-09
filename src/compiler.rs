@@ -15,8 +15,8 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, CallConv, FatStmt, Field, Flag, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId,
-    TargetArch, Var, VarType, WalkAst,
+    garbage_loc, Annotation, Binding, CallConv, FatStmt, Field, Flag, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
+    ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -2752,20 +2752,39 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // TODO: memoize these. I memoize generics but these are different. be careful of closures. should implement escape checking with better error messages. -- May 9
     fn curry_const_args(&mut self, original_f: FuncId, f_expr: &mut FatExpr<'p>, arg_expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
-        self.program[original_f].assert_body_not_resolved()?;
+        if self.program[original_f].allow_rt_capture {
+            debug_assert!(self.program[original_f].resolved_body);
+        } else {
+            self.program[original_f].assert_body_not_resolved()?;
+        }
         let state = DebugState::Msg(format!("Bake CT Only {original_f:?}"));
         self.push_state(&state);
         // Some part of the argument must be known at comptime.
         // You better hope compile_expr noticed and didn't put it in a stack slot.
         let mut new_func = self.program[original_f].clone();
         debug_assert!(new_func.local_constants.is_empty());
+        // Closures always resolve up front, so they need to renumber the clone.
+        // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
+        if self.program[original_f].allow_rt_capture {
+            let mut mapping = Default::default();
+            let mut renumber = RenumberVars {
+                vars: self.program.next_var,
+                mapping: &mut mapping,
+                compile: self,
+            };
+            renumber.pattern(&mut new_func.arg);
+            renumber.ty(&mut new_func.ret);
+            renumber.expr(new_func.body.as_mut().unwrap());
+        }
         new_func.referencable_name = false;
         let scope = new_func.scope.unwrap();
         let new_fid = self.program.add_func(new_func);
         self[scope].funcs.push(new_fid);
         self.ensure_resolved_sign(new_fid)?;
         self.ensure_resolved_body(new_fid)?;
+
         let func = &self.program[new_fid];
         let pattern = func.arg.flatten();
 
