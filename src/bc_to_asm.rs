@@ -1217,7 +1217,7 @@ impl Value {
             &Value::GetFn(i) => i.as_raw(),
             &Value::Symbol(i) => i as i64,
             &Value::Type(ty) => ty.as_raw(),
-            &Value::Label { return_from } => return_from.as_raw(),
+            &Value::Label(return_from) => return_from.as_raw(),
             Value::Unit => 0, // TODO
             &Value::Heap(ptr) => ptr as usize as i64,
             Value::SplitFunc { ct, rt } => todo!(),

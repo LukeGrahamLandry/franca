@@ -1,7 +1,7 @@
 //! Low level instructions that the interpreter can execute.
 use std::marker::PhantomData;
 
-use crate::ast::{OverloadSetId, TypeInfo};
+use crate::ast::{LabelId, OverloadSetId, TypeInfo, Var};
 use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
 use crate::emit_bc::ResultLoc;
@@ -77,7 +77,7 @@ pub struct FnBody<'p> {
     pub(crate) _p: PhantomData<&'p ()>,
     pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
-    pub inlined_return_addr: Map<FuncId, (BbId, ResultLoc)>,
+    pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,
     pub clock: u16,
 }
 
@@ -101,9 +101,7 @@ pub enum Value {
     // Both closures and types don't have values at runtime, all uses must be inlined.
     Type(TypeId),
     GetFn(FuncId),
-    Label {
-        return_from: FuncId,
-    },
+    Label(LabelId),
     /// The empty tuple.
     Unit,
     // Note: you can't just put these in a function's arena because they get copied by value.
@@ -268,9 +266,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         TypeInfo::F64 => Value::F64(n as u64), // TODO: high bit?
         TypeInfo::Bool => Value::Bool(n != 0),
         TypeInfo::Fn(_) => Value::GetFn(FuncId::from_raw(n)),
-        TypeInfo::Label(_) => Value::Label {
-            return_from: FuncId::from_raw(n),
-        },
+        TypeInfo::Label(_) => Value::Label(LabelId::from_raw(n)),
         TypeInfo::Type => Value::Type(TypeId::from_raw(n)),
         TypeInfo::OverloadSet => Value::OverloadSet(OverloadSetId::from_raw(n)),
         TypeInfo::FnPtr(_) => {

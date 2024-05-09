@@ -149,7 +149,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         debug_assert!(is_flat_call || ret_slots <= 1); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
         let return_block = result.push_block(ret_slots, ret_floats);
-        result.inlined_return_addr.insert(f, (return_block, result_location));
+        // result
+        //     .inlined_return_addr
+        //     .insert(self.program[f].return_var.unwrap(), (return_block, result_location));
         result.current_block = entry_block;
         if result_location == ResAddr {
             result.push(Bc::AddrFnResult);
@@ -166,7 +168,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         } else {
             result.push_to(return_block, Bc::NoCompile);
         }
-        result.inlined_return_addr.remove(&f);
+        // result.inlined_return_addr.remove(&f);
 
         for _id in self.locals.pop().unwrap() {
             // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
@@ -366,7 +368,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
                     if let Expr::Value {
-                        value: Values::One(Value::Label { return_from }),
+                        value: Values::One(Value::Label(return_from)),
                         ..
                     } = f.expr
                     {
@@ -388,14 +390,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Block {
                 body,
                 result: value,
-                inlined,
+                ret_label: ret_var,
                 ..
             } => {
                 self.locals.push(vec![]);
                 let slots = self.slot_count(expr.ty);
                 debug_assert!(slots < 8 || result_location != PushStack);
 
-                if let Some(inlined) = inlined {
+                if let Some(ret_var) = ret_var {
                     let floats = self.program.float_mask_one(expr.ty);
                     let entry_block = result.current_block;
                     let return_block = if result_location == PushStack {
@@ -403,7 +405,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else {
                         result.push_block(0, 0)
                     };
-                    result.inlined_return_addr.insert(*inlined, (return_block, result_location));
+                    result.inlined_return_addr.insert(*ret_var, (return_block, result_location));
                     result.current_block = entry_block;
 
                     for stmt in body {
@@ -419,7 +421,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else {
                         result.push_to(return_block, Bc::NoCompile);
                     }
-                    result.inlined_return_addr.remove(inlined);
+                    result.inlined_return_addr.remove(ret_var);
                 } else {
                     for stmt in body {
                         self.compile_stmt(result, stmt)?;

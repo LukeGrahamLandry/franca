@@ -15,8 +15,8 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    garbage_loc, Annotation, Binding, CallConv, FatStmt, Field, Flag, IntTypeInfo, Name, OverloadSet, OverloadSetId, Pattern, ScopeId, TargetArch,
-    Var, VarType, WalkAst,
+    garbage_loc, Annotation, Binding, CallConv, FatStmt, Field, Flag, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, ScopeId,
+    TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -77,11 +77,13 @@ pub struct Compile<'a, 'p> {
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
     pub scopes: Vec<Scope<'p>>,
     pub parsing: ParseTasks<'p>,
+    pub next_label: LabelId,
 }
 
 pub struct Scope<'p> {
     pub parent: ScopeId,
     pub constants: Map<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
+    pub rt_types: Map<Var<'p>, TypeId>,
     pub vars: Vec<BlockScope<'p>>,
     pub depth: usize,
     pub funcs: Vec<FuncId>,
@@ -143,6 +145,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             scopes: vec![],
             parsing,
             tests_broken: vec![],
+            next_label: LabelId(0),
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
@@ -193,6 +196,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             funcs: vec![],
             name,
             block_in_parent,
+            rt_types: Default::default(),
         });
         ScopeId::from_index(self.scopes.len() - 1)
     }
@@ -274,25 +278,19 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!self.program[f].evil_uninit);
         let result = self.ensure_compiled(f, when);
         if result.is_ok() {
-            let func = &self.program[f];
-            if func.wip.as_ref().is_some() {
-                let mut i = 0;
-                while let Some(&(id, when)) = &self.program[f].wip.as_ref().unwrap().callees.get(i) {
-                    if id == f {
-                        continue;
-                    }
-                    let res = self.compile(id, when);
-                    self.tag_err(res)?;
-                    i += 1;
+            let mut i = 0;
+            while let Some(&(id, when)) = &self.program[f].wip.as_ref().unwrap().callees.get(i) {
+                if id == f {
+                    continue;
                 }
+                let res = self.compile(id, when);
+                self.tag_err(res)?;
+                i += 1;
+            }
 
-                if self.program[f].cc.unwrap() != CallConv::Inline {
-                    let body = emit_bc(self, f)?;
-                    emit_aarch64(self, f, when, &body)?;
-                }
-            } else {
-                // TODO
-                // result = self.compile(func.any_reg_template.unwrap(), ExecTime::Comptime);
+            if self.program[f].cc.unwrap() != CallConv::Inline {
+                let body = emit_bc(self, f)?;
+                emit_aarch64(self, f, when, &body)?;
             }
         }
 
@@ -560,6 +558,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             ret_ty
         } else {
             let hint = self.program[f].finished_ret;
+            if let Some(return_var) = self.program[f].return_var {
+                if let Some(ret_ty) = hint {
+                    let ret = self.next_label;
+                    self.next_label.0 += 1;
+                    let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
+                    self.save_const(
+                        return_var,
+                        Expr::Value {
+                            value: Values::One(Value::Label(ret)),
+                        },
+                        label_ty,
+                        self.program[f].loc,
+                    )?;
+                    if let Expr::Block { ret_label, .. } = &mut body_expr.expr {
+                        *ret_label = Some(ret);
+                    }
+                }
+            }
+
             let res = self.compile_expr(result, &mut body_expr, hint)?;
             if self.program[f].finished_ret.is_none() {
                 // If you got to the point of emitting the body, the only situation where you don't know the return type yet is if they didn't put a type anotation there.
@@ -628,6 +645,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.eval_and_close_local_constants(f)?;
         let func = &self.program.funcs[f.as_index()];
+        let ret_ty = func.finished_ret.unwrap(); // TODO: if let this? its for return_var
+        let hint = func.finished_ret;
+        let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
+        let func = &self.program.funcs[f.as_index()];
+
         assert!(!func.any_const_args());
         for capture in &func.capture_vars {
             assert!(capture.3 != VarType::Const);
@@ -646,6 +668,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: dont bother if its just unit args (which most are because of !if and !while).
         // TODO: you want to be able to share work (across all the call-sites) compiling parts of the body that don't depend on the captured variables
         // TODO: need to move the const args to the top before eval_and_close_local_constants
+        let old_ret_var = func.return_var.unwrap();
+        let mut new_ret_var = old_ret_var;
+        new_ret_var.1 = self.program.next_var;
+        self.program.next_var += 1;
+
+        let ret_label = self.next_label;
+        self.next_label.0 += 1;
         expr_out.expr = Expr::Block {
             resolved: None,
             body: vec![FatStmt {
@@ -657,13 +686,23 @@ impl<'a, 'p> Compile<'a, 'p> {
                 loc,
             }],
             result: Box::new(func.body.as_ref().unwrap().clone()),
-            inlined: Some(f),
+            ret_label: Some(ret_label),
         };
-        self.program.next_var = expr_out.renumber_vars(self.program.next_var); // Note: not renumbering on the function. didn't need to clone it.
+        let mut mapping = Map::<Var, Var>::default();
+        mapping.insert(old_ret_var, new_ret_var);
+        self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping); // Note: not renumbering on the function. didn't need to clone it.
 
         self.currently_inlining.retain(|check| *check != f);
 
-        let hint = func.finished_ret;
+        self.save_const(
+            new_ret_var,
+            Expr::Value {
+                value: Values::One(Value::Label(ret_label)),
+            },
+            label_ty,
+            loc,
+        )?;
+
         let res = self.compile_expr(result, expr_out, hint)?;
         if hint.is_none() {
             self.program[f].finished_ret = Some(res);
@@ -903,6 +942,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
             Stmt::DeclVar { name, ty, value, kind, .. } => {
+                // println!("{}", name.log(self.pool));
                 self.decl_var(result, *name, ty, value, *kind, &stmt.annotations, stmt.loc)?;
                 debug_assert_ne!(*kind, VarType::Const);
             }
@@ -1486,21 +1526,21 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         err!("bad !as: {}", arg.log(self.pool))
                     }
-                    Flag::Return => {
-                        let ty = self.compile_expr(result, arg, None)?;
-                        if arg.is_raw_unit() {
-                            todo!()
-                        } else if ty == TypeId::overload_set() {
-                            todo!()
-                        } else {
-                            let f: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
-                            if let Some(f_ret) = self.program[f].finished_ret {
-                                let ty = self.program.intern_type(TypeInfo::Label(f_ret));
-                                expr.set(Values::One(Value::Label { return_from: f }), ty);
-                            }
-                        }
-                        return Ok(expr.ty);
-                    }
+                    // Flag::Return => {
+                    //     let ty = self.compile_expr(result, arg, None)?;
+                    //     if arg.is_raw_unit() {
+                    //         todo!()
+                    //     } else if ty == TypeId::overload_set() {
+                    //         todo!()
+                    //     } else {
+                    //         let f: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
+                    //         if let Some(f_ret) = self.program[f].finished_ret {
+                    //             let ty = self.program.intern_type(TypeInfo::Label(f_ret));
+                    //             expr.set(Values::One(Value::Label { return_from: f }), ty);
+                    //         }
+                    //     }
+                    //     return Ok(expr.ty);
+                    // }
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
                     }
@@ -1743,6 +1783,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.pop_state(s);
         Ok(res)
     }
+
     // TODO: this is clunky. Err means invalid input, None means couldn't infer type (often just not implemented yet).
     // It's sad that this could mutate expr, but the easiest way to typecheck closures is to promote them to functions,
     // which you have to do anyway eventually so you might as well save that work.

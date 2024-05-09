@@ -106,7 +106,7 @@ pub enum Expr<'p> {
         resolved: Option<(ScopeId, usize)>, // TODO: this is like only used by @namespace. maybe that should take a function somehow instead.
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
-        inlined: Option<FuncId>,
+        ret_label: Option<LabelId>,
     },
     Tuple(Vec<FatExpr<'p>>),
     Closure(Box<Func<'p>>),
@@ -320,9 +320,8 @@ impl<'a, 'p> RenumberVars<'a, 'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn renumber_vars(&mut self, vars: usize) -> usize {
-        let mut mapping = Default::default();
-        let mut ctx = RenumberVars { vars, mapping: &mut mapping };
+    pub fn renumber_vars(&mut self, vars: usize, mapping: &mut Map<Var<'p>, Var<'p>>) -> usize {
+        let mut ctx = RenumberVars { vars, mapping };
         ctx.expr(self);
         ctx.vars
     }
@@ -709,6 +708,7 @@ pub struct Func<'p> {
     pub asm_done: bool,
     pub aarch64_stack_bytes: Option<u16>,
     pub cc: Option<CallConv>,
+    pub return_var: Option<Var<'p>>,
 }
 
 #[repr(C)]
@@ -1541,6 +1541,7 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            return_var: None,
             cc: None,
             asm_done: false,
             annotations: vec![],
@@ -1749,6 +1750,7 @@ pub enum Flag {
     Log_Ast,
     Log_Asm_Bc,
     Return,
+    __Return,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     Test_Broken,
@@ -1827,6 +1829,7 @@ tagged_index!(TypeId, 31);
 tagged_index!(FuncId, 30);
 tagged_index!(ScopeId, 29);
 tagged_index!(OverloadSetId, 28);
+tagged_index!(LabelId, 27);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
@@ -1843,3 +1846,7 @@ pub struct ScopeId(pub u64);
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub struct OverloadSetId(pub u64);
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend, Debug)]
+pub struct LabelId(pub u64);

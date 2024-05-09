@@ -134,6 +134,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.push_scope(None);
         func.resolved_body = true;
         if let Some(body) = &mut func.body {
+            func.return_var = Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
             self.resolve_expr(body)?;
         }
         self.pop_block();

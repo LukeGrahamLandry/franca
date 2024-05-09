@@ -1,11 +1,36 @@
+# simplify some stuff (May 9)
+
 - using Vec::with_capacity in a few places
 - fixed do_flat_call_values where I was doing Vec(i64) -> Vec(Value) -> Vec(i64)
 - emit asm right after bc always so don't have to do callee loop in asm.
   then it turns out you never look at any function's FnBody other than the one you're currently doing, so there's no point in saving them all.
   very nice to replace every `self.compile.ready[self.f].as_ref().unwrap()` with `self.body`.
   only .7MB but feels less complicated now.
+- track exactly one calling convention on a function instead of having to reinterpret the flags every time
 
-  13.0 kloc -> 12.86 kloc
+(start plan)
+Ok my FnWip result thing doesn't make any sense. It currently just holds var types (tho eventually early return targets too??)
+and its tied to functions but really there should be multiple contexts like that in a function.
+Like all the comptime expressions kinda take place in a different universe.
+Which is how my current make_lit_fn works but I try to skip that as much as possible because it seems dumb to make a whole function just to lookup a single constant or whatever.
+And my current way of threading it through macros is a hacky unsafe thing.
+You need to be able to have them inherit like scopes for my @type thing to work intuitivly.
+Maybe the same thing as const values makes sense where you just do it by var in a hashmap in the sky and if you are able to refer to something you must be allowed to have it.
+I think its really important that it always work if it looks like it should work lexically.
+The thing where most languages closures don't capture the control flow context of thier declaration is the extream version of this problem i feel.
+So for vars i think the easy choice is that global thing but how to handle the stack of lambdas you might be trying to return from.
+Like you want it labeled by name but you might have nested of the same funcid and be trying to refer to the outer one,
+and it would look reasonable because maybe the closer one is inside another lambda so you can't see it.
+The current thing where you just hope the inner one is right will be super confusing.
+So you need like a parallel system to the var scoping... but with exactly the same rules kinda.
+Cause again, having it thread through a result thing means you have to recreate the path you should have had from scope.rs anyway.
+Easy way i guess would be force you to declare labels on the lambda you're trying to return from.
+Kotlin also lets you use the name of the function you're passing the lambda to to qualify the return.
+Have to just start with the easy thing to prove it works even tho the syntax is ass.
+I guess even easier is the original idea of only unqualified !return and you just assign to a variable,
+but then you need to track what block you're in all the time. When really you want '!return' to just act like a variable.
+could declare a fake `__return` in scope.rs? maybe that's the dumbest option (affectionate).
+(end plan)
 
 ## syntax tweaks (May 8)
 

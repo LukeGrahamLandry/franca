@@ -674,7 +674,7 @@ impl Debug for Value {
             &Value::Symbol(v) => write!(f, "sym{v}"),
             &Value::OverloadSet(v) => write!(f, "os{v:?}"),
             &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),
-            &Value::Label { return_from } => write!(f, "L{return_from:?}"),
+            &Value::Label(return_from) => write!(f, "L{return_from:?}"),
             &Value::SplitFunc { ct, rt } => write!(f, "cr={ct:?}|rt={rt:?}"),
         }
     }
