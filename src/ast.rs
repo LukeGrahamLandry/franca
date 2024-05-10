@@ -873,6 +873,8 @@ pub struct Program<'p> {
     pub inline_llvm_ir: Vec<FuncId>,
     pub contextual_fields: Vec<Option<Map<Ident<'p>, (Values, TypeId)>>>,
     pub ffi_definitions: String,
+    // After binding const args to a function, you get a new function with fewer arguments.
+    pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -987,6 +989,7 @@ impl<'p> Program<'p> {
             type_lookup: Default::default(),
             contextual_fields: vec![],
             ffi_definitions: String::new(),
+            const_bound_memo: Default::default(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {

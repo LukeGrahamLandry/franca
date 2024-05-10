@@ -145,7 +145,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             scopes: vec![],
             parsing,
             tests_broken: vec![],
-            next_label: LabelId(0),
+            next_label: LabelId::from_index(0),
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
@@ -613,7 +613,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Replace a call expr with the body of the target function.
-    // The idea is having zero cost (50 cycles) closures :)
     fn emit_capturing_call(&mut self, result: &mut FnWip<'p>, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         self.ensure_resolved_body(f)?; // it might not be a closure. it might be an inlined thing.
         let loc = expr_out.loc;
@@ -2449,6 +2448,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 unwrap!(parts[0].as_fn(), "while first arg must be func not {:?}", parts[0]);
                 todo!("shouldnt get here twice")
             }
+            self.finish_closure(&mut parts[0]);
+
+            // TODO: compile the condition to check if its obviously constant.
+            //       like if, dont compile body if unreachable. also make the result never if while(true)
+            //       tho this is going to become tail rec so maybe dont bother
+
             if let Some(body_fn) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, Some(TypeId::unit()))? {
                 let body_fn = body_fn.single()?;
                 self.program[body_fn].set_cc(CallConv::Inline)?; // hack
@@ -2460,8 +2465,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 unwrap!(parts[1].as_fn(), "while second arg must be func not {:?}", parts[1]);
                 todo!("shouldnt get here twice")
             }
-            self.finish_closure(&mut parts[0]);
             self.finish_closure(&mut parts[1]);
+
             while_macro_arg.ty = TypeId::unit();
         } else {
             ice!("if args must be tuple not {:?}", while_macro_arg);
@@ -2752,8 +2757,109 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // TODO: memoize these. I memoize generics but these are different. be careful of closures. should implement escape checking with better error messages. -- May 9
+    fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Vec<i64>> {
+        if self.program[original_f].arg.bindings.len() == 1 {
+            if let Expr::Value { value } = arg_expr.expr.clone() {
+                Ok(value.vec())
+            } else {
+                unreachable!()
+            }
+        } else {
+            let check_len = |len| {
+                assert_eq!(
+                    self.program[original_f].arg.bindings.len(),
+                    len,
+                    "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
+                    self.program[original_f].arg,
+                    arg_expr.log(self.pool),
+                    self.pool.get(self.program[original_f].name)
+                );
+                Ok(())
+            };
+
+            let ty = unwrap!(self.program.tuple_types(arg_expr.ty), "TODO: non-trivial pattern matching");
+            check_len(ty.len())?;
+            match &arg_expr.expr {
+                Expr::Value { value } => {
+                    check_len(value.len())?;
+                    // TODO: this is super dumb but better than what I did before. -- May 3
+                    let ty = ty.to_vec(); // sad
+                    let values = values_from_ints_one(self, arg_expr.ty, value.clone().vec())?;
+                    let mut parts = Vec::with_capacity(values.len());
+                    for (v, ty) in values.into_iter().zip(ty.into_iter()) {
+                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg_expr.loc, ty))
+                    }
+                    arg_expr.expr = Expr::Tuple(parts);
+                }
+                Expr::Tuple(parts) => {
+                    check_len(parts.len())?;
+                }
+                _ => err!("TODO: fancier pattern matching",),
+            }
+
+            let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() {
+                v
+            } else {
+                err!("TODO: pattern match on non-tuple",)
+            };
+            assert_eq!(arg_exprs.len(), self.program[original_f].arg.bindings.len(), "TODO: non-tuple baked args");
+
+            let mut all_const_args = vec![];
+            for (i, binding) in self.program[original_f].arg.bindings.iter().enumerate() {
+                if binding.kind == VarType::Const {
+                    if let Expr::Value { value } = arg_exprs[i].expr.clone() {
+                        all_const_args.extend(value.vec());
+                    } else {
+                        unreachable!()
+                    };
+                }
+            }
+            Ok(all_const_args)
+        }
+    }
+
+    fn remove_const_args(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, ()> {
+        if self.program[original_f].arg.bindings.len() == 1 {
+            self.set_literal(arg_expr, ())
+        } else {
+            let arg_exprs = if let Expr::Tuple(v) = arg_expr.deref_mut() {
+                v
+            } else {
+                err!("TODO: pattern match on non-tuple",)
+            };
+            let mut skipped_types = vec![];
+            let mut removed = 0;
+            for (i, binding) in self.program[original_f].arg.bindings.iter().enumerate() {
+                if binding.kind == VarType::Const {
+                    // TODO: this would be better if i was iterating backwards
+                    arg_exprs.remove(i - removed);
+                    removed += 1; // TODO: this sucks
+                } else {
+                    skipped_types.push(binding.ty.unwrap());
+                }
+            }
+            let arg_ty = self.program.tuple_of(skipped_types);
+            if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
+                if v.is_empty() {
+                    // Note: this started being required when I added fn while.
+                    self.set_literal(arg_expr, ())?;
+                } else if v.len() == 1 {
+                    *arg_expr = mem::take(v.iter_mut().next().unwrap());
+                }
+            }
+            // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
+            // Symptom of forgetting this was emit_bc passing extra uninit args.
+            arg_expr.ty = arg_ty;
+            Ok(())
+        }
+    }
     fn curry_const_args(&mut self, original_f: FuncId, f_expr: &mut FatExpr<'p>, arg_expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
+        let key = (original_f, self.const_args_key(original_f, arg_expr)?);
+        if let Some(new_f) = self.program.const_bound_memo.get(&key).copied() {
+            self.remove_const_args(original_f, arg_expr)?;
+            return Ok(new_f);
+        }
+
         if self.program[original_f].allow_rt_capture {
             debug_assert!(self.program[original_f].resolved_body);
         } else {
@@ -2786,55 +2892,27 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ensure_resolved_body(new_fid)?;
 
         let func = &self.program[new_fid];
-        let pattern = func.arg.flatten();
 
-        if pattern.len() == 1 {
-            let (name, _, kind) = pattern.into_iter().next().unwrap();
-            debug_assert_eq!(kind, VarType::Const);
-            let name = unwrap!(name, "arg needs name (unreachable?)");
-            let ty = arg_expr.ty;
-            let arg_value = if let Expr::Value { value } = arg_expr.expr.clone() {
-                value
-            } else {
-                unreachable!()
+        if self.program[new_fid].arg.bindings.len() == 1 {
+            let binding = &self.program[new_fid].arg.bindings[0];
+            debug_assert_eq!(binding.kind, VarType::Const);
+            let Name::Var(name) = binding.name else {
+                err!("arg needs name (unreachable?)",)
             };
-            self.bind_const_arg(new_fid, name, arg_value, ty)?;
+            let ty = arg_expr.ty;
+            let Expr::Value { value } = arg_expr.expr.clone() else { unreachable!() };
+            self.bind_const_arg(new_fid, name, value, ty)?;
             self.set_literal(arg_expr, ())?;
 
             let ty = self.program.func_type(new_fid);
             f_expr.set(Value::GetFn(new_fid).into(), ty);
+            self.program.const_bound_memo.insert(key, new_fid);
             self.pop_state(state);
             Ok(new_fid)
         } else {
-            let check_len = |len| {
-                assert_eq!(
-                    pattern.len(),
-                    len,
-                    "TODO: non-trivial pattern matching\n{:?} <= {:?} for call to {:?}",
-                    pattern,
-                    arg_expr.log(self.pool),
-                    self.pool.get(func.name)
-                );
-                Ok(())
-            };
-
-            let ty = unwrap!(self.program.tuple_types(arg_expr.ty), "TODO: non-trivial pattern matching");
-            check_len(ty.len())?;
             match &arg_expr.expr {
-                Expr::Value { value } => {
-                    check_len(value.len())?;
-                    // TODO: this is super dumb but better than what I did before. -- May 3
-                    let ty = ty.to_vec(); // sad
-                    let values = values_from_ints_one(self, arg_expr.ty, value.clone().vec())?;
-                    let mut parts = Vec::with_capacity(values.len());
-                    for (v, ty) in values.into_iter().zip(ty.into_iter()) {
-                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg_expr.loc, ty))
-                    }
-                    arg_expr.expr = Expr::Tuple(parts);
-                }
-                Expr::Tuple(parts) => {
-                    check_len(parts.len())?;
-                }
+                Expr::Value { .. } => unreachable!("because of const_arg_key"),
+                Expr::Tuple(_) => {}
                 _ => err!("TODO: fancier pattern matching",),
             }
 
@@ -2843,15 +2921,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             } else {
                 err!("TODO: pattern match on non-tuple",)
             };
-            assert_eq!(arg_exprs.len(), pattern.len(), "TODO: non-tuple baked args");
-            let mut skipped_types = vec![];
-            let mut removed = 0;
+            let pattern = func.arg.flatten();
             for (i, (name, ty, kind)) in pattern.into_iter().enumerate() {
                 if kind == VarType::Const {
                     let name = unwrap!(name, "arg needs name (unreachable?)");
-                    // TODO: this would be better if i was iterating backwards
-                    let this_arg_expr = arg_exprs.remove(i - removed);
-                    let arg_value = if let Expr::Value { value } = this_arg_expr.expr {
+                    let arg_value = if let Expr::Value { value } = arg_exprs[i].clone().expr {
                         value
                     } else {
                         unreachable!()
@@ -2860,30 +2934,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // bind_const_arg handles adding closure captures.
                     // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
                     self.bind_const_arg(new_fid, name, arg_value, ty)?;
-
-                    removed += 1; // TODO: this sucks
-                } else {
-                    skipped_types.push(ty);
                 }
             }
-            let arg_ty = self.program.tuple_of(skipped_types);
             debug_assert_ne!(new_fid, original_f);
-            if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
-                if v.is_empty() {
-                    // Note: this started being required when I added fn while.
-                    self.set_literal(arg_expr, ())?;
-                } else if v.len() == 1 {
-                    *arg_expr = mem::take(v.iter_mut().next().unwrap());
-                }
-            }
-            // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
-            // Symptom of forgetting this was emit_bc passing extra uninit args.
-            arg_expr.ty = arg_ty;
 
             let ty = self.program.func_type(new_fid);
             f_expr.set(Value::GetFn(new_fid).into(), ty);
             let f_ty = self.program.fn_ty(ty).unwrap();
-            self.type_check_arg(arg_ty, f_ty.arg, "sanity: post bake arg")?;
+
+            self.remove_const_args(original_f, arg_expr)?;
+            self.type_check_arg(arg_expr.ty, f_ty.arg, "sanity: post bake arg")?;
+            self.program.const_bound_memo.insert(key, new_fid);
             self.pop_state(state);
             // Don't need to explicitly force capturing because bind_const_arg added them if any args were closures.
             Ok(new_fid)

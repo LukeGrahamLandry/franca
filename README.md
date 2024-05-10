@@ -10,7 +10,7 @@
 - manual memory management (like zig)
 - direct asm backend for quick debug builds, llvm backend for optimised release builds (like zig/jai)
 - no blessed methods, call any function with dot syntax (like d/nim)
-- lazy analysis, functions/constants that are not reachable may contain invalid code (like zig)
+- lazy analysis, functions/constants that are statically unreachable may contain invalid code (like zig)
 - nonlocal returns from inline lambdas (like kotlin)
 
 ## Future Goals

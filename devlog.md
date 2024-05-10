@@ -1,3 +1,5 @@
+- fixed next_label starting at from_raw(0) instead of from_index(0) so serialization works
+
 # simplify FnBody/cc/returns/constants (May 9)
 
 - using Vec::with_capacity in a few places
