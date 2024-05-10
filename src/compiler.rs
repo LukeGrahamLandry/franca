@@ -318,7 +318,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // we might be doing ffi at comptime, thats fine
                     addr as *const u8
                 } else {
-                    unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr()
+                    unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}")
                 };
 
                 let cc = self.program[f].cc.unwrap();
@@ -373,7 +373,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // it might be a builtin macro that's part of the compiler but is resolved like normal for consistancy (like @enum).
             addr as *const u8
         } else {
-            unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}").as_ptr()
+            unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}")
         };
 
         let ty = self.program[f].unwrap_ty();

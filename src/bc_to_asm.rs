@@ -172,7 +172,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
                 let func = &self.compile.program[f];
                 if TRACE_ASM || self.log_asm_bc || func.has_tag(Flag::Log_Asm) {
-                    let asm = unsafe { &*asm };
+                    let asm = unsafe { &*self.compile.aarch64.ranges[f.as_index()] };
                     let hex: String = asm
                         .iter()
                         .copied()
@@ -237,6 +237,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.block_ips.extend(vec![None; block_count]);
         self.state = Default::default();
 
+        self.compile.aarch64.mark_start(f);
         self.compile.aarch64.push(sub_im(X64, sp, sp, 16, 0));
         self.compile.aarch64.push(stp_so(X64, fp, lr, sp, 0)); // save our return address
         self.compile.aarch64.push(add_im(X64, fp, sp, 0, 0)); // Note: normal mov encoding can't use sp
@@ -361,6 +362,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             is_done = self.emit_inst(b, inst, i)?;
             debugln!("{b}:{i} {inst:?} => {:?} | free: {:?}", self.state.stack, self.state.free_reg);
         }
+        debug_assert!(is_done);
         Ok(())
     }
 
@@ -399,18 +401,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 //     self.call_direct(f)?;
                 todo!()
             }
-            Bc::CallDirect { f } => {
-                self.call_direct_c(f)?;
-            }
-            Bc::CallDirectFlat { f } => {
-                self.call_direct_flat(f);
-            }
             Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
             Bc::GetNativeFnPtr(f) => {
                 // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
 
                 if let Some(ptr) = self.compile.aarch64.get_fn(f) {
-                    self.state.stack.push(Val::Literal(ptr.as_ptr() as i64));
+                    self.state.stack.push(Val::Literal(ptr as i64));
                 } else if let Some(addr) = self.compile.program[f].comptime_addr {
                     self.state.stack.push(Val::Literal(addr as i64));
                 } else {
@@ -463,6 +459,29 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 return Ok(true);
             }
+            Bc::CallDirect { f, tail } => {
+                let target = &self.compile.program[f];
+                debug_assert!(target.any_reg_template.is_none());
+                let comp_ctx = match self.compile.program[f].cc.unwrap() {
+                    CallConv::Arg8Ret1Ct => true,
+                    CallConv::Arg8Ret1 | CallConv::OneRetPic => false,
+                    _ => err!("expected c_call",),
+                };
+                let f_ty = target.unwrap_ty();
+
+                // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
+                // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
+                self.dyn_c_call(f_ty, comp_ctx, |s| {
+                    if tail {
+                        s.emit_stack_fixup();
+                    }
+                    s.branch_func(f, !tail)
+                });
+                return Ok(tail);
+            }
+            Bc::CallDirectFlat { f } => {
+                self.call_direct_flat(f);
+            }
             Bc::Ret => {
                 let ff = &self.compile.program[self.f];
                 let cc = ff.cc.unwrap();
@@ -483,13 +502,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 }
                 // debug_assert!(self.state.stack.is_empty()); // todo
 
-                // Leave holes for stack fixup code.
-                self.compile.aarch64.push(brk(0));
-                let a = self.compile.aarch64.prev();
-                self.compile.aarch64.push(brk(0));
-                let b = self.compile.aarch64.prev();
-                self.compile.aarch64.push(brk(0));
-                self.release_stack.push((a, b, self.compile.aarch64.prev()));
+                self.emit_stack_fixup();
                 // Do the return
                 self.compile.aarch64.push(ret(()));
                 return Ok(true);
@@ -551,6 +564,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 // don't drop <reg>, we just peeked it
             }
             Bc::CallFnPtr { ty, comp_ctx } => {
+                // TODO: tail call
                 assert!(!comp_ctx, "flat call needs special handling");
                 self.dyn_c_call(ty, comp_ctx, |s| {
                     // dyn_c_call will have popped the args, so now stack is just the pointer to call
@@ -1055,19 +1069,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         }
     }
 
-    fn call_direct_c(&mut self, f: FuncId) -> Res<'p, ()> {
-        let target = &self.compile.program[f];
-        debug_assert!(target.any_reg_template.is_none());
-        let comp_ctx = match self.compile.program[f].cc.unwrap() {
-            CallConv::Arg8Ret1Ct => true,
-            CallConv::Arg8Ret1 | CallConv::OneRetPic => false,
-            _ => err!("expected c_call",),
-        };
-        let f_ty = target.unwrap_ty();
-        self.dyn_c_call(f_ty, comp_ctx, |s| s.branch_with_link(f));
-        Ok(())
-    }
-
     // stack must be [<ret_ptr>, <arg_ptr>]. bc needs to deal with loading/storing stuff from memory.
     fn call_direct_flat(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.compile.program[f];
@@ -1078,7 +1079,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         debugln!("flat_call");
         // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
 
-        let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v.as_ptr() as u64));
+        let addr = target.comptime_addr.or_else(|| self.compile.aarch64.get_fn(f).map(|v| v as u64));
 
         let arg_ptr = self.state.stack.pop().unwrap();
         let ret_ptr = self.state.stack.pop().unwrap();
@@ -1094,7 +1095,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
         self.stack_to_ccall_reg(5, 0);
         self.spill_abi_stompable();
-        self.branch_with_link(f);
+        self.branch_func(f, true);
 
         for i in 0..7 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
@@ -1105,13 +1106,19 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
 
     const DO_BASIC_ASM_INLINE: bool = true;
 
-    fn branch_with_link(&mut self, f: FuncId) {
+    // TODO: use with_link for tail calls.
+    // !with_link === tail
+    fn branch_func(&mut self, f: FuncId, with_link: bool) {
         if Self::DO_BASIC_ASM_INLINE {
             // TODO: save result on the function so dont have to recheck every time?
             if let Some(code) = &self.compile.program[f].jitted_code {
                 if self.compile.program[f].cc == Some(CallConv::OneRetPic) {
                     // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
                     if code.len() == 2 && code[0] as i64 == ret(()) && code[1] as i64 == ret(()) {
+                        if !with_link {
+                            // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.
+                            self.compile.aarch64.push(ret(()));
+                        }
                         return;
                     }
                     for op in &code[0..code.len() - 1] {
@@ -1119,6 +1126,10 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                         self.compile.aarch64.push(*op as i64);
                     }
                     debug_assert_eq!(*code.last().unwrap() as i64, ret(()));
+                    if !with_link {
+                        // If you're trying to do a tail call to fn add, that means emit the add instruction and then return.
+                        self.compile.aarch64.push(ret(()));
+                    }
                     return;
                 }
             }
@@ -1128,13 +1139,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         // This covers the majority of cases because I try to handle callees first.
         // Note: checking this before comptime_addr means we handle inline asm as a normal function.
         if let Some(bytes) = self.compile.aarch64.get_fn(f) {
-            let mut offset = bytes.as_ptr() as i64 - self.compile.aarch64.get_current() as i64;
-            debug_assert!(offset % 4 == 0, "instructions are u32");
+            let mut offset = bytes as i64 - self.compile.aarch64.get_current() as i64;
+            debug_assert!(offset % 4 == 0, "instructions are u32 but {offset}%4");
             offset /= 4;
-            assert!(offset.abs() < (1 << 25), "can't jump that far"); // TODO: use adr/adrp
-            offset = signed_truncate(offset, 26);
-            self.compile.aarch64.push(b(offset, 1));
-            return;
+            // TODO: use adr/adrp
+            if offset.abs() < (1 << 25) {
+                offset = signed_truncate(offset, 26);
+                self.compile.aarch64.push(b(offset, with_link as i64));
+                return;
+            }
         }
 
         // TODO: maybe its prefereable to use the dispatch table even when its const because then runtime code could setup the pointers with dlopen,
@@ -1142,14 +1155,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         if let Some(bytes) = self.compile.program[f].comptime_addr {
             debug_assert!(self.compile.program[f].jitted_code.is_none(), "inline asm should be emitted normally");
             let mut offset = bytes as i64 - self.compile.aarch64.get_current() as i64;
-            debug_assert!(offset % 4 == 0, "instructions are u32");
+            debug_assert!(offset % 4 == 0, "instructions are u32 but {offset}%4");
             offset /= 4;
 
             // If its a comptime_addr into the compiler, (which happens a lot because of assert_eq and tag_value),
             //     aslr might be our friend and just put the mmaped pages near where it originally loaded the compiler.
             if offset.abs() < (1 << 25) {
                 offset = signed_truncate(offset, 26);
-                self.compile.aarch64.push(b(offset, 1));
+                self.compile.aarch64.push(b(offset, with_link as i64));
                 return;
             } else {
                 // If its a comptime_addr into libc, its probably far away, but that's fine, we're not limited to one instruction.
@@ -1168,7 +1181,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.compile.aarch64.push(ldr_uo(X64, x16, x21, f.as_index() as i64));
         }
 
-        self.compile.aarch64.push(br(x16, 1))
+        self.compile.aarch64.push(br(x16, with_link as i64))
     }
 
     fn drop_slot(&mut self, slot: SpOffset, bytes: u16) {
@@ -1180,6 +1193,15 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.store_u64(x17, sp, slot.0 + (i * 8));
             }
         }
+    }
+
+    fn emit_stack_fixup(&mut self) {
+        self.compile.aarch64.push(brk(0));
+        let a = self.compile.aarch64.prev();
+        self.compile.aarch64.push(brk(0));
+        let b = self.compile.aarch64.prev();
+        self.compile.aarch64.push(brk(0));
+        self.release_stack.push((a, b, self.compile.aarch64.prev()));
     }
 }
 
@@ -1244,7 +1266,7 @@ pub mod jit {
         /// This is redundant but is the pointer used for actually calling functions and there aren't that many bits in the instruction,
         /// so I don't want to spend one doubling to skip lengths.
         pub dispatch: Vec<*const u8>,
-        ranges: Vec<*const [u8]>,
+        pub ranges: Vec<*const [u8]>,
         pub current_start: *const u8,
         pub next: *mut u8,
         old: *mut u8,
@@ -1291,12 +1313,11 @@ pub mod jit {
             self.dispatch.as_ptr()
         }
 
-        pub fn get_fn(&self, f: FuncId) -> Option<*const [u8]> {
-            let ptr = self.ranges[f.as_index()];
-            if ptr.len() == 0 {
+        pub fn get_fn(&self, f: FuncId) -> Option<*const u8> {
+            if self.dispatch[f.as_index()].is_null() {
                 None
             } else {
-                Some(ptr)
+                Some(self.dispatch[f.as_index()])
             }
         }
 
@@ -1324,6 +1345,12 @@ pub mod jit {
                 *(self.next as *mut u32) = inst as u32;
                 self.next = self.next.add(4);
             }
+        }
+
+        // Recursion shouldn't have to slowly lookup the start address.
+        pub fn mark_start(&mut self, f: FuncId) {
+            debug_assert_eq!(self.current_start as usize % 4, 0);
+            self.dispatch[f.as_index()] = self.current_start;
         }
 
         pub fn save_current(&mut self, f: FuncId) {

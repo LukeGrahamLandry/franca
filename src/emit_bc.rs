@@ -156,7 +156,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if result_location == ResAddr {
             result.push(Bc::AddrFnResult);
         }
-        self.compile_expr(result, body, result_location)?;
+        // TODO: flat_call tail
+        self.compile_expr(result, body, result_location, !is_flat_call)?;
 
         if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
             result.push(Bc::Goto {
@@ -199,7 +200,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn emit_runtime_call(&mut self, result: &mut FnBody<'p>, f: FuncId, arg_expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
+    fn emit_runtime_call(
+        &mut self,
+        result: &mut FnBody<'p>,
+        f: FuncId,
+        arg_expr: &FatExpr<'p>,
+        result_location: ResultLoc,
+        can_tail: bool,
+    ) -> Res<'p, ()> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = self.program[f].cc.unwrap() == CallConv::Flat;
@@ -239,13 +247,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             result.push(Bc::LastUse { id });
         } else {
-            result.push(Bc::CallDirect { f });
+            result.push(Bc::CallDirect { f, tail: can_tail });
             let slots = self.slot_count(f_ty.ret);
             match result_location {
                 PushStack => {}
                 ResAddr => result.push(Bc::StorePre { slots }),
                 Discard => result.push(Bc::Pop { slots }),
             }
+        }
+        if func.finished_ret.unwrap().is_never() {
+            result.push(Bc::Unreachable);
         }
         Ok(())
     }
@@ -255,7 +266,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         match stmt.deref() {
             Stmt::Eval(expr) => {
                 debug_assert!(!expr.ty.is_unknown());
-                self.compile_expr(result, expr, Discard)?;
+                self.compile_expr(result, expr, Discard, false)?;
             }
             Stmt::DeclVar { name, ty, value, kind } => {
                 assert_ne!(VarType::Const, *kind);
@@ -263,7 +274,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let id = result.add_var(ty);
                 result.push(Bc::AddrVar { id });
-                self.compile_expr(result, value, ResAddr)?;
+                self.compile_expr(result, value, ResAddr, false)?;
                 let prev = self.var_lookup.insert(*name, id);
                 self.locals.last_mut().unwrap().push(id);
                 assert!(prev.is_none(), "shadow is still new var");
@@ -293,7 +304,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn do_binding(&mut self, result: &mut FnBody<'p>, name: Option<Var<'p>>, ty: TypeId, value: &FatExpr<'p>) -> Res<'p, ()> {
         let id = result.add_var(ty);
         result.push(Bc::AddrVar { id });
-        self.compile_expr(result, value, ResAddr)?;
+        self.compile_expr(result, value, ResAddr, false)?;
         self.locals.last_mut().unwrap().push(id);
         if let Some(name) = name {
             let prev = self.var_lookup.insert(name, id);
@@ -308,17 +319,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // TODO: fowrad this ot flat call somehow
             let id = result.add_var(arg.ty);
             result.push(Bc::AddrVar { id });
-            self.compile_expr(result, arg, ResAddr)?;
+            self.compile_expr(result, arg, ResAddr, false)?;
             Ok(Some(id))
         } else {
-            self.compile_expr(result, arg, PushStack)?;
+            self.compile_expr(result, arg, PushStack, false)?; // TODO: if its for a ret of the main function
             Ok(None)
         }
     }
 
     // if result_location==true, the top of the stack on entry to this function has the pointer where the result should be stored.
     // otherwise, just push it to the stack.
-    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
+    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
         assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
 
         debug_assert!(
@@ -340,7 +351,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let Some(f_id) = f.as_fn() {
                     let func = &self.program[f_id];
                     assert!(!func.has_tag(Flag::Comptime));
-                    return self.emit_runtime_call(result, f_id, arg, result_location);
+                    return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
                 }
                 if let Expr::Value {
                     value: Values::One(Value::SplitFunc { ct, rt }),
@@ -350,7 +361,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     todo!()
                 }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
-                    self.compile_expr(result, f, PushStack)?;
+                    self.compile_expr(result, f, PushStack, false)?;
                     self.compile_for_arg(result, arg, false)?; // TODO: im assuming no flat call
                     result.push(Bc::CallFnPtr {
                         ty: f_ty,
@@ -381,7 +392,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         ResAddr => ice!(" TODO: need be be able to find the ResAddr cause it might not be on top of the stack"),
                         Discard => 0,
                     };
-                    self.compile_expr(result, arg, res_loc)?;
+                    // TODO: sometimes can_tail, if you're returning the main function
+                    self.compile_expr(result, arg, res_loc, false)?;
                     result.push(Bc::Goto { ip, slots });
                     result.blocks[ip.0 as usize].incoming_jumps += 1;
                     return Ok(());
@@ -392,14 +404,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Block {
                 body,
                 result: value,
-                ret_label: ret_var,
+                ret_label,
                 ..
             } => {
                 self.locals.push(vec![]);
                 let slots = self.slot_count(expr.ty);
                 debug_assert!(slots < 8 || result_location != PushStack);
 
-                if let Some(ret_var) = ret_var {
+                if let Some(ret_var) = ret_label {
                     let floats = self.program.float_mask_one(expr.ty);
                     let entry_block = result.current_block;
                     let return_block = if result_location == PushStack {
@@ -413,7 +425,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     for stmt in body {
                         self.compile_stmt(result, stmt)?;
                     }
-                    self.compile_expr(result, value, result_location)?;
+                    self.compile_expr(result, value, result_location, can_tail)?;
 
                     if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
                         let slots = result.blocks[return_block.0 as usize].arg_slots;
@@ -425,11 +437,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     result.inlined_return_addr.remove(ret_var);
                 } else {
+                    // TODO: sometimes the last one can tail, if value is Unit and we're the body of the main function.
                     for stmt in body {
                         self.compile_stmt(result, stmt)?;
                     }
 
-                    self.compile_expr(result, value, result_location)?;
+                    self.compile_expr(result, value, result_location, can_tail)?;
                 }
 
                 // TODO: check if you try to let an address to a variable escape from its scope.
@@ -448,7 +461,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::IncPtr { offset });
                         offset += slots;
                     }
-                    self.compile_expr(result, value, result_location)?;
+                    self.compile_expr(result, value, result_location, false)?;
                 }
 
                 if result_location == ResAddr {
@@ -496,7 +509,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     err!(CErr::UndeclaredIdent(*macro_name))
                 };
                 match name {
-                    Flag::If => self.emit_call_if(result, arg, result_location)?,
+                    Flag::If => self.emit_call_if(result, arg, result_location, can_tail)?,
                     Flag::While => {
                         debug_assert_eq!(result_location, Discard);
                         self.emit_call_while(result, arg)?;
@@ -511,7 +524,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                         let id = result.add_var(container_ty);
                         result.push(Bc::AddrVar { id });
-                        self.compile_expr(result, arg, ResAddr)?;
+                        self.compile_expr(result, arg, ResAddr, false)?;
 
                         result.push(Bc::AddrVar { id });
                         result.push(Bc::PushConstant { value: count as i64 });
@@ -523,7 +536,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         self.locals.last_mut().unwrap().push(id);
                     }
                     Flag::Deref => {
-                        self.compile_expr(result, arg, PushStack)?; // get the pointer
+                        self.compile_expr(result, arg, PushStack, false)?; // get the pointer
                         let slots = self.slot_count(expr.ty);
                         match result_location {
                             PushStack => result.push(Bc::Load { slots }),
@@ -533,7 +546,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::Tag => {
                         debug_assert_eq!(self.program[expr.ty], TypeInfo::Ptr(TypeId::i64()));
-                        self.compile_expr(result, arg, result_location)?;
+                        self.compile_expr(result, arg, result_location, can_tail)?;
                     }
                     Flag::Fn_Ptr => {
                         // TODO: say arg is of type fn and dont let as_fn accept addr ptr. -- Apr 30
@@ -572,7 +585,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::FieldAccess(_, _) => unreachable!(),
             Expr::Index { ptr, index } => {
-                self.compile_expr(result, ptr, PushStack)?;
+                self.compile_expr(result, ptr, PushStack, false)?;
                 let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
                 self.index_expr(result, ptr.ty, index)?;
                 match result_location {
@@ -598,7 +611,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::AddrVar { id });
             }
             // TODO: this is a bit weird but it makes place expressions work.
-            Expr::Index { .. } => self.compile_expr(result, arg, PushStack)?,
+            Expr::Index { .. } => self.compile_expr(result, arg, PushStack, false)?,
             _ => err!("took address of r-value",),
         }
         match result_location {
@@ -611,11 +624,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     // we never make the temp variable. if the arg is big, caller needs to setup a result location.
-    fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
+    fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
         let Expr::Tuple(parts) = &arg.expr else {
             ice!("if args must be tuple not {:?}", arg);
         };
-        self.compile_expr(result, &parts[0], PushStack)?; // cond
+        self.compile_expr(result, &parts[0], PushStack, false)?; // cond
         let (if_true, if_false) = (&parts[1], &parts[2]);
 
         let slots = self.slot_count(if_true.ty);
@@ -624,11 +637,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let branch_block = result.current_block;
         let true_ip = result.push_block(0, 0);
         result.current_block = true_ip;
-        self.compile_expr(result, if_true, result_location)?;
+        self.compile_expr(result, if_true, result_location, can_tail)?;
         let end_true_block = result.current_block;
         let false_ip = result.push_block(0, 0);
         result.current_block = false_ip;
-        self.compile_expr(result, if_false, result_location)?;
+        self.compile_expr(result, if_false, result_location, can_tail)?;
         let end_false_block = result.current_block;
 
         let floats = self.program.float_mask_one(if_true.ty);
@@ -673,11 +686,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             },
         );
 
-        self.compile_expr(result, cond_fn, PushStack)?;
+        self.compile_expr(result, cond_fn, PushStack, false)?;
         let end_cond_block = result.current_block;
 
         let start_body_block = result.push_block(0, 0);
-        self.compile_expr(result, body_fn, Discard)?;
+        self.compile_expr(result, body_fn, Discard, false)?;
         let end_body_block = result.current_block;
 
         let exit_block = result.push_block(0, 0);
@@ -710,14 +723,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let id = self.var_lookup.get(var);
                 let id = *unwrap!(id, "SetVar: var must be declared: {}", var.log(self.program.pool));
                 result.push(Bc::AddrVar { id });
-                self.compile_expr(result, value, ResAddr)?;
+                self.compile_expr(result, value, ResAddr, false)?;
                 Ok(())
             }
             Expr::SuffixMacro(macro_name, arg) => {
                 // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
                 if let Ok(Flag::Deref) = Flag::try_from(*macro_name) {
-                    self.compile_expr(result, arg, PushStack)?;
-                    self.compile_expr(result, value, ResAddr)?;
+                    self.compile_expr(result, arg, PushStack, false)?;
+                    self.compile_expr(result, value, ResAddr, false)?;
                     return Ok(());
                 }
                 todo!()
@@ -808,7 +821,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::Dup);
                         result.push(Bc::IncPtr { offset });
                     }
-                    self.compile_expr(result, value, result_location)?;
+                    self.compile_expr(result, value, result_location, false)?;
                     offset += size;
                 }
 
@@ -836,7 +849,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match result_location {
                     PushStack => {
                         result.push(Bc::PushConstant { value: i as i64 });
-                        self.compile_expr(result, values[0], result_location)?;
+                        self.compile_expr(result, values[0], result_location, false)?;
                         // If this is a smaller varient, pad out the slot.
                         for _ in (payload_size + 1)..size {
                             result.push(Bc::PushConstant { value: 0 });
@@ -847,10 +860,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::PushConstant { value: i as i64 });
                         result.push(Bc::StorePre { slots: 1 });
                         result.push(Bc::IncPtr { offset: 1 });
-                        self.compile_expr(result, values[0], result_location)?;
+                        self.compile_expr(result, values[0], result_location, false)?;
                     }
                     Discard => {
-                        self.compile_expr(result, values[0], result_location)?;
+                        self.compile_expr(result, values[0], result_location, false)?;
                     }
                 }
 

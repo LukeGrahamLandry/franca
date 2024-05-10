@@ -364,7 +364,7 @@ fn run_one(comp: &mut Compile, f: FuncId) {
     comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
     comp.aarch64.make_exec();
     comp.flush_cpu_instruction_cache();
-    let code = comp.aarch64.get_fn(f).unwrap().as_ptr();
+    let code = comp.aarch64.get_fn(f).unwrap();
 
     let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
     let indirect_fns = comp.aarch64.get_dispatch();

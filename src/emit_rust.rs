@@ -45,7 +45,7 @@ pub fn bootstrap() -> (String, String) {
 
     let mut fr = String::from("//! This file was @generated from lib/codegen/aarch64/basic.fr\n");
     for f in &bs {
-        let bytes = unsafe { &*comp.aarch64.get_fn(*f).unwrap() };
+        let bytes = unsafe { &*comp.aarch64.ranges[f.as_index()] };
 
         let annotations: String = comp.program[*f]
             .annotations

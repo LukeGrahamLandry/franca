@@ -1,4 +1,9 @@
+## simple tail recursion (May 10)
+
 - fixed next_label starting at from_raw(0) instead of from_index(0) so serialization works
+- cache specilization of const args.
+- did simple tail calls. needed to add hack to backtrace test so all the frames would show up.
+- saved the start of the function at the beginning instead of the end so direct tail recursion works better
 
 # simplify FnBody/cc/returns/constants (May 9)
 
