@@ -530,9 +530,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         // It's gonna be Name = Value like for @enum(T) S or named arguments
                         LazyType::Infer
                     };
-                    let name = if let Expr::GetNamed(name) = args.pop().unwrap().expr {
-                        name
-                    } else {
+                    let Expr::GetNamed(name) = args.pop().unwrap().expr else {
                         return Err(self.expected("Ident before ':'/'=' in argument pattern"));
                     };
                     let default = if self.maybe(Equals) { Some(self.parse_expr()?) } else { None };
@@ -714,25 +712,23 @@ impl<'a, 'p> Parser<'a, 'p> {
 
                 if name == Flag::Include_Std.ident() {
                     self.eat(LeftParen)?;
-                    if let TokenType::Quoted(name) = self.peek() {
-                        self.pop();
-                        self.eat(RightParen)?;
-                        self.eat(Semicolon)?;
-                        if self.ctx.already_loaded.insert(name) {
-                            let name = self.pool.get(name);
-                            if let Some(src) = get_include_std(name) {
-                                let file = self.ctx.codemap.add_file(name.to_string(), src);
-                                let s = file.span;
-                                Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
-                            } else {
-                                return Err(self.expected("known path for #include_std"));
-                            }
-                        } else {
-                            // don't load the same file twice.
-                            Stmt::Noop
-                        }
-                    } else {
+                    let TokenType::Quoted(name) = self.peek() else {
                         return Err(self.expected("quoted path"));
+                    };
+                    self.pop();
+                    self.eat(RightParen)?;
+                    self.eat(Semicolon)?;
+                    if self.ctx.already_loaded.insert(name) {
+                        let name = self.pool.get(name);
+                        let Some(src) = get_include_std(name) else {
+                            return Err(self.expected("known path for #include_std"));
+                        };
+                        let file = self.ctx.codemap.add_file(name.to_string(), src);
+                        let s = file.span;
+                        Stmt::ExpandParsedStmts(self.ctx.add_task(false, file, s))
+                    } else {
+                        // don't load the same file twice.
+                        Stmt::Noop
                     }
                 } else {
                     return Err(self.error_next("reserved for stmt directives".to_string()));
@@ -1080,32 +1076,31 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn expr_call(&mut self, prefix: FatExpr<'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+        let Expr::FieldAccess(first, name) = prefix.expr else {
+            return self.expr(Expr::Call(Box::new(prefix), Box::new(arg)));
+        };
         // Dot call syntax sugar.
-        if let Expr::FieldAccess(first, name) = prefix.expr {
-            // TODO: I want this to just call push_arg
-            self.start_subexpr();
-            let f = self.expr(Expr::GetNamed(name));
-            match arg.expr {
-                Expr::Tuple(mut parts) => {
-                    parts.insert(0, *first);
-                    arg.expr = Expr::Tuple(parts);
-                    self.expr(Expr::Call(Box::new(f), Box::new(arg)))
-                }
-                // Parser flattened empty tuples.
-                Expr::Value {
-                    value: Values::One(Value::Unit),
-                    ..
-                } => self.expr(Expr::Call(Box::new(f), first)),
-                // Tuple parser eagerly falttened single tuples so we have to undo that here.
-                // TODO: have it work woth named arguments. Need to support mixing named and positional.
-                _ => {
-                    self.start_subexpr();
-                    let arg = self.expr(Expr::Tuple(vec![*first, arg]));
-                    self.expr(Expr::Call(Box::new(f), Box::new(arg)))
-                }
+        // TODO: I want this to just call push_arg
+        self.start_subexpr();
+        let f = self.expr(Expr::GetNamed(name));
+        match arg.expr {
+            Expr::Tuple(mut parts) => {
+                parts.insert(0, *first);
+                arg.expr = Expr::Tuple(parts);
+                self.expr(Expr::Call(Box::new(f), Box::new(arg)))
             }
-        } else {
-            self.expr(Expr::Call(Box::new(prefix), Box::new(arg)))
+            // Parser flattened empty tuples.
+            Expr::Value {
+                value: Values::One(Value::Unit),
+                ..
+            } => self.expr(Expr::Call(Box::new(f), first)),
+            // Tuple parser eagerly falttened single tuples so we have to undo that here.
+            // TODO: have it work woth named arguments. Need to support mixing named and positional.
+            _ => {
+                self.start_subexpr();
+                let arg = self.expr(Expr::Tuple(vec![*first, arg]));
+                self.expr(Expr::Call(Box::new(f), Box::new(arg)))
+            }
         }
     }
 

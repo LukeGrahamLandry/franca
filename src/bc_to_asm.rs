@@ -696,12 +696,11 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     }
                 }
 
-                if let Val::Spill(slot) = self.state.stack[stack_index] {
-                    self.compile.aarch64.push(f_ldr_uo(X64, next_float as i64, sp, slot.0 as i64 / 8));
-                    self.drop_slot(slot, 8);
-                } else {
+                let Val::Spill(slot) = self.state.stack[stack_index] else {
                     unreachable!()
-                }
+                };
+                self.compile.aarch64.push(f_ldr_uo(X64, next_float as i64, sp, slot.0 as i64 / 8));
+                self.drop_slot(slot, 8);
 
                 next_float += 1;
                 continue;

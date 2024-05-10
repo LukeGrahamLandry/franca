@@ -367,25 +367,24 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
-                    if let Expr::Value {
+                    let Expr::Value {
                         value: Values::One(Value::Label(return_from)),
                         ..
                     } = f.expr
-                    {
-                        // result_location is the result of the ret() expression, which is Never and we don't care.
-                        let (ip, res_loc) = *result.inlined_return_addr.get(&return_from).unwrap();
-                        let slots = match res_loc {
-                            PushStack => self.slot_count(ret_ty),
-                            ResAddr => ice!(" TODO: need be be able to find the ResAddr cause it might not be on top of the stack"),
-                            Discard => 0,
-                        };
-                        self.compile_expr(result, arg, res_loc)?;
-                        result.push(Bc::Goto { ip, slots });
-                        result.blocks[ip.0 as usize].incoming_jumps += 1;
-                        return Ok(());
-                    } else {
+                    else {
                         todo!()
-                    }
+                    };
+                    // result_location is the result of the ret() expression, which is Never and we don't care.
+                    let (ip, res_loc) = *result.inlined_return_addr.get(&return_from).unwrap();
+                    let slots = match res_loc {
+                        PushStack => self.slot_count(ret_ty),
+                        ResAddr => ice!(" TODO: need be be able to find the ResAddr cause it might not be on top of the stack"),
+                        Discard => 0,
+                    };
+                    self.compile_expr(result, arg, res_loc)?;
+                    result.push(Bc::Goto { ip, slots });
+                    result.blocks[ip.0 as usize].incoming_jumps += 1;
+                    return Ok(());
                 }
 
                 unreachable!("{}", f.log(self.program.pool))
@@ -460,16 +459,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if result_location == Discard {
                     return Ok(());
                 }
-                if let Some(id) = self.var_lookup.get(var).cloned() {
-                    let slots = self.slot_count(result.vars[id as usize]);
-                    result.push(Bc::AddrVar { id });
-                    if result_location == ResAddr {
-                        result.push(Bc::CopyToFrom { slots });
-                    } else {
-                        result.push(Bc::Load { slots });
-                    }
+                let id = *unwrap!(
+                    self.var_lookup.get(var),
+                    "(emit_bc) Missing resolved variable {:?}",
+                    var.log(self.program.pool)
+                );
+
+                let slots = self.slot_count(result.vars[id as usize]);
+                result.push(Bc::AddrVar { id });
+                if result_location == ResAddr {
+                    result.push(Bc::CopyToFrom { slots });
                 } else {
-                    ice!("(emit_bc) Missing resolved variable {:?}", var.log(self.program.pool),)
+                    result.push(Bc::Load { slots });
                 }
             }
             Expr::Value { value } => match result_location {
@@ -490,9 +491,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 Discard => {}
             },
             Expr::SuffixMacro(macro_name, arg) => {
-                let name = if let Ok(f) = Flag::try_from(*macro_name) {
-                    f
-                } else {
+                let Ok(name) = Flag::try_from(*macro_name) else {
                     // TODO: this will change when you're able to define !bang macros in the language.
                     err!(CErr::UndeclaredIdent(*macro_name))
                 };
@@ -594,18 +593,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(arg.loc);
         match arg.deref() {
             Expr::GetVar(var) => {
-                if let Some(id) = self.var_lookup.get(var).cloned() {
-                    if var.3 != VarType::Var {
-                        err!(
-                            "Can only take address of vars not {:?} {}. TODO: allow read field.",
-                            var.3,
-                            var.log(self.program.pool)
-                        )
-                    }
-                    result.push(Bc::AddrVar { id });
-                } else {
-                    ice!("Missing var {} (in !addr)", var.log(self.program.pool))
-                }
+                let id = *unwrap!(self.var_lookup.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
+                debug_assert_eq!(var.3, VarType::Var);
+                result.push(Bc::AddrVar { id });
             }
             // TODO: this is a bit weird but it makes place expressions work.
             Expr::Index { .. } => self.compile_expr(result, arg, PushStack)?,
@@ -622,14 +612,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     // we never make the temp variable. if the arg is big, caller needs to setup a result location.
     fn emit_call_if(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
-        let (if_true, if_false) = if let Expr::Tuple(parts) = &arg.expr {
-            self.compile_expr(result, &parts[0], PushStack)?; // cond
-            let if_true = &parts[1];
-            let if_false = &parts[2];
-            (if_true, if_false)
-        } else {
+        let Expr::Tuple(parts) = &arg.expr else {
             ice!("if args must be tuple not {:?}", arg);
         };
+        self.compile_expr(result, &parts[0], PushStack)?; // cond
+        let (if_true, if_false) = (&parts[1], &parts[2]);
+
         let slots = self.slot_count(if_true.ty);
         debug_assert!(slots < 8 || result_location != PushStack); // now its the callers problem to deal with this case
 
@@ -667,11 +655,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn emit_call_while(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, ()> {
-        let (cond_fn, body_fn) = if let Expr::Tuple(parts) = arg.deref() {
-            (&parts[0], &parts[1])
-        } else {
-            ice!("if args must be tuple not {:?}", arg);
+        let Expr::Tuple(parts) = &arg.expr else {
+            ice!("while args must be tuple not {:?}", arg);
         };
+        let (cond_fn, body_fn) = (&parts[0], &parts[1]);
 
         debug_assert_eq!(body_fn.ty, TypeId::unit());
 

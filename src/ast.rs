@@ -1220,7 +1220,6 @@ impl<'p> Program<'p> {
         })
     }
 
-    // BRO DO NOT FUCKING CALL THIS ONE UNLESS YOU'RE SURE YOU REMEMBER TO CLOSE CONSTANTS
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         debug_assert!(!func.evil_uninit);
