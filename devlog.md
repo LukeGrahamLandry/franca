@@ -5,6 +5,11 @@ I want x86 but I don't want to go back to the nightmares factory.
 - cranelift maybe doesn't inline things cause they expect you to already have optimised wasm?
   so my llvm strat of i write the basic functions in text ir and parse that into my module seems meh.
   instead just have a few magic callbacks in the compiler that get access to an instruction builder.
+- my old thing of SplitFunc for different targets is kinda confusing and annoying to deal with.
+  what if instead i merge them so theres only one func for iadd or whatever, and you just pick the impl depending on the target you're emitting for.
+- now with merge it means it tries to load the llvm ir funcs wven tho not using and i havent loaded them since i changed to inline asm needs to say #c_call,
+  and that was unacceptibly painful to figure out cause my error messages are useless cause they get swollowed by type_of,
+  so by the time it bubbles up, it doesn't have the right loc on it anymore. fuck.
 
 ## simple tail recursion (May 10)
 

@@ -6,11 +6,11 @@ use std::fmt::{Debug, Formatter, Write};
 use std::{fs, mem};
 
 #[inline(never)]
-pub fn break_here(_e: &CErr) {
+pub fn break_here(e: &CErr) {
     let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
     if depth == 0 {
         // TODO: make this never happen so dont have to worry about short circuiting -- Apr 25
-        // println!("err: {e:?}");
+        println!("err: {e:?}");
     }
 }
 
@@ -683,7 +683,6 @@ impl Debug for Value {
             &Value::OverloadSet(v) => write!(f, "os{v:?}"),
             &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),
             &Value::Label(return_from) => write!(f, "{return_from:?}"),
-            &Value::SplitFunc { ct, rt } => write!(f, "cr={ct:?}|rt={rt:?}"),
         }
     }
 }

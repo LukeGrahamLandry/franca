@@ -1,10 +1,10 @@
 use crate::ast::{
     Expr, FatExpr, Flag, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TargetArch, TypeId, Var, VarType,
 };
-use crate::bc::{FuncRef, Value, Values};
+use crate::bc::{Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
 use crate::logging::{LogTag, PoolLog};
-use crate::{assert_eq, err, outln, unwrap};
+use crate::{assert, assert_eq, err, outln, unwrap};
 use std::mem;
 use std::ops::DerefMut;
 
@@ -15,7 +15,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         f: &mut FatExpr<'p>,
         arg: &mut FatExpr<'p>,
         ret: Option<TypeId>,
-    ) -> Res<'p, Option<FuncRef>> {
+    ) -> Res<'p, Option<FuncId>> {
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
@@ -27,20 +27,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             &mut Expr::Value {
-                value: Values::One(Value::SplitFunc { ct, rt }),
-                ..
-            } => {
-                // TODO: assert no named args
-                assert_ne!(ct, rt);
-                Some(FuncRef::Split { ct, rt })
-            }
-            &mut Expr::Value {
                 value: Values::One(Value::GetFn(id)),
                 ..
             }
             | &mut Expr::WipFunc(id) => {
                 self.named_args_to_tuple(result, arg, id)?;
-                Some(id.into())
+                Some(id)
             }
             &mut Expr::Value {
                 value: Values::One(Value::OverloadSet(i)),
@@ -79,7 +71,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         name: Var<'p>,
         arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
-    ) -> Res<'p, FuncRef> {
+    ) -> Res<'p, FuncId> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
@@ -95,11 +87,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.named_args_to_tuple(result, arg, f)?;
                     self.pop_state(state);
                     Ok(f.into())
-                }
-                Values::One(Value::SplitFunc { rt, ct }) => {
-                    assert_ne!(ct, rt);
-                    self.pop_state(state);
-                    Ok(FuncRef::Split { ct, rt })
                 }
                 Values::One(Value::GetNativeFnPtr(_)) => {
                     err!("TODO: const GetNativeFnPtr?",)
@@ -123,7 +110,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         arg: &mut FatExpr<'p>,
         requested_ret: Option<TypeId>,
         i: OverloadSetId,
-    ) -> Res<'p, FuncRef> {
+    ) -> Res<'p, FuncId> {
         let name = self.program[i].name;
         self.compute_new_overloads(i)?;
         let mut overloads = self.program[i].clone(); // Sad
@@ -134,7 +121,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             if overloads.ready.len() == 1 {
                 let id = overloads.ready[0].func;
                 self.named_args_to_tuple(result, arg, id)?;
-                return Ok(id.into());
+                return Ok(id);
             }
         }
 
@@ -157,27 +144,74 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: PROBLEM: this doiesnt do voidptr check. it worked before because i did filter_arch first and there happened to only be one so it didnt even get here and then th e type check passed latter because it knows the rules.
                 overloads.ready.retain(|check| accept(check.arg, check.ret));
 
+                if overloads.ready.len() > 1 {
+                    let special = self.emit_special_body(overloads.ready[0].func)?;
+                    if !special {
+                        println!("warn: this does not bode well")
+                    }
+
+                    // It could be a builtin (like add) that exists for different architectures. Merge them into one.
+                    for j in (1..overloads.ready.len()).rev() {
+                        assert!(
+                            overloads.ready[j].arg == overloads.ready[0].arg && overloads.ready[j].ret == overloads.ready[0].ret,
+                            "overload missmatch. unreachable?"
+                        );
+
+                        let f = overloads.ready[j].func;
+                        // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.
+                        let special = self.emit_special_body(f)?;
+                        if !special {
+                            println!("warn: this does not bode well")
+                        }
+
+                        macro_rules! merge {
+                            ($field:ident) => {{
+                                let func = &self.program[f];
+                                if let Some(val) = func.$field.clone() {
+                                    self.last_loc = Some(self.program[f].loc);
+                                    let tags = self.program[f].annotations.clone();
+                                    let target = &mut self.program[overloads.ready[0].func];
+                                    // assert!(
+                                    //     target.$field.is_none(),
+                                    //     "tried to merge overwrite. {} {} {:?} <- {:?}",
+                                    //     self.pool.get(target.name),
+                                    //     stringify!($field),
+                                    //     overloads.ready[0].func,
+                                    //     overloads.ready[j].func
+                                    // );
+                                    // TODO: it shouldn't happen twice. i guess it happens on emit_body? but how can that happen before this and still have two of the same overload.
+                                    if let Some(prev) = &target.$field {
+                                        assert_eq!(
+                                            prev,
+                                            &val,
+                                            "tried to merge overwrite. {} {} {:?} <- {:?}",
+                                            self.pool.get(target.name),
+                                            stringify!($field),
+                                            overloads.ready[0].func,
+                                            overloads.ready[j].func
+                                        );
+                                    }
+                                    target.$field = Some(val);
+                                    target.annotations.extend(tags);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }};
+                        }
+
+                        if merge!(llvm_ir) | merge!(cl_emit_fn_ptr) | merge!(jitted_code) | merge!(comptime_addr) {
+                            // TODO: remove from program as well?
+                            overloads.ready.remove(j); // iter rev so its fine
+                            self.program[i].ready.retain(|o| o.func != f); // we cloned, so change the original too.
+                        }
+                    }
+                }
+
                 if overloads.ready.len() == 1 {
                     let id = overloads.ready[0].func;
                     self.named_args_to_tuple(result, arg, id)?;
-                    return Ok(id.into());
-                }
-
-                let mut ct = overloads.clone();
-                filter_arch(self.program, &mut overloads, ExecTime::Runtime);
-                filter_arch(self.program, &mut ct, ExecTime::Comptime);
-
-                if ct.ready.len() == 1 && overloads.ready.len() == 1 {
-                    // TODO: check that types are exactly the same.
-                    let ct = ct.ready[0].func;
-                    let rt = overloads.ready[0].func;
-                    if ct == rt {
-                        // TODO: this should be unreachable
-                        self.named_args_to_tuple(result, arg, rt)?;
-                        return Ok(FuncRef::Exact(rt));
-                    } else {
-                        return Ok(FuncRef::Split { ct, rt });
-                    }
+                    return Ok(id);
                 }
 
                 let log_goal = |s: &mut Self| {

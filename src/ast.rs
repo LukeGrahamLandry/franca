@@ -691,7 +691,7 @@ pub struct Func<'p> {
     // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
     pub any_reg_template: Option<FuncId>,
-    pub llvm_ir: Option<Vec<Ident<'p>>>,
+    pub llvm_ir: Option<Ident<'p>>,
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
     pub args_block: Option<usize>,
@@ -777,7 +777,9 @@ impl<'p> Func<'p> {
     pub fn get_tag_mut(&mut self, flag: Flag) -> Option<&mut Annotation<'p>> {
         self.annotations.iter_mut().find(|a| a.name == flag.ident())
     }
-
+    pub fn get_tag(&self, flag: Flag) -> Option<&Annotation<'p>> {
+        self.annotations.iter().find(|a| a.name == flag.ident())
+    }
     pub fn add_tag(&mut self, name: Flag) {
         if !self.has_tag(name) {
             self.annotations.push(Annotation {
@@ -790,6 +792,11 @@ impl<'p> Func<'p> {
     pub fn set_cc(&mut self, cc: CallConv) -> Res<'static, ()> {
         if cc == CallConv::Inline {
             assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
+        }
+        if self.cc == Some(CallConv::OneRetPic) && cc == CallConv::Arg8Ret1 {
+            // TODO: HACK. now with merging. the aarch64 version says OneRetPic and llvm version says Arg8Ret1 but thats fine cause really they're different functions.
+            //       so treating them as the same one is kinda but also the old SplitFunc system was more dumb.
+            return Ok(());
         }
         match self.cc {
             Some(old) => assert!(old == cc, "tried to change cc from {old:?} to {cc:?}"),
@@ -1147,14 +1154,7 @@ impl<'p> Program<'p> {
         for f in self.inline_llvm_ir.clone() {
             let arg = self.funcs[f.as_index()].arg.clone();
             let ret = self.funcs[f.as_index()].finished_ret.unwrap();
-            let body = self.funcs[f.as_index()]
-                .llvm_ir
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|n| self.pool.get(*n).to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let body = self.funcs[f.as_index()].llvm_ir.map(|n| self.pool.get(n).to_string()).unwrap();
             let args = arg
                 .flatten()
                 .into_iter()
@@ -1752,6 +1752,7 @@ pub enum Flag {
     Log_Ast,
     Log_Asm_Bc,
     Return,
+    Cranelift_Emit,
     __Return,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,

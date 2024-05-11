@@ -1226,7 +1226,6 @@ impl Value {
             &Value::Label(return_from) => return_from.as_raw(),
             Value::Unit => 0, // TODO
             &Value::Heap(ptr) => ptr as usize as i64,
-            Value::SplitFunc { ct, rt } => todo!(),
             &Value::GetNativeFnPtr(i) => {
                 // TODO: not sure if we want to preserve the id or use the actual address
                 i.as_raw()

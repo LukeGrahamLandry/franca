@@ -388,9 +388,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         let flat_call = cc == CallConv::Flat;
 
         let arg_ty = Arg::get_type(self.program);
-        self.type_check_arg(arg_ty, ty.arg, "sanity ICE")?;
+        self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
         let ret_ty = Ret::get_type(self.program);
-        self.type_check_arg(ret_ty, ty.ret, "sanity ICE")?;
+        self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
 
         // symptom if you forget: bus error
         self.aarch64.make_exec();
@@ -496,16 +496,59 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
+    pub fn emit_special_body(&mut self, f: FuncId) -> Res<'p, bool> {
+        debug_assert!(!self.program[f].evil_uninit);
+        self.ensure_resolved_sign(f)?;
+        self.ensure_resolved_body(f)?;
+        debug_assert!(self.program[f].local_constants.is_empty());
+        assert!(!self.program[f].has_tag(Flag::Comptime));
+
+        let mut special = false;
+        if let Some(body) = &mut self.program[f].body {
+            if let Some(arg) = body.as_suffix_macro_mut(Flag::Asm) {
+                let mut a = arg.clone();
+                self.inline_asm_body(f, &mut a)?;
+                self.program[f].body = None;
+                special = true;
+            }
+        } else {
+            assert!(self.program[f].finished_ty().is_some(), "fn without body needs type annotations.");
+            assert!(self.program[f].referencable_name, "fn no body needs name");
+            special = true;
+        }
+
+        if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
+            let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
+            self.program[f].comptime_addr = Some(addr.to_bytes());
+            special = true;
+        }
+
+        #[cfg(feature = "cranelift")]
+        if let Some(addr) = self.program[f].get_tag(Flag::Cranelift_Emit) {
+            let arg = unwrap!(addr.args.clone(), "Cranelift_Emit needs arg");
+            let addr: usize = self.immediate_eval_expr_known(arg)?;
+            self.program[f].cl_emit_fn_ptr = Some(addr);
+            special = true;
+        }
+
+        if special {
+            assert!(self.program[f].finished_ty().is_some(), "special def needs known type");
+        }
+
+        Ok(special)
+    }
+
     /// IMPORTANT: this pulls a little sneaky on ya, so you can't access the body of the function inside the main emit handlers.
     fn emit_body(&mut self, result: &mut FnWip<'p>, f: FuncId) -> Res<'p, TypeId> {
         let state = DebugState::EmitBody(f, self.program[f].name);
         self.push_state(&state);
+
+        if self.emit_special_body(f)? {
+            self.pop_state(state);
+            return Ok(self.program[f].finished_ret.unwrap());
+        }
+
         let has_body = self.program[f].body.is_some();
-        debug_assert!(!self.program[f].evil_uninit);
-
-        self.ensure_resolved_sign(f)?;
-        self.ensure_resolved_body(f)?;
-
         debug_assert!(self.program[f].local_constants.is_empty());
         assert!(!self.program[f].has_tag(Flag::Comptime));
         let arguments = self.program[f].arg.flatten();
@@ -519,72 +562,51 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        if !has_body {
-            // Functions without a body are probably an exten-ed ffi thing.
-            // It's convient to give them a FuncId so you can put them in a variable.
-            let ty = unwrap!(self.program[f].finished_ty(), "fn without body needs type annotations.");
-            if let Some(tag) = self.program[f].annotations.iter().find(|c| c.name == Flag::Comptime_Addr.ident()) {
-                let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
-                self.program[f].comptime_addr = Some(addr.to_bytes());
-            }
-            // TODO: this check is what prevents making types comptime only work because you need to pass a type to builtin alloc,
-            //       but specializing kills the name. But before that will work anyway i need tonot blindly pass on the shim args to the builtin
-            //       since the shim might be specialized so some args are in constants instead of at the base of the stack.
-            assert!(self.program[f].referencable_name, "fn no body needs name");
-            self.pop_state(state);
-            return Ok(ty.ret);
-        }
-
+        assert!(has_body, "");
         let mut body_expr = self.program[f].body.clone().unwrap(); // TODO: no clone. make errors recoverable. no mut_replace -- Apr 24
 
-        let ret_val = if let Some(arg) = body_expr.as_suffix_macro_mut(Flag::Asm) {
-            self.inline_asm_body(f, arg)?;
-            let fn_ty = self.program[f].unwrap_ty();
-            let ret_ty = fn_ty.ret;
-            self.program[f].body = None;
-            ret_ty
-        } else {
-            let hint = self.program[f].finished_ret;
-            if let Some(return_var) = self.program[f].return_var {
-                if let Some(ret_ty) = hint {
-                    let ret = self.next_label;
-                    self.next_label.0 += 1;
-                    let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
-                    self.save_const(
-                        return_var,
-                        Expr::Value {
-                            value: Values::One(Value::Label(ret)),
-                        },
-                        label_ty,
-                        self.program[f].loc,
-                    )?;
-                    if let Expr::Block { ret_label, .. } = &mut body_expr.expr {
-                        *ret_label = Some(ret);
-                    }
+        debug_assert!(body_expr.as_suffix_macro_mut(Flag::Asm).is_none(), "special should handle");
+
+        let hint = self.program[f].finished_ret;
+        if let Some(return_var) = self.program[f].return_var {
+            if let Some(ret_ty) = hint {
+                let ret = self.next_label;
+                self.next_label.0 += 1;
+                let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
+                self.save_const(
+                    return_var,
+                    Expr::Value {
+                        value: Values::One(Value::Label(ret)),
+                    },
+                    label_ty,
+                    self.program[f].loc,
+                )?;
+                if let Expr::Block { ret_label, .. } = &mut body_expr.expr {
+                    *ret_label = Some(ret);
                 }
             }
+        }
 
-            let res = self.compile_expr(result, &mut body_expr, hint)?;
-            if self.program[f].finished_ret.is_none() {
-                // If you got to the point of emitting the body, the only situation where you don't know the return type yet is if they didn't put a type anotation there.
-                // This isn't true if you have an @generic function that isn't @comptime trying to use its args in its return type.
-                // That case used to work becuase I'd always inline after doing const args so you've never even get to the point of compiling the function body on its own.
-                // However, that still wasn't the same as @comptime because it didn't egarly evaluate unless already in a const context.
-                // I do still want to get rid of @comptime and just use const args but I need to think about the semantics of when you inline more.
-                //  -- Apr 6, 2024
-                assert!(matches!(self.program[f].ret, LazyType::Infer));
+        let ret_ty = self.compile_expr(result, &mut body_expr, hint)?;
+        if self.program[f].finished_ret.is_none() {
+            // If you got to the point of emitting the body, the only situation where you don't know the return type yet is if they didn't put a type anotation there.
+            // This isn't true if you have an @generic function that isn't @comptime trying to use its args in its return type.
+            // That case used to work becuase I'd always inline after doing const args so you've never even get to the point of compiling the function body on its own.
+            // However, that still wasn't the same as @comptime because it didn't egarly evaluate unless already in a const context.
+            // I do still want to get rid of @comptime and just use const args but I need to think about the semantics of when you inline more.
+            //  -- Apr 6, 2024
+            assert!(matches!(self.program[f].ret, LazyType::Infer));
 
-                self.program[f].finished_ret = Some(res);
-                self.program[f].ret = LazyType::Finished(res);
-            }
-            self.program[f].body = Some(body_expr);
-            res
-        };
+            self.program[f].finished_ret = Some(ret_ty);
+            self.program[f].ret = LazyType::Finished(ret_ty);
+        }
+        self.program[f].body = Some(body_expr);
+
         let func = &self.program[f];
-        self.type_check_arg(ret_val, func.finished_ret.unwrap(), "bad return value")?;
+        self.type_check_arg(ret_ty, func.finished_ret.unwrap(), "bad return value")?;
         self.pop_state(state);
 
-        Ok(ret_val)
+        Ok(ret_ty)
     }
 
     // This is a normal function call. No comptime args, no runtime captures.
@@ -630,7 +652,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.currently_inlining.push(f);
 
         let func = &self.program.funcs[f.as_index()];
-        let ret_ty = func.finished_ret.unwrap(); // TODO: if let this? its for return_var
+        // TODO: if let this? its for return_var
+        let Some(ret_ty) = func.finished_ret else {
+            err!("Unknown ret type for {f:?} {}", self.pool.get(self.program[f].name))
+        };
         let hint = func.finished_ret;
         let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
         let func = &self.program.funcs[f.as_index()];
@@ -1068,6 +1093,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests_broken.push(id);
         }
+
         Ok(out)
     }
 
@@ -1170,9 +1196,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(res.is_valid());
         if !expr.ty.is_unknown() {
             self.last_loc = Some(expr.loc);
-            //format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak())?;
+            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
 
-            self.type_check_arg(expr.ty, res, "sanity ICE")?;
+            self.type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
         }
         if let Some(requested) = requested {
             debug_assert!(requested.is_valid());
@@ -1182,14 +1208,15 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       so maybe its better to have more consistant use of the context stack so you always know what you're doing and forwarding typecheck responsibility doesnt mean poor error messages.
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
-            // format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak()
-            self.type_check_arg(res, requested, "sanity ICE")?;
+
+            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
+            self.type_check_arg(res, requested, "sanity ICE req_expr")?;
         }
 
         expr.ty = res;
         if !old.is_unknown() {
             // TODO: cant just assert_eq because it does change for rawptr.
-            self.type_check_arg(expr.ty, old, "sanity ICE")?;
+            self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
         }
         Ok(res)
     }
@@ -1246,10 +1273,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
                 if let Some(f_id) = self.maybe_direct_fn(result, f, arg, requested)? {
-                    match f_id {
-                        FuncRef::Exact(f_id) => return Ok(self.compile_call(result, expr, f_id, requested)?.0),
-                        FuncRef::Split { ct, rt } => return self.compile_split_call(result, expr, ct, rt),
-                    }
+                    return Ok(self.compile_call(result, expr, f_id, requested)?.0);
                 }
 
                 self.last_loc = Some(f.loc);
@@ -1767,9 +1791,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if i.3 == VarType::Const {
                         if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
-                            if let Ok(Some(f_ty)) = self.infer_types(fid.at_rt()) {
+                            if let Ok(Some(f_ty)) = self.infer_types(fid) {
                                 // Need to save this because resolving overloads eats named arguments
-                                f.set(fid.as_value().into(), self.program.func_type(fid.at_rt()));
+                                f.set(Values::One(Value::GetFn(fid)), self.program.func_type(fid));
                                 return Ok(Some(f_ty.ret));
                             }
                         }
@@ -2345,7 +2369,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ice!("!if arg must be func not {:?}", parts[cond_index]);
             };
 
-            let branch_body = branch_body.single()?;
             let branch_arg = self.infer_arg(branch_body)?;
             self.type_check_arg(branch_arg, unit, sig)?;
             self.program[branch_body].set_cc(CallConv::Inline)?; // hack
@@ -2360,7 +2383,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let (true_ty, expect_fn) = if let Some(if_true) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, requested)? {
-            let if_true = if_true.single()?;
             self.program[if_true].set_cc(CallConv::Inline)?; // hack
             let true_arg = self.infer_arg(if_true)?;
             self.type_check_arg(true_arg, unit, sig)?;
@@ -2374,7 +2396,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             let Some(if_false) = self.maybe_direct_fn(result, &mut parts[2], &mut unit_expr, requested.or(Some(true_ty)))? else {
                 ice!("if third arg must be func not {:?}", parts[2]);
             };
-            let if_false = if_false.single()?;
             self.program[if_false].set_cc(CallConv::Inline)?; // hack
             let false_arg = self.infer_arg(if_false)?;
             self.type_check_arg(false_arg, unit, sig)?;
@@ -2402,7 +2423,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             ice!("if args must be tuple not {:?}", while_macro_arg);
         };
         if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
-            let cond_fn = cond_fn.single()?;
             self.program[cond_fn].set_cc(CallConv::Inline)?; // hack
             let cond_arg = self.infer_arg(cond_fn)?;
             self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
@@ -2419,7 +2439,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       tho this is going to become tail rec so maybe dont bother
 
         if let Some(body_fn) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, Some(TypeId::unit()))? {
-            let body_fn = body_fn.single()?;
             self.program[body_fn].set_cc(CallConv::Inline)?; // hack
             let body_arg = self.infer_arg(body_fn)?;
             self.type_check_arg(body_arg, TypeId::unit(), sig)?;
@@ -2914,48 +2933,42 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - tuple of string literals -> llvm-ir
     /// - tuple of 32-bit int literals -> aarch64 asm ops
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
-    fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
+    pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
         self.ensure_resolved_body(f)?;
+        self.last_loc = Some(self.program[f].loc);
+
         assert!(
             self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
-            "inline asm msut specify calling convention"
+            "inline asm msut specify calling convention. but just: {:?}",
+            self.program[f].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
         );
+        if self.program[f].has_tag(Flag::Aarch64) && self.program[f].jitted_code.is_none() {
+            let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
+                let asm_bytes: Option<Vec<u32>> = parts
+                    .iter()
+                    .map(|op| bit_literal(op, self.pool).and_then(|(ty, val)| if ty.bit_count == 32 { Some(val as u32) } else { None }))
+                    .collect();
 
-        // TODO: assert f has an arch and a calling convention annotation (I'd rather make people be explicit just guess, even if you can always tell arch).
-
-        let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
-            // TODO: allow quick const eval for single expression of correct type instead of just tuples.
-            // TODO: annotations to say which target you're expecting.
-            let llvm_ir: Option<Vec<Ident<'p>>> = parts
-                .iter()
-                // TODO: this will be broken by string rework wrapping everything in @as(Str) -- May 4
-                .map(|op| if let Expr::String(op) = op.expr { Some(op) } else { None })
-                .collect();
-            if llvm_ir.is_some() {
-                self.program[f].add_tag(Flag::Llvm);
-                self.program[f].llvm_ir = llvm_ir;
-                self.program.inline_llvm_ir.push(f);
-                return Ok(());
-            }
-            let asm_bytes: Option<Vec<u32>> = parts
-                .iter()
-                .map(|op| bit_literal(op, self.pool).and_then(|(ty, val)| if ty.bit_count == 32 { Some(val as u32) } else { None }))
-                .collect();
-
-            if let Some(ops) = asm_bytes {
-                ops
+                if let Some(ops) = asm_bytes {
+                    ops
+                } else {
+                    // TODO: support dynamic eval to string for llvm ir.
+                    self.immediate_eval_expr_known(asm.clone())?
+                }
             } else {
-                // TODO: support dynamic eval to string for llvm ir.
-                self.immediate_eval_expr_known(asm.clone())?
-            }
-        } else {
-            let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
-            ops
-        };
-        self.program[f].add_tag(Flag::Aarch64);
-        // TODO: emit into the Jitted thing instead of this.
-        //       maybe just keep the vec, defer dealing with it and have bc_to_asm do it?
-        self.program[f].jitted_code = Some(ops.clone());
+                let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
+                ops
+            };
+            self.program[f].jitted_code = Some(ops.clone());
+        } else if self.program[f].has_tag(Flag::Llvm) && self.program[f].llvm_ir.is_none() {
+            // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
+            // TODO: if its a string literal just take it
+            let ir: String = self.immediate_eval_expr_known(asm.clone())?;
+            self.program[f].llvm_ir = Some(self.pool.intern(&ir));
+            self.program.inline_llvm_ir.push(f);
+        } else if self.program[f].jitted_code.is_none() && self.program[f].llvm_ir.is_none() {
+            err!("!asm require arch tag",)
+        }
 
         Ok(())
     }
@@ -3145,61 +3158,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.save_const_values(name, val, final_ty)?;
         Ok(())
-    }
-
-    // Note: don't care about the requested type because functions are already resolved.
-    fn compile_split_call(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, mut ct: FuncId, mut rt: FuncId) -> Res<'p, TypeId> {
-        debug_assert_ne!(ct, rt);
-        let Expr::Call(f_expr, arg_expr) = expr.deref_mut() else { ice!("") };
-
-        let arg_ty_ct = unwrap!(self.program[ct].finished_arg, "ct fn arg");
-        let arg_ty = unwrap!(self.program[rt].finished_arg, "rt fn arg");
-        self.type_check_arg(arg_ty_ct, arg_ty, "ct vs rt")?;
-        self.compile_expr(result, arg_expr, Some(arg_ty))?;
-        let ret_ty_ct = unwrap!(self.program[ct].finished_ret, "ct fn ret");
-        let ret_ty = unwrap!(self.program[rt].finished_ret, "rt fn ret");
-        self.type_check_arg(ret_ty_ct, ret_ty, "ct vs rt")?;
-        let mut f_ty = self.program.func_type(rt);
-        // At this point we know they have matching arg and ret types.
-
-        assert!(
-            !self.program[ct].has_tag(Flag::Comptime) && !self.program[rt].has_tag(Flag::Comptime),
-            "@comptime fn must support all architectures"
-        );
-        assert!(self.program[ct].cc != Some(CallConv::Inline) && self.program[rt].cc != Some(CallConv::Inline));
-
-        let ct_consts: Vec<_> = self.program[ct].arg.bindings.iter().map(|b| b.kind == VarType::Const).collect();
-        let rt_consts: Vec<_> = self.program[rt].arg.bindings.iter().map(|b| b.kind == VarType::Const).collect();
-        assert_eq!(
-            ct_consts,
-            rt_consts,
-            "Split FuncRef arg bindings must have same const-ness. {}",
-            self.pool.get(self.program[rt].name)
-        );
-
-        if rt_consts.iter().any(|&b| b) {
-            let mut arg_expr2 = arg_expr.clone();
-            // Pretend we're just going to do one and bake the args so no more const.
-            rt = self.curry_const_args(rt, f_expr, arg_expr)?;
-            // Now do the same for the other, so now we have two functions that each go through a chain of calls baking the same const args.
-            ct = self.curry_const_args(ct, f_expr, &mut arg_expr2)?;
-            // TODO: assert no captures and that arg_expr===arg_expr2
-
-            // This will have changed from baking the args.
-            f_ty = self.program.func_type(rt);
-            let ct_ty = self.program.func_type(ct);
-            assert_eq!(f_ty, ct_ty);
-        }
-
-        // Since we just baked args, the ids might have changed so we have to update them.
-        f_expr.set(Value::SplitFunc { ct, rt }.into(), f_ty);
-
-        self.add_callee(result, ct, ExecTime::Comptime);
-        self.add_callee(result, rt, ExecTime::Runtime);
-        self.compile(ct, ExecTime::Comptime)?;
-        self.compile(rt, ExecTime::Runtime)?;
-
-        Ok(ret_ty)
     }
 
     pub fn flush_cpu_instruction_cache(&mut self) {

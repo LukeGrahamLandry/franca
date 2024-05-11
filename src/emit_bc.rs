@@ -353,13 +353,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(!func.has_tag(Flag::Comptime));
                     return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
                 }
-                if let Expr::Value {
-                    value: Values::One(Value::SplitFunc { ct, rt }),
-                    ..
-                } = f.expr
-                {
-                    todo!()
-                }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
                     self.compile_expr(result, f, PushStack, false)?;
                     self.compile_for_arg(result, arg, false)?; // TODO: im assuming no flat call
