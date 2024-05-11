@@ -1,3 +1,11 @@
+## cranelift
+
+I want x86 but I don't want to go back to the nightmares factory.
+
+- cranelift maybe doesn't inline things cause they expect you to already have optimised wasm?
+  so my llvm strat of i write the basic functions in text ir and parse that into my module seems meh.
+  instead just have a few magic callbacks in the compiler that get access to an instruction builder.
+
 ## simple tail recursion (May 10)
 
 - fixed next_label starting at from_raw(0) instead of from_index(0) so serialization works

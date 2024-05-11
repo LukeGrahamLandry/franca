@@ -199,6 +199,17 @@ pub fn get_include_std(name: &str) -> Option<String> {
             }
             Some(out)
         }
+        #[cfg(feature = "cranelift")]
+        "codegen_cranelift_basic" => {
+            let mut out = String::new();
+            writeln!(out, "{}", msg).unwrap();
+            for (sig, ptr) in crate::cranelift::BUILTINS {
+                writeln!(out, "#cranelift_emit({}) #c_call {sig};", *ptr as usize).unwrap();
+            }
+            Some(out)
+        }
+        #[cfg(not(feature = "cranelift"))]
+        "codegen_cranelift_basic" => Some(String::new()),
         _ => {
             // if let Some((_, src)) = INCLUDE_STD.iter().find(|(check, _)| name == *check) {
             //     return Some(src.to_string());

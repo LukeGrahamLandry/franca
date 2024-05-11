@@ -707,6 +707,7 @@ pub struct Func<'p> {
     pub aarch64_stack_bytes: Option<u16>,
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
+    pub cl_emit_fn_ptr: Option<usize>,
 }
 
 #[repr(C)]
@@ -1576,6 +1577,7 @@ impl<'p> Default for Func<'p> {
             args_block: None,
             high_jitted_callee: 0,
             aarch64_stack_bytes: None,
+            cl_emit_fn_ptr: None,
         }
     }
 }

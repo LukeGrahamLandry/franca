@@ -14,18 +14,26 @@ pub fn break_here(_e: &CErr) {
     }
 }
 
+pub fn make_err(reason: CErr) -> Box<CompileError> {
+    Box::new(CompileError {
+        internal_loc: if cfg!(feature = "trace_errors") {
+            Some(std::panic::Location::caller())
+        } else {
+            None
+        },
+        loc: None,
+        reason,
+        trace: String::new(),
+    })
+}
+
 #[macro_export]
 macro_rules! err {
     ($payload:expr) => {{
         let e = $payload;
         $crate::logging::break_here(&e);
 
-        return Err(Box::new($crate::compiler::CompileError {
-            internal_loc: if cfg!(feature="trace_errors") {Some(std::panic::Location::caller())} else {None},
-            loc: None,
-            reason: e,
-            trace: String::new(),
-        }))
+        return Err($crate::logging::make_err(e))
     }};
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);

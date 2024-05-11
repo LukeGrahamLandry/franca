@@ -590,21 +590,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     }
                 }
             }
-            Bc::Pick { back } => {
-                let index = self.state.stack.len() - back as usize - 1;
-                let val = self.state.stack[index];
-                match val {
-                    Val::Increment { reg, .. } => {
-                        if reg == sp {
-                            self.state.stack.push(val);
-                        } else {
-                            todo!()
-                        }
-                    }
-                    Val::Literal(_) | Val::Spill(_) => self.state.stack.push(val),
-                    Val::FloatReg(_) => todo!(),
-                }
-            }
             Bc::Dup => {
                 let val = *self.state.stack.last().unwrap();
                 match val {

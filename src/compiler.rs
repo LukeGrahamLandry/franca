@@ -20,6 +20,7 @@ use crate::ast::{
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
+use crate::cranelift::JittedCl;
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
@@ -78,6 +79,8 @@ pub struct Compile<'a, 'p> {
     pub scopes: Vec<Scope<'p>>,
     pub parsing: ParseTasks<'p>,
     pub next_label: LabelId,
+    #[cfg(feature = "cranelift")]
+    pub cranelift: JittedCl,
 }
 
 pub struct Scope<'p> {
@@ -146,6 +149,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             parsing,
             tests_broken: vec![],
             next_label: LabelId::from_index(0),
+
+            #[cfg(feature = "cranelift")]
+            cranelift: JittedCl::default(),
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
@@ -444,8 +450,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         for stmt in body.iter_mut() {
             if let Stmt::DeclFunc(func) = &mut stmt.stmt {
-                if self.decl_func(mem::take(func)).is_err() {
-                    ice!("hoist_constants mem::take so must not fail",);
+                if let Err(e) = self.decl_func(mem::take(func)) {
+                    ice!("hoist_constants mem::take so must not fail {:?}", e);
                 }
                 stmt.stmt = Stmt::Noop;
             }
@@ -1276,7 +1282,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 res
             }
             Expr::Tuple(values) => {
-                debug_assert!(values.len() > 1, "no trivial tuples");
+                assert!(values.len() > 1, "ICE: no trivial tuples");
                 let values: Res<'p, Vec<_>> = values.iter_mut().map(|v| self.compile_expr(result, v, None)).collect();
                 let types = values?;
                 let ty = self.program.tuple_of(types);

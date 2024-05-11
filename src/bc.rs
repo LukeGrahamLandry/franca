@@ -46,7 +46,6 @@ pub enum Bc {
     Unreachable,
     NoCompile,
     LastUse { id: u16 },
-    Pick { back: u16 },
     Noop,
     AddrFnResult,
     Dup,

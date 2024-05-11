@@ -389,7 +389,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let (ip, res_loc) = *result.inlined_return_addr.get(&return_from).unwrap();
                     let slots = match res_loc {
                         PushStack => self.slot_count(ret_ty),
-                        ResAddr => ice!(" TODO: need be be able to find the ResAddr cause it might not be on top of the stack"),
+                        ResAddr => {
+                            ice!("TODO: need be be able to find the ResAddr cause it might not be on top of the stack. (early return from flat_call: big ret/arg value )")
+                        }
                         Discard => 0,
                     };
                     // TODO: sometimes can_tail, if you're returning the main function
