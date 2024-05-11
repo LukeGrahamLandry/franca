@@ -10,6 +10,12 @@ I want x86 but I don't want to go back to the nightmares factory.
 - now with merge it means it tries to load the llvm ir funcs wven tho not using and i havent loaded them since i changed to inline asm needs to say #c_call,
   and that was unacceptibly painful to figure out cause my error messages are useless cause they get swollowed by type_of,
   so by the time it bubbles up, it doesn't have the right loc on it anymore. fuck.
+  also slower! but the old thing was so dumb. TODO: this one's doing redundant work somewhere, it merges the same thing twice.
+
+- it seems you can declare a symbol on the jit builder but not add imported functions later? which i want to for comptime_addr.
+  I guess i could to them up front but like... might as well just do it through a function pointer.
+- iconst never an R64 even if you're going to use it as a pointer
+- it gets less far if i try to return_call_indirect tail call comptime_addr??
 
 ## simple tail recursion (May 10)
 

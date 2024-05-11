@@ -5,6 +5,7 @@ use crate::ast::{LabelId, OverloadSetId, TypeInfo};
 use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
 use crate::emit_bc::ResultLoc;
+use crate::pool::Ident;
 use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId},
@@ -73,11 +74,11 @@ pub struct FnBody<'p> {
     pub last_loc: Span,
     pub jump_targets: BitSet,
     pub if_debug_count: u16,
-    pub(crate) _p: PhantomData<&'p ()>,
     pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
     pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,
     pub clock: u16,
+    pub name: Ident<'p>,
 }
 
 impl<'p> FnBody<'p> {

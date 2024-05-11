@@ -576,7 +576,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::Unreachable => {
                 self.compile.aarch64.push(brk(0xbabe));
-
                 return Ok(true);
             }
             Bc::Pop { slots } => {

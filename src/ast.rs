@@ -1753,6 +1753,8 @@ pub enum Flag {
     Log_Asm_Bc,
     Return,
     Cranelift_Emit,
+    Use_Cranelift,
+    Log_Cl,
     __Return,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,

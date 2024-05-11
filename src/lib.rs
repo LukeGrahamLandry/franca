@@ -331,10 +331,10 @@ pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
 }
 
 pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
-    outln!(ShowPrint, "ERROR");
+    println!("ERROR");
 
     if cfg!(feature = "trace_errors") {
-        outln!(ShowErr, "Internal: {}", e.internal_loc.unwrap());
+        println!("Internal: {}", e.internal_loc.unwrap());
     }
     if let CErr::Diagnostic(diagnostic) = &e.reason {
         emit_diagnostic(&interp.parsing.codemap, diagnostic);
@@ -351,7 +351,7 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
         }];
         emit_diagnostic(&interp.parsing.codemap, &diagnostic);
     } else {
-        outln!(ShowErr, "{}", e.reason.log(interp.program, interp.pool));
+        println!("{}", e.reason.log(interp.program, interp.pool));
     }
 
     println!("{}", e.trace);

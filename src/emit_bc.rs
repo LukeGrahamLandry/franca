@@ -64,7 +64,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             blocks: vec![],
             slot_types: vec![],
             if_debug_count: 0,
-            _p: PhantomData,
+            name: self.program[func.func].name,
             aarch64_stack_bytes: None,
             current_block: BbId(0),
             inlined_return_addr: Default::default(),
@@ -180,21 +180,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
         }
         if func.has_tag(Flag::Log_Bc) {
-            println!();
-            println!("=== Bytecode for {f:?}: {} ===", self.program.pool.get(func.name));
-            for (b, insts) in result.blocks.iter().enumerate() {
-                if insts.insts.len() == 1 && insts.insts[0] == Bc::NoCompile && insts.incoming_jumps == 0 {
-                    continue;
-                }
-                println!(
-                    "[b{b}({})]: ({} incoming. end height={})",
-                    insts.arg_slots, insts.incoming_jumps, insts.height
-                );
-                for (i, op) in insts.insts.iter().enumerate() {
-                    println!("    {i}. {op:?}");
-                }
-            }
-            println!("===")
+            println!("{}", result.log(self.program.pool));
         }
 
         Ok(())

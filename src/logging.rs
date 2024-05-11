@@ -554,20 +554,24 @@ impl<'p> PoolLog<'p> for Func<'p> {
 }
 
 impl<'p> PoolLog<'p> for FnBody<'p> {
-    fn log(&self, _: &StringPool<'p>) -> String {
+    fn log(&self, pool: &StringPool<'p>) -> String {
         let mut f = String::new();
-        writeln!(f, "=== Bytecode for {:?} at {:?} ===", self.func, self.when,);
-        writeln!(f, "TYPES: ");
-        for (i, ty) in self.slot_types.iter().enumerate() {
-            write!(f, "${i}:{ty:?}, ");
+
+        writeln!(f, "=== Bytecode for {} ===", pool.get(self.name));
+        for (b, insts) in self.blocks.iter().enumerate() {
+            if insts.insts.len() == 1 && insts.insts[0] == Bc::NoCompile && insts.incoming_jumps == 0 {
+                continue;
+            }
+            writeln!(
+                f,
+                "[b{b}({})]: ({} incoming. end height={})",
+                insts.arg_slots, insts.incoming_jumps, insts.height
+            );
+            for (i, op) in insts.insts.iter().enumerate() {
+                writeln!(f, "    {i}. {op:?}");
+            }
         }
-        writeln!(f);
-        // TODO
-        // for (i, bc) in self.insts.iter().enumerate() {
-        //     let bc = format!("{i}. {bc:?}");
-        //     writeln!(f, "{}", bc,);
-        // }
-        writeln!(f, "{}", self.why);
+        writeln!(f, "===");
         f
     }
 }

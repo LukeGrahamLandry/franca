@@ -20,7 +20,7 @@ use crate::ast::{
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
-use crate::cranelift::JittedCl;
+use crate::cranelift::{emit_cl, JittedCl};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
@@ -294,7 +294,17 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             if self.program[f].cc.unwrap() != CallConv::Inline {
                 let body = emit_bc(self, f)?;
-                emit_aarch64(self, f, when, &body)?;
+                // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
+                let use_cl = cfg!(feature = "cranelift") && self.program[f].has_tag(Flag::Use_Cranelift);
+                if use_cl {
+                    let res = emit_cl(self, &body, f);
+                    self.tag_err(res)?;
+                    // TODO: this is dumb hyper mmaping, just flush as needed
+                    self.aarch64.dispatch[f.as_index()] = self.cranelift.get_ptr(f).unwrap();
+                } else {
+                    let res = emit_aarch64(self, f, when, &body);
+                    self.tag_err(res)?;
+                }
             }
         }
 
@@ -2934,7 +2944,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - tuple of 32-bit int literals -> aarch64 asm ops
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
-        self.ensure_resolved_body(f)?;
         self.last_loc = Some(self.program[f].loc);
 
         assert!(

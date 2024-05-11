@@ -8,6 +8,7 @@ use cranelift::{
             ArgumentExtension, ArgumentPurpose, StackSlot,
         },
         settings::Flags,
+        CodegenError,
     },
     frontend::FuncInstBuilder,
     prelude::*,
@@ -16,11 +17,11 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, ModuleError};
 
 use crate::{
-    ast::{FnType, FuncId, TypeId, TypeInfo},
+    ast::{Flag, FnType, FuncId, TypeId, TypeInfo},
     bc::{Bc, FnBody},
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
-    logging::make_err,
+    logging::{make_err, PoolLog},
     reflect::BitSet,
 };
 
@@ -78,10 +79,48 @@ struct Emit<'z, 'a, 'p> {
 impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
     fn emit_func(&mut self, f: FuncId, mut builder_ctx: FunctionBuilderContext, mut ctx: codegen::Context) -> Res<'p, ()> {
         self.f = f;
+        self.compile.last_loc = Some(self.compile.program[f].loc);
         let f_ty = self.compile.program[f].unwrap_ty();
-        ctx.func.signature = self.make_sig(f_ty);
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        ctx.func.signature = self.make_sig(f_ty, true);
 
+        let linkage = if self.compile.program[f].comptime_addr.is_some() {
+            Linkage::Import
+        } else {
+            Linkage::Export
+        };
+
+        let name = format!("FN{}", f.as_index());
+        let id = self
+            .compile
+            .cranelift
+            .module
+            .declare_function(&name, linkage, &ctx.func.signature)
+            .map_err(wrap)?;
+
+        if let Some(addr) = self.compile.program[f].comptime_addr {
+        } else {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+            self.emit_body(&mut builder)?;
+            if self.compile.program[f].has_tag(Flag::Log_Cl) {
+                println!(
+                    "=== Cranelift IR for {f:?}: {} ===",
+                    self.compile.program.pool.get(self.compile.program[f].name)
+                );
+                println!("{}", builder.func);
+                println!("===");
+            }
+            builder.finalize();
+            self.compile.cranelift.module.define_function(id, &mut ctx).map_err(wrap)?;
+        }
+
+        extend_options(&mut self.compile.cranelift.funcs, f.as_index());
+        self.compile.cranelift.funcs[f.as_index()] = Some(id);
+        self.compile.cranelift.module.clear_context(&mut ctx);
+
+        Ok(())
+    }
+
+    fn emit_body(&mut self, builder: &mut FunctionBuilder) -> Res<'p, ()> {
         self.vars.clear();
         for ty in &self.body.vars {
             let slots = self.compile.slot_count(*ty);
@@ -91,9 +130,8 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
 
         self.blocks.clear();
         self.block_done.clear();
-
-        for b in 0..self.blocks.len() {
-            self.blocks[b] = builder.create_block();
+        for _ in 0..self.body.blocks.len() {
+            self.blocks.push(builder.create_block());
         }
 
         builder.append_block_params_for_function_params(self.blocks[0]);
@@ -104,27 +142,13 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
             self.indirect_ret_addr = None;
         }
 
-        self.emit_block(0, &mut builder)?;
+        self.emit_block(0, builder)?;
 
         for (b, bl) in self.blocks.iter().enumerate() {
             if self.block_done.get(b) {
                 builder.seal_block(*bl);
             }
         }
-
-        let name = format!("FN{}", self.compile.pool.get(self.compile.program[f].name));
-        let id = self
-            .compile
-            .cranelift
-            .module
-            .declare_function(&name, Linkage::Export, &ctx.func.signature)
-            .map_err(wrap)?;
-
-        self.compile.cranelift.module.define_function(id, &mut ctx).map_err(wrap)?;
-        self.compile.cranelift.module.clear_context(&mut ctx);
-        extend_options(&mut self.compile.cranelift.funcs, f.as_index());
-        self.compile.cranelift.funcs[f.as_index()] = Some(id);
-
         Ok(())
     }
 
@@ -136,8 +160,10 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
 
         let block = &self.body.blocks[b];
         builder.switch_to_block(self.blocks[b]);
+        let args = builder.block_params(self.blocks[b]);
+        debug_assert_eq!(args.len(), block.arg_slots as usize);
         for i in 0..block.arg_slots {
-            let v = builder.block_params(self.blocks[b])[i as usize];
+            let v = args[i as usize];
             self.stack.push(v)
         }
 
@@ -160,7 +186,43 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                         }
                     }
 
-                    todo!()
+                    // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
+                    // without slowing compilation for all of them. So when trying to call something, check if my asm backend has it.
+                    let addr = self.compile.program[f]
+                        .comptime_addr
+                        .or_else(|| self.compile.aarch64.get_fn(f).map(|a| a as u64));
+
+                    let call = if let Some(addr) = addr {
+                        let callee = builder.ins().iconst(I64, addr as i64);
+                        let ty = self.compile.program[f].unwrap_ty();
+                        let sig = self.make_sig(ty, false);
+                        let sig = builder.import_signature(sig);
+                        let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
+
+                        let call = builder.ins().call_indirect(sig, callee, args);
+                        if tail {
+                            // I guess we don't trust rustc to agree with cranelift about what a tail call means?
+                            // and they want to be fancier than me about skipping adjusting sp?
+                            let ret = builder.inst_results(call).to_vec();
+                            builder.ins().return_(&ret);
+                            break;
+                        }
+                        call
+                    } else {
+                        let func_id = self.compile.cranelift.funcs[f.as_index()].unwrap();
+                        let callee = self.compile.cranelift.module.declare_func_in_func(func_id, builder.func);
+                        if tail {
+                            builder.ins().return_call(callee, args);
+                            break;
+                        }
+                        builder.ins().call(callee, args)
+                    };
+
+                    let ret = builder.inst_results(call);
+                    pops(&mut self.stack, slots as usize);
+                    for v in ret {
+                        self.stack.push(*v);
+                    }
                 }
                 Bc::CallDirectFlat { f } => todo!(),
                 Bc::CallSplit { ct, rt } => todo!(),
@@ -236,7 +298,9 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                 Bc::IncPtr { offset } => {
                     let ptr = self.stack.pop().unwrap();
                     let offset = builder.ins().iconst(I64, offset as i64 * 8);
+                    let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
                     let res = builder.ins().iadd(ptr, offset);
+                    let res = builder.ins().bitcast(R64, MemFlags::new(), res);
                     self.stack.push(res);
                 }
                 Bc::Pop { slots } => {
@@ -256,9 +320,16 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                 Bc::CopyToFrom { slots } => {
                     let from = self.stack.pop().unwrap();
                     let to = self.stack.pop().unwrap();
-                    let size = builder.ins().iconst(I64, slots as i64 * 8);
-                    let config = self.compile.cranelift.module.target_config();
-                    builder.call_memcpy(config, to, from, size)
+                    if slots < 4 {
+                        for s in 0..slots {
+                            let v = builder.ins().load(I64, MemFlags::new(), from, s as i32 * 8);
+                            builder.ins().store(MemFlags::new(), v, to, s as i32 * 8);
+                        }
+                    } else {
+                        let size = builder.ins().iconst(I64, slots as i64 * 8);
+                        let config = self.compile.cranelift.module.target_config();
+                        builder.call_memcpy(config, to, from, size)
+                    }
                 }
             }
         }
@@ -288,8 +359,11 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
         }
     }
 
-    fn make_sig(&mut self, t: FnType) -> Signature {
+    fn make_sig(&mut self, t: FnType, internal: bool) -> Signature {
         let mut sig = self.compile.cranelift.module.make_signature();
+        if internal {
+            sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
+        }
         let arg = self.compile.program.raw_type(t.arg);
         if let TypeInfo::Tuple(types) = self.compile.program[arg].clone() {
             for t in types {
@@ -340,7 +414,10 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
 }
 
 fn wrap(e: ModuleError) -> Box<CompileError<'static>> {
-    make_err(CErr::Fatal(format!("cranelift: {}", e)))
+    make_err(CErr::Fatal(match e {
+        ModuleError::Compilation(CodegenError::Verifier(e)) => format!("cranelift: {}", e),
+        _ => format!("cranelift: {:?}", e),
+    }))
 }
 
 fn pops<T>(v: &mut Vec<T>, count: usize) {
