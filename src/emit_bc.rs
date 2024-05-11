@@ -3,7 +3,6 @@
 #![allow(clippy::wrong_self_convention)]
 
 use codemap::Span;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::usize;
 
@@ -23,6 +22,7 @@ pub struct EmitBc<'z, 'p: 'z> {
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
+    is_flat_call: bool,
 }
 
 pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, FnBody<'p>> {
@@ -47,6 +47,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             sizes,
             locals: vec![],
             var_lookup: Default::default(),
+            is_flat_call: false,
         }
     }
 
@@ -94,21 +95,43 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn bind_args(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let arguments = pattern.flatten();
-        // reversed because they're on the stack like [0, 1, 2]
-        for (name, ty, kind) in arguments.into_iter().rev() {
-            // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
-            // TODO: the frontend needs to remove the 'const' parts from the ast in DeclVarPattern
-            assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
+        // TODO: cringe copy-paste
+        if self.is_flat_call {
+            let mut offset = 0;
+            for (name, ty, kind) in arguments.into_iter() {
+                assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
 
-            let id = result.add_var(ty);
-            result.push(Bc::AddrVar { id });
-            let slots = self.slot_count(ty);
-            result.push(Bc::StorePost { slots });
+                let id = result.add_var(ty);
+                let slots = self.slot_count(ty);
 
-            self.locals.last_mut().unwrap().push(id);
-            if let Some(name) = name {
-                let prev = self.var_lookup.insert(name, id);
-                assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+                result.push(Bc::NameFlatCallArg { id, offset });
+                offset += slots;
+
+                self.locals.last_mut().unwrap().push(id);
+                if let Some(name) = name {
+                    let prev = self.var_lookup.insert(name, id);
+                    assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+                }
+            }
+        } else {
+            // reversed because they're on the stack like [0, 1, 2]
+            for (name, ty, kind) in arguments.into_iter().rev() {
+                // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
+                // TODO: the frontend needs to remove the 'const' parts from the ast in DeclVarPattern
+                assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
+
+                let id = result.add_var(ty);
+
+                let slots = self.slot_count(ty);
+
+                result.push(Bc::AddrVar { id });
+                result.push(Bc::StorePost { slots });
+
+                self.locals.last_mut().unwrap().push(id);
+                if let Some(name) = name {
+                    let prev = self.var_lookup.insert(name, id);
+                    assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+                }
             }
         }
         Ok(())
@@ -116,11 +139,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn emit_body(&mut self, result: &mut FnBody<'p>, f: FuncId) -> Res<'p, ()> {
         let func = &self.program[f];
+        let is_flat_call = func.cc.unwrap() == CallConv::Flat;
+        self.is_flat_call = is_flat_call;
         let has_body = func.body.is_some();
 
         let arg = func.finished_arg.unwrap();
-        let slots = self.slot_count(arg);
-        let floats = self.program.float_mask_one(arg);
+        let slots = if is_flat_call { 0 } else { self.slot_count(arg) };
+        let floats = if is_flat_call { 0 } else { self.program.float_mask_one(arg) };
         let entry_block = result.push_block(slots, floats);
 
         if !has_body {
@@ -145,7 +170,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
         let body = func.body.as_ref().unwrap();
 
-        let is_flat_call = func.cc.unwrap() == CallConv::Flat;
         debug_assert!(is_flat_call || ret_slots <= 1); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
         let return_block = result.push_block(ret_slots, ret_floats);

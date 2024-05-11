@@ -1,5 +1,4 @@
-//! Low level instructions that the interpreter can execute.
-use std::marker::PhantomData;
+//! Low level instructions
 
 use crate::ast::{LabelId, OverloadSetId, TypeInfo};
 use crate::bc_to_asm::store_to_ints;
@@ -30,7 +29,6 @@ pub struct BbId(pub u16);
 pub enum Bc {
     CallDirect { f: FuncId, tail: bool },                 // <args:m> -> <ret:n> OR _ ->  <ret:n>
     CallDirectFlat { f: FuncId },                         // <ret_ptr:1> <arg_ptr:1> -> _
-    CallSplit { ct: FuncId, rt: FuncId },                 // <args:m> -> <ret:n>
     CallFnPtr { ty: FnType, comp_ctx: bool },             // <ptr:1> <args:m> -> <ret:n>
     PushConstant { value: i64 },                          // _ -> <v:1>
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <cond:1> -> _
@@ -51,6 +49,7 @@ pub enum Bc {
     AddrFnResult,
     Dup,
     CopyToFrom { slots: u16 }, // <to_ptr:1> <from_ptr:1> -> _
+    NameFlatCallArg { id: u16, offset: u16 },
 }
 
 #[derive(Clone)]

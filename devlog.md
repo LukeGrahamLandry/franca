@@ -1,4 +1,4 @@
-## cranelift
+## cranelift (May 11)
 
 I want x86 but I don't want to go back to the nightmares factory.
 
@@ -16,6 +16,18 @@ I want x86 but I don't want to go back to the nightmares factory.
   I guess i could to them up front but like... might as well just do it through a function pointer.
 - iconst never an R64 even if you're going to use it as a pointer
 - it gets less far if i try to return_call_indirect tail call comptime_addr??
+- the way flat_call works rn is dumb. in the prelude, it loads the args to v-stack and stores them in its own stackframe in var slots,
+  instead of just treating that space as its variables. so you have to do that whole copy even if you only use one part,
+  and my backend does the spilling in a deranged way where it puts them in the wrong place when it runs out of registers, cause it can't look ahead, and recopies later.
+  Using that space as vars is sad because then you have to save the pointer, which is why the normal c abi is better, they have the caller just copy it to below the stack pointer.
+  but I i dont want to change too much at once. so just gonna add memory reference variables to bc,
+  and then it becomes a bit less painful to support on the new backend.
+- FIXED: `// TODO: why can't i do this ? feels like this has gotta be a lurking bug -- May 8`
+  the "x1 is not free" thing from a while ago, that happens when you remove a reg from the stack after assigned for arg:
+  was because i wasnt dropping the old reg after the move.
+
+cranelift has much better error messages than llvm (in that it doesn't just segfault if you make a mistake),
+and is like 2MB instead of 60MB compiled.
 
 ## simple tail recursion (May 10)
 

@@ -23,6 +23,7 @@ use crate::{
     err, extend_options,
     logging::{make_err, PoolLog},
     reflect::BitSet,
+    unwrap,
 };
 
 pub struct JittedCl {
@@ -169,6 +170,7 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
 
         for inst in &block.insts {
             match *inst {
+                Bc::NameFlatCallArg { id, offset } => todo!("flat call on cranelift"),
                 Bc::CallDirect { f, tail } => {
                     let f_ty = self.compile.program[f].unwrap_ty();
                     let slots = self.compile.slot_count(f_ty.arg);
@@ -224,8 +226,37 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                         self.stack.push(*v);
                     }
                 }
-                Bc::CallDirectFlat { f } => todo!(),
-                Bc::CallSplit { ct, rt } => todo!(),
+                Bc::CallDirectFlat { f } => {
+                    let f_ty = &self.compile.program[f].unwrap_ty();
+                    // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64)
+                    let c = self.compile as *const Compile as i64;
+                    let c = builder.ins().iconst(I64, c);
+                    let arg_ptr = self.stack.pop().unwrap();
+                    let arg_count = self.compile.slot_count(f_ty.arg);
+                    let arg_count = builder.ins().iconst(I64, arg_count as i64);
+                    let ret_ptr = self.stack.pop().unwrap();
+                    let ret_count = self.compile.slot_count(f_ty.ret);
+                    let ret_count = builder.ins().iconst(I64, ret_count as i64);
+
+                    let addr = self.compile.program[f]
+                        .comptime_addr
+                        .or_else(|| self.compile.aarch64.get_fn(f).map(|a| a as u64));
+                    let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
+                    // flat_call result goes into a variable somewhere, already setup by bc.
+                    if let Some(addr) = addr {
+                        let callee = builder.ins().iconst(I64, addr as i64);
+                        let ty = self.compile.program[f].unwrap_ty();
+                        // TODO: flat_call needs different sig!
+                        let sig = self.make_sig(ty, false);
+                        let sig = builder.import_signature(sig);
+                        builder.ins().call_indirect(sig, callee, args);
+                    } else {
+                        // TODO: flat_call needs different sig!
+                        let func_id = self.compile.cranelift.funcs[f.as_index()].unwrap();
+                        let callee = self.compile.cranelift.module.declare_func_in_func(func_id, builder.func);
+                        builder.ins().call(callee, args);
+                    }
+                }
                 Bc::CallFnPtr { ty, comp_ctx } => todo!(),
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::JumpIf { true_ip, false_ip, slots } => {
@@ -264,7 +295,15 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                     pops(&mut self.stack, slots as usize);
                     break;
                 }
-                Bc::GetNativeFnPtr(_) => todo!(),
+                Bc::GetNativeFnPtr(f) => {
+                    let addr = self.compile.program[f]
+                        .comptime_addr
+                        .map(|a| a as i64)
+                        .or_else(|| self.compile.cranelift.get_ptr(f).map(|a| a as i64))
+                        .or_else(|| self.compile.aarch64.get_fn(f).map(|a| a as i64));
+                    let addr = unwrap!(addr, "fn not ready");
+                    self.stack.push(builder.ins().iconst(I64, addr));
+                }
                 Bc::Load { slots } => {
                     debug_assert_ne!(slots, 0);
                     let addr = self.stack.pop().unwrap();

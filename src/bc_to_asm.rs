@@ -94,6 +94,9 @@ struct BcToAsm<'z, 'p, 'a> {
     markers: Vec<(String, usize)>,
     log_asm_bc: bool,
     body: &'z FnBody<'p>,
+    // rn these are offsets from the saved arg ptr but later they will be SpOffset for c abi struct args.
+    flat_arg_offsets: Vec<u16>,
+    flat_arg: Option<SpOffset>,
 }
 
 #[derive(Default, Clone)]
@@ -122,6 +125,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             markers: vec![],
             log_asm_bc: false,
             body,
+            flat_arg: None,
+            flat_arg_offsets: vec![],
         }
     }
 
@@ -230,6 +235,8 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.patch_cbz.clear();
         self.patch_b.clear();
         self.release_stack.clear();
+        self.flat_arg = None;
+        self.flat_arg_offsets.clear();
         self.block_ips.clear();
         self.markers.clear();
         self.clock = 0;
@@ -266,15 +273,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.flat_result = Some(self.next_slot);
                 self.store_u64(x3, sp, self.next_slot.0);
                 self.next_slot.0 += 8;
+                self.flat_arg = Some(self.next_slot);
+                self.store_u64(x1, sp, self.next_slot.0);
+                self.next_slot.0 += 8;
+                for i in 0..8 {
+                    self.state.free_reg.push(i as i64);
+                }
 
-                // Copy arguments into their stack slots.
-                // This is the same as the load instruction. We have a pointer and we want to splat it out onto the virtual stack.
-                // TODO: better would be allowing storing deref offsets on the stack so loads could be suspended. -- May 1
-                self.reset_free_reg();
-                self.state.free_reg.retain(|r| *r != x1);
-                self.state.stack.push(Val::Increment { reg: x1, offset_bytes: 0 });
-                // TODO: this is really dumb. it should just refer to them in mmoery if the arg is big because rn it will spill onto its own stack anyway.
-                self.emit_load(arg_size);
+                // Note: we rely on NameFlagArgOffset or whatever to remember how to actually access the parts you're interested in.
             }
             CallConv::Arg8Ret1 => {
                 debug_assert!(arg_size <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
@@ -288,12 +294,12 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 for i in int_count..8 {
                     self.state.free_reg.push(i as i64);
                 }
+                debug_assert_eq!(self.state.stack.len() as u16, arg_size);
             }
             CallConv::Inline | CallConv::OneRetPic | CallConv::Arg8Ret1Ct => unreachable!("unsupported cc {cc:?}"),
         }
 
         debugln!("entry: ({:?})", self.state.stack);
-        debug_assert_eq!(self.state.stack.len() as u16, arg_size);
         self.emit_block(0, false)?;
 
         for (inst, false_ip, reg) in self.patch_cbz.drain(..) {
@@ -377,6 +383,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
         }
         match inst {
+            Bc::NameFlatCallArg { id, offset } => {
+                if let Some(slot) = self.flat_arg {
+                    assert_eq!(id, self.flat_arg_offsets.len() as u16);
+                    self.flat_arg_offsets.push(offset);
+                } else {
+                    err!("only flat_call supports arg ptr currently.",)
+                }
+            }
             Bc::AddrFnResult => {
                 if let Some(slot) = self.flat_result {
                     self.state.stack.push(Val::Spill(slot));
@@ -386,6 +400,9 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::Noop => {}
             Bc::LastUse { id } => {
+                if id < self.flat_arg_offsets.len() as u16 {
+                    return Ok(false);
+                }
                 // TODO: I this doesn't work because if blocks are depth first now, not in order,
                 //       so the var can be done after they rejoin and then the other branch thinks that slot is free
                 //       and puts something else in it. -- May 6
@@ -396,11 +413,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 self.drop_slot(slot, count * 8);
             }
             Bc::NoCompile => unreachable!("{}", self.compile.program[self.f].log(self.compile.pool)),
-            Bc::CallSplit { rt, ct } => {
-                //     let f = if self.when == ExecTime::Comptime { ct } else { rt };
-                //     self.call_direct(f)?;
-                todo!()
-            }
+
             Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
             Bc::GetNativeFnPtr(f) => {
                 // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
@@ -508,7 +521,18 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 return Ok(true);
             }
             Bc::AddrVar { id } => {
-                if let Some(slot) = self.vars[id as usize] {
+                if id < self.flat_arg_offsets.len() as u16 {
+                    if let Some(arg) = self.flat_arg {
+                        // if its an arg to a flat call, reconstruct that address
+                        let slot = self.flat_arg_offsets[id as usize];
+                        let reg = self.get_free_reg();
+                        self.load_u64(reg, sp, arg.0);
+                        self.state.stack.push(Val::Increment { reg, offset_bytes: slot * 8 });
+                        return Ok(false);
+                    } else {
+                        unreachable!()
+                    }
+                } else if let Some(slot) = self.vars[id as usize] {
                     self.state.stack.push(Val::Increment {
                         reg: sp,
                         offset_bytes: slot.0,
@@ -703,7 +727,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                 next_float += 1;
                 continue;
             }
-
             if let Val::Increment { reg, offset_bytes } = self.state.stack[stack_index] {
                 if reg == next_int as i64 {
                     if offset_bytes != 0 {
@@ -747,14 +770,14 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
                     debug_assert_ne!(reg as usize, next_int);
                     // even if offset_bytes is 0, we need to move it to the right register. and add can encode that mov even if reg is sp.
                     self.compile.aarch64.push(add_im(X64, next_int as i64, reg, offset_bytes as i64, 0));
+                    self.drop_reg(reg);
                 }
                 Val::Literal(x) => self.load_imm(next_int as i64, x as u64),
                 Val::Spill(slot) => self.load_u64(next_int as i64, sp, slot.0),
                 Val::FloatReg(_) => todo!(),
             }
             self.state.free_reg.retain(|r| next_int as i64 != *r);
-            // TODO: why can't i do this ? feels like this has gotta be a lurking bug -- May 8
-            // self.state.stack[stack_index] = Val::Literal(0); // make sure we dont try to spill it later
+            self.state.stack[stack_index] = Val::Literal(0); // make sure we dont try to spill it later
             next_int += 1;
         }
         debugln!();

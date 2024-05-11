@@ -20,7 +20,6 @@ use crate::ast::{
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
-use crate::cranelift::{emit_cl, JittedCl};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
@@ -80,7 +79,7 @@ pub struct Compile<'a, 'p> {
     pub parsing: ParseTasks<'p>,
     pub next_label: LabelId,
     #[cfg(feature = "cranelift")]
-    pub cranelift: JittedCl,
+    pub cranelift: crate::cranelift::JittedCl,
 }
 
 pub struct Scope<'p> {
@@ -151,7 +150,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             next_label: LabelId::from_index(0),
 
             #[cfg(feature = "cranelift")]
-            cranelift: JittedCl::default(),
+            cranelift: crate::cranelift::JittedCl::default(),
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
         c
@@ -295,13 +294,22 @@ impl<'a, 'p> Compile<'a, 'p> {
             if self.program[f].cc.unwrap() != CallConv::Inline {
                 let body = emit_bc(self, f)?;
                 // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
-                let use_cl = cfg!(feature = "cranelift") && self.program[f].has_tag(Flag::Use_Cranelift);
-                if use_cl {
-                    let res = emit_cl(self, &body, f);
-                    self.tag_err(res)?;
-                    // TODO: this is dumb hyper mmaping, just flush as needed
-                    self.aarch64.dispatch[f.as_index()] = self.cranelift.get_ptr(f).unwrap();
-                } else {
+
+                #[cfg(feature = "cranelift")]
+                let aarch = {
+                    let use_cl = cfg!(feature = "cranelift") && self.program[f].has_tag(Flag::Use_Cranelift);
+                    if use_cl {
+                        let res = crate::cranelift::emit_cl(self, &body, f);
+                        self.tag_err(res)?;
+                        // TODO: this is dumb hyper mmaping, just flush as needed
+                        self.aarch64.dispatch[f.as_index()] = self.cranelift.get_ptr(f).unwrap();
+                    }
+                    !use_cl
+                };
+                #[cfg(not(feature = "cranelift"))]
+                let aarch = true;
+
+                if aarch {
                     let res = emit_aarch64(self, f, when, &body);
                     self.tag_err(res)?;
                 }
