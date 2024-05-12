@@ -912,7 +912,7 @@ impl SizeCache {
             | TypeInfo::Type
             | TypeInfo::OverloadSet
             | TypeInfo::Unit => 1,
-            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };
         self.known[ty.as_index()] = Some(size);
         size

@@ -104,7 +104,6 @@ pub enum Value {
     GetNativeFnPtr(FuncId),
 }
 
-#[repr(C)]
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
 pub enum Values {
     One(Value),
@@ -117,19 +116,6 @@ impl Values {
             Ok(i)
         } else {
             err!("expected OverloadSet not {self:?}",)
-        }
-    }
-
-    pub(crate) fn as_int_pair(&self) -> Res<'static, (i64, i64)> {
-        match self {
-            Values::One(_) => err!("expected (i64, i64)",),
-            Values::Many(vals) => {
-                if vals.len() == 2 {
-                    Ok((vals[0], vals[1]))
-                } else {
-                    err!("expected (i64, i64)",)
-                }
-            }
         }
     }
 }
@@ -197,7 +183,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         // TODO: struct and tuple with one field?
         &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
         TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
-        &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => unreachable!("should be raw type {ty:?}"),
+        &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
         TypeInfo::Unit => Value::Unit,
         TypeInfo::F64 => Value::F64(n as u64), // TODO: high bit?
         TypeInfo::Bool => Value::Bool(n != 0),

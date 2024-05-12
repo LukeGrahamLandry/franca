@@ -4,6 +4,8 @@
   taking off the scope tracking field from Expr::Block saves 24 bytes on every ast node.
   saves ~7MB on tests so I have 284K nodes, yikes. Stats::ast_expr_nodes_all says 34k... oh but it doesn't count clones.
 - made TypeId::scope just be one int, removed local_constants and some old fields of Func
+- made Enum cases a real type instead of weird contextual_fields thing in the sky.
+  prep for actually checking that casts are valid values.
 
 ## cranelift (May 11)
 

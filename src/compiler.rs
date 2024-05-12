@@ -30,7 +30,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
+use crate::{bc::*, ffi, impl_index, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
@@ -1484,13 +1484,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let Some(name) = arg.as_ident() else {
                             err!("!contextual_field (leading dot) requires name",)
                         };
-                        let fields = unwrap!(
-                            self.program.contextual_fields[ty.as_index()].as_ref(),
-                            "no contextual fields for type {ty:?}"
-                        );
-                        let (value, ty) = unwrap!(fields.get(&name), "contextual field not found {} for {ty:?}", self.pool.get(name));
-                        expr.set(value.clone(), *ty);
-                        return Ok(*ty);
+                        let TypeInfo::Enum { fields, .. } = &self.program[ty] else {
+                            err!("no contextual fields for type {ty:?}",)
+                        };
+                        let field = fields.iter().find(|f| f.0 == name);
+                        let (_, value) = unwrap!(field, "contextual field not found {} for {ty:?}", self.pool.get(name));
+                        expr.set(value.clone(), ty);
+                        return Ok(ty);
                     }
                     Flag::As => {
                         // TODO: sad day
@@ -1511,21 +1511,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         err!("bad !as: {}", arg.log(self.pool))
                     }
-                    // Flag::Return => {
-                    //     let ty = self.compile_expr(result, arg, None)?;
-                    //     if arg.is_raw_unit() {
-                    //         todo!()
-                    //     } else if ty == TypeId::overload_set() {
-                    //         todo!()
-                    //     } else {
-                    //         let f: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
-                    //         if let Some(f_ret) = self.program[f].finished_ret {
-                    //             let ty = self.program.intern_type(TypeInfo::Label(f_ret));
-                    //             expr.set(Values::One(Value::Label { return_from: f }), ty);
-                    //         }
-                    //     }
-                    //     return Ok(expr.ty);
-                    // }
                     _ => {
                         err!(CErr::UndeclaredIdent(*macro_name))
                     }
@@ -1536,11 +1521,12 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 if let Some(val) = e.as_const() {
                     if let Values::One(Value::Type(ty)) = val {
-                        if let Some(fields) = &self.program.contextual_fields[ty.as_index()] {
-                            let (val, ty) = unwrap!(fields.get(name).cloned(), "missing contextual field {} for {ty:?}", self.pool.get(*name));
-                            expr.set(val.clone(), ty);
+                        if let TypeInfo::Enum { fields, .. } = &self.program[ty] {
+                            let field = fields.iter().find(|f| f.0 == *name);
+                            let (_, value) = unwrap!(field, "contextual field not found {} for {ty:?}", self.pool.get(*name));
+                            expr.set(value.clone(), ty);
                             return Ok(ty);
-                        }
+                        };
                     }
 
                     let ty = e.ty;
@@ -1687,31 +1673,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Expr::StructLiteralP(pattern) = &mut target.expr else {
             err!("Expected struct literal found {target:?}",)
         };
-        let mut the_type = Pattern::empty(loc);
-        let unique_ty = self.program.unique_ty(ty);
-        let mut ctx_fields = Map::default();
+        let mut fields = vec![];
         for b in &mut pattern.bindings {
             assert!(b.default.is_some());
             assert!(matches!(b.lazy(), LazyType::Infer));
 
             let expr = unwrap!(b.default.take(), "");
-            let val = self.immediate_eval_expr(expr, unique_ty)?;
-
-            b.ty = LazyType::PendingEval(FatExpr::synthetic_ty(Expr::Value { value: val.clone() }, loc, unique_ty));
+            let val = self.immediate_eval_expr(expr, ty)?;
             let name = unwrap!(b.name(), "@enum field missing name??");
-            ctx_fields.insert(name, (val, unique_ty));
-            the_type.bindings.push(Binding {
-                name: b.name,
-                // ty: LazyType::Finished(unique_ty),
-                ty: LazyType::PendingEval(self.as_literal(unique_ty, loc)?),
-                default: None,
-                kind: VarType::Let,
-            });
+            fields.push((name, val));
         }
-        let i = unique_ty.as_index();
-        extend_options(&mut self.program.contextual_fields, i);
-        let old = self.program.contextual_fields[i].replace(ctx_fields);
-        debug_assert!(old.is_none());
+        let info = TypeInfo::Enum { raw: ty, fields };
+        let unique_ty = self.program.intern_type(info);
         self.as_literal(unique_ty, loc)
     }
 

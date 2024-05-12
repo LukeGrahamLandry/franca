@@ -39,6 +39,7 @@ pub enum VarType {
     Var,
     Const,
 }
+
 #[repr(C)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
@@ -60,6 +61,11 @@ pub enum TypeInfo<'p> {
     // What rust calls an enum
     Tagged {
         cases: Vec<(Ident<'p>, TypeId)>,
+    },
+    // TODO: on assignment, check that it's a valid value. (at the very least do it for constants)
+    Enum {
+        raw: TypeId,
+        fields: Vec<(Ident<'p>, Values)>,
     },
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(TypeId, usize),
@@ -855,7 +861,7 @@ pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
     // twice as much memory but it's so much faster. TODO: can i just store hashes?
-    type_lookup: Map<TypeInfo<'p>, TypeId>,
+    pub type_lookup: Map<TypeInfo<'p>, TypeId>,
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
@@ -868,7 +874,6 @@ pub struct Program<'p> {
     pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
-    pub contextual_fields: Vec<Option<Map<Ident<'p>, (Values, TypeId)>>>,
     pub ffi_definitions: String,
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
@@ -983,7 +988,6 @@ impl<'p> Program<'p> {
             comptime_arch,
             inline_llvm_ir: vec![],
             type_lookup: Default::default(),
-            contextual_fields: vec![],
             ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
         };
@@ -1097,7 +1101,7 @@ impl<'p> Program<'p> {
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
         debug_assert!(ty.is_valid(), "{}", ty.0);
 
-        while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) = &self[ty] {
+        while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) | &TypeInfo::Enum { raw: inner, .. } = &self[ty] {
             ty = inner
         }
         ty
@@ -1163,7 +1167,7 @@ impl<'p> Program<'p> {
             TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => {
                 todo!()
             }
-            &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
+            &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
         }
     }
 
@@ -1188,7 +1192,6 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
-            self.contextual_fields.push(None);
             self.type_lookup.insert(ty, TypeId::from_index(id));
             TypeId::from_index(id)
         })
@@ -1370,7 +1373,7 @@ impl<'p> Program<'p> {
             | TypeInfo::VoidPtr
             | TypeInfo::OverloadSet
             | TypeInfo::Scope => 0,
-            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!("raw"),
+            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!("raw"),
         }
     }
 }

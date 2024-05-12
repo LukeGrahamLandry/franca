@@ -151,7 +151,7 @@ impl<'p> Program<'p> {
                             .collect();
                         format!("@tagged({})", v.join(", "))
                     }
-                    TypeInfo::Unique(inner, _) => self.log_type(*inner),
+                    TypeInfo::Enum { raw: inner, .. } | TypeInfo::Unique(inner, _) => self.log_type(*inner),
                     TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
                     TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
                     TypeInfo::FnPtr(f) => {

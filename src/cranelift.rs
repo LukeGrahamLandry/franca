@@ -407,7 +407,7 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
             | TypeInfo::Bool => I64,
             TypeInfo::Tuple(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => R64,
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr => R64,
-            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             TypeInfo::Scope => todo!(),
         }
     }
