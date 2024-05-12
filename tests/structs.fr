@@ -11,15 +11,14 @@
     assert_eq(@type bob, Person);
     
     // dot syntax for computing field offsets. 
-    // Note: it returns a ptr to the field, not the value of the field. 
-    let age_ptr: Ptr(i64) = bob&.age; 
-    assert_eq(24, bob&.age[]);
-    assert_eq(42, bob&.gender[]);
-    let next_year = add(bob&.age[], 1);
+    let age_ptr: Ptr(i64) = bob.age&; 
+    assert_eq(24, bob.age);
+    assert_eq(42, bob.gender);
+    let next_year = add(bob.age, 1);
     // but assignment does auto-deref for you. 
     bob.age = next_year;
-    assert_eq(bob&.age[], 25);
-    assert_eq(bob&.gender[], 42);
+    assert_eq(bob.age, 25);
+    assert_eq(bob.gender, 42);
     
     // Composition
     const Animal = @struct(owner: Person, whiskers: bool);
@@ -29,22 +28,22 @@
         owner = bob,  // This is a copy of bob.
         whiskers = true,
     );
-    assert_eq(cat&.whiskers[], true);
-    var bob_again: Ptr(Person) = cat&.owner;
-    assert_eq(bob_again.age[], 25);
-    assert_eq(cat&.owner.gender[], 42);  // Auto deref for chained place expressions. 
+    assert_eq(cat.whiskers, true);
+    var bob_again: Ptr(Person) = cat.owner&;
+    assert_eq(bob_again[].age, 25);
+    assert_eq(cat.owner.gender, 42);  // Auto deref for chained place expressions. 
     
     // Structs are value types. 
-    bob_again.age[] = 99;
-    assert_eq(bob_again.age[], 99);
-    assert_eq(bob&.age[], 25);  // The original has not been mutated. 
+    bob_again[].age = 99;
+    assert_eq(bob_again[].age, 99);
+    assert_eq(bob.age, 25);  // The original has not been mutated. 
     
     // `!deref` or `[]` can load a whole struct from a pointer at once. 
     // TODO: this should just be the same as get() but that's not using generics yet so can only do scalars. 
-    var bob_part_three: Person = cat&.owner[];  // This is a copy
+    var bob_part_three: Person = cat.owner;  // This is a copy
     bob_part_three.age = 5;
-    assert_eq(bob_part_three&.age[], 5);
-    assert_eq(cat&.owner.age[], 99);
+    assert_eq(bob_part_three.age, 5);
+    assert_eq(cat.owner.age, 99);
     
     // Structs can contain pointers. 
     House :: @struct(
@@ -55,16 +54,16 @@
     
     // Note: this example aliases bob_again. Good luck compiling to rust :)
     var tent: House = (
-        tax_payer = cat&.owner,
+        tax_payer = cat.owner&,
         pet = cat!addr
     );
     assert_eq(@type tent, House);
-    assert_eq(tent&.pet[].owner.age[], 99);
-    tent&.pet[].owner.age[] = 55;  // Raw pointers can lead to spooky action at a distance... then again so can gc-ed pointers
-    assert_eq(tent&.pet[].owner.age[], 55);
-    assert_eq(tent&.tax_payer[].age[], 55);
-    assert_eq(bob_again.age[], 55);
-    assert_eq(bob&.age[], 25);  // OG bob is still just chillin
+    assert_eq(tent.pet[].owner.age, 99);
+    tent.pet[].owner.age = 55;  // Raw pointers can lead to spooky action at a distance... then again so can gc-ed pointers
+    assert_eq(tent.pet[].owner.age, 55);
+    assert_eq(tent.tax_payer[].age, 55);
+    assert_eq(bob_again[].age, 55);
+    assert_eq(bob.age, 25);  // OG bob is still just chillin
     
     var mouse: Animal = (
         owner = (
@@ -99,18 +98,18 @@
     fn mutate_copy(var who: Person) Unit = {
         who.age = 11;
     }
-    assert_eq(bob&.age[], 25);
+    assert_eq(bob.age, 25);
     mutate_copy(bob);
-    assert_eq(bob&.age[], 25);
+    assert_eq(bob.age, 25);
     
     // Pass a pointer if you want to mutate the original. 
     // TODO: maybe field access should just maintain you the same level of indirection instead of always being pointers. 
     fn mutate_real(who: Ptr(Person)) Unit = {
-        who.age[] = 11;
+        who[].age = 11;
     }
-    assert_eq(bob&.age[], 25);
+    assert_eq(bob.age, 25);
     mutate_real(bob!addr);
-    assert_eq(bob&.age[], 11);
+    assert_eq(bob.age, 11);
     
     // no implicitly created references. this isnt c++. 
     @assert_compile_error mutate_real(bob);
@@ -121,7 +120,7 @@
         gender = 192741892,
     );
     var bill = make_someone(17);
-    assert_eq(bill&.age[], 17);
+    assert_eq(bill.age, 17);
     
   
     
@@ -152,8 +151,8 @@
     
     // Like structs, dot syntax is a place expression. 
     // It's illegal to access a non-active field. // TODO: be able to !assert_runtime_error
-    assert_eq(yes&.Some[], 12);  
-    assert_eq(no&.None[], unit);
+    assert_eq(yes.Some, 12);  
+    assert_eq(no.None, unit);
     
     var things = (1, 2, 3);
     things&.(2)[] = 4;
@@ -167,7 +166,7 @@
     
     let n = 3;
     var a: AA = (a = n);
-    let out = add(a&.a[], 7);
+    let out = add(a.a, 7);
     assert_eq(out, 10);
 }
 
@@ -176,40 +175,40 @@
     A :: @struct(a: i64, b: i64);
     
     var s: A = (a = 1, b = 2);
-    assert_eq(s&.a[], 1); assert_eq(s&.b[], 2);
-    s = (a = s&.b[], b = s&.a[]);
-    assert_eq(s&.a[], 2);
-    assert_eq(s&.b[], 2);  // CORRECT: assert_eq(s&.b[], 1); 
+    assert_eq(s.a, 1); assert_eq(s.b, 2);
+    s = (a = s.b, b = s.a);
+    assert_eq(s.a, 2);
+    assert_eq(s.b, 2);  // CORRECT: assert_eq(s.b, 1); 
     
     var s: A = (a = 1, b = 2);
     s = {
         let a = 5;
-        let b = s&.a[].add(s&.b[]);
+        let b = s.a.add(s.b);
         (a = a, b = b)
     };
-    assert_eq(s&.a[], 5); 
-    assert_eq(s&.b[], 3);  // 'b' would be 7 if it forwarded to the final output location.   
+    assert_eq(s.a, 5); 
+    assert_eq(s.b, 3);  // 'b' would be 7 if it forwarded to the final output location.   
     
     var s: A = (a = 1, b = 2);
     s = {
-        (a = 5, b = s&.a[].add(s&.b[]))
+        (a = 5, b = s.a.add(s.b))
     };
     
-    assert_eq(s&.a[], 5); 
-    assert_eq(s&.b[], 7); // CORRECT: assert_eq(s&.b[], 3);
+    assert_eq(s.a, 5); 
+    assert_eq(s.b, 7); // CORRECT: assert_eq(s.b, 3);
     
     // This is what you're really doing
     var s: A = (a = 1, b = 2);
     s.a = 5;
-    s.b = s&.a[].add(s&.b[]);
-    assert_eq(s&.a[], 5); assert_eq(s&.b[], 7);  // Here it makes sense
+    s.b = s.a.add(s.b);
+    assert_eq(s.a, 5); assert_eq(s.b, 7);  // Here it makes sense
     
     var s: A = (a = 1, b = 2);
     s = {
-        (a = 5, b = s&.a[].add(s&.b[]))
+        (a = 5, b = s.a.add(s.b))
     };
-    assert_eq(s&.a[], 5); 
-    assert_eq(s&.b[], 7);   // CORRECT: assert_eq(s&.b[], 3);
+    assert_eq(s.a, 5); 
+    assert_eq(s.b, 7);   // CORRECT: assert_eq(s.b, 3);
    
     _canary
 }
@@ -221,9 +220,9 @@
     Car :: @struct(colour: Str, windows: i64 = 4, trunks := 1);
     
     my_car: Car = (colour = "red");
-    assert_eq(my_car&.windows[], 4);
+    assert_eq(my_car.windows, 4);
     my_car = (colour = "red", windows = 7);
-    assert_eq(my_car&.windows[], 7);
+    assert_eq(my_car.windows, 7);
 }
 
 // here you need to be able to infer from an expression in infer_pattern which currently means you need to thread a result context all the way through. 
@@ -231,7 +230,7 @@
     Car :: @struct(colour: Str, trunks := 1);
     
     my_car: Car = (colour = "red");
-    assert_eq(my_car&.trunks[], 1);
+    assert_eq(my_car.trunks, 1);
     my_car = (colour = "red", trunks = 2);
-    assert_eq(my_car&.trunks[], 2);
+    assert_eq(my_car.trunks, 2);
 }

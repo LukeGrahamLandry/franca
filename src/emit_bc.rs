@@ -600,18 +600,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
+    // :PlaceExpr
     fn addr_macro(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         self.last_loc = Some(arg.loc);
-        match arg.deref() {
-            Expr::GetVar(var) => {
-                let id = *unwrap!(self.var_lookup.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
-                debug_assert_eq!(var.3, VarType::Var);
-                result.push(Bc::AddrVar { id });
-            }
-            // TODO: this is a bit weird but it makes place expressions work.
-            Expr::Index { .. } => self.compile_expr(result, arg, PushStack, false)?,
-            _ => err!("took address of r-value",),
-        }
+        let Expr::GetVar(var) = arg.deref() else {
+            // field accesses should have been desugared.
+            err!("took address of r-value",)
+        };
+
+        let id = *unwrap!(self.var_lookup.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
+        debug_assert_eq!(var.3, VarType::Var);
+        result.push(Bc::AddrVar { id });
+
         match result_location {
             PushStack => {}
             ResAddr => result.push(Bc::StorePre { slots: 1 }),
@@ -715,6 +715,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
+    // :PlaceExpr
     fn set_deref(&mut self, result: &mut FnBody<'p>, place: &FatExpr<'p>, value: &FatExpr<'p>) -> Res<'p, ()> {
         match place.deref() {
             Expr::GetVar(_) => unreachable!("var set should be converted to place expr"),

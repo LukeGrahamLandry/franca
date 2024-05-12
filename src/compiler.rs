@@ -1204,8 +1204,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
 
-            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
-            self.type_check_arg(res, requested, "sanity ICE req_expr")?;
+            let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
+            self.type_check_arg(res, requested, msg)?; // "sanity ICE req_expr")?;
         }
 
         expr.ty = res;
@@ -1334,7 +1334,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // Note: arg is not evalutated
                     Flag::If => self.emit_call_if(result, expr, requested)?,
                     Flag::While => self.emit_call_while(result, arg)?,
-                    Flag::Addr => self.addr_macro(result, arg)?,
+                    Flag::Addr => self.addr_macro(result, expr)?,
                     // :UnquotePlaceholders
                     Flag::Quote => {
                         let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
@@ -1516,6 +1516,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
             }
+            // :PlaceExpr
             Expr::FieldAccess(e, name) => {
                 let container = self.compile_expr(result, e, None)?;
 
@@ -1547,14 +1548,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 assert!(container != TypeId::scope, "dot syntax on module must be const",);
+                // Otherwise its a normal struct/tagged field.
+                // println!("field: {}", expr.log(self.pool));
+                self.compile_place_expr(result, expr, requested)?;
+                expr.ty
 
-                let index = self.field_access_expr(result, e, *name)?;
-                expr.expr = Expr::Index {
-                    ptr: mem::take(e),
-                    index: Box::new(self.as_literal(index as i64, loc)?),
-                };
-                self.compile_expr(result, expr, requested)? // TODO: dont dispatch again
+                // let index = self.field_access_expr(result, e, *name)?;
+                // expr.expr = Expr::Index {
+                //     ptr: mem::take(e),
+                //     index: Box::new(self.as_literal(index as i64, loc)?),
+                // };
+                // self.compile_expr(result, expr, requested)? // TODO: dont dispatch again
             }
+            // :PlaceExpr
             Expr::Index { ptr, index } => {
                 let ptr_ty = self.compile_expr(result, ptr, None)?;
                 self.compile_expr(result, index, Some(TypeId::i64()))?;
@@ -1688,23 +1694,32 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.as_literal(unique_ty, loc)
     }
 
-    fn addr_macro(&mut self, result: &FnWip<'p>, arg: &mut FatExpr<'p>) -> Res<'p, TypeId> {
-        match arg.deref_mut().deref_mut() {
-            Expr::GetVar(var) => {
-                let value_ty = *unwrap!(result.vars.get(var), "Missing var {} (in !addr)", var.log(self.pool));
-                if var.3 != VarType::Var {
-                    err!("Can only take address of vars not {:?} {}.", var.3, var.log(self.pool))
-                }
-                let ptr_ty = self.program.ptr_type(value_ty);
-                Ok(ptr_ty)
+    // :PlaceExpr
+    fn addr_macro(&mut self, result: &mut FnWip<'p>, macro_expr: &mut FatExpr<'p>) -> Res<'p, TypeId> {
+        let Expr::SuffixMacro(_, arg) = &mut macro_expr.expr else {
+            unreachable!()
+        };
+        // This is kinda weird. base case because compile_place_expr turns anything into <ptr>[],
+        // but the only thing you can do for a var is <var>!addr, so you get stuck in a loop nesting !addr.  -- May 12
+        if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
+            let value_ty = *unwrap!(result.vars.get(var), "Missing var {} (in !addr)", var.log(self.pool));
+            if var.3 != VarType::Var {
+                err!("Can only take address of vars not {:?} {}.", var.3, var.log(self.pool))
             }
-            Expr::SuffixMacro(macro_name, _) => {
-                let name = self.pool.get(*macro_name);
-                ice!("Took address of macro {name} not supported")
-            }
-            &mut Expr::GetNamed(i) => err!(CErr::UndeclaredIdent(i)),
-            _ => err!("took address of r-value {}", arg.log(self.pool)),
+            let ptr_ty = self.program.ptr_type(value_ty);
+            return Ok(ptr_ty);
         }
+
+        self.compile_place_expr(result, arg, None)?;
+        let Expr::SuffixMacro(name, ptr) = mem::take(arg).expr else {
+            unreachable!("compile_place_expr []")
+        };
+        debug_assert_eq!(name, Flag::Deref.ident());
+
+        // Note: not assigning to the arg, assinging to the whole macro call. want to replace the !addr.
+        *macro_expr = *ptr;
+        macro_expr.done = true;
+        Ok(macro_expr.ty)
     }
 
     // HACK: type_of_inner can return None because of errors elsewhere in the compiler (which is a bad idea the way im currently doing it probably) so might leave junk on the context stack.
@@ -1847,7 +1862,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         &mut Expr::GetNamed(i) => {
                             err!(CErr::UndeclaredIdent(i))
                         }
-                        _ => err!("took address of r-value {}", arg.log(self.pool)),
+                        _ => {
+                            if (self.type_of(result, arg)?).is_some() {
+                                self.compile_expr(result, expr, None)?
+                            } else {
+                                return Ok(None);
+                            }
+                        } // _ => err!("took address of r-value {}", arg.log(self.pool)),
                     },
                     Flag::Deref => {
                         let ptr_ty = self.type_of(result, arg)?;
@@ -2528,11 +2549,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // :PlaceExpr
     // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
     fn compile_place_expr(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, ()> {
+        // println!("place: {}", place.log(self.pool));
         let loc = place.loc;
         match place.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
+                // Could even do this in the parser? -- May 12
                 assert_eq!(var.3, VarType::Var, "Only 'var' can be addressed (not let/const).");
                 let val_ty = result.vars.get(var);
                 let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.pool));
@@ -2573,8 +2597,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         place.ty = self.program.unptr_ty(arg.ty).unwrap();
                         Ok(())
                     }
-                    // TODO: when you see a !addr, compile that and then add a !deref.
-                    _ => todo!(),
+                    _ => err!("other place expr: {}!{}", arg.log(self.pool), self.pool.get(*macro_name)),
                 }
             }
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
@@ -2582,6 +2605,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // :PlaceExpr
     fn field_access_expr(&mut self, result: &mut FnWip<'p>, container_ptr: &mut FatExpr<'p>, name: Ident<'p>) -> Res<'p, usize> {
         let container_ptr_ty = self.compile_expr(result, container_ptr, None)?;
         let container_ptr_ty = self.program.raw_type(container_ptr_ty);
@@ -2622,6 +2646,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    // :PlaceExpr
     fn index_expr(&mut self, container_ptr: TypeId, index: usize) -> Res<'p, TypeId> {
         let container_ptr_ty = self.program.raw_type(container_ptr);
         let depth = self.program.ptr_depth(container_ptr_ty);
