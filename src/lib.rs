@@ -46,6 +46,7 @@ unsafe impl GlobalAlloc for MyAllocator {
     }
 }
 
+// TODO: #[cfg(not(feature="free_memory"))]
 // Apr 29. this makes (release mode) tests ~20% faster.
 #[global_allocator]
 static GLOBAL: MyAllocator = MyAllocator;
@@ -310,7 +311,6 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     let name = pool.intern("@toplevel@");
     let body = Some(FatExpr::synthetic(
         Expr::Block {
-            resolved: None,
             body: stmts,
             result: Box::new(FatExpr::synthetic_ty(Expr::Value { value: Value::Unit.into() }, user_span, TypeId::unit)),
             ret_label: None,

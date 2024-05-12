@@ -1059,7 +1059,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             self.raw_unit()
         };
         Ok(self.expr(Expr::Block {
-            resolved: None,
             body,
             result: Box::new(result),
             ret_label: None,

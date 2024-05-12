@@ -4,8 +4,8 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{int_to_value, values_from_ints, Values};
-use crate::compiler::{bit_literal, Compile, Res, Unquote, EXPECT_ERR_DEPTH};
+use crate::bc::{int_to_value, values_from_ints, Value, Values};
+use crate::compiler::{bit_literal, Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
@@ -636,23 +636,23 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let result = compile.pending_ffi.pop().unwrap().unwrap();
     let loc = block.loc;
     // give any other macros a chance to expand.
-    compile.compile_expr(unsafe { &mut *result }, &mut block, Some(TypeId::unit)).unwrap();
+    let ty = compile.program.intern_type(TypeInfo::Fn(FnType {
+        arg: TypeId::unit,
+        ret: TypeId::unit,
+    }));
+    compile.compile_expr(unsafe { &mut *result }, &mut block, Some(ty)).unwrap();
 
-    let (s, block) = if let Expr::Block {
-        resolved: Some((s, b)),
-        result,
-        ..
-    } = block.expr
-    {
-        debug_assert!(result.is_raw_unit());
-        (s, b)
-    } else {
+    let Some(id) = block.as_fn() else {
         panic!("expected block for @namespace not {}", block.log(compile.pool))
     };
 
-    compile.pending_ffi.push(Some(result));
+    compile.compile(id, ExecTime::Comptime).unwrap();
+    let func = &mut compile.program[id];
+    let s = func.scope.unwrap();
 
-    FatExpr::value(Values::Many(vec![s.as_raw(), block as i64]), TypeId::scope, loc)
+    compile.pending_ffi.push(Some(result));
+    // TODO: remove block index
+    FatExpr::value(Values::One(Value::I64(s.as_raw())), TypeId::scope, loc)
 }
 
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {

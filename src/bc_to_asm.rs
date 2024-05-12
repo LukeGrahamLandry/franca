@@ -139,9 +139,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         self.compile.aarch64.make_write();
 
         self.wip.push(f);
-        if let Some(template) = self.compile.program[f].any_reg_template {
-            todo!()
-        } else if let Some(addr) = self.compile.program[f].comptime_addr {
+        if let Some(addr) = self.compile.program[f].comptime_addr {
             self.compile.aarch64.dispatch[f.as_index()] = addr as *const u8;
         } else {
             let func = &self.compile.program[f];
@@ -474,7 +472,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
             }
             Bc::CallDirect { f, tail } => {
                 let target = &self.compile.program[f];
-                debug_assert!(target.any_reg_template.is_none());
                 let comp_ctx = match self.compile.program[f].cc.unwrap() {
                     CallConv::Arg8Ret1Ct => true,
                     CallConv::Arg8Ret1 | CallConv::OneRetPic => false,
@@ -1079,7 +1076,6 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
     // stack must be [<ret_ptr>, <arg_ptr>]. bc needs to deal with loading/storing stuff from memory.
     fn call_direct_flat(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.compile.program[f];
-        debug_assert!(target.any_reg_template.is_none());
         debug_assert_eq!(target.cc, Some(CallConv::Flat));
         let f_ty = target.unwrap_ty();
 

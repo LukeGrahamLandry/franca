@@ -12,6 +12,7 @@ pub fn break_here(e: &CErr) {
     }
 }
 
+#[track_caller]
 pub fn make_err(reason: CErr) -> Box<CompileError> {
     Box::new(CompileError {
         internal_loc: if cfg!(feature = "trace_errors") {

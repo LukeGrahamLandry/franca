@@ -78,6 +78,7 @@ pub struct Compile<'a, 'p> {
     pub cranelift: crate::cranelift::JittedCl,
 }
 
+#[derive(Debug)]
 pub struct Scope<'p> {
     pub parent: ScopeId,
     pub constants: Map<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
@@ -89,6 +90,7 @@ pub struct Scope<'p> {
     pub block_in_parent: usize,
 }
 
+#[derive(Debug)]
 pub struct BlockScope<'p> {
     pub vars: Vec<Var<'p>>,
     pub parent: usize,
@@ -450,7 +452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn hoist_constants(&mut self, body: &mut [FatStmt<'p>]) -> Res<'p, ()> {
+    pub fn hoist_constants(&mut self, body: &mut [FatStmt<'p>]) -> Res<'p, ()> {
         // Function tags (#when) are evaluated during decl_func but may refer to constants.
         // TODO: they should be allowed to refer to functiobns too so need to delay them.
         //       plus the double loop looks really dumb.
@@ -493,13 +495,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.infer_types(f)?;
         let func = &self.program[f];
-        if let Some(template) = func.any_reg_template {
-            self.ensure_compiled(template, ExecTime::Comptime)?;
-        } else {
-            let mut result = self.empty_fn(when, f, func.loc);
-            self.emit_body(&mut result, f)?;
-            self.program[f].wip = Some(result);
-        }
+        let mut result = self.empty_fn(when, f, func.loc);
+        self.emit_body(&mut result, f)?;
+        self.program[f].wip = Some(result);
         self.pop_state(state);
         let after = self.debug_trace.len();
         debug_assert_eq!(before, after);
@@ -700,7 +698,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ret_label = self.next_label;
         self.next_label.0 += 1;
         expr_out.expr = Expr::Block {
-            resolved: None,
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
                     binding: pattern,
@@ -1134,7 +1131,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(());
         }
         debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_sign of evil_uninit {}", self.log_trace());
-        self.program[f].why_resolved_sign = Some(Location::caller().to_string()); // self.log_trace()
         mut_replace!(self.program[f], |mut func: Func<'p>| {
             ResolveScope::resolve_sign(&mut func, self)?; // TODO
             Ok((func, ()))
@@ -1148,7 +1144,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(());
         }
         debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_body of evil_uninit {}", self.log_trace());
-        self.program[f].why_resolved_body = Some(Location::caller().to_string()); // self.log_trace()
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
             ResolveScope::resolve_body(&mut func, self)?; // TODO
@@ -1550,8 +1545,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                     let ty = e.ty;
                     if ty == TypeId::scope {
-                        let (s, b) = val.as_int_pair()?;
-                        let Some(&var) = self[ScopeId::from_raw(s)].vars[b as usize].vars.iter().find(|v| v.0 == *name) else {
+                        let Values::One(Value::I64(s)) = val else {
+                            err!("expected int for scope id",)
+                        };
+                        let Some(&var) = self[ScopeId::from_raw(s)].constants.keys().find(|v| v.0 == *name) else {
                             err!(CErr::UndeclaredIdent(*name))
                         };
                         debug_assert!(var.3 == VarType::Const);
@@ -2570,8 +2567,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn field_access_expr(&mut self, result: &mut FnWip<'p>, container_ptr: &mut FatExpr<'p>, name: Ident<'p>) -> Res<'p, usize> {
-        let container_ptr = self.compile_expr(result, container_ptr, None)?;
-        let container_ptr_ty = self.program.raw_type(container_ptr);
+        let container_ptr_ty = self.compile_expr(result, container_ptr, None)?;
+        let container_ptr_ty = self.program.raw_type(container_ptr_ty);
         let depth = self.program.ptr_depth(container_ptr_ty);
         assert_eq!(
             depth,
@@ -2587,6 +2584,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             TypeInfo::Struct { fields, .. } => {
                 for (i, f) in fields.iter().enumerate() {
                     if f.name == name {
+                        container_ptr.done = true;
                         return Ok(i);
                     }
                 }
@@ -3176,12 +3174,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             *ty = LazyType::Finished(final_ty);
         } else {
             // I think this just means we renumbered for a specialization.
-            let e = FatExpr {
-                loc,
-                expr: val_expr,
-                ty: final_ty,
-                done: true,
-            };
+            let mut e = FatExpr::synthetic_ty(val_expr, loc, final_ty);
+            e.done = true;
             let val = (e, LazyType::Finished(final_ty));
             self[name.2].constants.insert(name, val);
         }

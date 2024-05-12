@@ -1,3 +1,10 @@
+- made inserting #include_std stmts a bit less dumb.
+- change @namespace to take a closure instead of a block so every block doesn't need to remember its scope.
+  lookup field access in constants of that scope, dont care about which block for now, but eventually need to so you can do private/shadowing.
+  taking off the scope tracking field from Expr::Block saves 24 bytes on every ast node.
+  saves ~7MB on tests so I have 284K nodes, yikes. Stats::ast_expr_nodes_all says 34k... oh but it doesn't count clones.
+- made TypeId::scope just be one int, removed local_constants and some old fields of Func
+
 ## cranelift (May 11)
 
 I want x86 but I don't want to go back to the nightmares factory.

@@ -195,7 +195,7 @@ pub fn int_to_value(compile: &mut Compile, ty: TypeId, n: i64) -> Res<'static, V
 pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
     Some(match info {
         // TODO: struct and tuple with one field?
-        TypeInfo::Scope | &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
+        &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
         TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
         &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => unreachable!("should be raw type {ty:?}"),
         TypeInfo::Unit => Value::Unit,
@@ -211,19 +211,13 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         }
         &TypeInfo::Ptr(_) => Value::Heap(n as *mut i64),
         // TODO: remove any? its a boxed Value
-        TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
+        TypeInfo::Scope | TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
     })
 }
 
 pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
     let ty = compile.program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
     match &compile.program[ty] {
-        TypeInfo::Scope => {
-            let a = unwrap!(ints.next(), "");
-            let b = unwrap!(ints.next(), "");
-            out.push(Value::I64(a));
-            out.push(Value::I64(b));
-        }
         &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
         TypeInfo::Tuple(types) => {
             // TODO: no clone

@@ -899,9 +899,9 @@ impl SizeCache {
             TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(program, *t)).sum(),
             TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(program, f.ty)).sum(),
             TypeInfo::Tagged { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(program, *ty)).max().expect("no empty enum"),
-            TypeInfo::Scope => 2,
             TypeInfo::Never => 0,
-            TypeInfo::Int(_)
+            TypeInfo::Scope
+            | TypeInfo::Int(_)
             | TypeInfo::Label(_)
             | TypeInfo::F64
             | TypeInfo::Bool

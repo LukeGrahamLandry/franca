@@ -14,7 +14,6 @@ use crate::{
 
 pub struct ResolveScope<'z, 'a, 'p> {
     captures: Vec<Var<'p>>,
-    local_constants: Vec<Vec<(Var<'p>, LazyType<'p>, FatExpr<'p>)>>,
     compiler: &'z mut Compile<'a, 'p>,
     last_loc: Span,
     scope: ScopeId,
@@ -25,7 +24,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     fn new(compiler: &'z mut Compile<'a, 'p>, scope: ScopeId, last_loc: Span) -> Self {
         ResolveScope {
             captures: Default::default(),
-            local_constants: Default::default(),
             compiler,
             last_loc,
             scope,
@@ -39,7 +37,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             e.loc = e.loc.or(Some(r.last_loc));
             return Err(e);
         }
-        debug_assert!(r.local_constants.is_empty());
         debug_assert_eq!(r.scope, scope, "ICE: unmatched scopes");
         r.compiler.pool.use_constants(|c| c.adjust_writable());
         Ok(r.captures)
@@ -93,7 +90,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         debug_assert_eq!(self.scope, func.scope.unwrap());
         let generic = func.has_tag(Flag::Generic); // ret is allowed to depend on previous args.
 
-        self.local_constants.push(Default::default());
         func.resolved_sign = true;
         for b in &mut func.arg.bindings {
             self.resolve_binding(b)?;
@@ -102,8 +98,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             self.walk_ty(&mut func.ret);
         }
         self.pop_block();
-        let arg_block_const_decls = self.local_constants.pop().unwrap();
-        assert!(arg_block_const_decls.is_empty()); // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
+        // TODO: allow block exprs with consts in arg types but for now i dont use it and this is easier to think about. -- Apr 24
         debug_assert_eq!(self.scope, func.scope.unwrap());
         debug_assert_eq!(self.block, 0);
         Ok(())
@@ -122,7 +117,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         func.args_block = Some(self.block);
 
         self.block = func.args_block.unwrap();
-        self.local_constants.push(Default::default());
 
         for b in &mut func.arg.bindings {
             self.declare_binding(b, func.loc)?;
@@ -145,9 +139,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         // Now check which things we captured from *our* parent.
         for c in capures {
             self.find_var(&c.0); // This adds it back to self.captures if needed
-            if c.3 != VarType::Const {
-                func.capture_vars.push(c);
-            }
+            debug_assert!(c.3 != VarType::Const);
+            func.capture_vars.push(c);
         }
 
         if !func.allow_rt_capture {
@@ -290,35 +283,20 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.resolve_expr(arg)?;
                 self.resolve_expr(target)?;
             }
-            Expr::Block { body, result, resolved, .. } => {
+            Expr::Block { body, result, .. } => {
                 self.push_scope(None);
 
-                // TODO: this is dumb, most of the time you're not #include-ing something
-                let mut new_body = Vec::with_capacity(body.len());
-                let mut dirty = true;
-                while dirty {
-                    dirty = false;
-                    for stmt in mem::take(body) {
-                        if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
-                            dirty = true;
-                            for s in self.compiler.parsing.wait_for_stmts(name)? {
-                                new_body.push(s);
-                            }
-                        } else {
-                            new_body.push(stmt);
-                        }
-                    }
-                    *body = mem::take(&mut new_body);
-                }
-
                 for stmt in body.iter_mut() {
+                    if matches!(stmt.stmt, Stmt::ExpandParsedStmts(_)) {
+                        self.slow_body(body)?;
+                        break;
+                    }
                     self.scan_const_decls(stmt)?;
                 }
                 for stmt in body.iter_mut() {
                     self.resolve_stmt(stmt)?;
                 }
                 self.resolve_expr(result)?;
-                *resolved = Some((self.scope, self.block));
                 self.pop_block();
             }
             Expr::Tuple(values) => {
@@ -356,6 +334,31 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.pop_block();
             }
             Expr::String(_) => {}
+        }
+        Ok(())
+    }
+
+    // most blocks aren't using #include_std.
+    // doing it this way means you scan_const_decls twice anything in a block before a #include_std, but that doesn't matter.
+    fn slow_body(&mut self, body: &mut Vec<FatStmt<'p>>) -> Res<'p, ()> {
+        let mut new_body = Vec::with_capacity(body.len());
+        let mut dirty = true;
+        while dirty {
+            dirty = false;
+            for stmt in mem::take(body) {
+                if let Stmt::ExpandParsedStmts(name) = stmt.stmt {
+                    dirty = true;
+                    for s in self.compiler.parsing.wait_for_stmts(name)? {
+                        new_body.push(s);
+                    }
+                } else {
+                    new_body.push(stmt);
+                }
+            }
+            *body = mem::take(&mut new_body);
+        }
+        for stmt in body.iter_mut() {
+            self.scan_const_decls(stmt)?;
         }
         Ok(())
     }

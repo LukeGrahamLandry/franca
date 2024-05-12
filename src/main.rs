@@ -13,7 +13,7 @@ use franca::{
     parse::Parser,
     pool::StringPool,
     scope::ResolveScope,
-    timestamp, MEM, MMAP_ARENA_START, STACK_START,
+    timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
     arch::asm,
@@ -85,6 +85,7 @@ fn main() {
 
         if name == "--no-fork" {
             run_tests_serial();
+            println!("{:#?}", unsafe { &STATS });
             return;
         }
 

@@ -102,7 +102,6 @@ pub enum Expr<'p> {
     WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
     Block {
-        resolved: Option<(ScopeId, usize)>, // TODO: this is like only used by @namespace. maybe that should take a function somehow instead.
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
         ret_label: Option<LabelId>,
@@ -369,12 +368,7 @@ impl<'p> FatExpr<'p> {
     }
 
     pub fn value(value: Values, ty: TypeId, loc: Span) -> Self {
-        FatExpr {
-            expr: Expr::Value { value },
-            loc,
-            ty,
-            done: false,
-        }
+        FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
     }
 }
 
@@ -670,7 +664,6 @@ pub struct Func<'p> {
     pub name: Ident<'p>,           // it might be an annonomus closure
     pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
     pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
-    pub arg_loc: Vec<Option<Span>>,
     pub arg: Pattern<'p>,
     pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
@@ -689,13 +682,10 @@ pub struct Func<'p> {
     /// Inline assembly will be saved here.
     // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
     pub jitted_code: Option<Vec<u32>>,
-    pub any_reg_template: Option<FuncId>,
     pub llvm_ir: Option<Ident<'p>>,
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
     pub args_block: Option<usize>,
-    pub why_resolved_sign: Option<String>,
-    pub why_resolved_body: Option<String>,
     pub high_jitted_callee: usize,
     pub resolved_body: bool,
     pub resolved_sign: bool,
@@ -838,8 +828,8 @@ impl<'p> Func<'p> {
 
     #[track_caller]
     pub(crate) fn assert_body_not_resolved(&self) -> Res<'p, ()> {
-        debug_assert!(!self.evil_uninit);
-        debug_assert!(!self.resolved_body, "resolved {}", self.why_resolved_body.as_ref().unwrap());
+        assert!(!self.evil_uninit);
+        assert!(!self.resolved_body);
         Ok(())
     }
 }
@@ -1515,7 +1505,6 @@ impl<'p> Default for Func<'p> {
             name: Ident::null(),
             var_name: None,
             body: None,
-            arg_loc: vec![],
             arg: Pattern {
                 bindings: vec![],
                 loc: garbage_loc(),
@@ -1532,14 +1521,11 @@ impl<'p> Default for Func<'p> {
             dynamic_import_symbol: None,
             comptime_addr: None,
             jitted_code: None,
-            any_reg_template: None,
             llvm_ir: None,
             allow_rt_capture: false,
             resolved_sign: false,
             resolved_body: false,
             scope: None,
-            why_resolved_sign: None,
-            why_resolved_body: None,
             args_block: None,
             high_jitted_callee: 0,
             aarch64_stack_bytes: None,
