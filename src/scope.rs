@@ -7,8 +7,7 @@ use crate::{
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err, ice,
-    logging::{LogTag::Scope, PoolLog},
-    outln,
+    logging::PoolLog,
     pool::Ident,
     STATS,
 };
@@ -168,7 +167,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             );
         }
 
-        outln!(Scope, "{}", func.log_captures(self.compiler.pool));
         Ok(())
     }
 

@@ -5,7 +5,6 @@ use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
-use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId},
     compiler::{ExecTime, Res},
@@ -13,7 +12,6 @@ use crate::{
     ffi::InterpSend,
 };
 use crate::{unwrap, Map};
-use codemap::Span;
 use interp_derive::InterpSend;
 
 #[derive(Copy, Clone, InterpSend, Debug)]
@@ -27,13 +25,13 @@ pub struct BbId(pub u16);
 
 #[derive(Clone, InterpSend, Debug, Copy, PartialEq)]
 pub enum Bc {
-    CallDirect { f: FuncId, tail: bool },                 // <args:m> -> <ret:n> OR _ ->  <ret:n>
+    CallDirect { f: FuncId, tail: bool },                 // <args:m> -> <ret:n>
     CallDirectFlat { f: FuncId },                         // <ret_ptr:1> <arg_ptr:1> -> _
     CallFnPtr { ty: FnType, comp_ctx: bool },             // <ptr:1> <args:m> -> <ret:n>
     PushConstant { value: i64 },                          // _ -> <v:1>
-    JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <cond:1> -> _
-    Goto { ip: BbId, slots: u16 },                        // _ -> _
-    Ret,                                                  //
+    JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !
+    Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
+    Ret,                                                  // <vals:n> -> _ OR _-> _
     GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>
     Load { slots: u16 },                                  // <ptr:1> -> <?:n>
     StorePost { slots: u16 },                             // <?:n> <ptr:1> -> _
@@ -42,14 +40,14 @@ pub enum Bc {
     IncPtr { offset: u16 },                               // <ptr:1> -> <ptr:1>
     Pop { slots: u16 },                                   // <?:n> -> _
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
-    Unreachable,
+    AddrFnResult,                                         // _ -> <ptr:1>
+    Dup,                                                  // <x:1> -> <x:1> <x:1>
+    CopyToFrom { slots: u16 },                            // <to_ptr:1> <from_ptr:1> -> _
+    NameFlatCallArg { id: u16, offset: u16 },             // _ -> _
+    LastUse { id: u16 },                                  // _ -> _
+    Unreachable,                                          // _ -> !
     NoCompile,
-    LastUse { id: u16 },
     Noop,
-    AddrFnResult,
-    Dup,
-    CopyToFrom { slots: u16 }, // <to_ptr:1> <from_ptr:1> -> _
-    NameFlatCallArg { id: u16, offset: u16 },
 }
 
 #[derive(Clone)]
@@ -67,12 +65,7 @@ pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
     pub when: ExecTime,
-    pub slot_types: Vec<TypeId>,
     pub func: FuncId,
-    pub why: String,
-    pub last_loc: Span,
-    pub jump_targets: BitSet,
-    pub if_debug_count: u16,
     pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
     pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,
@@ -92,7 +85,7 @@ pub struct SizeCache {
     pub known: Vec<Option<usize>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub enum Value {
     F64(u64), // TODO: hash
     I64(i64),
@@ -137,16 +130,6 @@ impl Values {
                     err!("expected (i64, i64)",)
                 }
             }
-        }
-    }
-}
-
-impl Value {
-    pub fn to_overloads(&self) -> Option<OverloadSetId> {
-        if let &Value::OverloadSet(f) = self {
-            Some(f)
-        } else {
-            None
         }
     }
 }
@@ -228,7 +211,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         }
         &TypeInfo::Ptr(_) => Value::Heap(n as *mut i64),
         // TODO: remove any? its a boxed Value
-        TypeInfo::Int(_) | TypeInfo::VoidPtr | TypeInfo::Any => Value::I64(n),
+        TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
     })
 }
 

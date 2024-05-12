@@ -74,12 +74,9 @@ use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::cell::Cell;
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 
-use ast::FuncId;
-use ast::ScopeId;
 use bc::Value;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
@@ -120,14 +117,9 @@ pub mod pool;
 pub mod reflect;
 pub mod scope;
 
-use crate::logging::PoolLog;
 use crate::{
     ast::{Expr, FatExpr, FatStmt, Func, TypeId},
     compiler::{Compile, CompileError},
-    logging::{
-        get_logs, save_logs,
-        LogTag::{ShowErr, *},
-    },
 };
 
 #[derive(Debug)]
@@ -159,6 +151,7 @@ pub static mut STATS: Stats = Stats {
     compile_expr_calls_with_done_set: 0,
 };
 
+// TODO: feature = "bundle_stdlib"
 /*
 macro_rules! include_std {
     ($name:expr) => {
@@ -277,59 +270,6 @@ pub fn find_std_lib() -> bool {
     false
 }
 
-pub fn log_dbg(comp: &Compile<'_, '_>, save: Option<&str>) {
-    outln!(FinalAst, "============= BELOW IS ALL INCLUDING COMPTIME================");
-    for (i, f) in comp.program.funcs.iter().enumerate() {
-        if !f.evil_uninit {
-            outln!(FinalAst, "{:?} {}", FuncId::from_index(i), f.log(comp.pool));
-        }
-    }
-
-    let log_scope = |s: ScopeId| {
-        let scope = &comp[s];
-        let pad = format!("{}({}) ", "=".repeat(scope.depth), scope.depth);
-        outln!(
-            Consts,
-            "{pad}fn '{}'; scope {} has parent {} (b: {}); specializations: {:?};",
-            comp.pool.get(scope.name),
-            s.as_index(),
-            scope.parent.as_index(),
-            scope.block_in_parent,
-            scope.funcs
-        );
-
-        let mut s = pad.clone();
-        for (i, b) in scope.vars.iter().enumerate() {
-            s += &format!("({} -> {i}) ", b.parent);
-        }
-        outln!(Consts, "{s};");
-
-        let mut consts = scope.constants.iter().collect::<Vec<_>>();
-        consts.sort_by(|(a, _), (b, _)| a.1.cmp(&b.1));
-        for (var, (e, ty)) in consts {
-            outln!(Consts, "{pad}- {}: {} = {};", var.log(comp.pool), ty.log(comp.pool), e.log(comp.pool),);
-        }
-    };
-
-    for s in 0..comp.scopes.len() {
-        log_scope(ScopeId::from_index(s));
-    }
-
-    println!("{}", get_logs(ShowPrint));
-    let err = get_logs(ShowErr);
-    if !err.is_empty() {
-        println!("{err}");
-    }
-
-    if let Some(path) = save {
-        let folder = &format!("target/latest_log/{path}");
-        fs::create_dir_all(folder).unwrap();
-        save_logs(folder);
-        outln!(Perf, "Wrote log to {folder:?}");
-    }
-    outln!(Perf, "===============================");
-}
-
 pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     println!("ERROR");
 
@@ -361,20 +301,9 @@ fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
     for d in diagnostic {
         println!("{}", d.message);
     }
-    if cfg!(target_arch = "wasm32") {
-        let mut out = vec![];
-        let mut emitter = Emitter::vec(&mut out, Some(codemap));
-        emitter.emit(diagnostic);
-        drop(emitter);
-        outln!(
-            ShowErr,
-            "{}",
-            String::from_utf8(out).unwrap_or_else(|_| "ICE: diagnostic was not valid utf8".into())
-        );
-    } else {
-        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(codemap));
-        emitter.emit(diagnostic);
-    }
+
+    let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(codemap));
+    emitter.emit(diagnostic);
 }
 
 pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {
@@ -383,18 +312,14 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
         Expr::Block {
             resolved: None,
             body: stmts,
-            result: Box::new(FatExpr::synthetic_ty(
-                Expr::Value { value: Value::Unit.into() },
-                user_span,
-                TypeId::unit(),
-            )),
+            result: Box::new(FatExpr::synthetic_ty(Expr::Value { value: Value::Unit.into() }, user_span, TypeId::unit)),
             ret_label: None,
             hoisted_constants: false,
         },
         user_span,
     ));
 
-    let (g_arg, g_ret) = Func::known_args(TypeId::unit(), TypeId::unit(), user_span);
+    let (g_arg, g_ret) = Func::known_args(TypeId::unit, TypeId::unit, user_span);
     Func::new(name, g_arg, g_ret, body, user_span, true, false)
 }
 

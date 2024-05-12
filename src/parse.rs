@@ -9,14 +9,14 @@ use crate::ast::{Binding, Flag, Name, TypeId, VarType};
 use crate::bc::Values;
 use crate::compiler::{CErr, CompileError, Res};
 use crate::export_ffi::get_include_std;
+use crate::STATS;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
     bc::Value,
     lex::{Lexer, Token, TokenType},
-    logging::{LogTag::Parsing, PoolLog},
+    logging::PoolLog,
     pool::{Ident, StringPool},
 };
-use crate::{outln, STATS};
 use TokenType::*;
 
 pub struct Parser<'a, 'p> {
@@ -971,27 +971,19 @@ impl<'a, 'p> Parser<'a, 'p> {
         FatExpr {
             expr,
             loc: self.end_subexpr(),
-            ty: TypeId::unknown(),
+            ty: TypeId::unknown,
             done: false,
         }
     }
 
     fn raw_unit(&mut self) -> FatExpr<'p> {
         let mut e = self.expr(Expr::Value { value: Value::Unit.into() });
-        e.ty = TypeId::unit();
+        e.ty = TypeId::unit;
         e
     }
 
     #[track_caller]
     fn stmt(&mut self, annotations: Vec<Annotation<'p>>, stmt: Stmt<'p>) -> FatStmt<'p> {
-        outln!(
-            Parsing,
-            "{}({}) STMT {:?} {}",
-            "=".repeat(self.spans.len() * 2),
-            self.spans.len(),
-            annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>(),
-            stmt.log(self.pool)
-        );
         FatStmt {
             stmt,
             annotations,

@@ -4,7 +4,6 @@ use codemap::Span;
 
 use crate::{
     ast::{Program, TypeId, TypeInfo},
-    bc::Value,
     Map,
 };
 
@@ -59,7 +58,7 @@ pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut impl It
 }
 
 macro_rules! send_num {
-    ($ty:tt) => {
+    ($ty:ty) => {
         impl<'p> InterpSend<'p> for $ty {
             fn get_type_key() -> u128 {
                 unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -97,7 +96,7 @@ macro_rules! send_num {
 }
 
 // They're all treated as i64, just don't overflow and it will be fine.
-send_num!(i64, i32, i16, i8, u64, u32, u16, u8, usize, isize);
+send_num!(i64, i32, i16, i8, u64, u32, u16, u8, usize, isize, *mut i64);
 
 impl<'p> InterpSend<'p> for bool {
     fn get_type_key() -> u128 {
@@ -129,11 +128,11 @@ impl<'p> InterpSend<'p> for () {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
     fn create_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::unit()
+        TypeId::unit
     }
 
     fn get_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::unit()
+        TypeId::unit
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -209,11 +208,11 @@ impl<'p> InterpSend<'p> for TypeId {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
     fn create_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::ty()
+        TypeId::ty
     }
 
     fn get_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::ty()
+        TypeId::ty
     }
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -346,35 +345,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
 
     fn name() -> String {
         format!("*{}", T::name())
-    }
-}
-
-impl<'p> InterpSend<'p> for Value {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-
-    fn create_type(_interp: &mut Program<'p>) -> TypeId {
-        TypeId::any()
-    }
-
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        let addr = Box::into_raw(Box::new(self)) as *const Self as usize as i64;
-        values.push(addr)
-    }
-
-    fn size() -> usize {
-        1
-    }
-
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        let addr = i64::deserialize_from_ints(values)? as usize as *const Self;
-        // TODO: leak
-        Some(unsafe { *addr })
-    }
-
-    fn name() -> String {
-        "rawptr".to_string()
     }
 }
 
@@ -517,67 +487,6 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
     A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)
 }
 
-#[test]
-fn interp_send() {
-    use crate::ast::TargetArch;
-    use crate::pool::StringPool;
-    use interp_derive::InterpSend;
-    #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
-    struct HelloWorld {
-        a: i64,
-        b: i64,
-    }
-    #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
-    struct HelloTuple(u8, i64);
-    #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
-    enum HelloEnum {
-        // A,
-        B(i64),
-        E { _f: i64, _d: bool },
-        G,
-        F,
-    }
-
-    #[derive(Debug, InterpSend, PartialEq, Copy, Clone)]
-    struct Nested {
-        c: i64,
-        d: HelloWorld,
-        e: HelloTuple,
-        f: HelloEnum,
-        g: HelloEnum,
-        h: HelloEnum,
-        j: Option<i64>,
-    }
-
-    let pool = Box::leak(Box::<StringPool>::default());
-    let mut p = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
-    let one = HelloWorld { a: 123, b: 345 };
-    let two_b = one.serialize_to_ints_one();
-    let three_b = HelloWorld::deserialize_from_ints(&mut two_b.into_iter()).unwrap();
-    assert_eq!(one, three_b);
-
-    let four = vec![one, one, HelloWorld { a: 678, b: 910 }, one];
-    let five_b = four.clone().serialize_to_ints_one();
-    let six_b = Vec::<HelloWorld>::deserialize_from_ints(&mut five_b.into_iter()).unwrap();
-    assert_eq!(four, six_b);
-
-    let seven = Nested {
-        c: 314,
-        d: one,
-        e: HelloTuple(1, 2),
-        f: HelloEnum::E { _f: 15, _d: true },
-        g: HelloEnum::B(25),
-        h: HelloEnum::G,
-        j: Some(123),
-    };
-    let eight_b = seven.serialize_to_ints_one();
-    let nine_b = Nested::deserialize_from_ints(&mut eight_b.into_iter()).unwrap();
-    assert_eq!(seven, nine_b);
-
-    assert_eq!(HelloWorld::get_type(&mut p), HelloWorld::get_type(&mut p));
-    assert_ne!(HelloWorld::get_type(&mut p), Nested::get_type(&mut p));
-}
-
 pub mod c {
     use libffi::middle::{Arg, Type};
 
@@ -618,7 +527,7 @@ pub mod c {
             b = b.arg(Type::pointer());
         }
         f_ty.arg = program.program.raw_type(f_ty.arg); // so it notises things are tuples and should get splatted into multiple args
-        let mut args: Vec<_> = if f_ty.arg == TypeId::unit() {
+        let mut args: Vec<_> = if f_ty.arg == TypeId::unit {
             vec![]
         } else if let TypeInfo::Tuple(fields) = &program.program[f_ty.arg] {
             for ty in fields {
@@ -632,7 +541,7 @@ pub mod c {
             args.iter().map(Arg::new).collect()
         };
 
-        if f_ty.ret != TypeId::unit() {
+        if f_ty.ret != TypeId::unit {
             b = b.res(program.program.as_c_type(f_ty.ret)?)
         }
         if comp_ctx {

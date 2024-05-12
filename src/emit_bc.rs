@@ -56,15 +56,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let mut jump_targets = BitSet::empty();
         jump_targets.set(0); // entry is the first instruction
         FnBody {
-            jump_targets,
             vars: Default::default(),
             when: func.when,
             func: func.func,
-            why: func.why.clone(),
-            last_loc: func.last_loc,
             blocks: vec![],
-            slot_types: vec![],
-            if_debug_count: 0,
             name: self.program[func.func].name,
             aarch64_stack_bytes: None,
             current_block: BbId(0),
@@ -326,8 +321,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn compile_for_arg(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, force_flat: bool) -> Res<'p, Option<u16>> {
         // TODO: hack
         if force_flat {
-            // TODO: fowrad this ot flat call somehow
-            let id = result.add_var(arg.ty);
+            let id = result.add_var(arg.ty); // Note: this is kinda good because it gets scary if both sides try to avoid the copy and they alias.
             result.push(Bc::AddrVar { id });
             self.compile_expr(result, arg, ResAddr, false)?;
             Ok(Some(id))
@@ -347,7 +341,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             "{}",
             expr.log(self.program.pool)
         );
-        result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
@@ -678,7 +671,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
         let (cond_fn, body_fn) = (&parts[0], &parts[1]);
 
-        debug_assert_eq!(body_fn.ty, TypeId::unit());
+        debug_assert_eq!(body_fn.ty, TypeId::unit);
 
         let prev_block = result.current_block;
         let start_cond_block = result.push_block(0, 0);
@@ -909,7 +902,6 @@ impl SizeCache {
             TypeInfo::Scope => 2,
             TypeInfo::Never => 0,
             TypeInfo::Int(_)
-            | TypeInfo::Any
             | TypeInfo::Label(_)
             | TypeInfo::F64
             | TypeInfo::Bool

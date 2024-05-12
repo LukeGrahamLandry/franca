@@ -27,7 +27,19 @@ I want x86 but I don't want to go back to the nightmares factory.
   was because i wasnt dropping the old reg after the move.
 
 cranelift has much better error messages than llvm (in that it doesn't just segfault if you make a mistake),
-and is like 2MB instead of 60MB compiled.
+and is like 2MB extra instead of 60MB extra compiled binary.
+
+as a side quest i tried building my mandelbrot with `--target x86_64-unknown-linux-gnu` (yes I `rustup target add x86_64-unknown-linux-gnu`),
+to try blinknlights. it spewed errors. internet thinks maybe i need to install gcc.
+zig `zig build-exe tail_call.zig -target x86_64-linux-gnu` just worked.
+My cross compiling goals give me extra insentive to get rid of libffi so i dont need to figure out how to get thier massive pile of c to compile.
+
+- removed some #bs that werent actually called by the rust code
+- removed most of my old spammy logging. i never looked at it anyway so it was just kinda distracting to have in the middle of the code everywhere.
+  really what i want instead of that is a repl-ish thing where you can have an error and then be able to look around at the compiler's internals.
+  the just dumping out a bunch of files is not super useful.
+  anyway I've made constants less confusing since then and now what I have truble with is the asm stuf which has a different logging system.
+- finally removed last traces of my Any type from the interp.
 
 ## simple tail recursion (May 10)
 

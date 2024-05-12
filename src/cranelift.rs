@@ -21,7 +21,7 @@ use crate::{
     bc::{Bc, FnBody},
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
-    logging::{make_err, PoolLog},
+    logging::make_err,
     reflect::BitSet,
     unwrap,
 };
@@ -42,6 +42,8 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
         vars: vec![],
         f: FuncId::from_index(0),
         block_done: BitSet::empty(),
+        flat_arg_addr: None,
+        flat_args_already_offset: vec![],
     };
     e.emit_func(f, FunctionBuilderContext::new(), ctx)?;
     Ok(())
@@ -73,6 +75,8 @@ struct Emit<'z, 'a, 'p> {
     block_done: BitSet,
     stack: Vec<Value>,
     indirect_ret_addr: Option<Value>,
+    flat_arg_addr: Option<Value>,
+    flat_args_already_offset: Vec<Value>,
     vars: Vec<StackSlot>,
     f: FuncId,
 }
@@ -107,7 +111,7 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                     "=== Cranelift IR for {f:?}: {} ===",
                     self.compile.program.pool.get(self.compile.program[f].name)
                 );
-                println!("{}", builder.func);
+                println!("{}", builder.func.display());
                 println!("===");
             }
             builder.finalize();
@@ -131,6 +135,8 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
 
         self.blocks.clear();
         self.block_done.clear();
+        self.flat_arg_addr = None;
+        self.flat_args_already_offset.clear();
         for _ in 0..self.body.blocks.len() {
             self.blocks.push(builder.create_block());
         }
@@ -170,7 +176,15 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
 
         for inst in &block.insts {
             match *inst {
-                Bc::NameFlatCallArg { id, offset } => todo!("flat call on cranelift"),
+                Bc::NameFlatCallArg { id, offset } => {
+                    let Some(ptr) = self.flat_arg_addr else { err!("not flat call",) };
+                    debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
+                    let offset = builder.ins().iconst(I64, offset as i64 * 8);
+                    let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
+                    let ptr = builder.ins().iadd(ptr, offset);
+                    let ptr = builder.ins().bitcast(R64, MemFlags::new(), ptr);
+                    self.flat_args_already_offset.push(ptr);
+                }
                 Bc::CallDirect { f, tail } => {
                     let f_ty = self.compile.program[f].unwrap_ty();
                     let slots = self.compile.slot_count(f_ty.arg);
@@ -281,18 +295,16 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                     break;
                 }
                 Bc::Ret => {
-                    let slots = self.compile.slot_count(self.compile.program[self.f].finished_ret.unwrap());
-                    let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
-                    if let Some(ret_addr) = self.indirect_ret_addr {
-                        for s in 0..slots {
-                            let v = self.stack[self.stack.len() - slots as usize + s as usize];
-                            builder.ins().store(MemFlags::new(), v, ret_addr, s as i32 * 8);
-                        }
+                    if self.indirect_ret_addr.is_some() {
+                        // flat_call so we must have already put the values there.
+                        debug_assert!(self.flat_arg_addr.is_some());
                         builder.ins().return_(&[]);
                     } else {
+                        let slots = self.compile.slot_count(self.compile.program[self.f].finished_ret.unwrap());
+                        let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
                         builder.ins().return_(args);
+                        pops(&mut self.stack, slots as usize);
                     }
-                    pops(&mut self.stack, slots as usize);
                     break;
                 }
                 Bc::GetNativeFnPtr(f) => {
@@ -331,8 +343,12 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                     pops(&mut self.stack, slots as usize + 1);
                 }
                 Bc::AddrVar { id } => {
-                    let slot = self.vars[id as usize];
-                    self.stack.push(builder.ins().stack_addr(R64, slot, 0));
+                    if let Some(&ptr) = self.flat_args_already_offset.get(id as usize) {
+                        self.stack.push(ptr);
+                    } else {
+                        let slot = self.vars[id as usize];
+                        self.stack.push(builder.ins().stack_addr(R64, slot, 0));
+                    }
                 }
                 Bc::IncPtr { offset } => {
                     let ptr = self.stack.pop().unwrap();
@@ -345,7 +361,7 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
                 Bc::Pop { slots } => {
                     pops(&mut self.stack, slots as usize);
                 }
-                Bc::TagCheck { expected } => todo!(),
+                Bc::TagCheck { expected } => {} // TODO: !!!
                 Bc::Unreachable => {
                     builder.ins().trap(TrapCode::UnreachableCodeReached);
                     break;
@@ -378,7 +394,7 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
     fn make_type(&mut self, ty: TypeId) -> Type {
         let ty = self.compile.program.raw_type(ty);
         match &self.compile.program[ty] {
-            TypeInfo::Unknown | TypeInfo::Any => todo!(),
+            TypeInfo::Unknown => todo!(),
             TypeInfo::Never => todo!(),
             TypeInfo::F64 => F64,
             TypeInfo::FnPtr(_)
@@ -389,11 +405,9 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
             | TypeInfo::Int(_)
             | TypeInfo::Fn(_)
             | TypeInfo::Bool => I64,
-            TypeInfo::Tuple(_) => F64,
-            TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => R64,
-            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-
+            TypeInfo::Tuple(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => R64,
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr => R64,
+            TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             TypeInfo::Scope => todo!(),
         }
     }
@@ -403,6 +417,7 @@ impl<'z, 'a, 'p> Emit<'z, 'a, 'p> {
         if internal {
             sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
         }
+
         let arg = self.compile.program.raw_type(t.arg);
         if let TypeInfo::Tuple(types) = self.compile.program[arg].clone() {
             for t in types {
@@ -485,6 +500,7 @@ macro_rules! fcmp {
 
 pub type CfEmit = fn(FuncInstBuilder, &[Value]) -> Value;
 
+// TODO: still emit these as real functions if you take a pointer to one.
 pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn add(_: i64, __: i64) i64;", inst!(iadd)),
     ("fn sub(_: i64, __: i64) i64;", inst!(isub)),

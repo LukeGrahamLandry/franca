@@ -23,6 +23,7 @@ use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
+use crate::logging::PoolLog;
 use crate::parse::ParseTasks;
 use crate::scope::ResolveScope;
 use crate::{
@@ -30,13 +31,8 @@ use crate::{
     pool::{Ident, StringPool},
 };
 use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
-use crate::{
-    logging::{LogTag, PoolLog},
-    outln,
-};
 
-use crate::logging::LogTag::ShowErr;
-use crate::{assert, assert_eq, err, ice, logln, unwrap};
+use crate::{assert, assert_eq, err, ice, unwrap};
 
 #[derive(Clone)]
 pub struct CompileError<'p> {
@@ -754,7 +750,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
         self.program[o_f].arg = arg_x;
         self.type_check_arg(arg_ty_found, arg_ty, "bind arg")?;
-        outln!(LogTag::Generics, "bind_const_arg of {o_f:?}");
 
         // TODO: not sure if i actually need this but it seems like i should.
         if let Values::One(Value::GetFn(arg_func)) = &arg_value {
@@ -763,11 +758,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             for capture in &arg_func_obj.capture_vars {
                 debug_assert!(capture.3 != VarType::Const);
             }
-            outln!(
-                LogTag::Generics,
-                "   {arg_func:?} with captures {:?}.",
-                arg_func_obj.capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
-            );
             let mut i = 0;
             while let Some(&v) = self.program[*arg_func].capture_vars.get(i) {
                 // its fine if same this is there multiple times but this makes it less messy to debug logs.
@@ -785,11 +775,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let known_type = self.program[o_f].finished_arg.is_some();
         self.program[o_f].finished_arg = None;
-        outln!(
-            LogTag::Generics,
-            "  => {o_f:?} with captures {:?}",
-            self.program[o_f].capture_vars.iter().map(|v| v.log(self.pool)).collect::<Vec<_>>()
-        );
         // If it was fully resolved before, we can't leave the wrong answer there.
         // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
         if known_type {
@@ -847,7 +832,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
         // let arg_value = arg_value.normalize(); // TODO: general <-, this is just HACK because i know @comptime is always a type.
         if let Values::Many(ints) = &key.1 {
-            if ints.len() == 1 && arg_ty == TypeId::ty() {
+            if ints.len() == 1 && arg_ty == TypeId::ty {
                 key.1 = Values::One(Value::Type(TypeId::from_raw(ints[0])));
             }
         }
@@ -913,12 +898,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Drop the instantiation of the function specialized to this call's arguments.
         // We cache the result and will never need to call it again.
         let mut func = mem::take(&mut self.program[f]);
-        let name = func.name;
         let body = func.body.take();
         let body = unwrap!(body, "builtin?");
         let result = self.immediate_eval_expr(body, ret)?;
-
-        outln!(LogTag::Generics, "{:?}={} of {:?} => {:?}", key.0, self.pool.get(name), key.1, result);
 
         if !no_memo {
             self.program.generics_memo.insert(key, (result.clone(), ret));
@@ -978,7 +960,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if kind == VarType::Const {
                             debug_assert_eq!(binding.bindings.len(), 1);
                             binding.bindings.clear();
-                            value.set(Value::Unit.into(), TypeId::unit());
+                            value.set(Value::Unit.into(), TypeId::unit);
                         }
                         return Ok(());
                     } else {
@@ -1027,7 +1009,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 // If we changed stuff, make sure not to give the backend false type info.
                 if removed > 0 && !value.ty.is_unknown() {
-                    value.ty = TypeId::unknown();
+                    value.ty = TypeId::unknown;
                     self.compile_expr(result, value, None)?;
                 }
             }
@@ -1095,7 +1077,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         public,
                         just_resolved: vec![],
                     });
-                    self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set())?;
+                    self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set)?;
                     out = (Some(id), Some(index));
                 }
             }
@@ -1285,8 +1267,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let TypeInfo::Label(arg_ty) = self.program[f.ty] {
                     self.compile_expr(result, arg, Some(arg_ty))?;
                     expr.done = f.done && arg.done;
-                    expr.ty = TypeId::never();
-                    return Ok(TypeId::never());
+                    expr.ty = TypeId::never;
+                    return Ok(TypeId::never);
                 }
 
                 // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
@@ -1341,7 +1323,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     expr.done = true;
                     ty
                 } else {
-                    outln!(ShowErr, "VARS: {:?}", result.vars);
                     ice!("Missing resolved variable {}", var.log(self.pool),)
                 }
             }
@@ -1403,7 +1384,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let container = self.compile_expr(result, arg, None)?;
                         let ty = self.program.tuple_types(container);
                         let expect = if let Some(types) = ty {
-                            let expect = *unwrap!(types.iter().find(|t| !t.is_any()), "all any");
+                            let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
                             for t in types {
                                 self.type_check_arg(*t, expect, "match slice types")?;
                             }
@@ -1568,7 +1549,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
 
                     let ty = e.ty;
-                    if ty == TypeId::scope() {
+                    if ty == TypeId::scope {
                         let (s, b) = val.as_int_pair()?;
                         let Some(&var) = self[ScopeId::from_raw(s)].vars[b as usize].vars.iter().find(|v| v.0 == *name) else {
                             err!(CErr::UndeclaredIdent(*name))
@@ -1582,7 +1563,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
 
-                assert!(container != TypeId::scope(), "dot syntax on module must be const",);
+                assert!(container != TypeId::scope, "dot syntax on module must be const",);
 
                 let index = self.field_access_expr(result, e, *name)?;
                 expr.expr = Expr::Index {
@@ -1618,13 +1599,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
-                outln!(
-                    LogTag::Macros,
-                    "PrefixMacro: {}\nARG: {}\nTARGET: {}",
-                    handler.log(self.pool),
-                    arg.log(self.pool),
-                    target.log(self.pool)
-                );
                 let expr_ty = FatExpr::get_type(self.program);
                 let mut arg = mem::take(arg.deref_mut());
                 let mut target = mem::take(target.deref_mut());
@@ -1634,8 +1608,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
                 // TODO: OverloadSet: InterpSend so I can use known. cant say usize even tho thats kinda what i want cause its unique and anyway would be dumb to give up the typechecking -- Apr 21
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
-                let os = self.immediate_eval_expr(*handler.clone(), TypeId::overload_set())?;
-                let os = unwrap!(os.single()?.to_overloads(), "expected overload set. TODO: allow direct function");
+                let os = self.immediate_eval_expr(*handler.clone(), TypeId::overload_set)?;
+                let Value::OverloadSet(os) = os.single()? else {
+                    err!("expected overload set. TODO: allow direct function",)
+                };
                 self.compute_new_overloads(os)?;
 
                 let os = self.program[os].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
@@ -1675,8 +1651,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.typecheck_macro_outputs(f, requested)?;
                 let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, Some(result as *mut FnWip), (arg, target))?;
                 *expr = new_expr;
-                outln!(LogTag::Macros, "OUTPUT: {}", expr.log(self.pool));
-                outln!(LogTag::Macros, "================\n");
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(result, expr, requested);
             }
@@ -1701,7 +1675,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       would need better type inference to make that the same, but probably want that anyway.
     //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
     pub fn as_cast_macro(&mut self, result: &mut FnWip<'p>, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
-        self.compile_expr(result, &mut arg, Some(TypeId::ty()))?;
+        self.compile_expr(result, &mut arg, Some(TypeId::ty))?;
         let ty: TypeId = self.immediate_eval_expr_known(arg)?;
         assert!(!ty.is_unknown());
         target.ty = ty;
@@ -1748,7 +1722,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         match arg.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
                 let value_ty = *unwrap!(result.vars.get(var), "Missing var {} (in !addr)", var.log(self.pool));
-                assert!(!value_ty.is_any(), "took address of Any {}", var.log(self.pool));
                 if var.3 != VarType::Var {
                     err!("Can only take address of vars not {:?} {}.", var.3, var.log(self.pool))
                 }
@@ -1870,11 +1843,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
 
                 // TODO: hack yuck. now that i rely on expr working so it can be passed into quoted things, this is extra ugly.
-                match self.compile_expr(result, handler, Some(TypeId::overload_set())) {
+                match self.compile_expr(result, handler, Some(TypeId::overload_set)) {
                     Ok(_) => {
                         let os = handler.expect_const()?.as_overload_set()?;
                         // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
-                        if self.program[os].name == Flag::As.ident() && self.compile_expr(result, arg, Some(TypeId::ty())).is_ok() {
+                        if self.program[os].name == Flag::As.ident() && self.compile_expr(result, arg, Some(TypeId::ty)).is_ok() {
                             // HACK: sad that 'as' is special
                             let ty: TypeId = self.immediate_eval_expr_known(*arg.clone())?;
                             return Ok(Some(ty));
@@ -1923,7 +1896,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(None);
                     }
                     Flag::Quote => FatExpr::get_type(self.program),
-                    Flag::While => TypeId::unit(),
+                    Flag::While => TypeId::unit,
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
                     Flag::If => return Ok(None),
                     Flag::As => {
@@ -1941,7 +1914,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         if let Expr::Tuple(parts) = &mut arg.expr {
                             assert!(parts.len() == 2);
-                            if self.compile_expr(result, &mut parts[0], Some(TypeId::ty())).is_ok() {
+                            if self.compile_expr(result, &mut parts[0], Some(TypeId::ty)).is_ok() {
                                 // HACK: sad that 'as' is special
                                 let ty: TypeId = self.immediate_eval_expr_known(parts[0].clone())?;
                                 return Ok(Some(ty));
@@ -2002,14 +1975,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         if let Some(ty) = ty {
             let ty = self.program.intern_type(ty);
-            let tyty = TypeId::ty();
+            let tyty = TypeId::ty;
             return Some((Value::Type(ty), tyty));
         }
 
         macro_rules! ffi_type {
             ($ty:ty) => {{
                 let ty = <$ty>::get_type(self.program);
-                (Value::Type(ty), TypeId::ty())
+                (Value::Type(ty), TypeId::ty)
             }};
         }
 
@@ -2022,7 +1995,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             _ => {
                 let name = self.pool.intern(name);
                 if let Some(ty) = self.program.find_ffi_type(name) {
-                    (Value::Type(ty), TypeId::ty())
+                    (Value::Type(ty), TypeId::ty)
                 } else {
                     return None;
                 }
@@ -2036,7 +2009,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             LazyType::EvilUnit => panic!(),
             LazyType::Infer => false,
             LazyType::PendingEval(e) => {
-                let value = self.immediate_eval_expr(e.clone(), TypeId::ty())?;
+                let value = self.immediate_eval_expr(e.clone(), TypeId::ty)?;
                 let res = self.to_type(value)?;
                 *ty = LazyType::Finished(res);
                 true
@@ -2178,8 +2151,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // fallthrough
             }
             Expr::Tuple(elements) => {
-                let types = if ret_ty == TypeId::ty() {
-                    vec![TypeId::ty(); elements.len()]
+                let types = if ret_ty == TypeId::ty {
+                    vec![TypeId::ty; elements.len()]
                 } else if let Some(types) = self.program.tuple_types(ret_ty) {
                     types.to_vec()
                 } else {
@@ -2253,18 +2226,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
         let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
-        let (arg, ret) = Func::known_args(TypeId::unit(), ret_ty, e.loc);
+        let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
         let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
         debug_assert!(fake_func.local_constants.is_empty());
         fake_func.resolved_body = true;
         fake_func.resolved_sign = true;
-        fake_func.finished_arg = Some(TypeId::unit());
+        fake_func.finished_arg = Some(TypeId::unit);
         fake_func.finished_ret = Some(ret_ty);
         fake_func.scope = Some(ScopeId::from_index(0));
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
         self.update_cc(func_id)?;
-        logln!("Made anon: {func_id:?} = {}", self.program[func_id].log(self.pool));
         self.compile(func_id, ExecTime::Comptime)?;
         Ok(func_id)
     }
@@ -2367,7 +2339,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Expr::SuffixMacro(_, if_macro_arg) = &mut if_macro.expr else {
             err!("expected !if",)
         };
-        let unit = TypeId::unit();
+        let unit = TypeId::unit;
         let sig = "if(bool, fn(Unit) T, fn(Unit) T)";
         let mut unit_expr = self.as_literal((), if_macro_arg.loc)?;
         let Expr::Tuple(parts) = &mut if_macro_arg.expr else {
@@ -2432,7 +2404,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_call_while(&mut self, result: &mut FnWip<'p>, while_macro_arg: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         if !while_macro_arg.ty.is_unknown() {
             // We've been here before and already replaced closures with calls.
-            return Ok(TypeId::unit());
+            return Ok(TypeId::unit);
         }
 
         let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
@@ -2443,7 +2415,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(cond_fn) = self.maybe_direct_fn(result, &mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
             self.program[cond_fn].set_cc(CallConv::Inline)?; // hack
             let cond_arg = self.infer_arg(cond_fn)?;
-            self.type_check_arg(cond_arg, TypeId::unit(), sig)?;
+            self.type_check_arg(cond_arg, TypeId::unit, sig)?;
             let cond_ret = self.emit_call_on_unit(result, cond_fn, &mut parts[0], None)?;
             self.type_check_arg(cond_ret, TypeId::bool(), sig)?;
         } else {
@@ -2456,21 +2428,21 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       like if, dont compile body if unreachable. also make the result never if while(true)
         //       tho this is going to become tail rec so maybe dont bother
 
-        if let Some(body_fn) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, Some(TypeId::unit()))? {
+        if let Some(body_fn) = self.maybe_direct_fn(result, &mut parts[1], &mut unit_expr, Some(TypeId::unit))? {
             self.program[body_fn].set_cc(CallConv::Inline)?; // hack
             let body_arg = self.infer_arg(body_fn)?;
-            self.type_check_arg(body_arg, TypeId::unit(), sig)?;
+            self.type_check_arg(body_arg, TypeId::unit, sig)?;
             let body_ret = self.emit_call_on_unit(result, body_fn, &mut parts[1], None)?;
-            self.type_check_arg(body_ret, TypeId::unit(), sig)?;
+            self.type_check_arg(body_ret, TypeId::unit, sig)?;
         } else {
             unwrap!(parts[1].as_fn(), "while second arg must be func not {:?}", parts[1]);
             todo!("shouldnt get here twice")
         }
         self.finish_closure(&mut parts[1]);
 
-        while_macro_arg.ty = TypeId::unit();
+        while_macro_arg.ty = TypeId::unit;
 
-        Ok(TypeId::unit())
+        Ok(TypeId::unit)
     }
 
     #[track_caller]
@@ -2479,8 +2451,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
         // println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
-
-        debug_assert!(!found.is_any() && !expected.is_any(), "wip removing Any");
 
         if found == expected {
             Ok(())
@@ -2518,7 +2488,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
                 (TypeInfo::Tuple(found_elements), TypeInfo::Type) => {
                     // :Coercion
-                    if found_elements.iter().all(|e| self.type_check_arg(*e, TypeId::ty(), msg).is_ok()) {
+                    if found_elements.iter().all(|e| self.type_check_arg(*e, TypeId::ty, msg).is_ok()) {
                         return Ok(());
                     }
                 }
@@ -2942,7 +2912,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let get_fn = FatExpr::synthetic_ty(e, expr_out.loc, ty);
         let unit = self.as_literal((), expr_out.loc)?;
         expr_out.expr = Expr::Call(Box::new(get_fn), Box::new(unit));
-        expr_out.ty = self.program[cond_fn].finished_ret.unwrap_or(TypeId::unknown());
+        expr_out.ty = self.program[cond_fn].finished_ret.unwrap_or(TypeId::unknown);
         self.compile_expr(result, expr_out, requested)
     }
 
@@ -3124,7 +3094,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: better syntax for inserting a function into an imported overload set.
         if let Values::One(Value::OverloadSet(i)) = val {
             if let Some(ty) = ty.ty() {
-                if ty != TypeId::overload_set() {
+                if ty != TypeId::overload_set {
                     // TODO: fn name instead of var name in messages?
                     let f_ty = unwrap!(
                         self.program.fn_ty(ty),
@@ -3150,7 +3120,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             } else {
                 // TODO: make sure its not a problem that usage in an expression can end up as different types each time
-                *ty = LazyType::Finished(TypeId::overload_set())
+                *ty = LazyType::Finished(TypeId::overload_set)
             }
         }
 
@@ -3167,7 +3137,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             expected_ty
         } else {
-            assert!(!(value.ty.is_unknown() || value.ty.is_any()));
             let found = value.ty;
             *ty = LazyType::Finished(found);
             found

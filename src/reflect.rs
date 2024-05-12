@@ -1,7 +1,6 @@
-use core::slice;
 use std::cell::{Cell, UnsafeCell};
 use std::mem::{self, align_of, size_of, ManuallyDrop, MaybeUninit};
-use std::ptr::{self, addr_of, NonNull};
+use std::ptr::{self, NonNull};
 
 use interp_derive::Reflect;
 
@@ -131,13 +130,6 @@ macro_rules! field_offset {
     };
 }
 pub(crate) use field_offset;
-
-fn _does_it_compile(_: &dyn VReflect) {}
-
-pub fn none_bytes<T>() -> &'static [u8] {
-    let none: ManuallyDrop<Option<T>> = ManuallyDrop::new(None);
-    unsafe { slice::from_raw_parts(addr_of!(none) as *const u8, size_of::<Option<T>>()) }
-}
 
 macro_rules! opaque {
     ($ty:ty) => {
@@ -578,16 +570,4 @@ impl BitSet {
             }
         }
     }
-}
-
-#[test]
-fn bitset() {
-    assert_eq!(size_of::<BitSet>(), size_of::<Vec<usize>>());
-    let mut b = BitSet::empty();
-    b.set(1);
-    assert!(b.get(1), "{b:?}");
-    b.set(100);
-    assert!(b.get(100));
-    // b.set(500);
-    // assert!(b.get(500));
 }

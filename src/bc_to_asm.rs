@@ -1146,7 +1146,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         // This covers the majority of cases because I try to handle callees first.
         // Note: checking this before comptime_addr means we handle inline asm as a normal function.
         if let Some(bytes) = self.compile.aarch64.get_fn(f) {
-            let mut offset = bytes as i64 - self.compile.aarch64.get_current() as i64;
+            let mut offset = bytes as i64 - self.compile.aarch64.next as i64;
             debug_assert!(offset % 4 == 0, "instructions are u32 but {offset}%4");
             offset /= 4;
             // TODO: use adr/adrp
@@ -1161,7 +1161,7 @@ impl<'z, 'p, 'a> BcToAsm<'z, 'p, 'a> {
         //       and could reuse the same code for comptime and runtime.
         if let Some(bytes) = self.compile.program[f].comptime_addr {
             debug_assert!(self.compile.program[f].jitted_code.is_none(), "inline asm should be emitted normally");
-            let mut offset = bytes as i64 - self.compile.aarch64.get_current() as i64;
+            let mut offset = bytes as i64 - self.compile.aarch64.next as i64;
             debug_assert!(offset % 4 == 0, "instructions are u32 but {offset}%4");
             offset /= 4;
 
@@ -1388,10 +1388,6 @@ pub mod jit {
             }
         }
 
-        pub fn get_current(&self) -> *const u8 {
-            self.next
-        }
-
         // Returns the range of memory we've written since the last call.
         pub fn bump_dirty(&mut self) -> (*mut u8, *mut u8) {
             let dirty = (self.old, self.next);
@@ -1409,8 +1405,8 @@ enum CmpFlags {
 
 // There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
 /// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
-fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
-    debug_assert!(x > -(1 << (bit_count - 1)) && (x < (1 << (bit_count - 1))));
+pub fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
+    debug_assert!(x > -(1 << (bit_count)) && (x < (1 << (bit_count))));
     let mask = (1 << bit_count) - 1;
     if x < 0 {
         x *= -1;

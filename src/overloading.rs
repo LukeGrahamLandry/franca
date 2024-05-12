@@ -3,8 +3,8 @@ use crate::ast::{
 };
 use crate::bc::{Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
-use crate::logging::{LogTag, PoolLog};
-use crate::{assert, assert_eq, err, outln, unwrap};
+use crate::logging::PoolLog;
+use crate::{assert, assert_eq, err, unwrap};
 use std::mem;
 use std::ops::DerefMut;
 
@@ -54,7 +54,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let arg_ty = self.compile_expr(result, arg, ret)?;
                 let id = self.promote_closure(result, f, Some(arg_ty), ret)?;
                 self.named_args_to_tuple(result, arg, id)?;
-                Some(id.into())
+                Some(id)
             }
             &mut Expr::GetNamed(i) => {
                 err!("GetNamed func: {}", self.pool.get(i));
@@ -77,7 +77,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: get rid of any
         if let Some(ty) = requested_ret {
-            assert!(!ty.is_any());
             assert!(!ty.is_unknown());
         }
 
@@ -86,7 +85,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Values::One(Value::GetFn(f)) => {
                     self.named_args_to_tuple(result, arg, f)?;
                     self.pop_state(state);
-                    Ok(f.into())
+                    Ok(f)
                 }
                 Values::One(Value::GetNativeFnPtr(_)) => {
                     err!("TODO: const GetNativeFnPtr?",)
@@ -281,7 +280,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         if decls.is_empty() {
             return Ok(());
         }
-        outln!(LogTag::Generics, "Compute overloads of {} = L{i:?}", self.pool.get(overloads.name),);
         while let Some(f) = decls.pop() {
             decls.extend(mem::take(&mut self.program[i].pending));
 
@@ -293,13 +291,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             match self.infer_types(f) {
                 Ok(Some(f_ty)) => {
-                    outln!(
-                        LogTag::Generics,
-                        "- {f:?} is {:?}={} -> {}",
-                        f_ty.arg,
-                        self.program.log_type(f_ty.arg),
-                        self.program.log_type(f_ty.ret)
-                    );
                     // TODO: this is probably wrong if you use !assert_compile_error
                     self.program[i].ready.push(OverloadOption {
                         arg: f_ty.arg,
@@ -338,7 +329,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             debug_assert!(pattern.bindings.is_empty());
             match parts.len() {
-                0 => todo!("untested"), // arg.set(Value::Unit.into(), TypeId::unit()),
+                0 => todo!("untested"), // arg.set(Value::Unit.into(), TypeId::unit),
                 // NOTE: not just taking arg.expr because need to preserve the .ty for int/float literals now that I don't track redundantly in Expr::Value! -- Apr 30
                 1 => *arg = parts.into_iter().next().unwrap(),
                 _ => arg.expr = Expr::Tuple(parts),

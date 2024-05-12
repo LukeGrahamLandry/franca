@@ -636,7 +636,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let result = compile.pending_ffi.pop().unwrap().unwrap();
     let loc = block.loc;
     // give any other macros a chance to expand.
-    compile.compile_expr(unsafe { &mut *result }, &mut block, Some(TypeId::unit())).unwrap();
+    compile.compile_expr(unsafe { &mut *result }, &mut block, Some(TypeId::unit)).unwrap();
 
     let (s, block) = if let Expr::Block {
         resolved: Some((s, b)),
@@ -652,7 +652,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
 
     compile.pending_ffi.push(Some(result));
 
-    FatExpr::value(Values::Many(vec![s.as_raw(), block as i64]), TypeId::scope(), loc)
+    FatExpr::value(Values::Many(vec![s.as_raw(), block as i64]), TypeId::scope, loc)
 }
 
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {

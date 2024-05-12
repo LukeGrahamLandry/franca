@@ -122,6 +122,11 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
         if self.ready[f.as_index()].is_some() {
             return Ok(());
         }
+        // HACK. these are always inlined. means you can't take fn ptr but i only generate rust for asm insturction encoding so its fine.
+        match self.comp.pool.get(self.comp.program[f].name) {
+            "shift_left" | "bit_or" | "bit_and" | "sub" | "mul" | "le" | "add" => return Ok(()),
+            _ => {}
+        };
         self.comp.compile(f, ExecTime::Runtime)?;
         let callees = self.comp.program[f].wip.as_ref().unwrap().callees.clone();
         for c in callees {
@@ -182,6 +187,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
 
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, String> {
         let func = &self.comp.program[f];
+
         let _ = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
         debug_assert!(!func.evil_uninit);
         let func = self.comp.program[f].clone(); // TODO: no clone

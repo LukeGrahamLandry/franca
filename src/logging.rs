@@ -1,9 +1,7 @@
 // nobody cares its just logging. TODO: should do it anyway i guess.
 #![allow(unused_must_use)]
 use core::fmt;
-use std::cell::RefCell;
 use std::fmt::{Debug, Formatter, Write};
-use std::{fs, mem};
 
 #[inline(never)]
 pub fn break_here(e: &CErr) {
@@ -107,113 +105,6 @@ macro_rules! unwrap {
 
 pub use unwrap;
 
-// Note: if you add more, make sure nobody's using 255 to mean 'all'.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogTag {
-    Parsing = 0,
-    Scope = 1,
-    InitialAst = 2,
-    Bytecode = 3,
-    FinalAst = 4,
-    ShowPrint = 5,
-    ShowErr = 6,
-    Macros = 7,
-    Generics = 8,
-    Jitted = 9,
-    RtRust = 10,
-    Perf = 11,
-    Consts = 12,
-    _Last = 13,
-}
-
-pub struct LogSettings {
-    pub track: u64,
-    pub logs: Vec<Vec<String>>,
-}
-
-thread_local! {
-    pub static LOG: RefCell<LogSettings> = RefCell::new(LogSettings {
-        track: 0,
-        logs: vec![],
-    });
-}
-
-pub fn init_logs(want: &[LogTag]) {
-    let mut flag = 0;
-    for tag in want {
-        flag |= 1 << (*tag as usize);
-    }
-    init_logs_flag(flag);
-}
-
-pub fn init_logs_flag(want: u64) {
-    LOG.with(|settings| {
-        let mut settings = settings.borrow_mut();
-        settings.track = want;
-        settings.logs = vec![vec![]; LogTag::_Last as usize + 1];
-    });
-}
-
-pub fn get_logs(kind: LogTag) -> String {
-    LOG.with(|settings| settings.borrow().logs[kind as usize].join("\n"))
-}
-
-pub fn save_logs(folder: &str) {
-    for i in 0..(LogTag::_Last as usize) {
-        let tag: LogTag = unsafe { mem::transmute(i as u8) };
-        let s = get_logs(tag);
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            unsafe { crate::web::show_log(i, s.as_ptr(), s.len()) };
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if !s.is_empty() {
-            fs::write(format!("{folder}/{tag:?}.log"), s).unwrap();
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! outln {
-    ($tag:expr, $($arg:tt)*) => {{
-        if $tag == $crate::logging::LogTag::ShowPrint {
-            println!($($arg)*);
-        } else if cfg!(feature = "some_log") {
-            let tag: $crate::logging::LogTag = $tag;
-            $crate::logging::LOG.with(|settings| {
-                if (settings.borrow().track & (1 << tag as usize)) != 0 {
-                    settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
-                }
-            })
-        } else if $tag == $crate::logging::LogTag::ShowPrint || $tag == $crate::logging::LogTag::ShowErr {
-            let tag: $crate::logging::LogTag = $tag;
-            $crate::logging::LOG.with(|settings| {
-                settings.borrow_mut().logs[tag as usize].push(format!($($arg)*));
-            })
-        }
-    }};
-}
-
-#[macro_export]
-macro_rules! log {
-    ($($arg:tt)*) => {{
-        if cfg!(feature = "spam_log") {
-            print!($($arg)*);
-        }
-    }};
-}
-
-#[macro_export]
-macro_rules! logln {
-    // Using cfg!(...) instead of #[cfg(...)] to avoid unused var warnings.
-    ($($arg:tt)*) => {{
-        if cfg!(feature = "spam_log") {
-            println!($($arg)*);
-        }
-    }};
-}
-
 use crate::ast::{FatStmt, Pattern};
 use crate::bc::*;
 use crate::pool::Ident;
@@ -237,7 +128,6 @@ impl<'p> Program<'p> {
             if t.is_valid() && t.as_index() < self.types.len() {
                 match &self[t] {
                     TypeInfo::Unknown => "Unknown".to_owned(),
-                    TypeInfo::Any => "Any".to_owned(),
                     TypeInfo::Never => "Never".to_owned(),
                     TypeInfo::F64 => "f64".to_owned(),
                     TypeInfo::Bool => "bool".to_owned(),
@@ -287,17 +177,6 @@ impl<'p> Program<'p> {
         })
     }
 
-    // Note: be careful this can't get into a recursive loop trying to pretty print stuff.
-    pub fn log_cached_types(&self) -> String {
-        let mut s = String::new();
-        writeln!(s, "=== {} CACHED TYPES ===", self.types.len());
-        for (i, ty) in self.types.iter().enumerate() {
-            writeln!(s, "- {:?} = {} = {:?};", TypeId::from_index(i), self.log_type(TypeId::from_index(i)), ty,);
-        }
-        writeln!(s, "====================");
-        s
-    }
-
     pub fn find_ffi_type(&self, name: Ident<'p>) -> Option<TypeId> {
         let mut found = None;
         for ty in self.ffi_types.values() {
@@ -305,7 +184,7 @@ impl<'p> Program<'p> {
                 if let &TypeInfo::Named(ty, check) = &self[*ty] {
                     if name == check {
                         if found.is_some() {
-                            outln!(LogTag::ShowErr, "duplicate ffi name {}", self.pool.get(name));
+                            println!("err: duplicate ffi name {}", self.pool.get(name));
                             return None;
                         }
                         found = Some(ty);
@@ -315,7 +194,7 @@ impl<'p> Program<'p> {
                                 // TODO: ffi cases that are akreayd named types
                                 if case_name == name {
                                     if found.is_some() {
-                                        outln!(LogTag::ShowErr, "duplicate ffi name {}", self.pool.get(name));
+                                        println!("err: duplicate ffi name {}", self.pool.get(name));
                                         return None;
                                     }
                                     found = Some(inner);
@@ -352,14 +231,6 @@ impl<'p> Program<'p> {
             }
         }
         out
-    }
-}
-
-impl<'p> PoolLog<'p> for Program<'p> {
-    fn log(&self, _: &StringPool<'p>) -> String {
-        let mut s = String::new();
-        s += &self.log_cached_types();
-        s
     }
 }
 
@@ -635,42 +506,6 @@ impl<'p> FatStmt<'p> {
     pub fn log_annotations(&self, pool: &StringPool<'p>) -> String {
         self.annotations.iter().map(|a| pool.get(a.name)).collect()
     }
-}
-
-impl<'p> Func<'p> {
-    pub fn log_captures(&self, pool: &StringPool<'p>) -> String {
-        let mut s = String::new();
-        writeln!(s, "fn {:?}", pool.get(self.name));
-        if !self.capture_vars.is_empty() {
-            writeln!(
-                s,
-                "- Runtime captures: {:?}",
-                self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<String>>()
-            );
-        }
-        writeln!(s, "====");
-        s
-    }
-}
-
-pub fn log_tag_info() {
-    use LogTag::*;
-    let info = |tag: LogTag, msg: &str| outln!(tag, "{msg}\n###################################");
-
-    info(
-        Parsing,
-        "The parser uncovers the structure of your program without any understanding of its semantics.",
-    );
-    info(FinalAst, "This is how the compiler sees your program after comptime execution but before code generation. \nOverloads have been resolved, types are explicit, macros have been applied.");
-    info(Macros, "Macros are functions, written in this language, that transform the AST.");
-    info(
-        Scope,
-        "As part of resolving variable shadowing, we find out if any functions are actually closures that capture part of thier environment.",
-    );
-    info(
-        Bytecode,
-        "Your program broken down into simple instructions. This is the format understood by the comptime interpreter. It's also the only backend that exists so far.",
-    );
 }
 
 impl Debug for Value {

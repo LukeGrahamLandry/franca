@@ -44,7 +44,6 @@ pub enum VarType {
 pub enum TypeInfo<'p> {
     #[default]
     Unknown,
-    Any,
     Never,
     F64,
     Int(IntTypeInfo),
@@ -133,7 +132,7 @@ pub enum Expr<'p> {
 impl<'p> FatExpr<'p> {
     pub fn as_overload_set(&self) -> Option<OverloadSetId> {
         if let Expr::Value { value } = &self.expr {
-            if self.ty == TypeId::overload_set() {
+            if self.ty == TypeId::overload_set {
                 if let &Values::One(Value::OverloadSet(i)) = value {
                     return Some(i);
                 } else {
@@ -555,7 +554,7 @@ impl<'p> Pattern<'p> {
         if self.bindings.is_empty() {
             self.bindings.push(Binding {
                 name: Name::None,
-                ty: LazyType::Finished(TypeId::unit()),
+                ty: LazyType::Finished(TypeId::unit),
                 default: None,
                 kind: VarType::Let,
             })
@@ -582,7 +581,7 @@ impl<'p> Pattern<'p> {
         if self.bindings.is_empty() {
             self.bindings.push(Binding {
                 name: Name::None,
-                ty: LazyType::Finished(TypeId::unit()),
+                ty: LazyType::Finished(TypeId::unit),
                 default: None,
                 kind: VarType::Let,
             });
@@ -599,7 +598,7 @@ impl<'p> FatExpr<'p> {
         FatExpr {
             expr,
             loc,
-            ty: TypeId::unknown(),
+            ty: TypeId::unknown,
             done: false,
         }
     }
@@ -971,7 +970,6 @@ impl<'p> Program<'p> {
             // these are hardcoded numbers in TypeId constructors
             types: vec![
                 TypeInfo::Unknown,
-                TypeInfo::Any,
                 TypeInfo::Unit,
                 TypeInfo::Type,
                 TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
@@ -1026,7 +1024,7 @@ impl<'p> Program<'p> {
     pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             self.add_ffi_definition::<T>();
-            let n = TypeId::unknown();
+            let n = TypeId::unknown;
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId::from_index(placeholder);
@@ -1051,7 +1049,7 @@ impl<'p> Program<'p> {
         }
         let id = type_info as *const RsType as usize as u128;
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            let n = TypeId::unknown();
+            let n = TypeId::unknown;
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId::from_index(placeholder);
@@ -1126,7 +1124,7 @@ impl<'p> Program<'p> {
 
     pub fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
         match types.len() {
-            0 => TypeId::unit(),
+            0 => TypeId::unit,
             1 => types[0],
             _ => self.intern_type(TypeInfo::Tuple(types)),
         }
@@ -1139,13 +1137,6 @@ impl<'p> Program<'p> {
     pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {
         let ty = TypeInfo::Named(ty, self.pool.intern(name));
         self.intern_type(ty)
-    }
-
-    // aaaaa
-    #[track_caller]
-    pub fn find_interned(&self, ty: TypeInfo) -> TypeId {
-        let id = self.types.iter().position(|check| *check == ty).expect("find_interned");
-        TypeId::from_index(id)
     }
 
     pub fn emit_inline_llvm_ir(&mut self) -> String {
@@ -1174,7 +1165,7 @@ impl<'p> Program<'p> {
     pub fn for_llvm_ir(&self, ty: TypeId) -> &str {
         match &self[ty] {
             TypeInfo::F64 => "double",
-            TypeInfo::Unknown | TypeInfo::Any | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
+            TypeInfo::Unknown | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
             TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
@@ -1200,14 +1191,6 @@ impl<'p> Program<'p> {
 
         None
     }
-
-    pub fn flat_types(&self, ty: TypeId) -> Option<&[TypeId]> {
-        match &self[ty] {
-            TypeInfo::Tuple(t) => Some(t),
-            &TypeInfo::Struct { as_tuple, .. } => self.flat_types(as_tuple),
-            _ => None,
-        }
-    }
 }
 
 impl<'p> Program<'p> {
@@ -1227,17 +1210,6 @@ impl<'p> Program<'p> {
         let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id
-    }
-
-    pub fn returns_type(&self, f: FuncId) -> bool {
-        let func = &self.funcs[f.as_index()];
-        let ret = func.ret.unwrap();
-        let ty = &self[ret];
-        ty == &TypeInfo::Type
-    }
-
-    pub fn is_type(&self, ty: TypeId, expect: TypeInfo) -> bool {
-        self[ty] == expect
     }
 
     pub fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
@@ -1361,7 +1333,7 @@ impl<'p> Program<'p> {
     #[track_caller]
     pub fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
         match value {
-            Values::One(Value::Unit) => Ok(TypeId::unit()),
+            Values::One(Value::Unit) => Ok(TypeId::unit),
             Values::One(Value::Type(id)) => Ok(id),
             Values::Many(values) => {
                 let values: Vec<_> = values.into_iter().map(TypeId::from_raw).collect();
@@ -1393,7 +1365,7 @@ impl<'p> Program<'p> {
                 }
                 mask
             }
-            TypeInfo::Unknown | TypeInfo::Any => todo!(),
+            TypeInfo::Unknown => todo!(),
             &TypeInfo::Struct { as_tuple, .. } => self.float_mask_one(as_tuple),
             TypeInfo::Tagged { .. } => 0, // the varients can be different, never use float reg.
             TypeInfo::Never
@@ -1531,12 +1503,6 @@ impl<'p> Expr<'p> {
         }
         None
     }
-    pub fn as_var(&self) -> Option<Var<'p>> {
-        if let &Expr::GetVar(name) = self {
-            return Some(name);
-        }
-        None
-    }
 }
 
 impl<'p> Default for Func<'p> {
@@ -1602,74 +1568,42 @@ impl<'p> TypeInfo<'p> {
     }
 }
 
+#[allow(non_upper_case_globals)]
 impl TypeId {
     pub fn is_unit(&self) -> bool {
-        *self == Self::unit()
+        *self == Self::unit
     }
 
     pub fn is_unknown(&self) -> bool {
-        *self == Self::unknown()
+        *self == Self::unknown
     }
-
-    pub fn is_any(&self) -> bool {
-        *self == Self::any()
-    }
-
     pub fn is_never(&self) -> bool {
-        *self == Self::never()
+        *self == Self::never
     }
 
-    // Be careful that this is in the pool correctly!
-    pub fn unknown() -> TypeId {
-        TypeId::from_index(0)
-    }
+    // Be careful that these is in the pool correctly!
+    pub const unknown: Self = Self::from_index(0);
+    pub const unit: Self = Self::from_index(1);
+    pub const ty: Self = Self::from_index(2);
 
     // Be careful that this is in the pool correctly!
-    /// Placeholder to use while working on typechecking.
-    pub fn any() -> TypeId {
-        TypeId::from_index(1)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn unit() -> TypeId {
-        TypeId::from_index(2)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn ty() -> TypeId {
+    pub const fn i64() -> TypeId {
         TypeId::from_index(3)
     }
 
     // Be careful that this is in the pool correctly!
-    pub const fn i64() -> TypeId {
+    pub fn bool() -> TypeId {
         TypeId::from_index(4)
     }
 
-    // Be careful that this is in the pool correctly!
-    pub fn bool() -> TypeId {
-        TypeId::from_index(5)
-    }
+    pub const never: Self = Self::from_index(6);
 
-    // Be careful that this is in the pool correctly!
-    pub fn void_ptr() -> TypeId {
-        TypeId::from_index(6)
-    }
-
-    // Be careful that this is in the pool correctly!
-    pub fn never() -> TypeId {
+    pub fn f64() -> TypeId {
         TypeId::from_index(7)
     }
 
-    pub fn f64() -> TypeId {
-        TypeId::from_index(8)
-    }
-
-    pub fn overload_set() -> TypeId {
-        TypeId::from_index(9)
-    }
-    pub fn scope() -> TypeId {
-        TypeId::from_index(10)
-    }
+    pub const overload_set: Self = Self::from_index(8);
+    pub const scope: Self = Self::from_index(9);
 }
 
 /// It's important that these are consecutive in flags for safety of TryFrom

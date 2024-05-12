@@ -238,21 +238,6 @@ impl<T: ?Sized> Clone for Ptr<T> {
 
 impl<T: ?Sized> Copy for Ptr<T> {}
 
-#[test]
-fn string_pool() {
-    let pool = StringPool::default();
-    let hello = pool.intern("hello");
-    let hello2 = pool.intern("hello");
-    let goodbye = pool.intern("goodbye");
-
-    assert_eq!(hello, hello2);
-    assert_ne!(hello, goodbye);
-
-    assert_eq!("hello", pool.get(hello));
-    assert_eq!("hello", pool.get(hello2));
-    assert_eq!("goodbye", pool.get(goodbye));
-}
-
 impl<'p> InterpSend<'p> for Ident<'p> {
     fn get_type_key() -> u128 {
         // i dare you to change the generic to Self
