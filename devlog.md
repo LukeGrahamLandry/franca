@@ -9,6 +9,13 @@
 - replaced `tuple[index]` with `tuple.(index)` which frees up the brackets for something an overloadable operator for containers.
   the tuples one looks dumber but you'll probably never want that once i can pattern match on them properly in declarations.
   using just .index means you can't use an arbirary expr and you have to deal with it when lexing floats if you want to chain them.
+- less painful place exprs.
+  currently `n&[] = 456` and `n = 456` generate the same code (as they should),
+  but raw var access has wierd special cases as tho it needs to specially optimise out taking the pointer to it (which it then does it in the end anyway).
+  so give set_deref the special power of evaling place exprs.
+  the easy case is wrap <var> in <var&[]>.
+  then assinging to a field access expr (not a []), doesn't conflict, so handle that recursively inserting &,
+  so that avoids writing `a&.b[] = c` all the time instead of `a.b = c`. but doesn't help with more complex nesting or even jsut reads of the value yet.
 
 ## cranelift (May 11)
 

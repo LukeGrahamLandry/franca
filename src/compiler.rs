@@ -2516,23 +2516,66 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn set_deref(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
         match place.deref_mut().deref_mut() {
-            Expr::GetVar(var) => {
-                assert_eq!(var.3, VarType::Var, "Only 'var' can be reassigned (not let/const).");
-                let oldty = result.vars.get(var);
-                let oldty = *unwrap!(oldty, "SetVar: var must be declared: {}", var.log(self.pool));
+            Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
+                self.compile_place_expr(result, place, None)?;
+                let oldty = place.ty;
                 let value = self.compile_expr(result, value, Some(oldty))?;
                 self.type_check_arg(value, oldty, "reassign var")?;
                 Ok(())
             }
-            Expr::SuffixMacro(macro_name, arg) => {
-                // TODO: type checking
-                // TODO: general place expressions.
-                let Ok(Flag::Deref) = Flag::try_from(*macro_name) else { todo!() };
-                let ptr = self.compile_expr(result, arg, None)?;
-                let expected_ty = unwrap!(self.program.unptr_ty(ptr), "not ptr");
-                let value = self.compile_expr(result, value, Some(expected_ty))?;
-                self.type_check_arg(value, expected_ty, "set ptr")?;
+            &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
+            _ => ice!("TODO: other `place=e;`"),
+        }
+    }
+
+    // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
+    fn compile_place_expr(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, ()> {
+        let loc = place.loc;
+        match place.deref_mut().deref_mut() {
+            Expr::GetVar(var) => {
+                assert_eq!(var.3, VarType::Var, "Only 'var' can be addressed (not let/const).");
+                let val_ty = result.vars.get(var);
+                let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.pool));
+                let ptr_ty = self.program.ptr_type(val_ty);
+
+                let temp = Box::new(FatExpr::synthetic_ty(
+                    Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))),
+                    loc,
+                    ptr_ty,
+                ));
+                *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), temp), loc, val_ty);
+                place.done = true;
                 Ok(())
+            }
+            Expr::FieldAccess(container, name) => {
+                // TODO: could lookup field and pass down requested
+                self.compile_place_expr(result, container, None)?;
+                // Now we know <container> is a !deref of something.
+                let container_ptr = container.as_suffix_macro_mut(Flag::Deref).unwrap();
+                let index = self.field_access_expr(result, container_ptr, *name)?;
+                container_ptr.expr = Expr::Index {
+                    ptr: Box::new(mem::take(container_ptr)),
+                    index: Box::new(self.as_literal(index as i64, loc)?),
+                };
+                let ptr_ty = self.compile_expr(result, container_ptr, None)?;
+                let val_ty = self.program.unptr_ty(ptr_ty).unwrap();
+                // Now we have the offset-ed ptr, add back the deref
+                let ptr = Box::new(mem::take(container_ptr));
+                *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, val_ty);
+                Ok(())
+            }
+            Expr::SuffixMacro(macro_name, arg) => {
+                let name = Flag::try_from(*macro_name)?;
+                match name {
+                    Flag::Deref => {
+                        // When you see a !deref, treat the expression as a pointer value.
+                        self.compile_expr(result, arg, None)?;
+                        place.ty = self.program.unptr_ty(arg.ty).unwrap();
+                        Ok(())
+                    }
+                    // TODO: when you see a !addr, compile that and then add a !deref.
+                    _ => todo!(),
+                }
             }
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             _ => ice!("TODO: other `place=e;`"),

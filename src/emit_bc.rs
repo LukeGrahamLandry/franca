@@ -717,13 +717,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn set_deref(&mut self, result: &mut FnBody<'p>, place: &FatExpr<'p>, value: &FatExpr<'p>) -> Res<'p, ()> {
         match place.deref() {
-            Expr::GetVar(var) => {
-                let id = self.var_lookup.get(var);
-                let id = *unwrap!(id, "SetVar: var must be declared: {}", var.log(self.program.pool));
-                result.push(Bc::AddrVar { id });
-                self.compile_expr(result, value, ResAddr, false)?;
-                Ok(())
-            }
+            Expr::GetVar(_) => unreachable!("var set should be converted to place expr"),
             Expr::SuffixMacro(macro_name, arg) => {
                 // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
                 if let Ok(Flag::Deref) = Flag::try_from(*macro_name) {
