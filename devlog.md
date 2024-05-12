@@ -6,6 +6,9 @@
 - made TypeId::scope just be one int, removed local_constants and some old fields of Func
 - made Enum cases a real type instead of weird contextual_fields thing in the sky.
   prep for actually checking that casts are valid values.
+- replaced `tuple[index]` with `tuple.(index)` which frees up the brackets for something an overloadable operator for containers.
+  the tuples one looks dumber but you'll probably never want that once i can pattern match on them properly in declarations.
+  using just .index means you can't use an arbirary expr and you have to deal with it when lexing floats if you want to chain them.
 
 ## cranelift (May 11)
 

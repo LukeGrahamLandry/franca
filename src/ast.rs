@@ -1660,6 +1660,7 @@ pub enum Flag {
     Operator_Minus_Equal,
     Operator_Star_Equal,
     Operator_Slash_Equal,
+    Operator_Index,
     Flat_Call,
     Builtin,
     No_Memo,

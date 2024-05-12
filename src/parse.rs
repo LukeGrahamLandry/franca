@@ -468,8 +468,23 @@ impl<'a, 'p> Parser<'a, 'p> {
                 Dot => {
                     self.start_subexpr();
                     self.eat(Dot)?;
-                    let name = self.ident()?;
-                    self.expr(Expr::FieldAccess(Box::new(prefix), name))
+                    match self.peek() {
+                        Symbol(name) => {
+                            self.pop();
+                            self.expr(Expr::FieldAccess(Box::new(prefix), name))
+                        }
+                        LeftParen => {
+                            self.eat(LeftParen)?;
+                            let index = Box::new(self.parse_expr()?);
+                            self.eat(RightParen)?;
+                            self.expr(Expr::Index {
+                                ptr: Box::new(prefix),
+                                index,
+                            })
+                        }
+
+                        _ => return Err(self.expected(".name or .(index)")),
+                    }
                 }
                 DoubleSquare => {
                     self.start_subexpr();
@@ -479,12 +494,9 @@ impl<'a, 'p> Parser<'a, 'p> {
                 LeftSquare => {
                     self.start_subexpr();
                     self.eat(LeftSquare)?;
-                    let index = Box::new(self.parse_expr()?);
+                    let index = self.parse_expr()?;
                     self.eat(RightSquare)?;
-                    self.expr(Expr::Index {
-                        ptr: Box::new(prefix),
-                        index,
-                    })
+                    self.bin_named_macro(Flag::Operator_Index, prefix, index)
                 }
                 Amp => {
                     self.start_subexpr();
@@ -795,14 +807,8 @@ impl<'a, 'p> Parser<'a, 'p> {
             EqOp(op) => {
                 self.pop();
                 self.start_subexpr();
-                self.start_subexpr();
-                let target = Box::new(self.parse_expr()?);
-                let handler = Box::new(self.expr(Expr::GetNamed(op.ident())));
-                let e = self.expr(Expr::PrefixMacro {
-                    handler,
-                    arg: Box::new(e),
-                    target,
-                });
+                let target = self.parse_expr()?;
+                let e = self.bin_named_macro(op, e, target);
                 Stmt::Eval(e)
             }
             _ => {
@@ -814,6 +820,16 @@ impl<'a, 'p> Parser<'a, 'p> {
             return Err(self.expected("';' (discard) or '}' (return) after expr stmt"));
         }
         Ok(s)
+    }
+
+    pub fn bin_named_macro(&mut self, handler: Flag, arg: FatExpr<'p>, target: FatExpr<'p>) -> FatExpr<'p> {
+        self.start_subexpr();
+        let handler = Box::new(self.expr(Expr::GetNamed(handler.ident())));
+        self.expr(Expr::PrefixMacro {
+            handler,
+            arg: Box::new(arg),
+            target: Box::new(target),
+        })
     }
 
     // | @name(args) |
