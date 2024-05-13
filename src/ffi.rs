@@ -1,4 +1,4 @@
-use std::{mem, ptr::slice_from_raw_parts};
+use std::{arch::global_asm, mem, ptr::slice_from_raw_parts};
 
 use codemap::Span;
 
@@ -488,75 +488,53 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 }
 
 pub mod c {
-    use libffi::middle::{Arg, Type};
-
     use crate::compiler::Compile;
-    use crate::err;
-    use crate::{
-        ast::{Program, TypeId, TypeInfo},
-        compiler::Res,
-    };
+    use crate::compiler::Res;
+    use std::arch::global_asm;
 
-    type CTy = libffi::middle::Type;
+    // NOTE: you have to put this in the same module ::c! you cant put it outside and then import it .
+    global_asm!(
+        r#"
+        _arg8ret1:
+        mov x16, x0 ; save callee since we need to use this register for args
+        mov x17, x1
+        ldr x0, [x17, #0]
+        ldr x1, [x17, #8]
+        ldr x2, [x17, #16]
+        ldr x3, [x17, #24]
+        ldr x4, [x17, #32]
+        ldr x5, [x17, #40]
+        ldr x6, [x17, #48]
+        ldr x7, [x17, #56]
+        mov x8, #0 ; extra debug check: set indirect return ptr to null so they segfault if they try to return a struct. 
+        br x16 ; tail call
+    "#
+    );
 
-    impl<'p> Program<'p> {
-        pub fn as_c_type(&self, ty: TypeId) -> Res<'p, CTy> {
-            Ok(match &self[ty] {
-                TypeInfo::F64 => CTy::f64(),
-                // TODO: actually different int types
-                TypeInfo::Scope | TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::Never => {
-                    CTy::i64()
-                }
-                // Not a whole word!
-                TypeInfo::Bool => CTy::c_uchar(),
-                TypeInfo::Label(_) | TypeInfo::FnPtr(_) | TypeInfo::VoidPtr | TypeInfo::Ptr(_) => CTy::pointer(),
-                TypeInfo::Unique(ty, _) | TypeInfo::Named(ty, _) => self.as_c_type(*ty)?,
-                TypeInfo::Tagged { .. } | TypeInfo::Tuple(_) | TypeInfo::Struct { .. } => {
-                    err!("i use wrong c abi for aggragates {}", self.log_type(ty))
-                }
-                _ => err!("No c abi for {}", self.log_type(ty)),
-            })
-        }
+    extern "C" {
+        // loads 8 words from args into x0-x7 then calls fnptr
+        fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
     }
 
-    // NOTE: pointers passed to Arg::new must live until into_cif
-    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, mut f_ty: crate::ast::FnType, args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
-        use libffi::middle::{Builder, CodePtr};
-        let ptr = CodePtr::from_ptr(ptr as *const std::ffi::c_void);
-        let mut b = Builder::new();
-
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
+        let floats = program.program.float_mask(f_ty);
+        assert!(floats.arg == 0 && floats.ret == 0, "ICE: i dont do the float registers but backend does");
+        assert!(program.slot_count(f_ty.ret) <= 1, "i dont do struct calling convention yet");
         if comp_ctx {
-            b = b.arg(Type::pointer());
+            args.insert(0, program as *mut Compile as i64);
         }
-        f_ty.arg = program.program.raw_type(f_ty.arg); // so it notises things are tuples and should get splatted into multiple args
-        let mut args: Vec<_> = if f_ty.arg == TypeId::unit {
-            vec![]
-        } else if let TypeInfo::Tuple(fields) = &program.program[f_ty.arg] {
-            for ty in fields {
-                b = b.arg(program.program.as_c_type(*ty)?);
+        assert!(args.len() <= 8);
+        // not doing this is ub but like... meh.
+        // if something interesting happens to be after the args and you call with the wrong signature you could read it.
+        // its fine to read garbage memory and put it in the registers you know callee will ignore (if types are right).
+        const READ_GARBAGE: bool = true;
+        if !READ_GARBAGE {
+            args.reserve_exact(8 - args.len());
+            while args.len() < 8 {
+                args.push(0);
             }
-            args.iter().map(Arg::new).collect()
-        } else if let &TypeInfo::Struct { .. } = &program.program[f_ty.arg] {
-            unreachable!("args should be seen as a tuple. this briefly broke when i fixed the type of string literals");
-        } else {
-            b = b.arg(program.program.as_c_type(f_ty.arg)?);
-            args.iter().map(Arg::new).collect()
-        };
-
-        if f_ty.ret != TypeId::unit {
-            b = b.res(program.program.as_c_type(f_ty.ret)?)
         }
-        if comp_ctx {
-            // IMPORTANT: extra &indirection. We want a pointer to the argument, even if the argument is already a pointer.
-            // Note: dont put it in a local first because release mode reuses the stack slot.
-            args.insert(0, Arg::new(&program));
-        }
-
-        assert!(
-            program.slot_count(f_ty.ret) <= 1,
-            "my c_call doesn't use correct struct calling convention yet"
-        );
-        let ret: i64 = unsafe { b.into_cif().call(ptr, &args) };
+        let ret: i64 = unsafe { arg8ret1(ptr, args.as_mut_ptr()) };
         Ok(ret)
     }
 }

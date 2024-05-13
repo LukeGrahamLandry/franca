@@ -1310,11 +1310,7 @@ pub mod jit {
         }
 
         pub fn get_fn(&self, f: FuncId) -> Option<*const u8> {
-            if self.dispatch[f.as_index()].is_null() {
-                None
-            } else {
-                Some(self.dispatch[f.as_index()])
-            }
+            self.dispatch.get(f.as_index()).and_then(|f| if f.is_null() { None } else { Some(*f) })
         }
 
         #[allow(clippy::not_unsafe_ptr_arg_deref)]

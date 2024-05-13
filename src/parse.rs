@@ -477,7 +477,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                             self.eat(LeftParen)?;
                             let index = Box::new(self.parse_expr()?);
                             self.eat(RightParen)?;
-                            self.expr(Expr::Index {
+                            self.expr(Expr::TupleAccess {
                                 ptr: Box::new(prefix),
                                 index,
                             })

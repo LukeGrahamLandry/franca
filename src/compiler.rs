@@ -1551,15 +1551,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.ty
             }
             // :PlaceExpr
-            Expr::Index { ptr, index } => {
-                let ptr_ty = self.compile_expr(result, ptr, None)?;
-                self.compile_expr(result, index, Some(TypeId::i64()))?;
-                let i: usize = self.immediate_eval_expr_known(*index.clone())?;
-                self.set_literal(index, i as i64)?;
-                expr.done = ptr.done;
-                let res = self.index_expr(ptr_ty, i)?;
-                expr.ty = res;
-                res
+            Expr::TupleAccess { .. } => {
+                self.compile_place_expr(result, expr, requested, true)?;
+                expr.ty
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => {
@@ -1567,6 +1561,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.ty = res;
                 res
             }
+            Expr::PtrOffset { .. } => unreachable!("PtrOffset should be done=true"),
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
                 expr.done = true;
@@ -1792,9 +1787,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(None);
                 }
             }
-            Expr::Index { ptr, index } => {
+            Expr::TupleAccess { ptr, .. } => {
+                if (self.type_of(result, ptr)?).is_some() {
+                    self.compile_expr(result, expr, None)?
+                } else {
+                    return Ok(None);
+                }
+            }
+            Expr::PtrOffset { ptr, index } => {
                 if let Ok(Some(container_ptr_ty)) = self.type_of(result, ptr) {
-                    self.get_index_type(container_ptr_ty, unwrap!(index.as_int(), "") as usize)?
+                    self.get_index_type(container_ptr_ty, *index)?
                 } else {
                     return Ok(None);
                 }
@@ -2528,13 +2530,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn set_deref(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
         match place.deref_mut().deref_mut() {
-            Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
+            Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) | Expr::TupleAccess { .. } => {
                 self.compile_place_expr(result, place, None, true)?;
                 let oldty = place.ty;
                 let value = self.compile_expr(result, value, Some(oldty))?;
                 self.type_check_arg(value, oldty, "reassign var")?;
                 Ok(())
             }
+            Expr::PtrOffset { .. } => unreachable!("compiled twice?"),
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             _ => ice!("TODO: other `place=e;`"),
         }
@@ -2542,6 +2545,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // :PlaceExpr
     // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
+    #[track_caller]
     fn compile_place_expr(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, requested: Option<TypeId>, want_deref: bool) -> Res<'p, ()> {
         let loc = place.loc;
         match place.deref_mut().deref_mut() {
@@ -2563,17 +2567,37 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_place_expr(result, container, None, false)?;
                 let (i, field_val_ty) = self.field_access_expr(container, *name)?;
                 let field_ptr_ty = self.program.ptr_type(field_val_ty);
-                place.expr = Expr::Index {
+                place.expr = Expr::PtrOffset {
                     ptr: Box::new(mem::take(container)),
-                    index: Box::new(self.as_literal(i as i64, loc)?),
+                    index: i,
                 };
                 if want_deref {
                     place.ty = field_ptr_ty;
+                    place.done = true;
                     // Now we have the offset-ed ptr, add back the deref
                     let ptr = Box::new(mem::take(place));
                     *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, field_val_ty);
                 } else {
                     place.ty = field_ptr_ty;
+                }
+                place.done = true;
+            }
+            Expr::TupleAccess { ptr, index } => {
+                self.compile_place_expr(result, ptr, None, false)?;
+                let i: i64 = self.immediate_eval_expr_known(*index.clone())?;
+                self.set_literal(index, i)?;
+                let field_ptr_ty = self.index_expr(ptr.ty, i as usize)?;
+                place.expr = Expr::PtrOffset {
+                    ptr: Box::new(mem::take(ptr)),
+                    index: i as usize,
+                };
+                place.ty = field_ptr_ty;
+                if want_deref {
+                    place.done = true;
+                    // Now we have the offset-ed ptr, add back the deref
+                    let ptr = Box::new(mem::take(place));
+                    let field_val_ty = self.program.unptr_ty(field_ptr_ty).unwrap();
+                    *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, field_val_ty);
                 }
                 place.done = true;
             }
@@ -2595,7 +2619,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
-            _ => ice!("TODO: other `place=e;`"),
+            Expr::PrefixMacro { .. } => {
+                // TODO: this is sketchy but makes []->.index work.
+                //       need to think about how requested/want_deref are handled
+                self.compile_expr(result, place, requested)?;
+                self.compile_place_expr(result, place, requested, want_deref)?;
+            }
+            _ => ice!("TODO: other `place=e;` {}", place.log(self.pool)),
         }
         Ok(())
     }

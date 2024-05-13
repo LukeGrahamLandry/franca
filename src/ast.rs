@@ -132,7 +132,12 @@ pub enum Expr<'p> {
     GetVar(Var<'p>),
     GetNamed(Ident<'p>),
     String(Ident<'p>),
-    Index {
+    // This is what TupleAccess and FieldAccess both desugar to.
+    PtrOffset {
+        ptr: Box<FatExpr<'p>>,
+        index: usize,
+    },
+    TupleAccess {
         ptr: Box<FatExpr<'p>>,
         index: Box<FatExpr<'p>>,
     },
@@ -173,9 +178,12 @@ pub trait WalkAst<'p> {
         match &mut expr.expr {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => unreachable!("ICE: POISON"),
-            Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
+            Expr::Call(fst, snd) | Expr::TupleAccess { ptr: fst, index: snd } => {
                 self.expr(fst);
                 self.expr(snd);
+            }
+            Expr::PtrOffset { ptr, .. } => {
+                self.expr(ptr);
             }
             Expr::Block { body, result, .. } => {
                 for stmt in body {

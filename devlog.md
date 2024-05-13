@@ -1,4 +1,14 @@
 - using 32 bit indices everywhere saves 9MB (15%)
+- made backends only get program and asm instead of whole compile struct so it feels a bit less messy.
+- i dont actually use most of libffi, i dont need structs abi since my backend can't do it and i only need aarch64 for now.
+  so removed it and replaced with tiny asm shim that just loads ints from an array into registers and calls a function.
+  libffi is ~45k lines of asm/c, mine is 13 lines... i just have very simple requirements compared to what its trying to give me.
+- interestingly that also fixed comptime print. so i guess i was lying to them about struct abi flattening somehow?
+- discovered that when you do global_asm! and extern c to your own function, it must be in the same rust module as calls it?
+  if you try to import it the linker spews a billion lines of errors.
+- made `.(i)` and `[i]` work like other place expressions.
+  had to add a new PtrOffset ast node that they desugar to so you can tell the tuple accesses
+  in user code apart from pointer ops that everything desugars to.
 
 ## place exprs (May 12)
 

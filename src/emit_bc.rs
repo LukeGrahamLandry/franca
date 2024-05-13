@@ -341,8 +341,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
-            Expr::String(_) | Expr::GetParsed(_) | Expr::AddToOverloadSet(_) | Expr::GetNamed(_) | Expr::WipFunc(_) | Expr::Closure(_) => {
-                unreachable!()
+            Expr::TupleAccess { .. }
+            | Expr::String(_)
+            | Expr::GetParsed(_)
+            | Expr::AddToOverloadSet(_)
+            | Expr::GetNamed(_)
+            | Expr::WipFunc(_)
+            | Expr::Closure(_) => {
+                unreachable!("{}", expr.log(self.program.pool))
             }
             Expr::Poison => ice!("POISON",),
             Expr::Call(f, arg) => {
@@ -579,10 +585,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::FieldAccess(_, _) => unreachable!(),
-            Expr::Index { ptr, index } => {
+            Expr::PtrOffset { ptr, index } => {
                 self.compile_expr(result, ptr, PushStack, false)?;
-                let index = unwrap!(index.as_int(), "tuple index must be const") as usize;
-                self.index_expr(result, ptr.ty, index)?;
+                self.index_expr(result, ptr.ty, *index)?;
                 match result_location {
                     PushStack => {}
                     ResAddr => result.push(Bc::StorePre { slots: 1 }),

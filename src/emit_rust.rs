@@ -271,7 +271,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
         Ok(match expr.deref() {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
-            Expr::Index { .. } => todo!(),
+            Expr::PtrOffset { .. } | Expr::TupleAccess { .. } => todo!(),
             Expr::WipFunc(_) => unreachable!(),
             Expr::Value { value, .. } => self.emit_values(value)?,
             Expr::Call(f, arg) => {

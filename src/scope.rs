@@ -274,9 +274,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Expr::AddToOverloadSet(_) | Expr::WipFunc(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
-            Expr::Call(fst, snd) | Expr::Index { ptr: fst, index: snd } => {
+            Expr::Call(fst, snd) | Expr::TupleAccess { ptr: fst, index: snd } => {
                 self.resolve_expr(fst)?;
                 self.resolve_expr(snd)?;
+            }
+            Expr::PtrOffset { ptr, .. } => {
+                self.resolve_expr(ptr)?;
             }
             Expr::PrefixMacro { handler, arg, target } => {
                 self.resolve_expr(handler)?;

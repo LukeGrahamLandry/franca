@@ -346,7 +346,8 @@ impl<'p> Expr<'p> {
             Expr::PrefixMacro { handler, arg, target } => {
                 format!("[@{}({}) {}]", handler.logd(pool, depth), arg.logd(pool, depth), target.logd(pool, depth))
             }
-            Expr::Index { ptr, index } => format!("{}[{}]", ptr.logd(pool, depth), index.logd(pool, depth)),
+            Expr::TupleAccess { ptr, index } => format!("{}.({})", ptr.logd(pool, depth), index.logd(pool, depth)),
+            Expr::PtrOffset { ptr, index } => format!("{}.(~{index})", ptr.logd(pool, depth)),
             _ => format!("{:?}", self),
         }
     }
