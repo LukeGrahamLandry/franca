@@ -35,18 +35,25 @@ fun List(const T: Type) Type = {
     }
     
     fun items(self: *Self) Slice$T = {
-        self[].maybe_uninit.slice(0, self[].len)
+        self.maybe_uninit.slice(0, self.len)
     }
     fun items(var self: Self) Slice$T = self&.items();
     
     // A pointer to the first element of the list. 
     // SAFETY: dont use the pointer if the list is empty. invalidated by resize. 
-    fun as_ptr(self: *Self) *T = self.maybe_uninit.ptr[];
+    fun as_ptr(self: *Self) *T = self.maybe_uninit.ptr;
     
     #inline
     fun index(self: *Self, i: i64) *T = {
-        assert(i.lt(self[].len), "OOB");
-        self[].maybe_uninit.index(i)
+        assert(i.lt(self.len), "OOB");
+        self.maybe_uninit.index(i)
+    }
+    
+    // TODO: hack because auto deref doesn't work through function calls
+    // TODO: self shouldn't have to be var just to read fields
+    fun index(var self: Self, i: i64) *T = {
+        assert(i.lt(self.len), "OOB");
+        self.maybe_uninit.index(i)
     }
     
     fun get(self: *Self, i: i64) T = {
@@ -60,15 +67,15 @@ fun List(const T: Type) Type = {
     }
     
     fun reserve(self: *Self, extra: i64) Unit = {
-        let total = self[].len.add(extra);
-        let old_cap = self[].maybe_uninit.len;
+        let total = self.len.add(extra);
+        let old_cap = self.maybe_uninit.len;
         if(lt(old_cap, total)) {|
             let cap = 4.max(old_cap.add(extra).max(old_cap.mul(2)));
             var new: Self = list(cap);
-            if(self[].len.gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
-                let dest: Slice$T = new.maybe_uninit.subslice(0, self[].len);
+            if(self.len.gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
+                let dest: Slice$T = new.maybe_uninit.subslice(0, self.len);
                 memcpy(dest, items(self));
-                new.len = self[].len;
+                new.len = self.len;
             };
             drop(self);
             self[] = new;
@@ -77,23 +84,23 @@ fun List(const T: Type) Type = {
     
     fun push(self: *Self, v: T) Unit = {
         reserve(self, 1);
-        let last = self[].maybe_uninit.index(self[].len); 
+        let last = self.maybe_uninit.index(self.len); 
         last[] = v;
-        self[].len = add(self[].len, 1);
+        self.len = add(self.len, 1);
     }
     
     fun pop_last(self: *Self) T = {
-        assert(gt(self[].len, 0), "OOB");
-        let i = sub(self[].len, 1);
-        self[].len = i;
-        self[].maybe_uninit.get(i)
+        assert(gt(self.len, 0), "OOB");
+        let i = sub(self.len, 1);
+        self.len = i;
+        self.maybe_uninit.get(i)
     }
     
     fun push_all(self: *Self, new: Slice$T) Unit = {
         reserve(self, len(new));
-        let dest = subslice(self[].maybe_uninit, self[].len, len(new));
+        let dest = subslice(self.maybe_uninit, self.len, len(new));
         memcpy(dest, new);
-        self[].len = add(self[].len, len(new));
+        self.len = add(self.len, len(new));
     }
     
     fun push_all(self: *Self, owned: *Self) Unit = {
@@ -103,22 +110,22 @@ fun List(const T: Type) Type = {
     
     // TODO: this doesn't drop the entries. 
     fun drop(self: *Self) Unit = {
-        if(self[].maybe_uninit.len.ne(0)) {|
-            let ptr: rawptr = self[].maybe_uninit.ptr;
+        if(self.maybe_uninit.len.ne(0)) {|
+            let ptr: rawptr = self.maybe_uninit.ptr;
             // TODO: calling this makes fmt.fr fail when runtime target is aarch64,
             //       but it fails in the comptime interp still which is scary. 
             //       its a poison on taking args of a SplitFunc. 
             //       but its fine when collections.fr calls drop and that targets both too tho maybe doesnt cause a split because simpler comptime. 
             //       
-            dealloc(T, ptr, self[].maybe_uninit.len);
-            self[].maybe_uninit.len = 0;
-            self[].len = 0;
+            dealloc(T, ptr, self.maybe_uninit.len);
+            self.maybe_uninit.len = 0;
+            self.len = 0;
         };
     }
     
     /// Retains capacity
     fun clear(self: *Self) Unit = {
-        self[].len = 0;
+        self.len = 0;
     }
     
     Self

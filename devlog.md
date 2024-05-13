@@ -9,6 +9,11 @@
 - made `.(i)` and `[i]` work like other place expressions.
   had to add a new PtrOffset ast node that they desugar to so you can tell the tuple accesses
   in user code apart from pointer ops that everything desugars to.
+- auto deref in chained place expressions (like rust).
+  you still need to manually dereference for function calls (which is kinda inconsistant, might change that),
+  and if the type of the first is a pointer and you want the value, like it doesnt just auto deref on assignment,
+  its just a magic part of the dot operator. which is how rust does it, and feels kinda nice,
+  cause you never meant to access a field on the pointer so it always guesses right.
 
 ## place exprs (May 12)
 

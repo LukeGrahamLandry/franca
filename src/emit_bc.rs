@@ -609,9 +609,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // field accesses should have been desugared.
             err!("took address of r-value",)
         };
-
+        assert_eq!(var.kind, VarType::Var, "Can only take address of var (not let/const)");
         let id = *unwrap!(self.var_lookup.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
-        debug_assert_eq!(var.kind, VarType::Var);
         result.push(Bc::AddrVar { id });
 
         match result_location {

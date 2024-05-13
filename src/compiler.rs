@@ -324,6 +324,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime, result: Option<*mut FnWip<'p>>) -> Res<'p, Values> {
+        unsafe { STATS.jit_call += 1 };
         let state2 = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state2);
         self.pending_ffi.push(result);
@@ -386,6 +387,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         result: Option<*mut FnWip<'p>>,
         arg: Arg,
     ) -> Res<'p, Ret> {
+        unsafe { STATS.jit_call += 1 };
         let state = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state);
         self.compile(f, when)?;
@@ -1332,7 +1334,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // Note: arg is not evalutated
                     Flag::If => self.emit_call_if(result, expr, requested)?,
                     Flag::While => self.emit_call_while(result, arg)?,
-                    Flag::Addr => self.addr_macro(result, expr)?,
+                    Flag::Addr => self.addr_macro(result, expr, requested)?,
                     // :UnquotePlaceholders
                     Flag::Quote => {
                         let mut arg: FatExpr<'p> = *arg.clone(); // Take the contents of the box, not the box itself!
@@ -1516,6 +1518,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             // :PlaceExpr
             Expr::FieldAccess(e, name) => {
+                // TODO: this is unfortunate. it means you prewalk instead of letting placeexpr do the recursion
+                //       but need to check if its a value that has special fields first.
                 let container = self.compile_expr(result, e, None)?;
 
                 if let Some(val) = e.as_const() {
@@ -1680,7 +1684,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // :PlaceExpr
-    fn addr_macro(&mut self, result: &mut FnWip<'p>, macro_expr: &mut FatExpr<'p>) -> Res<'p, TypeId> {
+    fn addr_macro(&mut self, result: &mut FnWip<'p>, macro_expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
         let Expr::SuffixMacro(_, arg) = &mut macro_expr.expr else {
             unreachable!()
         };
@@ -1695,7 +1699,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(ptr_ty);
         }
 
-        self.compile_place_expr(result, arg, None, false)?;
+        self.compile_place_expr(result, arg, requested, false)?;
 
         // Note: not assigning to the arg, assinging to the whole macro call. want to replace the !addr.
         *macro_expr = mem::take(arg);
@@ -2096,6 +2100,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
+        unsafe { STATS.const_eval_node += 1 };
         let ret_ty = Ret::get_type(self.program);
         if let Some(val) = self.check_quick_eval(&mut e, ret_ty)? {
             return self.deserialize_values(val);
@@ -2139,6 +2144,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 };
                 // TODO: this only helps if some can be quick-evaled by special cases above, otherwise makes it worse.
                 // TODO:  however.... it debug_asserts it you comment this case out!! -- Apr 30
+                //      because of the special casing on types? (Type, Type) === Type
                 let values: Res<'p, Vec<Values>> = elements
                     .iter()
                     .zip(types)
@@ -2227,6 +2233,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
     pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+        unsafe { STATS.const_eval_node += 1 };
         if let Some(values) = self.check_quick_eval(&mut e, ret_ty)? {
             return Ok(values);
         }
@@ -2547,24 +2554,44 @@ impl<'a, 'p> Compile<'a, 'p> {
     // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
     #[track_caller]
     fn compile_place_expr(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, requested: Option<TypeId>, want_deref: bool) -> Res<'p, ()> {
+        // println!("in: {}", place.log(self.pool));
         let loc = place.loc;
         match place.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
                 // Could even do this in the parser? -- May 12
-                assert_eq!(var.kind, VarType::Var, "Only 'var' can be addressed (not let/const).");
+                // Note: we no longer do this check here because auto deref creates a temperatoy illegal state that gest removed by deref_one.
+                //       emit_bc still checks tho.
+                // assert_eq!(var.kind, VarType::Var, "Only 'var' can be addressed (not let/const).");
                 let val_ty = result.vars.get(var);
                 let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.pool));
                 let ptr_ty = self.program.ptr_type(val_ty);
 
                 *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
                 if want_deref {
+                    // Note: not using deref_one, becuase you want to use this to create var& expressions sometimes. kinda HACK
                     *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(place))), loc, val_ty);
                 }
                 place.done = true;
             }
             Expr::FieldAccess(container, name) => {
                 // TODO: could lookup field and pass down requested
+                // Note: compile_expr may have already walked the container because it has to check if its an enum/scope.
                 self.compile_place_expr(result, container, None, false)?;
+
+                // :AutoDeref
+                {
+                    let raw = self.program.raw_type(container.ty);
+                    let TypeInfo::Ptr(mut inner) = self.program[raw] else {
+                        err!("PlaceExpr of FieldAccess should be ptr",)
+                    };
+                    inner = self.program.raw_type(inner);
+                    // Pointers never have fields, so the thing behind the pointer, shouldn't be a pointer.
+                    // This lets you write `self: *Self; self.name` instead of  `self: *Self; self[].name`.
+                    while let TypeInfo::Ptr(next_inner) = self.program[inner] {
+                        self.deref_one(container)?;
+                        inner = self.program.raw_type(next_inner);
+                    }
+                }
                 let (i, field_val_ty) = self.field_access_expr(container, *name)?;
                 let field_ptr_ty = self.program.ptr_type(field_val_ty);
                 place.expr = Expr::PtrOffset {
@@ -2575,8 +2602,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     place.ty = field_ptr_ty;
                     place.done = true;
                     // Now we have the offset-ed ptr, add back the deref
-                    let ptr = Box::new(mem::take(place));
-                    *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, field_val_ty);
+                    self.deref_one(place)?;
                 } else {
                     place.ty = field_ptr_ty;
                 }
@@ -2584,6 +2610,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::TupleAccess { ptr, index } => {
                 self.compile_place_expr(result, ptr, None, false)?;
+                // TODO: auto deref
                 let i: i64 = self.immediate_eval_expr_known(*index.clone())?;
                 self.set_literal(index, i)?;
                 let field_ptr_ty = self.index_expr(ptr.ty, i as usize)?;
@@ -2595,9 +2622,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if want_deref {
                     place.done = true;
                     // Now we have the offset-ed ptr, add back the deref
-                    let ptr = Box::new(mem::take(place));
-                    let field_val_ty = self.program.unptr_ty(field_ptr_ty).unwrap();
-                    *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, field_val_ty);
+                    self.deref_one(place)?;
                 }
                 place.done = true;
             }
@@ -2605,9 +2630,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let name = Flag::try_from(*macro_name)?;
                 match name {
                     Flag::Deref => {
-                        // TODO: use requested
                         // When you see a !deref, treat the expression as a pointer value.
-                        self.compile_expr(result, arg, None)?;
+                        let req = requested.map(|r| self.program.ptr_type(r));
+                        self.compile_expr(result, arg, req)?;
                         if want_deref {
                             place.ty = self.program.unptr_ty(arg.ty).unwrap();
                         } else {
@@ -2627,6 +2652,29 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             _ => ice!("TODO: other `place=e;` {}", place.log(self.pool)),
         }
+        // println!("out: {}", place.log(self.pool));
+        Ok(())
+    }
+
+    fn deref_one(&mut self, ptr: &mut FatExpr<'p>) -> Res<'p, ()> {
+        assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
+        let raw = self.program.raw_type(ptr.ty);
+
+        let TypeInfo::Ptr(inner) = self.program[raw] else {
+            err!("expected ptr",)
+        };
+
+        // Avoid reduntant var&[]. this allows auto deref to work on let ptr vars.
+        if let Some(arg) = ptr.as_suffix_macro_mut(Flag::Addr) {
+            *ptr = mem::take(arg);
+            if ptr.ty.is_unknown() {
+                ptr.ty = inner; // TODO: this shouldn't happen
+            }
+        } else {
+            let loc = ptr.loc;
+            *ptr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(ptr))), loc, inner);
+        }
+        assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
         Ok(())
     }
 

@@ -604,9 +604,7 @@ impl<'p> Pattern<'p> {
 
 impl<'p> FatExpr<'p> {
     pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
-        unsafe {
-            STATS.ast_expr_nodes_all += 1;
-        }
+        unsafe { STATS.ast_expr_nodes_all += 1 };
 
         FatExpr {
             expr,

@@ -7,14 +7,14 @@ Vm :: @struct(
 
 fun init() Vm = {
     var self: Vm = ()!uninitialized; // TODO: no uninit
-    self&.stack[] = list(stack_max);  // EXTRA: grow stack
+    self.stack = list(stack_max);  // EXTRA: grow stack
     self&.reset_stack();
     self
 }
 
 fun drop(self: *Vm) Unit = {
-    self.chunk[].drop();
-    self.stack.drop();
+    self.chunk.drop();
+    self.stack&.drop();
 }
 
 InterpretResult :: @enum(Ok, CompileError, RuntimeError);
@@ -26,8 +26,8 @@ fun interpret(self: *Vm, source: Str) InterpretResult = {
 }
 
 fun interpret(self: *Vm, chunk: *Chunk) InterpretResult = {
-    self.chunk[] = chunk;
-    self.ip[] = chunk.code.as_ptr();
+    self.chunk = chunk;
+    self.ip = chunk[].code&.as_ptr();
     self.run()
 }
 
@@ -41,15 +41,15 @@ fn run(self: *Vm) InterpretResult = {
         if(::debug_trace_execution){|
             debug&.clear();
             @fmt(debug&, "         %", ""); // TODO: fix 'no trivial tuples'
-            for(self.stack.as_ptr(), self.stack_top[]) {(slot: *Value)|
+            for(self.stack&.as_ptr(), self.stack_top) {(slot: *Value)|
                 @fmt(debug&, "[ % ]", slot);
             };
             println(debug&.items());
         
-            p := self.chunk[].code.as_ptr();
-            i := p.ptr_diff(self.ip[]);
+            p := self.chunk[].code&.as_ptr();
+            i := p.ptr_diff(self.ip);
             println(i);  // TODO: do these into the buffer as well 
-            self.chunk[].dis_inst(i);
+            self.chunk.dis_inst(i);
         };
         
         instruction := self.read_byte();
@@ -95,29 +95,29 @@ fn run(self: *Vm) InterpretResult = {
 
 // TODO: I could expose the dereference and increment instruction but presumably if you want it to be fast you'd just use llvm anyway. 
 #inline fn read_byte(self: *Vm) u8 = {
-    let b = self.ip[][];
-    self.ip[] = self.ip[].offset(1);
+    let b = self.ip[];
+    self.ip = self.ip.offset(1);
     b
 }
 
 #inline fn read_constant(self: *Vm) Value = {
     // TODO: you can't put the type annotation that does the cast on the var or the call because then it changes the overload resolution. 
     let index = self.read_byte();
-    self.chunk[].constants.get(@as(i64) index)
+    self.chunk.constants&.get(@as(i64) index)
 }
 
 fun push(self: *Vm, value: Value) Unit = {
-    self.stack_top[][] = value;
-    self.stack_top[] = self.stack_top[].offset(1);
+    self.stack_top[] = value;
+    self.stack_top = self.stack_top.offset(1);
 }
 
 fun pop(self: *Vm) Value = {
-    self.stack_top[] = self.stack_top[].offset(1.neg());
-    self.stack_top[][]
+    self.stack_top = self.stack_top.offset(1.neg());
+    self.stack_top[]
 }
 
 fn reset_stack(self: *Vm) Unit = {
-    self.stack_top[] = self.stack.as_ptr();
+    self.stack_top = self.stack&.as_ptr();
 }
 
 ::ptr_utils(u8);
