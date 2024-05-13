@@ -186,7 +186,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         .array_chunks::<4>()
                         .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
                         .collect();
-                    let path = "target/latest_log/temp.asm".to_string();
+                    let path = "target/temp.asm".to_string();
                     fs::write(&path, hex).unwrap();
                     let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
                     println!();

@@ -347,8 +347,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             | Expr::AddToOverloadSet(_)
             | Expr::GetNamed(_)
             | Expr::WipFunc(_)
+            | Expr::FieldAccess(_, _)
             | Expr::Closure(_) => {
-                unreachable!("{}", expr.log(self.program.pool))
+                unreachable!("didn't desugar: {}", expr.log(self.program.pool))
             }
             Expr::Poison => ice!("POISON",),
             Expr::Call(f, arg) => {
@@ -584,7 +585,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
-            Expr::FieldAccess(_, _) => unreachable!(),
             Expr::PtrOffset { ptr, index } => {
                 self.compile_expr(result, ptr, PushStack, false)?;
                 self.index_expr(result, ptr.ty, *index)?;

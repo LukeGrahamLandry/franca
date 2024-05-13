@@ -9,6 +9,8 @@ use crate::{
 
 // TODO: figure out how to check that my garbage type keys are unique.
 pub trait InterpSend<'p>: Sized {
+    const SIZE: usize;
+
     // TODO: could use ptr&len of a static string of the type name. but thats sad.
     //       cant use std::any because of lifetimes. tho my macro can cheat and refer to the name without lifetimes,
     //       so its jsut about the manual base impls for vec,box,option,hashmap.
@@ -21,13 +23,11 @@ pub trait InterpSend<'p>: Sized {
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
     fn serialize_to_ints(self, values: &mut Vec<i64>);
     fn serialize_to_ints_one(self) -> Vec<i64> {
-        let mut values = Vec::with_capacity(Self::size());
+        let mut values = Vec::with_capacity(Self::SIZE);
         self.serialize_to_ints(&mut values);
-        debug_assert_eq!(values.len(), Self::size());
+        debug_assert_eq!(values.len(), Self::SIZE);
         values
     }
-
-    fn size() -> usize;
 
     fn definition() -> String {
         String::new()
@@ -60,6 +60,8 @@ pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut impl It
 macro_rules! send_num {
     ($ty:ty) => {
         impl<'p> InterpSend<'p> for $ty {
+            const SIZE: usize = 1;
+
             fn get_type_key() -> u128 {
                 unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
             }
@@ -80,10 +82,6 @@ macro_rules! send_num {
                 Some(values.next()? as $ty)
             }
 
-            fn size() -> usize {
-                1
-            }
-
             fn name() -> String {
                 stringify!($ty).to_string()
             }
@@ -99,6 +97,8 @@ macro_rules! send_num {
 send_num!(i64, i32, i16, i8, u64, u32, u16, u8, usize, isize, *mut i64);
 
 impl<'p> InterpSend<'p> for bool {
+    const SIZE: usize = 1;
+
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -114,16 +114,14 @@ impl<'p> InterpSend<'p> for bool {
         Some(values.next()? != 0)
     }
 
-    fn size() -> usize {
-        1
-    }
-
     fn name() -> String {
         "bool".to_string()
     }
 }
 
 impl<'p> InterpSend<'p> for () {
+    const SIZE: usize = 1;
+
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -144,16 +142,14 @@ impl<'p> InterpSend<'p> for () {
         Some(())
     }
 
-    fn size() -> usize {
-        1
-    }
-
     fn name() -> String {
         "Unit".to_string()
     }
 }
 
 impl<'p> InterpSend<'p> for char {
+    const SIZE: usize = 1;
+
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -169,16 +165,14 @@ impl<'p> InterpSend<'p> for char {
         char::from_u32(values.next()? as u32)
     }
 
-    fn size() -> usize {
-        1
-    }
-
     fn name() -> String {
         "u32".to_string()
     }
 }
 
 impl<'p> InterpSend<'p> for f64 {
+    const SIZE: usize = 1;
+
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -194,16 +188,14 @@ impl<'p> InterpSend<'p> for f64 {
         Some(f64::from_bits(values.next()? as u64))
     }
 
-    fn size() -> usize {
-        1
-    }
-
     fn name() -> String {
         "f64".to_string()
     }
 }
 
 impl<'p> InterpSend<'p> for TypeId {
+    const SIZE: usize = 1;
+
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -223,16 +215,13 @@ impl<'p> InterpSend<'p> for TypeId {
         Some(TypeId::from_raw(values.next()?))
     }
 
-    fn size() -> usize {
-        1
-    }
-
     fn name() -> String {
         "Type".to_string()
     }
 }
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
+    const SIZE: usize = A::SIZE + B::SIZE;
     fn get_type_key() -> u128 {
         mix::<A, B>(6749973390999)
     }
@@ -253,16 +242,13 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
         Some((a, b))
     }
 
-    fn size() -> usize {
-        A::size() + B::size()
-    }
-
     fn name() -> String {
         format!("Ty({}, {})", A::name(), B::name())
     }
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
+    const SIZE: usize = 2;
     fn get_type_key() -> u128 {
         mix::<T, i16>(999998827262625)
     }
@@ -275,11 +261,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         let len = self.len();
-        let mut parts = Vec::with_capacity(T::size() * len);
+        let mut parts = Vec::with_capacity(T::SIZE * len);
         for e in self {
             e.serialize_to_ints(&mut parts);
         }
-        debug_assert_eq!(parts.len(), T::size() * len);
+        debug_assert_eq!(parts.len(), T::SIZE * len);
         let (ptr, _, _) = parts.into_raw_parts();
         values.push(ptr as i64);
         values.push(len as i64);
@@ -290,7 +276,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let len = usize::deserialize_from_ints(values)?;
 
-        let entries = T::size() * len;
+        let entries = T::SIZE * len;
         let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, entries) };
         let mut values = s.iter().copied();
 
@@ -302,16 +288,13 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         Some(res)
     }
 
-    fn size() -> usize {
-        2
-    }
-
     fn name() -> String {
         format!("List({})", T::name())
     }
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
+    const SIZE: usize = 1;
     fn get_type_key() -> u128 {
         mix::<T, i8>(67445234555533)
     }
@@ -325,7 +308,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         let mut parts = vec![];
         let inner: T = *self;
         inner.serialize_to_ints(&mut parts);
-        debug_assert_eq!(parts.len(), T::size());
+        debug_assert_eq!(parts.len(), T::SIZE);
         let (ptr, _, _) = parts.into_raw_parts();
         values.push(ptr as i64)
     }
@@ -333,14 +316,10 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         let ptr = values.next()?;
         debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, T::size()) };
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, T::SIZE) };
         let mut values = s.iter().copied();
         let v = T::deserialize_from_ints(&mut values)?;
         Some(Box::new(v))
-    }
-
-    fn size() -> usize {
-        1
     }
 
     fn name() -> String {
@@ -350,6 +329,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
 
 // TODO: this should be an enum
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
+    const SIZE: usize = 1 + T::SIZE;
     fn get_type_key() -> u128 {
         mix::<T, bool>(8090890890986)
     }
@@ -367,7 +347,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
             }
             None => {
                 values.push(1);
-                for _ in 0..T::size() {
+                for _ in 0..T::SIZE {
                     values.push(66666);
                 }
             }
@@ -378,7 +358,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         match values.next()? {
             0 => Some(T::deserialize_from_ints(values)),
             1 => {
-                for _ in 0..T::size() {
+                for _ in 0..T::SIZE {
                     let _ = values.next()?;
                 }
                 Some(None)
@@ -387,16 +367,13 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         }
     }
 
-    fn size() -> usize {
-        1 + T::size()
-    }
-
     fn name() -> String {
         format!("?{}", T::name())
     }
 }
 
 impl<'p> InterpSend<'p> for Span {
+    const SIZE: usize = 2;
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -418,10 +395,6 @@ impl<'p> InterpSend<'p> for Span {
         Some(res)
     }
 
-    fn size() -> usize {
-        <(u32, u32)>::size()
-    }
-
     fn definition() -> String {
         "(u32, u32)".to_string()
     }
@@ -432,6 +405,7 @@ impl<'p> InterpSend<'p> for Span {
 }
 
 impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for Map<K, V> {
+    const SIZE: usize = 2;
     fn get_type_key() -> u128 {
         mix::<K, V>(1234567890)
     }
@@ -448,16 +422,13 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
         Some(Vec::<(K, V)>::deserialize_from_ints(values)?.into_iter().collect::<Self>())
     }
 
-    fn size() -> usize {
-        Vec::<(K, V)>::size()
-    }
-
     fn name() -> String {
         format!("HashMap({}, {})", K::name(), V::name())
     }
 }
 
 impl<'p> InterpSend<'p> for String {
+    const SIZE: usize = 2;
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -472,10 +443,6 @@ impl<'p> InterpSend<'p> for String {
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
-    }
-
-    fn size() -> usize {
-        Vec::<u8>::size()
     }
 
     fn name() -> String {
@@ -537,4 +504,21 @@ pub mod c {
         let ret: i64 = unsafe { arg8ret1(ptr, args.as_mut_ptr()) };
         Ok(ret)
     }
+}
+
+pub const fn const_max(sizes: &[usize]) -> usize {
+    pub const fn helper(sizes: &[usize], start: usize) -> usize {
+        if sizes.len() - 1 == start {
+            sizes[start]
+        } else {
+            let s = helper(sizes, start + 1);
+            if sizes[start] > s {
+                sizes[start]
+            } else {
+                s
+            }
+        }
+    }
+
+    helper(sizes, 0)
 }

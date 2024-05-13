@@ -25,8 +25,9 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let definition = get_definition(&input.data);
 
     let expanded = quote! {
-        // The generated impl.
         impl #impl_generics crate::ffi::InterpSend<'p> for #name #ty_generics #where_clause {
+
+            const SIZE: usize = #size;
             fn get_type_key() -> u128 {
                 // # Safety: trust me bro
                 unsafe { std::mem::transmute(std::any::TypeId::of::<#name>()) }
@@ -43,12 +44,6 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
                 #deserialize_from_ints
             }
-
-            fn size() -> usize {
-                use crate::ffi::InterpSend;
-                #size
-            }
-
 
             fn definition() -> String {
                 #definition.to_string()
@@ -214,7 +209,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                     }
                 };
 
-                let payload_size = Self::size() - 1;
+                let payload_size = Self::SIZE - 1;
                 for _ in 0..(payload_size-varient_size) {
                     let unit = values.next()?;
                     //debug_assert_eq!(unit, Value::I64(123));
@@ -314,7 +309,7 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                 #[allow(unused_variables)]
                 let varient_size = match &self {  #(#recurse_tag)* };
                 match self {  #(#recurse_fields)* };
-                let payload_size = Self::size() - 1;
+                let payload_size = Self::SIZE - 1;
                 for _ in 0..(payload_size-varient_size) {
                     #pad  // TODO: less dumb padding
                 }
@@ -403,10 +398,10 @@ fn size_for(name: &Ident, data: &Data) -> TokenStream {
                     ( #fields )
                 }
             });
-            quote! {
-                [0, #( #recurse, )* ].into_iter().max().unwrap() + 1
-
-            }
+            quote! {{
+                use crate::ffi::const_max;
+                const_max(&[0, #( #recurse, )* ]) + 1
+            }}
         }
         syn::Data::Union(_) => todo!(),
     }
@@ -418,7 +413,7 @@ fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
             let recurse = fields.named.iter().map(|f| {
                 let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                    <#ty as InterpSend>::size()
+                    <#ty as InterpSend>::SIZE
                 }
             });
             quote! {
@@ -429,7 +424,7 @@ fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
             let recurse = fields.unnamed.iter().map(|f| {
                 let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                     <#ty as InterpSend>::size()
+                     <#ty as InterpSend>::SIZE
                 }
             });
             quote! {

@@ -31,8 +31,8 @@ macro_rules! bounce_flat_call {
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
             pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut i64, arg_count: i64, retptr: *mut i64, ret_count: i64) {
-                debug_assert_eq!(arg_count, <$Arg>::size() as i64, "bad arg count. expected {}", stringify!($Arg));
-                debug_assert_eq!(ret_count, <$Ret>::size() as i64, "bad ret count. expected {}", stringify!($Ret));
+                debug_assert_eq!(arg_count, <$Arg>::SIZE as i64, "bad arg count. expected {}", stringify!($Arg));
+                debug_assert_eq!(ret_count, <$Ret>::SIZE as i64, "bad ret count. expected {}", stringify!($Ret));
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     debugln!("bounce ARG: {argslice:?}");
@@ -421,7 +421,7 @@ pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *
 // This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
     let mut arg = arg.serialize_to_ints_one();
-    let mut ret = vec![0i64; Ret::size()];
+    let mut ret = vec![0i64; Ret::SIZE];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     Ret::deserialize_from_ints(&mut ret.into_iter()).unwrap()
 }

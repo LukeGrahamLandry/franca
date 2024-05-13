@@ -14,6 +14,8 @@
   and if the type of the first is a pointer and you want the value, like it doesnt just auto deref on assignment,
   its just a magic part of the dot operator. which is how rust does it, and feels kinda nice,
   cause you never meant to access a field on the pointer so it always guesses right.
+- im suspisious that it wasn't inlining InterpSend::size cause i saw it in the profiler so i made it an associated constant.
+  that seems to have made less serialize_to_ints show up but that seems crazy? like its always through a generic (its not even object safe), why wouldn't it get inlined?
 
 ## place exprs (May 12)
 

@@ -239,6 +239,8 @@ impl<T: ?Sized> Clone for Ptr<T> {
 impl<T: ?Sized> Copy for Ptr<T> {}
 
 impl<'p> InterpSend<'p> for Ident<'p> {
+    const SIZE: usize = 1;
+
     fn get_type_key() -> u128 {
         // i dare you to change the generic to Self
         unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
@@ -250,10 +252,6 @@ impl<'p> InterpSend<'p> for Ident<'p> {
 
     fn serialize_to_ints(self, values: &mut Vec<i64>) {
         self.0.serialize_to_ints(values)
-    }
-
-    fn size() -> usize {
-        1
     }
 
     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
