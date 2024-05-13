@@ -136,6 +136,7 @@ pub struct Stats {
     pub ast_expr_nodes_parser_only: usize,
     pub compile_expr_calls_all: usize,
     pub compile_expr_calls_with_done_set: usize,
+    pub expr_fmt: usize,
 }
 
 pub static mut STATS: Stats = Stats {
@@ -150,6 +151,7 @@ pub static mut STATS: Stats = Stats {
     ast_expr_nodes_parser_only: 0,
     compile_expr_calls_all: 0,
     compile_expr_calls_with_done_set: 0,
+    expr_fmt: 0,
 };
 
 // TODO: feature = "bundle_stdlib"

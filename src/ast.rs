@@ -4,6 +4,7 @@ use crate::{
     compiler::{CErr, Compile, CompileError, FnWip, Res},
     err,
     export_ffi::RsResolvedSymbol,
+    extend_options,
     ffi::{init_interp_send, InterpSend},
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
@@ -92,10 +93,14 @@ pub struct Annotation<'p> {
     pub args: Option<FatExpr<'p>>,
 }
 
-// TODO: this is getting a bit chonky if I want to store the kind here instead of globally. 32 bit indices would make it reasonable again
-#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
-pub struct Var<'p>(pub Ident<'p>, pub usize, pub ScopeId, pub VarType, pub u32);
+pub struct Var<'p> {
+    pub name: Ident<'p>,
+    pub id: u32,
+    pub scope: ScopeId,
+    pub block: u32,
+    pub kind: VarType,
+}
 
 // TODO: should really get an arena going because boxes make me sad.
 #[repr(C)]
@@ -269,7 +274,7 @@ pub trait WalkAst<'p> {
 
 // Used for inlining closures.
 pub(crate) struct RenumberVars<'a, 'p, 'aa> {
-    pub vars: usize,
+    pub vars: u32,
     pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
     pub(crate) compile: &'a mut Compile<'aa, 'p>,
 }
@@ -314,7 +319,7 @@ impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
 
 impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
     fn decl(&mut self, name: &mut Var<'p>) {
-        let new = Var(name.0, self.vars, name.2, name.3, name.4); // TODO:SCOPE?
+        let new = Var { id: self.vars, ..*name };
         self.vars += 1;
         let stomp = self.mapping.insert(*name, new);
         debug_assert!(stomp.is_none());
@@ -323,7 +328,7 @@ impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn renumber_vars(&mut self, vars: usize, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> usize {
+    pub fn renumber_vars(&mut self, vars: u32, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> u32 {
         let mut ctx = RenumberVars { vars, mapping, compile };
         ctx.expr(self);
         ctx.vars
@@ -420,7 +425,7 @@ impl<'p> Name<'p> {
     pub fn ident(&self) -> Option<Ident<'p>> {
         match self {
             Name::Ident(n) => Some(*n),
-            Name::Var(n) => Some(n.0),
+            Name::Var(n) => Some(n.name),
             Name::None => None,
         }
     }
@@ -441,7 +446,7 @@ impl<'p> Binding<'p> {
     pub fn name(&self) -> Option<Ident<'p>> {
         match self.name {
             Name::Ident(n) => Some(n),
-            Name::Var(n) => Some(n.0),
+            Name::Var(n) => Some(n.name),
             Name::None => None,
         }
     }
@@ -866,7 +871,7 @@ pub struct Program<'p> {
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
     pub generics_memo: Map<(FuncId, Values), (Values, TypeId)>,
-    pub next_var: usize,
+    pub next_var: u32,
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: Map<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
@@ -877,6 +882,7 @@ pub struct Program<'p> {
     pub ffi_definitions: String,
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
+    pub sizes: RefCell<Vec<Option<u16>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -962,6 +968,7 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
+            sizes: Default::default(),
             // these are hardcoded numbers in TypeId constructors
             types: vec![
                 TypeInfo::Unknown,
@@ -1090,7 +1097,7 @@ impl<'p> Program<'p> {
             .arg
             .flatten()
             .iter()
-            .map(|(name, ty, _)| format!("{}: {}, ", name.map(|n| self.pool.get(n.0)).unwrap_or("_"), self.log_type(*ty)))
+            .map(|(name, ty, _)| format!("{}: {}, ", name.map(|n| self.pool.get(n.name)).unwrap_or("_"), self.log_type(*ty)))
             .collect();
         let ret = self.log_type(func.ret.unwrap());
         let out = format!("fn {}({args}) {ret}", self.pool.get(func.name));
@@ -1143,7 +1150,7 @@ impl<'p> Program<'p> {
             let args = arg
                 .flatten()
                 .into_iter()
-                .map(|(name, ty, _)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().0)))
+                .map(|(name, ty, _)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().name)))
                 .collect::<Vec<_>>()
                 .join(", ");
             out += &format!(
@@ -1338,6 +1345,40 @@ impl<'p> Program<'p> {
         }
     }
 
+    // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
+    //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
+    //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
+    pub fn slot_count(&self, ty: TypeId) -> u16 {
+        extend_options(self.sizes.borrow_mut().deref_mut(), ty.as_index());
+        if let Some(size) = self.sizes.borrow_mut().deref_mut()[ty.as_index()] {
+            return size;
+        }
+        let ty = self.raw_type(ty);
+        extend_options(self.sizes.borrow_mut().deref_mut(), ty.as_index());
+        let size = match &self[ty] {
+            TypeInfo::Unknown => 9999,
+            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
+            TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(f.ty)).sum(),
+            TypeInfo::Tagged { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(*ty)).max().expect("no empty enum"),
+            TypeInfo::Never => 0,
+            TypeInfo::Scope
+            | TypeInfo::Int(_)
+            | TypeInfo::Label(_)
+            | TypeInfo::F64
+            | TypeInfo::Bool
+            | TypeInfo::Fn(_)
+            | TypeInfo::Ptr(_)
+            | TypeInfo::VoidPtr
+            | TypeInfo::FnPtr(_)
+            | TypeInfo::Type
+            | TypeInfo::OverloadSet
+            | TypeInfo::Unit => 1,
+            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+        };
+        self.sizes.borrow_mut().deref_mut()[ty.as_index()] = Some(size);
+        size
+    }
+
     // TODO: cache these on the Func
     pub fn float_mask(&self, ty: FnType) -> FloatMask {
         let arg = self.float_mask_one(ty.arg);
@@ -1441,7 +1482,7 @@ impl<'p> FatStmt<'p> {
 impl<'p> Expr<'p> {
     pub fn as_ident(&self) -> Option<Ident<'p>> {
         match self {
-            Expr::GetVar(v) => Some(v.0),
+            Expr::GetVar(v) => Some(v.name),
             &Expr::GetNamed(i) => Some(i),
             _ => None,
         }
@@ -1719,7 +1760,7 @@ flag_subset!(Flag, Flag::_Reserved_Null_, Flag::_Reserved_Count_);
 macro_rules! tagged_index {
     ($name:ty, $magic_offset:expr) => {
         impl $name {
-            pub const MASK: u64 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
+            pub const MASK: u32 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
 
             #[track_caller]
             pub fn as_index(self) -> usize {
@@ -1735,15 +1776,15 @@ macro_rules! tagged_index {
 
             #[track_caller]
             pub fn from_raw(value: i64) -> Self {
-                let s = Self(value as u64);
+                let s = Self(value as u32);
                 debug_assert!(s.is_valid());
                 s
             }
 
             #[track_caller]
             pub const fn from_index(value: usize) -> Self {
-                debug_assert!((value as u64) < Self::MASK);
-                Self(value as u64 | Self::MASK)
+                debug_assert!((value as u32) < Self::MASK);
+                Self(value as u32 | Self::MASK)
             }
 
             pub fn is_valid(self) -> bool {
@@ -1762,20 +1803,20 @@ tagged_index!(LabelId, 27);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
-pub struct TypeId(pub u64);
+pub struct TypeId(pub u32);
 
 #[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
-pub struct FuncId(u64);
+pub struct FuncId(u32);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
-pub struct ScopeId(pub u64);
+pub struct ScopeId(u32);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
-pub struct OverloadSetId(pub u64);
+pub struct OverloadSetId(u32);
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend, Debug)]
-pub struct LabelId(pub u64);
+pub struct LabelId(u32);

@@ -80,11 +80,6 @@ impl<'p> FnBody<'p> {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct SizeCache {
-    pub known: Vec<Option<usize>>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub enum Value {
     F64(u64), // TODO: hash
@@ -213,11 +208,11 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
         }
         TypeInfo::Tagged { cases } => {
             let start = out.len();
-            let payload_size = compile.sizes.slot_count(compile.program, ty) - 1;
+            let payload_size = compile.slot_count(ty) - 1;
             let tag = unwrap!(ints.next(), "");
             out.push(Value::I64(tag));
             let ty = cases[tag as usize].1;
-            let value_size = compile.sizes.slot_count(compile.program, ty);
+            let value_size = compile.slot_count(ty);
             values_from_ints(compile, ty, ints, out)?;
 
             for _ in 0..payload_size - value_size {
@@ -231,7 +226,7 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
                 out.push(Value::I64(99999));
             }
             let end = out.len();
-            assert_eq!(end - start, payload_size + 1, "{out:?}");
+            assert_eq!(end - start, payload_size as usize + 1, "{out:?}");
         }
         info => {
             let n = unwrap!(ints.next(), "");

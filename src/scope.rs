@@ -138,8 +138,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let capures = mem::take(&mut self.captures);
         // Now check which things we captured from *our* parent.
         for c in capures {
-            self.find_var(&c.0); // This adds it back to self.captures if needed
-            debug_assert!(c.3 != VarType::Const);
+            self.find_var(&c.name); // This adds it back to self.captures if needed
+            debug_assert!(c.kind != VarType::Const);
             func.capture_vars.push(c);
         }
 
@@ -192,7 +192,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 // Functions don't shadow, they just add to an overload group.
                 // TOOD: @pub vs @private
                 if let Some(v) = self.find_var(&func.name) {
-                    assert!(v.3 == VarType::Const);
+                    assert!(v.kind == VarType::Const);
                     func.var_name = Some(v);
                 } else {
                     let v = self.decl_var(&func.name, VarType::Const, func.loc)?;
@@ -373,10 +373,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             let mut vars = &scope.vars[block];
             loop {
                 // 13M
-                if let Some(found) = vars.vars.iter().rev().position(|v| v.0 == *name) {
+                if let Some(found) = vars.vars.iter().rev().position(|v| v.name == *name) {
                     // Reverse so you get the shadowing first.
                     let v = vars.vars[vars.vars.len() - found - 1];
-                    if v.3 == VarType::Const {
+                    if v.kind == VarType::Const {
                         debug_assert!(scope.constants.contains_key(&v));
                     }
                     return Some(v);
@@ -409,7 +409,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 // TODO: the depth thing is a bit confusing. it was a bit less jaring before when it was just local on the resolver.
                 //       brifly needed -1 because scope 0 is now a marker and always empty i guess, but now thats done in push_scope instead.
                 //       its about which scopes count as function captures vs just normal blocks. should try to clean that up. -- Apr 23
-                if !self.captures.contains(&v) && v.3 != VarType::Const {
+                if !self.captures.contains(&v) && v.kind != VarType::Const {
                     // We got it from our parent function.
                     self.captures.push(v);
                 }
@@ -431,7 +431,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         //       this makes it easier to think about having functions be the unit of resolving instead of blocks but still allowing shadowing consts in inner blocks.
         let wip = &self.compiler[s].vars[self.block].vars;
         // 1.6M
-        let shadow_const = |v: &Var<'_>| v.0 == *name && v.3 == VarType::Const;
+        let shadow_const = |v: &Var<'_>| v.name == *name && v.kind == VarType::Const;
         if wip.iter().any(shadow_const) {
             err!(
                 "Cannot shadow constant in the same scope: {}",
@@ -439,7 +439,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             )
         }
 
-        let var = Var(*name, self.compiler.program.next_var, s, kind, self.block as u32);
+        let var = Var {
+            name: *name,
+            id: self.compiler.program.next_var,
+            scope: s,
+            block: self.block as u32,
+            kind,
+        };
         if kind == VarType::Const {
             let empty = (FatExpr::synthetic(Expr::Poison, loc), LazyType::Infer);
             self.compiler[s].constants.insert(var, empty); // sad. two lookups per constant. but doing it different on each branch looks verbose.

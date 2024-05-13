@@ -145,7 +145,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 ];
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
-    compiler.sizes.slot_count(compiler.program, ty) as i64 * 8
+    compiler.slot_count(ty) as i64 * 8
 }
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -406,7 +406,7 @@ extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg:
         let addr = *arg as usize;
         // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
         debug_assert!(
-            addr % 4 == 0 && (addr as u64 & FuncId::MASK == 0 || FuncId::from_raw(addr as i64).as_index() > compile.program.funcs.len()),
+            addr % 4 == 0 && (addr as u32 & FuncId::MASK == 0 || FuncId::from_raw(addr as i64).as_index() > compile.program.funcs.len()),
             "thats a weird ptr my dude, did you mean to call {:?}?",
             FuncId::from_raw(addr as i64)
         );
@@ -428,7 +428,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
-    let ret_count = compile.sizes.slot_count(compile.program, ret_type);
+    let ret_count = compile.slot_count(ret_type) as usize;
     let mut arg = arg.vec();
     debugln!("IN: {arg:?}");
     let mut ret = vec![0i64; ret_count];
@@ -552,7 +552,7 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
 
     match compile.immediate_eval_expr(expr, ty) {
         Ok(val) => {
-            let slots = compile.sizes.slot_count(compile.program, ty);
+            let slots = compile.slot_count(ty) as usize;
             let val = val.vec();
             debug_assert_eq!(val.len(), slots);
             let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut i64, val.len()) };
@@ -618,7 +618,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
 }
 
 fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
-    let slots = compile.sizes.slot_count(compile.program, ty);
+    let slots = compile.slot_count(ty) as usize;
     let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
     let mut out = vec![];
     values_from_ints(compile, ty, &mut value.iter().copied().peekable(), &mut out).unwrap();
@@ -694,7 +694,7 @@ fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatE
         // TODO: use match
         let value = match &mut arg.expr {
             &mut Expr::GetNamed(i) => i,
-            &mut Expr::GetVar(v) => v.0,
+            &mut Expr::GetVar(v) => v.name,
             &mut Expr::String(i) => i,
             Expr::PrefixMacro { target, .. } => {
                 // TODO: check that handler is @as

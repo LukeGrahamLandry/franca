@@ -107,13 +107,13 @@ macro_rules! unwrap {
 pub use unwrap;
 
 use crate::ast::{FatStmt, Pattern};
-use crate::bc::*;
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
     compiler::{CErr, CompileError, DebugState},
     pool::StringPool,
 };
+use crate::{bc::*, STATS};
 
 /// It felt like a good idea to be able to compare identifiers super fast but now its forever a pain to look at them while debugging.
 pub trait PoolLog<'p> {
@@ -272,6 +272,7 @@ impl<'p> PoolLog<'p> for Expr<'p> {
 
 impl<'p> Expr<'p> {
     fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
+        unsafe { STATS.expr_fmt += 1 };
         match self {
             Expr::Call(func, arg) => {
                 format!("{}({})", func.logd(pool, depth), arg.logd(pool, depth))
@@ -386,14 +387,13 @@ impl<'p> PoolLog<'p> for FatExpr<'p> {
 
 impl<'p> PoolLog<'p> for Var<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        let i = self.1;
         use crate::ast::VarType;
-        let kind = match self.3 {
+        let kind = match self.kind {
             VarType::Let => "L",
             VarType::Var => "V",
             VarType::Const => "C",
         };
-        format!("{}%{}{}s{}b{}", pool.get(self.0), i, kind, self.2.as_index(), self.4)
+        format!("{}%{}{}s{}b{}", pool.get(self.name), self.id, kind, self.scope.as_index(), self.block)
     }
 }
 

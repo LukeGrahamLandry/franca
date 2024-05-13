@@ -1,3 +1,7 @@
+- using 32 bit indices everywhere saves 9MB (15%)
+
+## place exprs (May 12)
+
 - made inserting #include_std stmts a bit less dumb.
 - change @namespace to take a closure instead of a block so every block doesn't need to remember its scope.
   lookup field access in constants of that scope, dont care about which block for now, but eventually need to so you can do private/shadowing.
@@ -21,8 +25,10 @@ I want less painful place exprs.
 - now !addr means eval that as a place expr but remove the deref. that still needs a special case for var!addr because there's no desugaring you can do for that.
   so `var&.field` and `var.field&` produce the same value. which might be the last unambigous change i can make on the path to being normal.
 - changed to more c like syntax where `var.field` is a load and `var.field&` gets the address.
-  now its much slower cause i do a bunch of intermediate addr/deref chasing.
   also i think `ptr[].field&` is really dumb because you have to pretend to load the whole struct but you don't actually.
+
+  now its much slower cause i do a bunch of intermediate addr/deref chasing.
+  holy shit im stupid, no, nothing matters, i just left on my log and leak everything on every recrusive call to compile.
 
 ## cranelift (May 11)
 

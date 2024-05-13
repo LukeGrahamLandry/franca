@@ -53,7 +53,7 @@ pub struct ParseTasks<'p> {
 unsafe impl<'p> Sync for ParseTasks<'p> {}
 unsafe impl<'p> Send for ParseTasks<'p> {}
 
-const ANON_BODY_AS_NAME: bool = false;
+pub const ANON_BODY_AS_NAME: bool = false;
 
 impl<'p> ParseTasks<'p> {
     pub fn new(pool: &'p StringPool<'p>) -> Self {

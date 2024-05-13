@@ -24,7 +24,7 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::parse::ParseTasks;
+use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -69,11 +69,10 @@ pub struct Compile<'a, 'p> {
     pub tests: Vec<FuncId>,
     pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
-    pub sizes: SizeCache,
     pub pending_ffi: Vec<Option<*mut FnWip<'p>>>,
     pub scopes: Vec<Scope<'p>>,
     pub parsing: ParseTasks<'p>,
-    pub next_label: LabelId,
+    pub next_label: usize,
     #[cfg(feature = "cranelift")]
     pub cranelift: crate::cranelift::JittedCl,
 }
@@ -138,14 +137,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             currently_compiling: vec![],
             program,
             aarch64: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
-            sizes: SizeCache::default(),
+
             save_bootstrap: vec![],
             tests: vec![],
             pending_ffi: vec![],
             scopes: vec![],
             parsing,
             tests_broken: vec![],
-            next_label: LabelId::from_index(0),
+            next_label: 0,
 
             #[cfg(feature = "cranelift")]
             cranelift: crate::cranelift::JittedCl::default(),
@@ -154,8 +153,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         c
     }
 
-    pub(crate) fn slot_count(&mut self, ty: TypeId) -> u16 {
-        self.sizes.slot_count(self.program, ty) as u16
+    pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {
+        self.program.slot_count(ty)
     }
 
     pub(crate) fn _as_value_expr<T: InterpSend<'p>>(&mut self, val: &FatExpr<'p>) -> Option<T> {
@@ -239,7 +238,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some(ty) = self.program[f].finished_ty() {
-            let is_big = self.sizes.slot_count(self.program, ty.arg) >= 7 || self.sizes.slot_count(self.program, ty.ret) > 1;
+            let is_big = self.slot_count(ty.arg) >= 7 || self.slot_count(ty.ret) > 1;
             if self.program[f].has_tag(Flag::Flat_Call) || is_big {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 // TODO: my c_Call can;t handle agragates
@@ -459,7 +458,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         for stmt in body.iter_mut() {
             if let Stmt::DeclVar { name, ty, value, kind } = &mut stmt.stmt {
                 if *kind == VarType::Const {
-                    self[name.2].constants.insert(*name, (mem::take(value), mem::take(ty)));
+                    self[name.scope].constants.insert(*name, (mem::take(value), mem::take(ty)));
                     stmt.stmt = Stmt::Noop;
                 }
             }
@@ -568,7 +567,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
             debug_assert!(kind != VarType::Const, "Tried to emit before binding const args.");
             if let Some(name) = name {
-                debug_assert!(kind == name.3);
+                debug_assert!(kind == name.kind);
                 let prev = result.vars.insert(name, ty);
                 assert!(prev.is_none(), "overwrite arg?");
             }
@@ -582,8 +581,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let hint = self.program[f].finished_ret;
         if let Some(return_var) = self.program[f].return_var {
             if let Some(ret_ty) = hint {
-                let ret = self.next_label;
-                self.next_label.0 += 1;
+                let ret = LabelId::from_index(self.next_label);
+                self.next_label += 1;
                 let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
                 self.save_const(
                     return_var,
@@ -674,7 +673,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         assert!(!func.any_const_args());
         for capture in &func.capture_vars {
-            assert!(capture.3 != VarType::Const);
+            assert!(capture.kind != VarType::Const);
             if result.vars.get(capture).is_none() {
                 // :ChainedCaptures // TODO
                 // now whatever function we're inlining _into_ needs to capture this variable.
@@ -692,11 +691,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: need to move the const args to the top before eval_and_close_local_constants
         let old_ret_var = func.return_var.unwrap();
         let mut new_ret_var = old_ret_var;
-        new_ret_var.1 = self.program.next_var;
+        new_ret_var.id = self.program.next_var;
         self.program.next_var += 1;
 
-        let ret_label = self.next_label;
-        self.next_label.0 += 1;
+        let ret_label = LabelId::from_index(self.next_label);
+        self.next_label += 1;
         expr_out.expr = Expr::Block {
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
@@ -753,7 +752,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: support fns nested in tuples.
             let arg_func_obj = &self.program[*arg_func];
             for capture in &arg_func_obj.capture_vars {
-                debug_assert!(capture.3 != VarType::Const);
+                debug_assert!(capture.kind != VarType::Const);
             }
             let mut i = 0;
             while let Some(&v) = self.program[*arg_func].capture_vars.get(i) {
@@ -873,7 +872,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         key.1 = arg_value.clone();
         let mut arg_values = arg_value.vec().into_iter();
         for (name, ty, kind) in args {
-            let size = self.sizes.slot_count(self.program, ty); // TODO: better pattern matching
+            let size = self.slot_count(ty) as usize; // TODO: better pattern matching
             let mut values = vec![];
             for _ in 0..size {
                 values.push(unwrap!(arg_values.next(), "ICE: missing arguments"));
@@ -1069,7 +1068,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let index = OverloadSetId::from_index(self.program.overload_sets.len());
                     self.program.overload_sets.push(OverloadSet {
                         ready: vec![],
-                        name: var.0,
+                        name: var.name,
                         pending: vec![id],
                         public,
                         just_resolved: vec![],
@@ -1095,7 +1094,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn find_const(&mut self, name: Var<'p>) -> Res<'p, Option<(Values, TypeId)>> {
-        if let Some(s) = self[name.2].constants.get(&name) {
+        if let Some(s) = self[name.scope].constants.get(&name) {
             if let Some(known) = s.1.ty() {
                 if let Expr::Value { value } = &s.0.expr {
                     let ty = s.0.ty;
@@ -1110,9 +1109,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(None);
             }
 
-            let (mut val, mut ty) = mem::take(self[name.2].constants.get_mut(&name).unwrap());
+            let (mut val, mut ty) = mem::take(self[name.scope].constants.get_mut(&name).unwrap());
             // println!("- {} {} {}", name.log(self.pool), ty.log(self.pool), val.log(self.pool));
-            self[name.2].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
+            self[name.scope].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
             self.infer_types_progress(&mut ty)?;
             let loc = val.loc;
             self.decl_const(name, &mut ty, &mut val, loc)?;
@@ -1204,8 +1203,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
 
-            let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
-            self.type_check_arg(res, requested, msg)?; // "sanity ICE req_expr")?;
+            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
+            self.type_check_arg(res, requested, "sanity ICE req_expr")?;
         }
 
         expr.ty = res;
@@ -1229,7 +1228,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_expr_inner(&mut self, result: &mut FnWip<'p>, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
         result.last_loc = expr.loc;
         self.last_loc = Some(expr.loc);
-        let loc = expr.loc;
 
         Ok(match expr.deref_mut() {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
@@ -1535,10 +1533,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let Values::One(Value::I64(s)) = val else {
                             err!("expected int for scope id",)
                         };
-                        let Some(&var) = self[ScopeId::from_raw(s)].constants.keys().find(|v| v.0 == *name) else {
+                        let Some(&var) = self[ScopeId::from_raw(s)].constants.keys().find(|v| v.name == *name) else {
                             err!(CErr::UndeclaredIdent(*name))
                         };
-                        debug_assert!(var.3 == VarType::Const);
+                        debug_assert!(var.kind == VarType::Const);
                         let Some((val, ty)) = self.find_const(var)? else {
                             err!("missing constant {}", var.log(self.pool))
                         };
@@ -1549,16 +1547,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 assert!(container != TypeId::scope, "dot syntax on module must be const",);
                 // Otherwise its a normal struct/tagged field.
-                // println!("field: {}", expr.log(self.pool));
-                self.compile_place_expr(result, expr, requested)?;
+                self.compile_place_expr(result, expr, requested, true)?;
                 expr.ty
-
-                // let index = self.field_access_expr(result, e, *name)?;
-                // expr.expr = Expr::Index {
-                //     ptr: mem::take(e),
-                //     index: Box::new(self.as_literal(index as i64, loc)?),
-                // };
-                // self.compile_expr(result, expr, requested)? // TODO: dont dispatch again
             }
             // :PlaceExpr
             Expr::Index { ptr, index } => {
@@ -1703,21 +1693,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         // but the only thing you can do for a var is <var>!addr, so you get stuck in a loop nesting !addr.  -- May 12
         if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
             let value_ty = *unwrap!(result.vars.get(var), "Missing var {} (in !addr)", var.log(self.pool));
-            if var.3 != VarType::Var {
-                err!("Can only take address of vars not {:?} {}.", var.3, var.log(self.pool))
+            if var.kind != VarType::Var {
+                err!("Can only take address of vars not {:?} {}.", var.kind, var.log(self.pool))
             }
             let ptr_ty = self.program.ptr_type(value_ty);
             return Ok(ptr_ty);
         }
 
-        self.compile_place_expr(result, arg, None)?;
-        let Expr::SuffixMacro(name, ptr) = mem::take(arg).expr else {
-            unreachable!("compile_place_expr []")
-        };
-        debug_assert_eq!(name, Flag::Deref.ident());
+        self.compile_place_expr(result, arg, None, false)?;
 
         // Note: not assigning to the arg, assinging to the whole macro call. want to replace the !addr.
-        *macro_expr = *ptr;
+        *macro_expr = mem::take(arg);
         macro_expr.done = true;
         Ok(macro_expr.ty)
     }
@@ -1765,7 +1751,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
-                    if i.3 == VarType::Const {
+                    if i.kind == VarType::Const {
                         if let Ok(fid) = self.resolve_function(result, *i, arg, None) {
                             if let Ok(Some(f_ty)) = self.infer_types(fid) {
                                 // Need to save this because resolving overloads eats named arguments
@@ -1920,7 +1906,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::GetVar(var) => {
-                let ty = if var.3 == VarType::Const {
+                let ty = if var.kind == VarType::Const {
                     self.find_const_type(*var)?
                 } else {
                     result.vars.get(var).cloned()
@@ -2216,9 +2202,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
-        let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
+        let name = if ANON_BODY_AS_NAME {
+            let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
+            self.pool.intern(&name)
+        } else {
+            Flag::Anon.ident()
+        };
         let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
-        let mut fake_func = Func::new(self.pool.intern(&name), arg, ret, Some(e.clone()), e.loc, false, false);
+        let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false, false);
         debug_assert!(fake_func.local_constants.is_empty());
         fake_func.resolved_body = true;
         fake_func.resolved_sign = true;
@@ -2257,7 +2248,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub(crate) fn add_func(&mut self, func: Func<'p>) -> Res<'p, FuncId> {
         // TODO: make this less trash. it fixes generics where it thinks a cpatured argument is var cause its arg but its actually in consts because generic.
         for capture in &func.capture_vars {
-            assert!(capture.3 != VarType::Const);
+            assert!(capture.kind != VarType::Const);
         }
         let scope = func.scope.unwrap();
         let id = self.program.add_func(func);
@@ -2538,7 +2529,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn set_deref(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
         match place.deref_mut().deref_mut() {
             Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
-                self.compile_place_expr(result, place, None)?;
+                self.compile_place_expr(result, place, None, true)?;
                 let oldty = place.ty;
                 let value = self.compile_expr(result, value, Some(oldty))?;
                 self.type_check_arg(value, oldty, "reassign var")?;
@@ -2551,51 +2542,54 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // :PlaceExpr
     // takes any of (<ptr_expr>[] OR <var> OR <ptr>.<field>) and turns it into (<ptr_expr>[])
-    fn compile_place_expr(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, ()> {
-        // println!("place: {}", place.log(self.pool));
+    fn compile_place_expr(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, requested: Option<TypeId>, want_deref: bool) -> Res<'p, ()> {
         let loc = place.loc;
         match place.deref_mut().deref_mut() {
             Expr::GetVar(var) => {
                 // Could even do this in the parser? -- May 12
-                assert_eq!(var.3, VarType::Var, "Only 'var' can be addressed (not let/const).");
+                assert_eq!(var.kind, VarType::Var, "Only 'var' can be addressed (not let/const).");
                 let val_ty = result.vars.get(var);
                 let val_ty = *unwrap!(val_ty, "var must be declared: {}", var.log(self.pool));
                 let ptr_ty = self.program.ptr_type(val_ty);
 
-                let temp = Box::new(FatExpr::synthetic_ty(
-                    Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))),
-                    loc,
-                    ptr_ty,
-                ));
-                *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), temp), loc, val_ty);
+                *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
+                if want_deref {
+                    *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(place))), loc, val_ty);
+                }
                 place.done = true;
-                Ok(())
             }
             Expr::FieldAccess(container, name) => {
                 // TODO: could lookup field and pass down requested
-                self.compile_place_expr(result, container, None)?;
-                // Now we know <container> is a !deref of something.
-                let container_ptr = container.as_suffix_macro_mut(Flag::Deref).unwrap();
-                let index = self.field_access_expr(result, container_ptr, *name)?;
-                container_ptr.expr = Expr::Index {
-                    ptr: Box::new(mem::take(container_ptr)),
-                    index: Box::new(self.as_literal(index as i64, loc)?),
+                self.compile_place_expr(result, container, None, false)?;
+                let (i, field_val_ty) = self.field_access_expr(container, *name)?;
+                let field_ptr_ty = self.program.ptr_type(field_val_ty);
+                place.expr = Expr::Index {
+                    ptr: Box::new(mem::take(container)),
+                    index: Box::new(self.as_literal(i as i64, loc)?),
                 };
-                let ptr_ty = self.compile_expr(result, container_ptr, None)?;
-                let val_ty = self.program.unptr_ty(ptr_ty).unwrap();
-                // Now we have the offset-ed ptr, add back the deref
-                let ptr = Box::new(mem::take(container_ptr));
-                *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, val_ty);
-                Ok(())
+                if want_deref {
+                    place.ty = field_ptr_ty;
+                    // Now we have the offset-ed ptr, add back the deref
+                    let ptr = Box::new(mem::take(place));
+                    *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), ptr), loc, field_val_ty);
+                } else {
+                    place.ty = field_ptr_ty;
+                }
+                place.done = true;
             }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = Flag::try_from(*macro_name)?;
                 match name {
                     Flag::Deref => {
+                        // TODO: use requested
                         // When you see a !deref, treat the expression as a pointer value.
                         self.compile_expr(result, arg, None)?;
-                        place.ty = self.program.unptr_ty(arg.ty).unwrap();
-                        Ok(())
+                        if want_deref {
+                            place.ty = self.program.unptr_ty(arg.ty).unwrap();
+                        } else {
+                            *place = mem::take(arg);
+                        }
+                        place.done = true;
                     }
                     _ => err!("other place expr: {}!{}", arg.log(self.pool), self.pool.get(*macro_name)),
                 }
@@ -2603,20 +2597,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             _ => ice!("TODO: other `place=e;`"),
         }
+        Ok(())
     }
 
     // :PlaceExpr
-    fn field_access_expr(&mut self, result: &mut FnWip<'p>, container_ptr: &mut FatExpr<'p>, name: Ident<'p>) -> Res<'p, usize> {
-        let container_ptr_ty = self.compile_expr(result, container_ptr, None)?;
-        let container_ptr_ty = self.program.raw_type(container_ptr_ty);
+    fn field_access_expr(&mut self, container_ptr: &mut FatExpr<'p>, name: Ident<'p>) -> Res<'p, (usize, TypeId)> {
+        let container_ptr_ty = self.program.raw_type(container_ptr.ty);
         let depth = self.program.ptr_depth(container_ptr_ty);
-        assert_eq!(
-            depth,
-            1,
-            "index expr ptr must be one level of indirection. {:?} {:?}",
-            self.program.log_type(container_ptr_ty),
-            container_ptr
-        );
+        if depth != 1 {
+            let ty = self.program.log_type(container_ptr_ty);
+            err!("index expr ptr must be one level of indirection. {ty}",)
+        }
         let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "",);
 
         let raw_container_ty = self.program.raw_type(container_ty);
@@ -2625,15 +2616,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 for (i, f) in fields.iter().enumerate() {
                     if f.name == name {
                         container_ptr.done = true;
-                        return Ok(i);
+                        return Ok((i, f.ty));
                     }
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
             }
             TypeInfo::Tagged { cases, .. } => {
-                for (i, (f_name, _)) in cases.iter().enumerate() {
+                for (i, (f_name, f_ty)) in cases.iter().enumerate() {
                     if *f_name == name {
-                        return Ok(i);
+                        return Ok((i, *f_ty));
                     }
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
@@ -3091,7 +3082,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             VarType::Const => self.decl_const(name, ty, value, loc)?,
             VarType::Let | VarType::Var => {
                 if kind == VarType::Let && value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-                    let name = self.pool.get(name.0);
+                    let name = self.pool.get(name.name);
                     err!("let bindings cannot be reassigned so '{name}' cannot be !uninitialized",)
                 }
                 let value = self.compile_expr(result, value, ty.ty())?;
@@ -3118,7 +3109,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn decl_const(&mut self, name: Var<'p>, ty: &mut LazyType<'p>, value: &mut FatExpr<'p>, loc: Span) -> Res<'p, ()> {
         // TODO: doing the check here every time is sad.
         if value.expr.as_suffix_macro(Flag::Uninitialized).is_some() {
-            let name = self.pool.get(name.0);
+            let name = self.pool.get(name.name);
             err!("const bindings cannot be reassigned so '{name}' cannot be '()!uninitialized'",)
         }
         // You don't need to precompile, immediate_eval_expr will do it for you.
@@ -3203,7 +3194,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn save_const(&mut self, name: Var<'p>, val_expr: Expr<'p>, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
-        if let Some((val, ty)) = self[name.2].constants.get_mut(&name) {
+        if let Some((val, ty)) = self[name.scope].constants.get_mut(&name) {
             if matches!(ty, LazyType::Finished(_)) {
                 ice!("tried to re-save constant {}", name.log(self.pool));
             }
@@ -3218,7 +3209,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut e = FatExpr::synthetic_ty(val_expr, loc, final_ty);
             e.done = true;
             let val = (e, LazyType::Finished(final_ty));
-            self[name.2].constants.insert(name, val);
+            self[name.scope].constants.insert(name, val);
         }
         Ok(())
     }

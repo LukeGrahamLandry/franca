@@ -19,7 +19,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
-                if i.3 == VarType::Const {
+                if i.kind == VarType::Const {
                     let id = self.resolve_function(result, i, arg, ret)?; // TODO: error here is probably fine, just return None
                     Some(id)
                 } else {

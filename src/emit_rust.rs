@@ -105,7 +105,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             .clone()
             .into_iter()
             .map(|(name, (ty, value))| {
-                let name = emit.comp.pool.get(name.0).to_string();
+                let name = emit.comp.pool.get(name.name).to_string();
                 let ty = emit.emit_type(ty).unwrap();
                 format!("const {name}: {ty} = {value};")
             })
@@ -147,7 +147,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
             .iter()
             .map(|(name, ty, kind)| {
                 assert_ne!(*kind, VarType::Const);
-                let name = name.map(|name| self.comp.pool.get(name.0)).unwrap_or("_");
+                let name = name.map(|name| self.comp.pool.get(name.name)).unwrap_or("_");
                 let ty = self.emit_type(*ty).unwrap();
                 format!("{}: {}, ", name, ty)
             })
@@ -229,7 +229,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                 format!("{};\n", self.compile_expr(expr)?)
             }
             Stmt::DeclVar { name, value, .. } => {
-                let name = self.comp.pool.get(name.0);
+                let name = self.comp.pool.get(name.name);
                 let value = self.compile_expr(value)?;
                 format!("let mut {} = {};", name, value)
             }
@@ -331,7 +331,7 @@ impl<'z, 'p: 'z> EmitRs<'z, 'p> {
                 format!("&(*{}).{}", self.compile_expr(container)?, self.comp.pool.get(*name))
             }
             Expr::StructLiteralP(_) => todo!(),
-            Expr::GetVar(var) => self.comp.pool.get(var.0).to_string(),
+            Expr::GetVar(var) => self.comp.pool.get(var.name).to_string(),
             Expr::PrefixMacro { .. } | Expr::Closure(_) | Expr::GetNamed(_) | Expr::String(_) => {
                 unreachable!()
             }

@@ -9,7 +9,6 @@ use std::usize;
 use crate::ast::{CallConv, Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, FnWip, Res};
-use crate::extend_options;
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
 use crate::{bc::*, Map};
@@ -18,15 +17,14 @@ use crate::{assert, assert_eq, err, ice, unwrap};
 
 pub struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
-    sizes: &'z mut SizeCache,
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
     is_flat_call: bool,
 }
 
-pub fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, FnBody<'p>> {
-    let mut emit = EmitBc::new(compile.program, &mut compile.sizes);
+pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId) -> Res<'p, FnBody<'p>> {
+    let mut emit = EmitBc::new(compile.program);
     let body = emit.compile_inner(f)?;
     Ok(body)
 }
@@ -40,11 +38,10 @@ pub enum ResultLoc {
 use ResultLoc::*;
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    fn new(program: &'z Program<'p>, sizes: &'z mut SizeCache) -> Self {
+    fn new(program: &'z Program<'p>) -> Self {
         Self {
             last_loc: None,
             program,
-            sizes,
             locals: vec![],
             var_lookup: Default::default(),
             is_flat_call: false,
@@ -609,7 +606,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
 
         let id = *unwrap!(self.var_lookup.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
-        debug_assert_eq!(var.3, VarType::Var);
+        debug_assert_eq!(var.kind, VarType::Var);
         result.push(Bc::AddrVar { id });
 
         match result_location {
@@ -783,8 +780,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    pub fn slot_count(&mut self, ty: TypeId) -> u16 {
-        self.sizes.slot_count(self.program, ty) as u16
+    pub fn slot_count(&self, ty: TypeId) -> u16 {
+        self.program.slot_count(ty)
     }
 
     fn construct_struct(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>, requested: TypeId, result_location: ResultLoc) -> Res<'p, ()> {
@@ -874,43 +871,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             _ => err!("struct literal but expected {:?}", requested),
         }
         Ok(())
-    }
-}
-
-// TODO: !!! doesnt work if you use .slot_count and .byte_count. dont allow that.
-impl SizeCache {
-    // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
-    //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
-    //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
-    pub fn slot_count(&mut self, program: &Program, ty: TypeId) -> usize {
-        extend_options(&mut self.known, ty.as_index());
-        if let Some(size) = self.known[ty.as_index()] {
-            return size;
-        }
-        let ty = program.raw_type(ty);
-        extend_options(&mut self.known, ty.as_index());
-        let size = match &program[ty] {
-            TypeInfo::Unknown => 9999,
-            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(program, *t)).sum(),
-            TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(program, f.ty)).sum(),
-            TypeInfo::Tagged { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(program, *ty)).max().expect("no empty enum"),
-            TypeInfo::Never => 0,
-            TypeInfo::Scope
-            | TypeInfo::Int(_)
-            | TypeInfo::Label(_)
-            | TypeInfo::F64
-            | TypeInfo::Bool
-            | TypeInfo::Fn(_)
-            | TypeInfo::Ptr(_)
-            | TypeInfo::VoidPtr
-            | TypeInfo::FnPtr(_)
-            | TypeInfo::Type
-            | TypeInfo::OverloadSet
-            | TypeInfo::Unit => 1,
-            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-        };
-        self.known[ty.as_index()] = Some(size);
-        size
     }
 }
 

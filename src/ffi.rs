@@ -553,7 +553,7 @@ pub mod c {
         }
 
         assert!(
-            program.sizes.slot_count(program.program, f_ty.ret) <= 1,
+            program.slot_count(f_ty.ret) <= 1,
             "my c_call doesn't use correct struct calling convention yet"
         );
         let ret: i64 = unsafe { b.into_cif().call(ptr, &args) };
