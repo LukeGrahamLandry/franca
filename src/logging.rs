@@ -278,6 +278,7 @@ impl<'p> Expr<'p> {
                 format!("{}({})", func.logd(pool, depth), arg.logd(pool, depth))
             }
             &Expr::GetNamed(i) => pool.get(i).to_string(),
+            &Expr::String(i) => format!("\"{}\"", pool.get(i)),
             Expr::Block { body, result, .. } => {
                 let es: Vec<_> = body
                     .iter()

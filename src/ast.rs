@@ -1291,10 +1291,6 @@ impl<'p> Program<'p> {
             TypeInfo::Tuple(types) => Some(types),
             &TypeInfo::Struct { as_tuple, .. } => self.tuple_types(as_tuple),
             &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
-            TypeInfo::Scope => {
-                const S: [TypeId; 2] = [TypeId::i64(), TypeId::i64()]; // TOOD: this is kinda hacky. should make it an ffi struct
-                Some(&S)
-            }
             _ => None,
         }
     }

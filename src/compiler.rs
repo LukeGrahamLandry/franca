@@ -6,6 +6,7 @@
 
 use codemap::Span;
 use codemap_diagnostic::Diagnostic;
+use core::slice;
 use interp_derive::InterpSend;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -117,7 +118,7 @@ pub struct FnWip<'p> {
     pub vars: Map<Var<'p>, TypeId>, // TODO: use a vec
     pub when: ExecTime,
     pub func: FuncId,
-    pub why: String,
+    // pub why: String, // TODO: do i ever care? need to deal with strings being bytes eventually...
     pub last_loc: Span,
     pub callees: Vec<(FuncId, ExecTime)>,
 }
@@ -445,7 +446,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             vars: Default::default(),
             when,
             func,
-            why: self.log_trace(),
+            // why: self.log_trace(),
             last_loc: loc,
             callees: vec![],
         }
@@ -1395,7 +1396,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let os = OverloadSetId::from_index(os);
                             let f = Box::new(self.as_literal(os, loc)?);
                             expr.expr = Expr::Call(f, mem::take(arg));
-                            self.compile_expr(result, expr, requested)?;
+                            self.compile_expr(result, expr, Some(ty))?;
                         } else {
                             expr.done = arg.done;
                             expr.ty = ty;
@@ -1572,8 +1573,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             // err!("Raw struct literal. Maybe you meant to call 'init'?",),
             &mut Expr::String(i) => {
                 expr.done = true;
-                let bytes = self.pool.get(i).to_string();
-                self.set_literal(expr, bytes)?;
+                let bytes = self.pool.get(i);
+                self.set_literal(expr, (bytes.as_ptr() as *mut i64, bytes.len() as i64))?;
                 if let Some(requested) = requested {
                     expr.ty = requested; // hack? :StrVarType
                 }
@@ -1923,7 +1924,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 unwrap!(ty, "type check missing var {:?}", var.log(self.pool))
                 //TODO: else return Ok(None)?
             }
-            Expr::String(_) => String::get_type(self.program),
+            Expr::String(_) => <(*mut u8, i64)>::get_type(self.program),
         }))
     }
 
@@ -2549,9 +2550,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let value_ty = self.compile_expr(result, value, Some(oldty))?;
                 self.type_check_arg(value_ty, oldty, "reassign var")?;
                 if self.program.special_pointer_fns.get(oldty.as_index()) {
-                    // :SmallType
+                    // :SmallTypes
                     // Replace with a call to fn store to handle types smaller than a word.
                     self.underef_one(place)?;
+                    debug_assert!(self.program.raw_type(place.ty) != TypeId::i64());
 
                     let loc = place.loc;
                     let os = self.program.overload_sets.iter().position(|o| o.name == Flag::Store.ident()).unwrap();
@@ -3072,8 +3074,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
                 let mut ops = Vec::with_capacity(parts.len());
                 for int in parts {
-                    let i: u32 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
-                    ops.push(i);
+                    let i: i64 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
+                    ops.push(i as u32);
                 }
                 ops
             } else {
@@ -3084,7 +3086,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else if self.program[f].has_tag(Flag::Llvm) && self.program[f].llvm_ir.is_none() {
             // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
             // TODO: if its a string literal just take it
-            let ir: String = self.immediate_eval_expr_known(asm.clone())?;
+            let ir: (*mut u8, i64) = self.immediate_eval_expr_known(asm.clone())?;
+            let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
+            let Ok(ir) = std::str::from_utf8(ir) else { err!("wanted utf8 llvmir",) };
             self.program[f].llvm_ir = Some(self.pool.intern(&ir));
             self.program.inline_llvm_ir.push(f);
         } else if self.program[f].jitted_code.is_none() && self.program[f].llvm_ir.is_none() {

@@ -33,6 +33,20 @@ with calls to the inline asm functions that use the short instructions.
 
 - so now i hackily desugar `u8_ptr[]` to `load(u8_ptr)` and `u8_ptr[] = val` to `store(u8_ptr, val)`.
   which seems to work. its doing a sad slow overload set find every time it sees one of those expression tho.
+- painful debugging of requested not being unpointer-ed. really need to make my error message better.
+- ok trying to make Str be Slice(u8).
+  after adding some casts, only ~8 tests fail. eq is sometimes reading them like its a i64 still.
+  made ints interpsend know thier bit count so string literals can be the right type.
+  that made it worse.
+- it gets weird with string being InterpSend cause that expects everything to be serializable,
+  as a vec of ints which is odd when reading from a ptr to u8 with the wrong len.
+  so hacky answer for now is i dont actually need strings to be interp send, ill just treat them as (\*mut u8, i64).
+- oh ok that just worked. i thought it was broken cause 2 eq tests were crashing on oob
+  but it was just my debug print that i did before the length check in the loop.
+- so now the state is that slices/lists/ptrs/sizeof correctly treat u8 as bytes.
+  however, they still take 8 bytes as struct fields/stack slots.
+  does that mean size_of is wrong for structs containing 8 bytes? yikes.
+  oh, no it doesnt... becuase size_of specially lies for u8 and uniques of it, otherwise it still does slot count times 8, so thats ok for now.
 
 ## more place exprs (May 13)
 

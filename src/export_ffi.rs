@@ -52,19 +52,20 @@ macro_rules! bounce_flat_call {
     }};
 }
 
+// TODO: use the right int types
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
-    ("fn write(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::write as *const u8),
-    ("fn getchar() i32", libc::getchar as *const u8),
-    ("fn putchar(c: i64) i32", libc::putchar as *const u8),  // TODO: c: i32
+    ("fn write(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::write as *const u8),
+    ("fn getchar() i64", libc::getchar as *const u8),
+    ("fn putchar(c: i64) i64", libc::putchar as *const u8),  // TODO: c: i32
     ("fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
     ("fn malloc(size: usize) rawptr", libc::malloc as *const u8),
     ("fn free(ptr: rawptr) Unit", libc::free as *const u8),
-    ("fn system(null_terminated_cmd: Ptr(u8)) i32", libc::system as *const u8),
-    ("fn open(null_terminated_path: Ptr(u8), flags: i32) Fd", libc::open as *const u8),
-    ("fn close(fd: Fd) i32", libc::close as *const u8),
-    ("fn rand() i32", libc::rand as *const u8),
-    ("fn get_errno() i32", get_errno as *const u8),
+    ("fn system(null_terminated_cmd: Ptr(u8)) i64", libc::system as *const u8),
+    ("fn open(null_terminated_path: Ptr(u8), flags: i64) Fd", libc::open as *const u8),
+    ("fn close(fd: Fd) i64", libc::close as *const u8),
+    ("fn rand() i64", libc::rand as *const u8),
+    ("fn get_errno() i64", get_errno as *const u8),
     ("fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
     ("fn dlsym(lib: DlHandle, name: CStr) rawptr", libc::dlsym as *const u8),
     ("fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
@@ -81,7 +82,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ),
     ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
     ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
-    ("fn read(fd: Fd, buf: Ptr(u8), size: usize) isize", libc::read as *const u8),
+    ("fn read(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::read as *const u8),
 ];
 
 // thank you rust very cool. TODO: non-macos
@@ -124,10 +125,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
     ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
-    // TODO: this return a packed string, with the length divided by 8
-    //       so its truncated to amultiple of 8 chars but with an unknown amount of memory hanging off the end that you can't free.
-    //       WORTHLESS  --Apr, 10
-    ("fn sym_to_str(s: Symbol) Str", symbol_to_str as *const u8),
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
@@ -293,17 +290,6 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
         assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
         Ok(program.intern_type(TypeInfo::FnPtr(FnType { arg, ret })))
-    })
-}
-
-// TODO: test abi
-extern "C-unwind" fn symbol_to_str(program: &mut &mut Program, symbol: i64) -> (*const u8, i64) {
-    let symbol = symbol as u32;
-    hope(|| {
-        let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol");
-        let s = program.pool.get(symbol);
-        // TODO: fix len stuff
-        Ok((s.as_ptr(), (s.len()) as i64 / 2 - 1))
     })
 }
 
@@ -585,7 +571,7 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
 
 // :UnquotePlaceholders
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
-    hope(|| {
+    let doo = || {
         let result = unwrap!(unwrap!(compile.pending_ffi.pop(), "ffi ctx"), "fn result ctx");
 
         let mut template = unwrap!(args.pop(), "template arg");
@@ -602,7 +588,10 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
 
         compile.pending_ffi.push(Some(result));
         Ok(template)
-    })
+    }; // topdpdwkp[aspefiwfe]e
+
+    let res = doo();
+    compile.tag_err(res).unwrap_or_else(|e| panic!("{e:?}"))
 }
 
 fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntTypeInfo {

@@ -58,20 +58,27 @@ pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut impl It
 }
 
 macro_rules! send_num {
-    ($ty:ty) => {
+    ($ty:ty, $bits:expr, $signed:expr) => {
         impl<'p> InterpSend<'p> for $ty {
             const SIZE: usize = 1;
 
             fn get_type_key() -> u128 {
                 unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
             }
-            fn create_type(_: &mut Program<'p>) -> TypeId {
-                TypeId::i64()
+
+            fn create_type(p: &mut Program<'p>) -> TypeId {
+                p.intern_type(TypeInfo::Int($crate::ast::IntTypeInfo {
+                    bit_count: $bits,
+                    signed: $signed,
+                }))
             }
 
             // TODO: use correct types
-            fn get_type(_: &mut Program<'p>) -> TypeId {
-                TypeId::i64()
+            fn get_type(p: &mut Program<'p>) -> TypeId {
+                p.intern_type(TypeInfo::Int($crate::ast::IntTypeInfo {
+                    bit_count: $bits,
+                    signed: $signed,
+                }))
             }
 
             fn serialize_to_ints(self, values: &mut Vec<i64>) {
@@ -87,14 +94,48 @@ macro_rules! send_num {
             }
         }
     };
-    ($ty:tt, $($arg:tt)*) => {
-        send_num!($ty);
-        send_num!($($arg)*);
-    }
 }
 
-// They're all treated as i64, just don't overflow and it will be fine.
-send_num!(i64, i32, i16, i8, u64, u32, u16, u8, usize, isize, *mut i64);
+send_num!(i64, 64, true);
+send_num!(u64, 64, false);
+send_num!(isize, 64, true);
+send_num!(usize, 64, false);
+send_num!(i32, 32, true);
+send_num!(u32, 32, false);
+send_num!(i16, 16, true);
+send_num!(u16, 16, false);
+send_num!(i8, 8, true);
+send_num!(u8, 8, false);
+
+impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
+    const SIZE: usize = 1;
+
+    fn get_type_key() -> u128 {
+        mix::<T, Box<()>>(1274222)
+    }
+    fn create_type(p: &mut Program<'p>) -> TypeId {
+        let t = T::get_type(p);
+        p.intern_type(TypeInfo::Ptr(t))
+    }
+
+    // TODO: use correct types
+    fn get_type(p: &mut Program<'p>) -> TypeId {
+        let t = T::get_type(p);
+        p.intern_type(TypeInfo::Ptr(t))
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(self as i64)
+    }
+
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        Some(values.next()? as *mut T)
+    }
+
+    fn name() -> String {
+        format!("*{}", T::name())
+    }
+}
 
 impl<'p> InterpSend<'p> for bool {
     const SIZE: usize = 1;
@@ -455,28 +496,28 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     }
 }
 
-impl<'p> InterpSend<'p> for String {
-    const SIZE: usize = 2;
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
+// impl<'p> InterpSend<'p> for String {
+//     const SIZE: usize = 2;
+//     fn get_type_key() -> u128 {
+//         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+//     }
 
-    fn create_type(interp: &mut Program<'p>) -> TypeId {
-        Vec::<u8>::get_type(interp)
-    }
+//     fn create_type(interp: &mut Program<'p>) -> TypeId {
+//         Vec::<u8>::get_type(interp)
+//     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        Vec::<u8>::from(self).serialize_to_ints(values)
-    }
+//     fn serialize_to_ints(self, values: &mut Vec<i64>) {
+//         Vec::<u8>::from(self).serialize_to_ints(values)
+//     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
-    }
+//     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+//         Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
+//     }
 
-    fn name() -> String {
-        Vec::<u8>::name()
-    }
-}
+//     fn name() -> String {
+//         Vec::<u8>::name()
+//     }
+// }
 
 fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
     A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)
