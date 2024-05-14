@@ -17,6 +17,8 @@ Rn I generate instruction encoding stuff so there's a sad amount of code there t
   bring that back when i actually do smaller types as a first class thing.
 - then can remove the stupid hack with allocating a list for the asm so it looks much neater.
 - so that gets the arith but cmp still needs to call a fucntion so has to return a list.
+  cant just compile first so inline fns work because then have to thread a FnWip through which is annoying.
+  and even then, inlining doesn't project the args so i couldn't just poke through the ast like im doing now, would have to actually call it.
 
 FIXED:
 
@@ -24,6 +26,13 @@ FIXED:
 //! If you change anything here, you have to `./bootstrap.sh` again.
 // TODO: some of the argument names matter because they're hardcoded in emit_rs
 ```
+
+I wonder if --64fps demo would be less flashy if i did u8 properly instead of printing x8 as many nulls.
+Maybe start with still spending 8 bytes of stack/struct on everything and just intercepting load/store
+with calls to the inline asm functions that use the short instructions.
+
+- so now i hackily desugar `u8_ptr[]` to `load(u8_ptr)` and `u8_ptr[] = val` to `store(u8_ptr, val)`.
+  which seems to work. its doing a sad slow overload set find every time it sees one of those expression tho.
 
 ## more place exprs (May 13)
 

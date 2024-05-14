@@ -147,6 +147,13 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 ];
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
+    let raw = compiler.program.raw_type(ty);
+    if let TypeInfo::Int(int) = compiler.program[raw] {
+        // :SmallTypes
+        if int.bit_count == 8 {
+            return 1;
+        }
+    }
     compiler.slot_count(ty) as i64 * 8
 }
 

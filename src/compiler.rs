@@ -923,7 +923,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                             // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                 }
             }
-            Stmt::Set { place, value } => self.set_deref(result, place, value)?,
+            Stmt::Set { .. } => self.set_deref(result, stmt)?,
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
             }
@@ -1385,8 +1385,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(result, arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
-                        expr.done = arg.done;
-                        expr.ty = ty;
+                        if self.program.special_pointer_fns.get(ty.as_index()) {
+                            // :SmallTypes
+                            // Replace with a call to fn load to handle types smaller than a word.
+                            // TODO: this is really stupid
+                            let loc = arg.loc;
+                            // TODO: save the overload set somewhere. should probably have an init_blessed that fills in a vtable or something. that the compiler calls.
+                            let os = self.program.overload_sets.iter().position(|o| o.name == Flag::Load.ident()).unwrap();
+                            let os = OverloadSetId::from_index(os);
+                            let f = Box::new(self.as_literal(os, loc)?);
+                            expr.expr = Expr::Call(f, mem::take(arg));
+                            self.compile_expr(result, expr, requested)?;
+                        } else {
+                            expr.done = arg.done;
+                            expr.ty = ty;
+                        }
+
                         ty
                     }
                     Flag::Const_Eval => {
@@ -2524,13 +2538,30 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(TypeInfo::simple_struct(fields, as_tuple))
     }
 
-    fn set_deref(&mut self, result: &mut FnWip<'p>, place: &mut FatExpr<'p>, value: &mut FatExpr<'p>) -> Res<'p, ()> {
+    fn set_deref(&mut self, result: &mut FnWip<'p>, full_stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
+        let Stmt::Set { place, value } = &mut full_stmt.stmt else {
+            unreachable!()
+        };
         match place.deref_mut().deref_mut() {
             Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) | Expr::TupleAccess { .. } => {
                 self.compile_place_expr(result, place, None, true)?;
                 let oldty = place.ty;
-                let value = self.compile_expr(result, value, Some(oldty))?;
-                self.type_check_arg(value, oldty, "reassign var")?;
+                let value_ty = self.compile_expr(result, value, Some(oldty))?;
+                self.type_check_arg(value_ty, oldty, "reassign var")?;
+                if self.program.special_pointer_fns.get(oldty.as_index()) {
+                    // :SmallType
+                    // Replace with a call to fn store to handle types smaller than a word.
+                    self.underef_one(place)?;
+
+                    let loc = place.loc;
+                    let os = self.program.overload_sets.iter().position(|o| o.name == Flag::Store.ident()).unwrap();
+                    let os = OverloadSetId::from_index(os);
+                    let f = Box::new(self.as_literal(os, loc)?);
+                    value.expr = Expr::Tuple(vec![mem::take(place), mem::take(value)]);
+                    place.expr = Expr::Call(f, Box::new(mem::take(value)));
+                    self.compile_expr(result, place, Some(TypeId::unit))?;
+                    full_stmt.stmt = Stmt::Eval(mem::take(place));
+                }
                 Ok(())
             }
             Expr::PtrOffset { .. } => unreachable!("compiled twice?"),
@@ -2662,6 +2693,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else {
             let loc = ptr.loc;
             *ptr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(ptr))), loc, inner);
+        }
+        assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
+        Ok(())
+    }
+
+    fn underef_one(&mut self, ptr: &mut FatExpr<'p>) -> Res<'p, ()> {
+        assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
+        if let Some(arg) = ptr.as_suffix_macro_mut(Flag::Deref) {
+            *ptr = mem::take(arg);
+        } else {
+            err!("underef_one wanted []",)
         }
         assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
         Ok(())

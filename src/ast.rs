@@ -8,7 +8,7 @@ use crate::{
     ffi::{init_interp_send, InterpSend},
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
-    reflect::{Reflect, RsType},
+    reflect::{BitSet, Reflect, RsType},
     unwrap, Map, STATS,
 };
 use codemap::Span;
@@ -905,6 +905,8 @@ pub struct Program<'p> {
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
     pub sizes: RefCell<Vec<Option<u16>>>,
+    // :SmallTypes
+    pub special_pointer_fns: BitSet, // TODO: HACK. u8
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -1019,6 +1021,7 @@ impl<'p> Program<'p> {
             type_lookup: Default::default(),
             ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
+            special_pointer_fns: BitSet::empty(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1221,8 +1224,19 @@ impl<'p> Program<'p> {
         self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
             let id = self.types.len();
             self.types.push(ty.clone());
-            self.type_lookup.insert(ty, TypeId::from_index(id));
-            TypeId::from_index(id)
+            let id = TypeId::from_index(id);
+            self.type_lookup.insert(ty, id);
+
+            // :SmallTypes
+            let raw = self.raw_type(id);
+            let is_small = if let TypeInfo::Int(int) = &self[raw] {
+                int.bit_count == 8
+            } else {
+                false
+            };
+            self.special_pointer_fns.insert(id.as_index(), is_small);
+
+            id
         })
     }
 
@@ -1746,6 +1760,8 @@ pub enum Flag {
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     Test_Broken,
+    Load,
+    Store,
     _Reserved_Count_,
 }
 
@@ -1836,7 +1852,7 @@ pub struct FuncId(u32);
 pub struct ScopeId(u32);
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OverloadSetId(u32);
 
 #[repr(C)]

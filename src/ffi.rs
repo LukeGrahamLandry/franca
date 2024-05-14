@@ -3,7 +3,7 @@ use std::{mem, ptr::slice_from_raw_parts};
 use codemap::Span;
 
 use crate::{
-    ast::{Program, TypeId, TypeInfo},
+    ast::{OverloadSetId, Program, TypeId, TypeInfo},
     Map,
 };
 
@@ -217,6 +217,34 @@ impl<'p> InterpSend<'p> for TypeId {
 
     fn name() -> String {
         "Type".to_string()
+    }
+}
+
+// TODO: this is sad.
+impl<'p> InterpSend<'p> for OverloadSetId {
+    const SIZE: usize = 1;
+
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn create_type(_: &mut Program<'p>) -> TypeId {
+        TypeId::overload_set
+    }
+
+    fn get_type(_: &mut Program<'p>) -> TypeId {
+        TypeId::overload_set
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(self.as_raw())
+    }
+
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        Some(OverloadSetId::from_raw(values.next()?))
+    }
+
+    fn name() -> String {
+        "OverloadSet".to_string()
     }
 }
 
