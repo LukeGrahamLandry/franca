@@ -1696,8 +1696,6 @@ pub enum Flag {
     Deref,
     Patch,
     Ct,
-    Bs,
-    Rs,
     Any_Reg,
     Impl,
     Main,
@@ -1742,6 +1740,8 @@ pub enum Flag {
     Cranelift_Emit,
     Use_Cranelift,
     Log_Cl,
+    __Shift_Or_Slice,
+    No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
     __Return,
     __String_Literal_Type_Hack,
     __Get_Assertions_Passed,

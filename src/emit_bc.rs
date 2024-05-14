@@ -208,7 +208,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         f: FuncId,
         arg_expr: &FatExpr<'p>,
         result_location: ResultLoc,
-        can_tail: bool,
+        mut can_tail: bool,
     ) -> Res<'p, ()> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
@@ -249,6 +249,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             result.push(Bc::LastUse { id });
         } else {
+            if func.has_tag(Flag::No_Tail) {
+                can_tail = false;
+            }
             result.push(Bc::CallDirect { f, tail: can_tail });
             let slots = self.slot_count(f_ty.ret);
             match result_location {

@@ -1,7 +1,9 @@
 //! Instruction encoding for aarch64. 
 //! Magic numbers from https://developer.arm.com/documentation/ddi0487/latest/ (section 6.2 is the good bit)
 //! Helpful for debugging: https://armconverter.com/ (toggle the endianness)
-
+//!
+//! Note: @bits and @BITS do the same thing but the latter is provided by the compiler instead of the standard library,
+//!       so it can be used to bootstrap the instructions you need to compile the former. 
 
 // TODO: fix uniques so i can still use int literals
 const RegI = u5; // Unique(u5);
@@ -36,113 +38,113 @@ const Cond = @enum(u4) (
 // Note: Branch instructions replace the normal ip increment. So b(1) is a no-op and b(0) is an infinite loop on that instruction.
 fun JumpRel(Int: Type) = Int;  // measured in instructions, not bytes
 
-fn add_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b0001011, shift, 0b0, a, amount, b, dest);
+// TODO: fix error message so its not just segfault if you try to use @bits instead of @BITS on one of the bootstrap path ones. 
+fn add_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) i64 =
+    @BITS(sf, 0b0001011, shift, 0b0, a, amount, b, dest);
 
- fn add_im(sf: Bits, dest: RegO, src: RegI, imm: u12, lsl_12: u1) u32 =
+fn add_im(sf: Bits, dest: RegO, src: RegI, imm: u12, lsl_12: u1) i64 =
     @bits(sf, 0b00100010, lsl_12, imm, src, dest);
 
- fn orr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b0101010, shift, 0b0, a, amount, b, dest);
+fn orr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) i64 =
+    @BITS(sf, 0b0101010, shift, 0b0, a, amount, b, dest);
 
 /// dest = a | ~(b <shift> amount)  // TODO: make sure that order is right.
-fn orn(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
+fn orn(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) i64 =
     @bits(sf, 0b0101010, shift, 0b1, a, amount, b, dest);
 
-fn and_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b0001010, shift, 0b0, a, amount, b, dest);
+fn and_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) i64 =
+    @BITS(sf, 0b0001010, shift, 0b0, a, amount, b, dest);
 
-fn sub_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) u32 =
-    @bits(sf, 0b1001011, shift, 0b0, b, amount, a, dest);
+fn sub_sr(sf: Bits, dest: RegO, a: RegI, b: RegI, shift: Shift, amount: u6) i64 =
+    @BITS(sf, 0b1001011, shift, 0b0, b, amount, a, dest);
 
- fn sub_im(sf: Bits, dest: RegO, src: RegI, imm: u12, lsl_12: u1) u32 =
+ fn sub_im(sf: Bits, dest: RegO, src: RegI, imm: u12, lsl_12: u1) i64 =
     @bits(sf, 0b10100010, lsl_12, imm, src, dest);
 
 // TODO: really the sub instructions should have a set_flags: u1 = 0 and this could just call that.
 //       in general default arguments could make a lot of this neater I think, but then it gets harder for the rust code to use.
-fn cmp(sf: Bits, a: RegI, b: RegI) u32 =  // should be cmp_sr with more args but like who would ever want that?
+fn cmp(sf: Bits, a: RegI, b: RegI) i64 =  // should be cmp_sr with more args but like who would ever want that?
     @bits(sf, 0b1101011, Shift.LSL, 0b0, b, 0b000000, a, 0b11111);
 
- fn cmp_im(sf: Bits, src: RegI, imm: u12, lsl_12: u1) u32 =
+fn cmp_im(sf: Bits, src: RegI, imm: u12, lsl_12: u1) i64 =
     @bits(sf, 0b11100010, lsl_12, imm, src, 0b11111);
 
 // Note: this one can't use sp (r31 is ZXR), use add_im instead. 
- fn mov(sf: Bits, dest: RegO, src: RegI) u32 = orr(sf, dest, src, 0b11111, Shift.LSL, 0b000000);
+fn mov(sf: Bits, dest: RegO, src: RegI) i64 = orr(sf, dest, src, 0b11111, Shift.LSL, 0b000000);
 
 /// dest = (x * y) + add
 /// This works with signed numbers, even though there's another instruction that says signed mul? i guess the difference matters for the ones that have multiple output registers.
-fn madd(sf: Bits, dest: RegO, x: RegI, y: RegI, add: RegI) u32 =
-    @bits(sf, 0b0011011000, x, 0b0, add, y, dest);
+fn madd(sf: Bits, dest: RegO, x: RegI, y: RegI, add: RegI) i64 =
+    @BITS(sf, 0b0011011000, x, 0b0, add, y, dest);
 
 /// dest = dividend / divisor
-fn sdiv(sf: Bits, dest: RegO, dividend: RegI, divisor: RegI) u32 =
-    @bits(sf, 0b0011010110, divisor, 0b000011, dividend, dest);
+fn sdiv(sf: Bits, dest: RegO, dividend: RegI, divisor: RegI) i64 =
+    @BITS(sf, 0b0011010110, divisor, 0b000011, dividend, dest);
 
- fn cbz(sf: Bits, offset: JumpRel(i19), val: RegI) u32 =
+fn cbz(sf: Bits, offset: JumpRel(i19), val: RegI) i64 =
     @bits(sf, 0b0110100, offset, val);
 
-fn cbnz(sf: Bits, offset: JumpRel(i19), val: RegI) u32 =
+fn cbnz(sf: Bits, offset: JumpRel(i19), val: RegI) i64 =
     @bits(sf, 0b0110101, offset, val);
 
- fn b(offset: JumpRel(i26), set_link: u1) u32 =
+fn b(offset: JumpRel(i26), set_link: u1) i64 =
     @bits(set_link, 0b00101, offset);
 
- fn b_cond(offset: JumpRel(i19), cond: Cond) u32 =
+fn b_cond(offset: JumpRel(i19), cond: Cond) i64 =
     @bits(0b01010100, offset, 0b0, cond);
 
 const Hw = @enum(u2) (Left0 = 0b00, Left16 = 0b01, Left32 = 0b10, Left48 = 0b11);
 
 /// Zero the other bits.
- fn movz(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
+fn movz(sf: Bits, dest: RegO, imm: u16, hw: Hw) i64 =
     @bits(sf, 0b10100101, hw, imm, dest);
 
 /// Keep the other bits.
- fn movk(sf: Bits, dest: RegO, imm: u16, hw: Hw) u32 =
+fn movk(sf: Bits, dest: RegO, imm: u16, hw: Hw) i64 =
     @bits(sf, 0b11100101, hw, imm, dest);
 
-// TODO: this is an alias for the one where you specify a register. 
- fn ret() u32 = 0xD65F03C0;
+// TODO: this is an alias for the one where you specify a register to jump to. 
+fn ret() i64 = 0xD65F03C0;
 
 // Note: be very careful! The scale of offset_words depends on sf. They save bits by making unaligned access un-encodable.
 
- fn str_uo(sf: Bits, src: RegI, addr: RegI, offset_words: u12) u32 = 
+fn str_uo(sf: Bits, src: RegI, addr: RegI, offset_words: u12) i64 = 
     @bits(0b1, sf, 0b11100100, offset_words, addr, src);
 
- fn ldr_uo(sf: Bits, dest: RegO, addr: RegI, offset_words: u12) u32 = 
+fn ldr_uo(sf: Bits, dest: RegO, addr: RegI, offset_words: u12) i64 = 
     @bits(0b1, sf, 0b11100101, offset_words, addr, dest);
 
 /// Load two sequential words (addr, addr+word_size) into two registers. idk why offset can be negative in this one but not in ldr.
- fn ldp_so(sf: Bits, dest1: RegO, dest2: RegO, addr: RegI, offset_words: i7) u32 =
+fn ldp_so(sf: Bits, dest1: RegO, dest2: RegO, addr: RegI, offset_words: i7) i64 =
     @bits(sf, 0b010100101, offset_words, dest2, addr, dest1);
 
- fn stp_so(sf: Bits, src1: RegO, src2: RegO, addr: RegI, offset_words: i7) u32 =
+fn stp_so(sf: Bits, src1: RegO, src2: RegO, addr: RegI, offset_words: i7) i64 =
     @bits(sf, 0b010100100, offset_words, src2, addr, src1);
 
 /// Branch to an address in a register. Maybe set link register to next pc (return address).
- fn br(addr: RegI, set_link: u1) u32 = 
+fn br(addr: RegI, set_link: u1) i64 = 
     @bits(0b1101011000, set_link, 0b11111000000, addr, 0b00000);
 
 /// Raise a hardware exception
- fn brk(context: u16) u32 =
+fn brk(context: u16) i64 =
     @bits(0b11010100001, context, 0b00000);
 
 /// IMPORTANT: this is an alias of CSINC so the cond is inverted from what you'd expect from a real assembler.
 /// cond=TRUE === dest=0      cond=FALSE === dest=1
 /// https://stackoverflow.com/questions/56519227/arm-cset-condition-encoding-as-vs-docu
-fn cset(sf: Bits, dest: RegI, zero_when: Cond) u32 =
+fn cset(sf: Bits, dest: RegI, zero_when: Cond) i64 =
     @bits(sf, 0b0011010100, 0b11111, zero_when, 0b01, 0b11111, dest);
 
 /// Logical Shift Left. <shift> is truncated to the bottom 5/6 bits. (1 << 64 === 1)
-fn lslv(sf: Bits, dest: RegI, val: RegI, shift: RegI) u32 =
-    @bits(sf, 0b0011010110, shift, 0b001000, val, dest);
-    
+fn lslv(sf: Bits, dest: RegI, val: RegI, shift: RegI) i64 =
+    @BITS(sf, 0b0011010110, shift, 0b001000, val, dest);
     
 // Load a byte and zero extend it. 
-fn ldrb_uo(dest: RegO, src_addr: RegI, offset_bytes: u12) u32 = 
+fn ldrb_uo(dest: RegO, src_addr: RegI, offset_bytes: u12) i64 = 
     @bits(0b00, 0b11100101, offset_bytes, src_addr, dest);
 
 // Store the least significant byte of <src>.
-fn strb_uo(src: RegI, dest_addr: RegI, offset_bytes: u12) u32 = 
+fn strb_uo(src: RegI, dest_addr: RegI, offset_bytes: u12) i64 = 
     @bits(0b00, 0b11100100, offset_bytes, dest_addr, src);
 
 // TODO: there's a bit of a confusing dependency where this needs to import things but everything expands to calls to these...
@@ -158,43 +160,43 @@ const FRegO = u5; // Unique(u5);
 
 /// 'offset_scaled' == 'offset_bytes / size_of(F)'
 /// X64===D64 and W32===S32
- fn f_ldr_uo(sf: Bits, dest: FRegO, addr: RegI, offset_scaled: u12) u32 = 
+fn f_ldr_uo(sf: Bits, dest: FRegO, addr: RegI, offset_scaled: u12) i64 = 
     @bits(0b1, sf, 0b11110101, offset_scaled, addr, dest);
 
 /// 'offset_scaled' == 'offset_bytes / size_of(F)'
 /// X64===D64 and W32===S32
- fn f_str_uo(sf: Bits, src: FRegI, addr: RegI, offset_scaled: u12) u32 = 
+fn f_str_uo(sf: Bits, src: FRegI, addr: RegI, offset_scaled: u12) i64 = 
     @bits(0b1, sf, 0b11110100, offset_scaled, addr, src);
 
 // Note: int mul doesn't exist (?) so it used madd with the zero register but I guess there's no zero reguister for floats
 // TODO: test that this is the right encoding, might as well provide it just in case
-//  fn fmadd(sf: FType, dest: FRegO, x: FRegI, y: FRegI, add: FRegI) u32 =
+//  fn fmadd(sf: FType, dest: FRegO, x: FRegI, y: FRegI, add: FRegI) i64 =
 //    @bits(0b00011111, size, 0b0, x, 0b0, add, y, dest);
 
 // TODO: all the bin ops have the same encoding with a different magic number. make it a table. 
 
-fun fadd(size: FType, dest: FRegO, a: FRegI, b: FRegI) u32 =
+fun fadd(size: FType, dest: FRegO, a: FRegI, b: FRegI) i64 =
     @bits(0b00011110, size, 0b1, a, 0b001010, b, dest);
 
-fun fsub(size: FType, dest: FRegO, a: FRegI, b: FRegI) u32 =
+fun fsub(size: FType, dest: FRegO, a: FRegI, b: FRegI) i64 =
     @bits(0b00011110, size, 0b1, b, 0b001110, a, dest);
     
-fun fmul(size: FType, dest: FRegO, a: FRegI, b: FRegI) u32 =
+fun fmul(size: FType, dest: FRegO, a: FRegI, b: FRegI) i64 =
     @bits(0b00011110, size, 0b1, a, 0b000010, b, dest);
     
-fun fdiv(size: FType, dest: FRegO, dividend: FRegI, divisor: FRegI) u32 =
+fun fdiv(size: FType, dest: FRegO, dividend: FRegI, divisor: FRegI) i64 =
     @bits(0b00011110, size, 0b1, divisor, 0b000110, dividend, dest);
 
 // TODO: this has a different encoding for comparing to zero without using an extra register. 
-fun fcmp(size: FType, a: FRegI, b: FRegI) u32 =
+fun fcmp(size: FType, a: FRegI, b: FRegI) i64 =
     @bits(0b00011110, size, 0b1, b, 0b001000, a, 0b00000);
 
 /// Floating-point Convert to Signed Integer, rounding toward Zero. 
-fun fcvtzs(sf: Bits, size: FType, dest: RegO, src: FRegI) u32 =
+fun fcvtzs(sf: Bits, size: FType, dest: RegO, src: FRegI) i64 =
     @bits(sf, 0b0011110, size, 0b111000000000, src, dest);
 
 const OpPtr = rawptr;
-const YieldArg: Type = (OpPtr, u32);
+const YieldArg: Type = (OpPtr, i64);
 const RetOp = FnPtr(YieldArg, Unit);
 
 //////

@@ -1,5 +1,5 @@
 // TODO: HACK: i only have i64 but code needs to be a packed array of u32. 
-fn pack_u32(dest: Slice$i64, src: Slice$i64) Unit = {
+fn pack_i64(dest: Slice$i64, src: Slice$i64) Unit = {
     assert(dest.len().mul(2).eq(src.len()).or(dest.len().mul(2).eq(src.len().add(1))), "bad len");
     
     range(0, dest.len()) {(i: i64)|
@@ -10,14 +10,14 @@ fn pack_u32(dest: Slice$i64, src: Slice$i64) Unit = {
         if(src.len().gt(next)) {|
             let v = src.get(next).shift_left(32);
             value = value.bit_or(v);
-        }; // else: there's an odd number of u32s so we just do the last and leave 0 in the final slot. 
+        }; // else: there's an odd number of i64s so we just do the last and leave 0 in the final slot. 
         
         dest.index(i)[] = value;
     };
 }
 
 #aarch64 
-fn call_jit(input: i64, var code: Ty(*u32, i64)) i64 = {
+fn call_jit(input: i64, var code: Ty(*i64, i64)) i64 = {
     let code: Slice$i64 = (ptr = code.(0), len = code.(1));
     var bytes = code.len().mul(4);
     code.len().mod(2).eq(1).if {|
@@ -25,7 +25,7 @@ fn call_jit(input: i64, var code: Ty(*u32, i64)) i64 = {
     };
     
     var mapped = os_alloc(bytes);
-    pack_u32(mapped, code);
+    pack_i64(mapped, code);
     let beg: rawptr = mapped.ptr;
     let end: rawptr = beg.ptr_to_int().add(bytes).int_to_ptr();
     var exec = make_exec(mapped);
@@ -33,16 +33,6 @@ fn call_jit(input: i64, var code: Ty(*u32, i64)) i64 = {
     __clear_cache(beg, end);
     let out = f(input);
     os_dealloc(exec);
-    out
-}
-
-// TODO: can't say a return type here (Ty(*u32, i64) or Slice(u32)) because compiler wants an ffi Vec<u32>
-// TODO: cant say arg is Slice(u32) because !slice doesn't infer the right type because compiler can't refer to it. 
-fn heap(var ops: Ty(*u32, i64)) = {
-    var out: List(u32) = list(ops.(1));
-    push_all(out!addr, @as(Slice(u32)) ops);
-    
-    var out: Slice(u32) = items(out!addr);
     out
 }
 
@@ -68,32 +58,33 @@ fn heap(var ops: Ty(*u32, i64)) = {
 
 #test fn math_ops(canary: i64) i64 = {
     #c_call #aarch64
-    fn add_by_asm(a: i64, b: i64) i64 = heap((
+    fn add_by_asm(a: i64, b: i64) i64 = (
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000),
         ret(),
-    )!slice)!asm;
+    )!asm;
     
     let three = add_by_asm(1, 2);
     assert_eq(three, 3);
     
     #c_call #aarch64
-    fn add_one(a: i64) i64 = heap((
+    fn add_one(a: i64) i64 = (
         add_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(add_one(9), 10);
     
     #c_call #aarch64
-    fn sub_one(a: i64) i64 = heap((
+    fn sub_one(a: i64) i64 = (
         sub_im(Bits.X64, x0, x0, @as(u12) 1, 0b0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(sub_one(10), 9);
     
     #c_call #aarch64
-    fn bool_to_int(b: bool) i64 = heap((
+    fn bool_to_int(b: bool) i64 = (
         ret(),
-    )!slice)!asm;
+        ret(), // TODO: single element tuple
+    )!asm;
     assert_eq(bool_to_int(true), 1);
     assert_eq(bool_to_int(false), 0);
     
@@ -102,35 +93,35 @@ fn heap(var ops: Ty(*u32, i64)) = {
 
 #test fn branching(canary: i64) i64 = {
     #c_call #aarch64
-    fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = heap((
+    fn add_or_sub(a: i64, b: i64, add_if_seven: i64) i64 = (
         cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
         b_cond(@as(i19) 3, Cond.EQ),
         sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         ret(),
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(add_or_sub(30, 20, 7), 50);
     assert_eq(add_or_sub(30, 20, 8), 10);
 
     #c_call #aarch64
-    fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = heap((
+    fn add_or_sub2(a: i64, b: i64, add_if_seven: i64) i64 = (
         cmp_im(Bits.X64, x2, @as(u12) 7, 0b0),
         b_cond(@as(i19) 3, Cond.NE),
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         ret(),
         sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(add_or_sub2(30, 20, 7), 50);
     assert_eq(add_or_sub2(30, 20, 8), 10);
     
     #c_call #aarch64
-    fn is_seven(n: i64) i64 = heap((
+    fn is_seven(n: i64) i64 = (
         cmp_im(Bits.X64, x0, @as(u12) 7, 0b0),
         cset(Bits.X64, x0, Cond.NE),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(is_seven(7), 1);
     assert_eq(is_seven(8), 0);
 
@@ -139,18 +130,18 @@ fn heap(var ops: Ty(*u32, i64)) = {
 
 #test fn using_stack(canary: i64) i64 = {
     #c_call #aarch64
-    fn truncate_to_byte(in: *i64, out: *i64) Unit = heap((
+    fn truncate_to_byte(in: *i64, out: *i64) Unit = (
         ldrb_uo(x2, x0, @as(u12) 0),
         strb_uo(x2, x1, @as(u12) 0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     var in = 257;
     var out = 0;
     truncate_to_byte(in&, out&);
     assert_eq(out, 1);
     
     #c_call #aarch64
-    fn use_stack(a: i64) i64 = heap((
+    fn use_stack(a: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         str_uo(Bits.X64, x0, sp, @as(u12) 1),
         movz(Bits.X64, x0, @as(u16) 10, Hw.Left0), 
@@ -158,7 +149,7 @@ fn heap(var ops: Ty(*u32, i64)) = {
         add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(use_stack(15), 25);
 
     // Note: you make 16 bytes of room on the stack, then use offset 0 words and 1 words above sp. 
@@ -166,7 +157,7 @@ fn heap(var ops: Ty(*u32, i64)) = {
     //       but... its fine on interp because canary is stored on the fake stack and there happens to be a gap on the real one i guess. 
     //       I also didn't notice that I forgot to reset sp, I guess rust set the value after the call instead of trusing callee to offset it back? 
     #c_call #aarch64
-    fn read_pair(a: i64, b: i64) i64 = heap((
+    fn read_pair(a: i64, b: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         str_uo(Bits.X64, x0, sp, @as(u12) 0),
         str_uo(Bits.X64, x1, sp, @as(u12) 1),
@@ -174,11 +165,11 @@ fn heap(var ops: Ty(*u32, i64)) = {
         sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(read_pair(30, 20), 10);
     
     #c_call #aarch64
-    fn write_pair(a: i64, b: i64) i64 = heap((
+    fn write_pair(a: i64, b: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
         ldr_uo(Bits.X64, x2, sp, @as(u12) 0),
@@ -186,18 +177,18 @@ fn heap(var ops: Ty(*u32, i64)) = {
         sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(write_pair(30, 20), 10);
     
     #c_call #aarch64
-    fn both_pair(a: i64, b: i64) i64 = heap((
+    fn both_pair(a: i64, b: i64) i64 = (
         sub_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         stp_so(Bits.X64, x0, x1, sp, @as(i7) 0),
         ldp_so(Bits.X64, x2, x3, sp, @as(i7) 0),
         sub_sr(Bits.X64, x0, x2, x3, Shift.LSL, @as(u6) 0),  // sub means order matters, so you can catch if flipped in encoding.
         add_im(Bits.X64, sp, sp, @as(u12) 16, 0b0),
         ret(),
-    )!slice)!asm;
+    )!asm;
     assert_eq(both_pair(30, 20), 10);
 
     canary

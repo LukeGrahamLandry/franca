@@ -65,7 +65,6 @@ pub struct Compile<'a, 'p> {
     currently_inlining: Vec<FuncId>,
     currently_compiling: Vec<FuncId>, // TODO: use this to make recursion work
     pub last_loc: Option<Span>,
-    pub save_bootstrap: Vec<FuncId>,
     pub tests: Vec<FuncId>,
     pub tests_broken: Vec<FuncId>,
     pub aarch64: Jitted,
@@ -138,7 +137,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             program,
             aarch64: Jitted::new(1 << 26), // Its just virtual memory right? I really don't want to ever run out of space and need to change the address.
 
-            save_bootstrap: vec![],
             tests: vec![],
             pending_ffi: vec![],
             scopes: vec![],
@@ -1027,16 +1025,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let var = func.var_name;
-        let for_bootstrap = func.has_tag(Flag::Bs);
         let any_reg_template = func.has_tag(Flag::Any_Reg);
         if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
             func.set_cc(CallConv::Flat)?;
-        }
-
-        if for_bootstrap {
-            func.add_tag(Flag::Aarch64); // TODO: could do for llvm too once i support eval body
-            func.referencable_name = false;
         }
 
         let referencable_name = func.referencable_name;
@@ -1045,10 +1037,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let public = func.has_tag(Flag::Pub);
         let id = self.add_func(func)?;
-
-        if for_bootstrap {
-            self.save_bootstrap.push(id);
-        }
 
         let mut out = (None, None);
         // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
@@ -1154,7 +1142,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    fn func_expr(&mut self, id: FuncId) -> (Expr<'p>, TypeId) {
+    pub fn func_expr(&mut self, id: FuncId) -> (Expr<'p>, TypeId) {
         if self.program[id].finished_ret.is_some() {
             (
                 Expr::Value {
@@ -1205,7 +1193,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
 
-            // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
+            // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
             self.type_check_arg(res, requested, "sanity ICE req_expr")?;
         }
 
@@ -1272,7 +1260,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 self.last_loc = Some(f.loc);
-                ice!("tried to call non-function",)
+                ice!("tried to call non-function {:?}", f.log(self.pool))
             }
             Expr::Block {
                 body,
@@ -1381,7 +1369,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let expect = if let Some(types) = ty {
                             let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
                             for t in types {
-                                self.type_check_arg(*t, expect, "match slice types")?;
+                                // TODO: ODODODOdododododo this doesn't work when new @BITS -- May 14
+                                // self.type_check_arg(*t, expect, "match slice types")?;
                             }
                             expect
                         } else {
@@ -3039,17 +3028,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         );
         if self.program[f].has_tag(Flag::Aarch64) && self.program[f].jitted_code.is_none() {
             let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
-                let asm_bytes: Option<Vec<u32>> = parts
-                    .iter()
-                    .map(|op| bit_literal(op, self.pool).and_then(|(ty, val)| if ty.bit_count == 32 { Some(val as u32) } else { None }))
-                    .collect();
-
-                if let Some(ops) = asm_bytes {
-                    ops
-                } else {
-                    // TODO: support dynamic eval to string for llvm ir.
-                    self.immediate_eval_expr_known(asm.clone())?
+                let mut ops = Vec::with_capacity(parts.len());
+                for int in parts {
+                    let i: u32 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
+                    ops.push(i);
                 }
+                ops
             } else {
                 let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                 ops

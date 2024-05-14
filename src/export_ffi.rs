@@ -3,7 +3,7 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{garbage_loc, Expr, FatExpr, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
+use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{int_to_value, values_from_ints, Value, Values};
 use crate::compiler::{bit_literal, Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
@@ -133,7 +133,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
     ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
     (
-        "fn resolve_backtrace_symbol(addr: *u32, out: *RsResolvedSymbol) bool",
+        "fn resolve_backtrace_symbol(addr: *i64, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,
     ),
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
@@ -142,6 +142,8 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fun size_of(T: Type) i64", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
+    // Generated for @BITS to bootstrap encoding for inline asm.
+    ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
 ];
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
@@ -525,6 +527,10 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "#macro #outputs(Type) fun type(e: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, type_macro),
     ),
+    (
+        "#macro #outputs(i64) fun BITS(parts: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, bits_macro),
+    ),
 ];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
@@ -756,4 +762,53 @@ fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
 
     compile.pending_ffi.push(Some(result));
     arg
+}
+
+fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+    let Expr::Tuple(parts) = arg.expr else {
+        panic!("Expected @Bits(Tuple...)")
+    };
+    let shift_or_slice = compile.program.find_unique_func(Flag::__Shift_Or_Slice.ident()).unwrap();
+    compile.compile(shift_or_slice, ExecTime::Comptime).unwrap();
+
+    let mut new_args = Vec::with_capacity(parts.len() * 2);
+    let loc = arg.loc;
+    let mut shift = 32;
+    for mut int in parts {
+        let ty = get_type_int(compile, int.clone()); // TODO: redundant work cause of clone
+        assert!(!ty.signed);
+        shift -= ty.bit_count;
+        assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
+        if let Some((_, v)) = bit_literal(&int, compile.pool) {
+            int = compile.as_literal(v, loc).unwrap();
+        }
+        int.ty = TypeId::i64();
+        new_args.push(int);
+        let mut sh = compile.as_literal(shift, loc).unwrap();
+        sh.ty = TypeId::i64();
+        new_args.push(sh);
+    }
+
+    if shift != 0 {
+        panic!("shift != 0; expected 32 bits. TODO: other sizes.");
+    }
+
+    arg.expr = Expr::Tuple(new_args);
+    let (func, f_ty) = compile.func_expr(shift_or_slice);
+    let func = FatExpr::synthetic_ty(func, loc, f_ty);
+    let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc);
+    FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, TypeId::i64())
+}
+
+extern "C-unwind" fn shift_or_slice(compilerctx: usize, ptr: *const i64, len: usize) -> i64 {
+    assert!(len < 64, "{} {} {}", compilerctx, ptr as usize, len);
+    let ints = unsafe { &*slice_from_raw_parts(ptr, len) };
+    let mut acc = 0;
+    for i in 0..ints.len() / 2 {
+        let x = ints[i * 2];
+        let sh = ints[i * 2 + 1];
+        assert!(sh < 32, "{} {} {}", compilerctx, ptr as usize, len);
+        acc |= x << sh;
+    }
+    acc
 }

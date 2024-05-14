@@ -1,3 +1,32 @@
+## stop committing generated stuff (May 14)
+
+If I can't have a self-hosted compiler yet, I should at least get the benifit of being able to build from source directly.
+Rn I generate instruction encoding stuff so there's a sad amount of code there that i barely use.
+
+- cleaning up the rust side asm encoding stuff is easy.
+- for the rest, start by defining a version of @bits in rust.
+- fuck im trying to pass it a slice on the stack but that call is the last in the function so it tries to do a tail call.
+  and the tailcall resets the stack so the rust function puts its local variables overlapping the slice i tried to pass as an argument.
+  so i guess i have to say no tail calls if any of the args are pointers?
+  damn lifetimes are looking like a pretty good idea all of a sudden.
+  suppose its not that big of a deal cause the main thing i want them for is closure loops where the lambdas have no arguments anyway.
+  should make the calling convention thing a more useful struct if im gonna be having this many combinations.
+- then need to make !asm not force a slice. instead eval each int of the tuple seperately and build the vec on rust side.
+  if the expr isn't a tuple, you can still return a slice like before so the language hasn't lost cool jit power there.
+  had to get rid of u32 as inst return type cause it just makes everything harder cause ffi u32 things its just an i64.
+  bring that back when i actually do smaller types as a first class thing.
+- then can remove the stupid hack with allocating a list for the asm so it looks much neater.
+- so that gets the arith but cmp still needs to call a fucntion so has to return a list.
+
+FIXED:
+
+```
+//! If you change anything here, you have to `./bootstrap.sh` again.
+// TODO: some of the argument names matter because they're hardcoded in emit_rs
+```
+
+## more place exprs (May 13)
+
 - using 32 bit indices everywhere saves 9MB (15%)
 - made backends only get program and asm instead of whole compile struct so it feels a bit less messy.
 - i dont actually use most of libffi, i dont need structs abi since my backend can't do it and i only need aarch64 for now.

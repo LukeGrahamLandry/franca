@@ -1,76 +1,74 @@
-//! #bs functions have their bodies translated into a list of opcode integer literals.
-//! If you change anything here, you have to `./bootstrap.sh` again.
 //! #one_ret_pic SAFETY: one return at the end (or HACK), c abi, no relative jumps outside the function, no stack frame. 
 //! - means it can be done inline by just chopping off the ret at the end. makes it a bit less insane to use fns for add, etc. 
 //! - always inlines, trusts you that its small enough to be worth it. 
 //! - still really dumb rn cause i do redundant stack loads/stores. 
 // TODO: some consistent way of expressing debug mode bounds checks for div, shift, etc.
-// TODO: some of the argument names matter because they're hardcoded in emit_rs
 
-// TODO fix inline asm
-// TODO: copy paste from tests/aarch64_jit but ^
-fn lst(var ops: Ty(*u32, i64)) = {
-    var out: List(u32) = list(ops.(1));
-    push_all(out!addr, @as(Slice(u32)) ops);
-    var out: Slice(u32) = items(out!addr);
+#one_ret_pic #aarch64
+fn add(a: i64, b: i64) i64 = (
+    add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64
+fn sub(a: i64, b: i64) i64 = (
+    sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64
+fn mul(a: i64, b: i64) i64 = (
+    madd(Bits.X64, x0, x0, x1, 0b11111),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64
+fn div(a: i64, b: i64) i64 = (
+    sdiv(Bits.X64, x0, x0, x1),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64
+fn shift_left(value: i64, shift_amount: i64) i64 = (
+    lslv(Bits.X64, x0, x0, x1),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64
+fn bit_or(a: i64, b: i64) i64 = (
+    orr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64 // TODO: actually test
+fn bit_not(a: i64) i64 = (
+    orn(Bits.X64, x0, x0, 0b11111, Shift.LSL, @as(u6) 0),
+    ret(),
+)!asm;
+
+#one_ret_pic #aarch64
+fn bit_and(a: i64, b: i64) i64 = (
+    and_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
+    ret(),
+)!asm;
+
+// TODO fix inline asm. its still super painful when you want to call a function instead of just putting a tuple literal in there 
+fn lst(var ops: Ty(*i64, i64)) = {
+    var out: List(i64) = list(ops.(1));
+    push_all(out!addr, @as(Slice(i64)) ops);
+    var out: Slice(i64) = items(out!addr);
     out
 }
 
-#bs #one_ret_pic
-fn add(a: i64, b: i64) i64 = lst((
-    add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic
-fn sub(a: i64, b: i64) i64 = lst((
-    sub_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic
-fn mul(a: i64, b: i64) i64 = lst((
-    madd(Bits.X64, x0, x0, x1, 0b11111),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic
-fn div(a: i64, b: i64) i64 = lst((
-    sdiv(Bits.X64, x0, x0, x1),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic
-fn shift_left(value: i64, shift_amount: i64) i64 = lst((
-    lslv(Bits.X64, x0, x0, x1),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic
-fn bit_or(a: i64, b: i64) i64 = lst((
-    orr(Bits.X64, x0, x0, x1, Shift.LSL, 0b000000),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic // TODO: actually test
-fn bit_not(a: i64) i64 = lst((
-    orn(Bits.X64, x0, x0, 0b11111, Shift.LSL, @as(u6) 0),
-    ret(),
-)!slice)!asm;
-
-#bs #one_ret_pic
-fn bit_and(a: i64, b: i64) i64 = lst((
-    and_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
-    ret(),
-)!slice)!asm;
-
 //! IMPORTANT: cond is inverted is backwards because CSINC
-fn cmp_with_cond(inv_cond: Cond) = lst((
+fn cmp_with_cond(inv_cond: Cond) Slice(i64) = lst((
     cmp(Bits.X64, x0, x1),
     cset(Bits.X64, x0, inv_cond),
     ret(),
 )!slice);
 
+// TODO: fix the need for lst
+/*
 #bs #one_ret_pic
 fun eq(a: i64, b: i64) bool = cmp_with_cond(Cond.NE)!asm;
 
@@ -88,13 +86,15 @@ fn lt(a: i64, b: i64) bool = cmp_with_cond(Cond.GE)!asm;
 
 #bs #one_ret_pic
 fn gt(a: i64, b: i64) bool = cmp_with_cond(Cond.LE)!asm;
+*/
 
-// offsets measured in bytes. 
-#bs #one_ret_pic
-fun offset(ptr: rawptr, bytes: i64) rawptr = lst((
+// TODO: this is just the same as add.
+// offsets measured in bytes.  
+#one_ret_pic #aarch64
+fun offset(ptr: rawptr, bytes: i64) rawptr = (
     add_sr(Bits.X64, x0, x0, x1, Shift.LSL, @as(u6) 0),
     ret(),
-)!slice)!asm;
+)!asm;
 
 //////
 /// Floats
@@ -106,28 +106,28 @@ fun offset(ptr: rawptr, bytes: i64) rawptr = lst((
 
 // TODO: maybe its weird that #bs implies @pub
 #aarch64 #one_ret_pic
-fn add(a: f64, b: f64) f64 = lst((
+fn add(a: f64, b: f64) f64 = (
     fadd(FType.D64, x0, x0, x1),
     ret(),
-)!slice)!asm;
+)!asm;
 
 #aarch64 #one_ret_pic
-fn sub(a: f64, b: f64) f64 = lst((
+fn sub(a: f64, b: f64) f64 = (
     fsub(FType.D64, x0, x0, x1),
     ret(),
-)!slice)!asm;
+)!asm;
 
 #aarch64 #one_ret_pic
-fn mul(a: f64, b: f64) f64 = lst((
+fn mul(a: f64, b: f64) f64 = (
     fmul(FType.D64, x0, x0, x1),
     ret(),
-)!slice)!asm;
+)!asm;
 
 #aarch64 #one_ret_pic
-fn div(a: f64, b: f64) f64 = lst((
+fn div(a: f64, b: f64) f64 = (
     fdiv(FType.D64, x0, x0, x1),
     ret(),
-)!slice)!asm;
+)!asm;
 
 // TODO: can't say a return type here because its an ffi Vec<>
 fn fcmp_with_cond(inv_cond: Cond) = lst((
@@ -159,19 +159,19 @@ fn int_to_ptr(ptr: i64) rawptr = (0xd65f03c0, 0xd65f03c0)!asm;
 
 // preserves the value (not the bit pattern). rounds towards zero. 
 #aarch64 #one_ret_pic
-fun int(a: f64) i64 = lst((
+fun int(a: f64) i64 = (
     fcvtzs(Bits.X64, FType.D64, x0, x0),
     ret(),
-)!slice)!asm;
+)!asm;
 
 #one_ret_pic #aarch64
-fn load(ptr: *u8) u8 = lst((
+fn load(ptr: *u8) u8 = (
     ldrb_uo(x0, x0, @as(u12) 0),
     ret(),
-)!slice)!asm;
+)!asm;
 
 #one_ret_pic #aarch64
-fn store(ptr: *u8, value: u8) Unit = lst((
+fn store(ptr: *u8, value: u8) Unit = (
     strb_uo(x1, x0, @as(u12) 0),
     ret(),
-)!slice)!asm;
+)!asm;
