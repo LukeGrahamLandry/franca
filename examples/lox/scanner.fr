@@ -8,19 +8,190 @@ Scanner :: @struct(
 );
 
 Token :: @struct(type: TokenType, lexeme: Str, line: i64);
-TokenType :: @enum(Error, Eof, Number, Ident, String, Plus);
+TokenType :: @enum(
+    Error, Eof, 
+    Number, Ident, String, 
+    Plus, LeftParen, RightParen, Dot, Star, Slash, Plus, Minus, Dot, Comma, Semicolon, LeftBrace, RightBrace,
+    Equal, EqualEqual, Less, LessEqual, Greater, GreaterEqual, Bang, BangEqual,
+    Var, While, If, Nil, Return, Or, Print, Super, And, Class, Else, False, For, Fun, True, This,
+);
 
 fun init(source: Str) Scanner = (source = source, start = 0, current = 0, line = 1);
 
+// TODO: \n string escapes
+new_line :: 10;
+horizontal_tab :: 9;
+carriage_return :: 13;
+double_quote :: 34; 
+        
 // TODO: early return from flat_call but also indirect return addr for c_call
 fun next(self: *Scanner) Token = {
+    self.skip_whitespace();
     self[].start = self[].current;
     ::if(Token); // TODO: auto instantiate 
-    if(self[].current.lt(self[].source.len)){|
+    if(self.at_end()){|
         self.make_token(TokenType.Eof)
     }{|
-        self.error_token("Unexpected Character")
+        // TODO: it would be nice if @switch expanded macros so you could write this as loop. 
+        @switch(self.pop()) {
+            @case("+".char()) => self.make_token(TokenType.Plus);
+            @case("-".char()) => self.make_token(TokenType.Minus);
+            @case(",".char()) => self.make_token(TokenType.Comma);
+            @case(".".char()) => self.make_token(TokenType.Dot);
+            @case("(".char()) => self.make_token(TokenType.LeftParen);
+            @case(")".char()) => self.make_token(TokenType.RightParen);
+            @case("{".char()) => self.make_token(TokenType.LeftBrace);
+            @case("}".char()) => self.make_token(TokenType.RightBrace);
+            @case("*".char()) => self.make_token(TokenType.Star);
+            @case("/".char()) => self.make_token(TokenType.Slash);
+            @case(";".char()) => self.make_token(TokenType.Semicolon);
+            @case("=".char()) => self.pair_token("=".char(), TokenType.Equal, TokenType.EqualEqual);
+            @case("!".char()) => self.pair_token("=".char(), TokenType.Bang, TokenType.BangEqual);
+            @case("<".char()) => self.pair_token("=".char(), TokenType.Less, TokenType.LessEqual);
+            @case(">".char()) => self.pair_token("=".char(), TokenType.Greater, TokenType.GreaterEqual);
+            @case(double_quote) => self.string();
+            @default() fn(c: i64) Token => {
+                // TODO: nicer else-if
+                if(c.is_digit()){|
+                    self.number()
+                }{|
+                    if(c.is_alpha(), => self.ident()){|
+                        self.error_token("Unexpected Character")
+                    }
+                }
+            };
+        }
     }
+}
+
+fn ident(self: *Scanner) Token = {
+    while { ()bool|
+        c := self.peek();
+        c.is_alpha().or(=> self.peek().is_digit())
+    }{|
+        self.pop();
+    };
+    
+    fn keyword(self: *Scanner, i: i64, var rest: Str, type: TokenType) Token = {
+        type := if(rest.len.add(i).le(self.current.sub(self.start)).and {()bool|
+            s := self.source.subslice(self.start.add(i), rest.len);
+            rest.eq(s)
+        }, => type, => TokenType.Ident);
+        self.make_token(type)
+    }
+    
+    // TODO: this would be more efficient if the switch returned TokenType and then it got made at the end. 
+    @switch(self.source[self.start]) {
+        @case("p".char()) => self.keyword(1, "rint", TokenType.Print);
+        @case("e".char()) => self.keyword(1, "lse", TokenType.Else);
+        @case("o".char()) => self.keyword(1, "r", TokenType.Or);
+        @case("r".char()) => self.keyword(1, "eturn", TokenType.Return);
+        @case("w".char()) => self.keyword(1, "hile", TokenType.While);
+        @case("a".char()) => self.keyword(1, "nd", TokenType.And);
+        @case("s".char()) => self.keyword(1, "uper", TokenType.Super);
+        @case("v".char()) => self.keyword(1, "ar", TokenType.Var);
+        @case("i".char()) => self.keyword(1, "f", TokenType.If);
+        @case("n".char()) => self.keyword(1, "il", TokenType.Nil);
+        @case("c".char()) => self.keyword(1, "lass", TokenType.Class);
+        @case("t".char()) => {
+            if(self.current.sub(self.start).gt(1)){|
+                @switch(self.source[self.start.add(1)]) {
+                    @case("r".char()) => self.keyword(2, "ue", TokenType.True);
+                    @case("h".char()) => self.keyword(2, "is", TokenType.This);
+                    @default fn(_: i64) => self.make_token(TokenType.Ident);
+                } // TODO: it trace_traps if you have the else block here instead. probably just the macro tag check. should really make that an assertion so you get a message. 
+            } {| self.make_token(TokenType.Ident) }
+        };
+        @case("f".char()) => {
+            if(self.current.sub(self.start).gt(1)){|
+                @switch(self.source[self.start.add(1)]) {
+                    @case("o".char()) => self.keyword(2, "r", TokenType.For);
+                    @case("u".char()) => self.keyword(2, "n", TokenType.Fun);
+                    @case("a".char()) => self.keyword(2, "lse", TokenType.False);
+                    @default fn(_: i64) => self.make_token(TokenType.Ident);
+                }
+            } {| self.make_token(TokenType.Ident)}
+        };
+        @default fn(_: i64) => self.make_token(TokenType.Ident);
+    }
+}
+
+fn number(self: *Scanner) Token = {
+    while(=> self.peek().is_digit()) {|
+        self.pop();
+    };
+    if(self.peek().eq(".".char()).and(=> self.peek_next().is_digit())) {|
+        while(=> self.peek().is_digit()) {|
+            self.pop();
+        };
+    };
+    self.make_token(TokenType.Number)
+}
+
+fn string(self: *Scanner) Token = {
+    ::if(Token);
+    dowhile {()bool|
+        self.at_end().not().and {()bool|
+            c := self.pop();
+            if(c.eq(new_line)) {|
+                self.line = self.line.add(1);
+            };
+            c.ne(double_quote)
+        }
+    };
+    if(self.at_end()) {|
+        self.error_token("Unterminated String")
+    }{|
+        self.make_token(TokenType.String)
+    }
+}
+
+fn skip_whitespace(self: *Scanner) Unit = {
+    done :: __return;
+    loop {|
+        // TODO: multi case
+        @switch(self.peek()) {
+            @case(" ".char()) => { self.pop(); };
+            @case(horizontal_tab) => { self.pop(); }; 
+            @case(carriage_return) => { self.pop(); }; 
+            @case(new_line) => {  // new line
+                self.line = self.line.add(1);
+                self.pop();
+            }; 
+            @case("/".char()) => {
+                if(self.peek_next().eq("/".char())){|
+                    dowhile {|
+                        self.at_end().not().and(=> self.pop().ne(new_line))
+                    };
+                };
+            };
+            @default fn(_: i64) => {
+                done();
+            };
+        }
+    };
+}
+
+fn at_end(self: *Scanner) bool = self[].current.ge(self[].source.len);
+
+fn pair_token(self: *Scanner, maybe: i64, single: TokenType, double: TokenType) Token = {
+    ::if(TokenType); // TODO: auto instantiate. until then, should at least give better error when you forget. 
+    
+    type := if(self.at_end(), => single) {|
+        if(self.peek().eq(maybe)) {|
+            self.pop();
+            double
+        }{| single }
+    };
+    self.make_token(type)
+}
+
+fun peek(self: *Scanner) i64 = if(self.at_end(), => 0, => self.source[self.current]);
+fun peek_next(self: *Scanner) i64 = if(self.at_end(), => 0, => self.source[self.current.add(1)]);
+
+fun pop(self: *Scanner) i64 = {
+    self.current = self.current.add(1); // TODO: fix += with new place exprs. 
+    self.source[self.current.sub(1)]
 }
 
 fn make_token(self: *Scanner, type: TokenType) Token = 
@@ -28,5 +199,11 @@ fn make_token(self: *Scanner, type: TokenType) Token =
 
 fn error_token(self: *Scanner, msg: Str) Token = 
     (type = TokenType.Error, lexeme = msg, line = self[].line);
+
+fn is_digit(c: i64) bool = c.ge("0".char()).and(c.le("9".char()));
+fn is_alpha(c: i64) bool = 
+    c.ge("a".char()).and(c.le("z".char()))
+        .or(=> c.ge("A".char()).and(c.le("Z".char())))
+        .or(=> c.eq("_".char()));
 
 fun eqq(lhs: TokenType, rhs: TokenType) bool = eq(@as(i64) lhs, @as(i64) rhs); // TODO: this is ass. 

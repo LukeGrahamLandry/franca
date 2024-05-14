@@ -13,20 +13,11 @@ extern crate core;
 struct MyAllocator;
 
 pub const ARENA_SIZE: usize = 1 << 30;
-pub const COMPTIME_STACK_SIZE: usize = 1 << 20;
 
 thread_local! {
      pub static MEM: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
          null_mut(),
          ARENA_SIZE,
-         libc::PROT_WRITE | libc::PROT_READ,
-         libc::MAP_ANON | libc::MAP_PRIVATE,
-         -1,
-         0,
-     )} as *mut u8);
-     pub static COMPTIME_STACK: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
-         null_mut(),
-         COMPTIME_STACK_SIZE,
          libc::PROT_WRITE | libc::PROT_READ,
          libc::MAP_ANON | libc::MAP_PRIVATE,
          -1,
