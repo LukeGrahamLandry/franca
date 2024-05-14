@@ -1,5 +1,6 @@
 #![feature(slice_ptr_get)]
 #![feature(pattern)]
+#![feature(thread_sleep_until)]
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
@@ -20,13 +21,14 @@ use std::{
     env,
     fs::{self, File},
     io::{Read, Write},
-    mem,
-    mem::transmute,
+    mem::{self, transmute},
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::exit,
     str::pattern::Pattern,
+    thread::{sleep, sleep_until},
+    time::{Duration, Instant},
 };
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.
@@ -86,6 +88,10 @@ fn main() {
         if name == "--no-fork" {
             run_tests_serial();
             println!("{:#?}", unsafe { &STATS });
+            return;
+        }
+        if name == "--60fps" {
+            do_60fps();
             return;
         }
 
@@ -436,4 +442,114 @@ fn set_colour(r: u8, g: u8, b: u8) {
 fn unset_colour() {
     std::io::stdout().write_all(&[27]).unwrap();
     print!("[0m");
+}
+
+fn do_60fps() {
+    let name = "examples/mandelbrot.fr";
+    let src = fs::read_to_string(name).unwrap();
+    let mut src_parts = src.split("// @InsertConfig");
+    let src1 = src_parts.next().unwrap().to_string();
+    let src2 = src_parts.next().unwrap().to_string();
+
+    println!("\x1B[?1049h");
+    start_raw();
+    let base = MEM.get();
+
+    let start = timestamp();
+    let mut frames = 0;
+    let mut x = -1.5f32;
+    let mut y = -1.0f32;
+    loop {
+        let frame_end = Instant::now().checked_add(Duration::from_millis(18)).unwrap();
+        let mut src = String::with_capacity(src1.len() + src2.len() + 100);
+        src.push_str(&src1);
+        if x >= 0.0 {
+            src.push_str(&format!("x_start = {x:.2};"));
+        } else {
+            src.push_str(&format!("x_start = 0.0.sub({:.2});", x.abs()));
+        }
+        if y >= 0.0 {
+            src.push_str(&format!("y_start = {y:.2};"));
+        } else {
+            src.push_str(&format!("y_start = 0.0.sub({:.2});", y.abs()));
+        }
+        src.push_str(&src2);
+
+        let pool = Box::leak(Box::<StringPool>::default());
+        let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+        let mut comp = Compile::new(pool, &mut program);
+
+        let file = comp
+            .parsing
+            .codemap
+            .add_file(name.to_string(), format!("#include_std(\"core.fr\");\n{src}"));
+        let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
+        let parsed = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool).unwrap();
+
+        let mut global = make_toplevel(comp.pool, garbage_loc(), parsed);
+        ResolveScope::run(&mut global, &mut comp, ScopeId::from_index(0)).unwrap();
+        comp.compile_top_level(global).unwrap();
+        let f = comp.program.find_unique_func(comp.pool.intern("main")).unwrap();
+        comp.compile(f, ExecTime::Runtime).unwrap();
+
+        println!("\x1B[2J");
+        run_one(&mut comp, f);
+
+        frames += 1;
+        sleep_until(frame_end);
+        if let Some(c) = get_input() {
+            match c as char {
+                'q' => break,
+                'a' => x += 0.1,
+                'd' => x -= 0.1,
+                's' => y -= 0.1,
+                'w' => y += 0.1,
+                _ => {}
+            }
+        }
+
+        mem::forget(comp);
+        mem::forget(program);
+        // Reset the arena
+        MEM.set(base);
+    }
+    let end = timestamp();
+    let s = end - start;
+    end_raw();
+    println!("\x1B[?1049l");
+    println!("{frames} frames in {:.0} ms: {:.0}fps", s * 1000.0, frames as f64 / s);
+
+    // Based on man termios and
+    // https://stackoverflow.com/questions/421860/capture-characters-from-standard-input-without-waiting-for-enter-to-be-pressed
+    fn start_raw() {
+        use libc::*;
+        unsafe {
+            let mut term: termios = mem::zeroed();
+            tcgetattr(0, &mut term);
+            term.c_lflag &= !(ICANON | ECHO); // dont read in lines | dont show what you're typing
+            term.c_cc[VMIN] = 0; // its ok for a read to return nothing
+            term.c_cc[VTIME] = 0; // dont wait at all
+            tcsetattr(0, TCSANOW, &term);
+        }
+    }
+
+    fn end_raw() {
+        use libc::*;
+        unsafe {
+            let mut term: termios = mem::zeroed();
+            tcgetattr(0, &mut term);
+            term.c_lflag |= ICANON | ECHO;
+            tcsetattr(0, TCSADRAIN, &term);
+        }
+    }
+
+    fn get_input() -> Option<u8> {
+        let mut c = 0;
+        let len = unsafe { libc::read(0, &mut c as *mut u8 as *mut libc::c_void, 1) };
+        if len > 0 {
+            Some(c)
+        } else {
+            None
+        }
+    }
 }
