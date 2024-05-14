@@ -4,9 +4,7 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
-    bc_to_asm::TRACE_ASM,
     compiler::{Compile, ExecTime, Res},
-    emit_rust::bootstrap,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib,
     lex::Lexer,
@@ -27,7 +25,7 @@ use std::{
     path::PathBuf,
     process::exit,
     str::pattern::Pattern,
-    thread::{sleep, sleep_until},
+    thread::sleep_until,
     time::{Duration, Instant},
 };
 
@@ -68,12 +66,6 @@ fn main() {
     if let Some(name) = args.nth(1) {
         if name == "--" {
             panic!("dont put double dash to seperate args");
-        }
-        if name == "bootstrap" {
-            let (rs, fr) = bootstrap();
-            fs::write("target/bootstrap_gen.rs", rs).unwrap();
-            fs::write("target/aarch64_basic.gen.fr", fr).unwrap();
-            return;
         }
         if name == "log_export_ffi" {
             println!("{}", get_include_std("compiler").unwrap());
@@ -143,7 +135,6 @@ fn main() {
             eprint!("Directory 'tests' does not exist in cwd");
             exit(1);
         }
-        assert!(!TRACE_ASM, "TRACE_ASM is too slow to be reasonable on all tests");
         run_tests_find_failures();
         check_broken();
     }
@@ -462,6 +453,7 @@ fn do_60fps() {
     loop {
         let frame_end = Instant::now().checked_add(Duration::from_millis(18)).unwrap();
         let mut src = String::with_capacity(src1.len() + src2.len() + 100);
+        // TODO: cant do float calls in constants now without libffi
         src.push_str(&src1);
         if x >= 0.0 {
             src.push_str(&format!("x_start = {x:.2};"));
@@ -507,6 +499,10 @@ fn do_60fps() {
                 _ => {}
             }
         }
+
+        let mut temp = memmap2::MmapOptions::new().len(0).map_anon().unwrap().make_exec().unwrap();
+        mem::swap(comp.aarch64.map_exec.as_mut().unwrap(), &mut temp);
+        // TODO: unmap constant data in pool.rs
 
         mem::forget(comp);
         mem::forget(program);

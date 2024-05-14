@@ -103,7 +103,7 @@ impl<'z, 'p> Emit<'z, 'p> {
         let name = format!("FN{}", f.as_index());
         let id = self.cl.module.declare_function(&name, linkage, &ctx.func.signature).map_err(wrap)?;
 
-        if let Some(addr) = self.program[f].comptime_addr {
+        if let Some(_addr) = self.program[f].comptime_addr {
         } else {
             let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
             self.emit_body(&mut builder)?;
@@ -265,7 +265,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         builder.ins().call(callee, args);
                     }
                 }
-                Bc::CallFnPtr { ty, comp_ctx } => todo!(),
+                Bc::CallFnPtr { ty: _, comp_ctx: _ } => todo!(),
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::JumpIf { true_ip, false_ip, slots } => {
                     let cond = self.stack.pop().unwrap();
@@ -355,7 +355,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::Pop { slots } => {
                     pops(&mut self.stack, slots as usize);
                 }
-                Bc::TagCheck { expected } => {} // TODO: !!!
+                Bc::TagCheck { expected: _ } => {} // TODO: !!!
                 Bc::Unreachable => {
                     builder.ins().trap(TrapCode::UnreachableCodeReached);
                     break;

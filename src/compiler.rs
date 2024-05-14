@@ -2946,7 +2946,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut renumber = RenumberVars {
                 vars: self.program.next_var,
                 mapping: &mut mapping,
-                compile: self,
+                _compile: self,
             };
             renumber.pattern(&mut new_func.arg);
             renumber.ty(&mut new_func.ret);

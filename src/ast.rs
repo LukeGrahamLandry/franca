@@ -93,7 +93,7 @@ pub struct Annotation<'p> {
     pub args: Option<FatExpr<'p>>,
 }
 
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug, InterpSend)]
 pub struct Var<'p> {
     pub name: Ident<'p>,
     pub id: u32,
@@ -101,6 +101,18 @@ pub struct Var<'p> {
     pub block: u32,
     pub kind: VarType,
 }
+
+// impl<'p> PartialEq for Var<'p> {
+//     fn eq(&self, other: &Self) -> bool {
+//         self.id == other.id
+//     }
+// }
+// TODO: this should work??? implies the above only works by luck so im afraid until i understand
+// impl<'p> Hash for Var<'p> {
+//     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+//         state.write_u32(self.id);
+//     }
+// }
 
 // TODO: should really get an arena going because boxes make me sad.
 #[repr(C)]
@@ -284,7 +296,7 @@ pub trait WalkAst<'p> {
 pub(crate) struct RenumberVars<'a, 'p, 'aa> {
     pub vars: u32,
     pub mapping: &'a mut Map<Var<'p>, Var<'p>>,
-    pub(crate) compile: &'a mut Compile<'aa, 'p>,
+    pub(crate) _compile: &'a mut Compile<'aa, 'p>,
 }
 
 impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
@@ -337,7 +349,11 @@ impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
 
 impl<'p> FatExpr<'p> {
     pub fn renumber_vars(&mut self, vars: u32, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> u32 {
-        let mut ctx = RenumberVars { vars, mapping, compile };
+        let mut ctx = RenumberVars {
+            vars,
+            mapping,
+            _compile: compile,
+        };
         ctx.expr(self);
         ctx.vars
     }

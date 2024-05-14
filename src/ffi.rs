@@ -1,4 +1,4 @@
-use std::{arch::global_asm, mem, ptr::slice_from_raw_parts};
+use std::{mem, ptr::slice_from_raw_parts};
 
 use codemap::Span;
 

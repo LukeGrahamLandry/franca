@@ -94,12 +94,10 @@ macro_rules! mut_replace {
 pub mod ast;
 pub mod bc;
 pub mod bc_to_asm;
-pub mod bootstrap_gen;
 pub mod compiler;
 #[cfg(feature = "cranelift")]
 pub mod cranelift;
 pub mod emit_bc;
-pub mod emit_rust;
 pub mod export_ffi;
 pub mod ffi;
 pub mod lex;
