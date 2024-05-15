@@ -8,7 +8,7 @@ use std::usize;
 
 use crate::ast::{CallConv, Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
-use crate::compiler::{CErr, Compile, FnWip, Res};
+use crate::compiler::{CErr, Compile, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
 use crate::{bc::*, Map};
@@ -49,15 +49,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     #[track_caller]
-    fn empty_fn(&mut self, func: &FnWip<'p>) -> FnBody<'p> {
+    fn empty_fn(&mut self, func: FuncId) -> FnBody<'p> {
         let mut jump_targets = BitSet::empty();
         jump_targets.set(0); // entry is the first instruction
         FnBody {
             vars: Default::default(),
-            when: func.when,
-            func: func.func,
+            when: ExecTime::Comptime, // TODO
+            func,
             blocks: vec![],
-            name: self.program[func.func].name,
+            name: self.program[func].name,
             aarch64_stack_bytes: None,
             current_block: BbId(0),
             inlined_return_addr: Default::default(),
@@ -72,10 +72,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         self.locals.clear();
         self.locals.push(vec![]);
-        let func = &self.program[f];
-        let wip = unwrap!(func.wip.as_ref(), "Not done comptime for {f:?}"); // TODO
-        debug_assert!(!func.evil_uninit);
-        let mut result = self.empty_fn(wip);
+        let mut result = self.empty_fn(f);
         match self.emit_body(&mut result, f) {
             Ok(_) => Ok(result),
             Err(mut e) => {
@@ -252,6 +249,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             if func.has_tag(Flag::No_Tail) {
                 can_tail = false;
             }
+            // TODO: check if any args are pointers cause they might be to the stack and then you probably can't tail call.
             result.push(Bc::CallDirect { f, tail: can_tail });
             let slots = self.slot_count(f_ty.ret);
             match result_location {

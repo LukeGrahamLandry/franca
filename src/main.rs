@@ -199,7 +199,7 @@ fn run_tests_serial() {
     }
 
     let assertion_count = if let Some(f) = comp.program.find_unique_func(Flag::__Get_Assertions_Passed.ident()) {
-        let actual: usize = comp.call_jitted(f, ExecTime::Comptime, None, ()).unwrap();
+        let actual: usize = comp.call_jitted(f, ExecTime::Comptime, ()).unwrap();
         // assert_eq!(actual, assertion_count, "vm missed assertions?");
         actual
     } else {

@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Bc, FloatMask, Value, Values},
-    compiler::{CErr, Compile, CompileError, FnWip, Res},
+    compiler::{CErr, Compile, CompileError, Res},
     err,
     export_ffi::RsResolvedSymbol,
     extend_options,
@@ -704,7 +704,6 @@ pub struct Func<'p> {
     pub loc: Span,
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
-    pub wip: Option<FnWip<'p>>,
 
     /// Implies body.is_none(). For native targets this is the symbol to put in the indirect table for this forward declaration.
     /// This can be used for calling at runtime but not at comptime because we can't just ask the linker for the address.
@@ -726,10 +725,12 @@ pub struct Func<'p> {
     pub allow_rt_capture: bool,
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub asm_done: bool,
+    pub ensured_compiled: bool,
     pub aarch64_stack_bytes: Option<u16>,
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
     pub cl_emit_fn_ptr: Option<usize>,
+    pub callees: Vec<FuncId>,
 }
 
 #[repr(C)]
@@ -1574,6 +1575,8 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            ensured_compiled: false,
+            callees: vec![],
             return_var: None,
             cc: None,
             asm_done: false,
@@ -1593,7 +1596,6 @@ impl<'p> Default for Func<'p> {
             finished_ret: None,
             referencable_name: false,
             evil_uninit: true,
-            wip: None,
             dynamic_import_symbol: None,
             comptime_addr: None,
             jitted_code: None,

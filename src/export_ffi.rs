@@ -527,9 +527,8 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
 ];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     let res = compile.enum_constant_macro(arg, target);
-    compile.pending_ffi.push(Some(result));
+
     res.unwrap()
 }
 
@@ -545,9 +544,8 @@ fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
 //       need to think of better error handling story.
 
 fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((FatExpr<'p>, TypeId), usize)) {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     // TODO: immediate_eval_expr doesn't do a type check. -- Apr 27
-    compile.compile_expr(unsafe { &mut *result }, &mut expr, Some(ty)).unwrap();
+    compile.compile_expr(&mut expr, Some(ty)).unwrap();
 
     match compile.immediate_eval_expr(expr, ty) {
         Ok(val) => {
@@ -559,26 +557,20 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
         }
         Err(e) => panic!("{e:?}"),
     }
-    compile.pending_ffi.push(Some(result));
 }
 
 fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
-    compile.compile_expr(unsafe { &mut *result }, &mut expr, None).unwrap();
-    compile.pending_ffi.push(Some(result));
+    compile.compile_expr(&mut expr, None).unwrap();
     expr
 }
 
 // :UnquotePlaceholders
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
     let doo = || {
-        let result = unwrap!(unwrap!(compile.pending_ffi.pop(), "ffi ctx"), "fn result ctx");
-
         let mut template = unwrap!(args.pop(), "template arg");
         let mut walk = Unquote {
             compiler: compile,
             placeholders: args.into_iter().map(Some).collect(),
-            result: unsafe { &mut *result },
         };
         // TODO: rename to handle or idk so its harder to accidently call the walk one directly which is wrong but sounds like it should be right.
         walk.expr(&mut template);
@@ -586,7 +578,6 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
         assert!(placeholders.iter().all(|a| a.is_none()), "didnt use all arguments");
         compile.program.next_var = template.renumber_vars(compile.program.next_var, &mut Default::default(), compile);
 
-        compile.pending_ffi.push(Some(result));
         Ok(template)
     }; // topdpdwkp[aspefiwfe]e
 
@@ -595,8 +586,7 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args:
 }
 
 fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntTypeInfo {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
-    let res = hope(|| {
+    hope(|| {
         match &mut arg.expr {
             Expr::Call(_, _) => {
                 if let Some((int, _)) = bit_literal(&arg, compile.pool) {
@@ -605,7 +595,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
             }
             Expr::Value { .. } => err!("todo",),
             _ => {
-                let ty = compile.compile_expr(unsafe { &mut *result }, &mut arg, None)?;
+                let ty = compile.compile_expr(&mut arg, None)?;
                 let ty = compile.program.raw_type(ty);
                 if let TypeInfo::Int(int) = compile.program[ty] {
                     return Ok(int);
@@ -614,9 +604,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
             }
         }
         err!("expected binary literal not {arg:?}",);
-    });
-    compile.pending_ffi.push(Some(result));
-    res
+    })
 }
 
 fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
@@ -635,14 +623,13 @@ fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> boo
 
 // TODO: what if struct const fields were lazy like normal values and then could use that instead of this.
 fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     let loc = block.loc;
     // give any other macros a chance to expand.
     let ty = compile.program.intern_type(TypeInfo::Fn(FnType {
         arg: TypeId::unit,
         ret: TypeId::unit,
     }));
-    compile.compile_expr(unsafe { &mut *result }, &mut block, Some(ty)).unwrap();
+    compile.compile_expr(&mut block, Some(ty)).unwrap();
 
     let Some(id) = block.as_fn() else {
         panic!("expected block for @namespace not {}", block.log(compile.pool))
@@ -652,16 +639,14 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let func = &mut compile.program[id];
     let s = func.scope.unwrap();
 
-    compile.pending_ffi.push(Some(result));
     // TODO: remove block index
     FatExpr::value(Values::One(Value::I64(s.as_raw())), TypeId::scope, loc)
 }
 
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
-            let ty = compile.struct_type(pattern, Some(unsafe { &mut *result }))?;
+            let ty = compile.struct_type(pattern)?;
             let ty = compile.program.to_enum(ty);
             compile.set_literal(&mut cases, ty)?;
         } else {
@@ -670,15 +655,13 @@ fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> Fa
         Ok(())
     });
 
-    compile.pending_ffi.push(Some(result));
     cases
 }
 
 fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut fields.expr {
-            let ty = compile.struct_type(pattern, Some(unsafe { &mut *result }))?;
+            let ty = compile.struct_type(pattern)?;
             let ty = compile.program.intern_type(ty);
             compile.set_literal(&mut fields, ty)?;
         } else {
@@ -687,7 +670,6 @@ fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> F
         Ok(())
     });
 
-    compile.pending_ffi.push(Some(result));
     fields
 }
 
@@ -717,21 +699,17 @@ fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatE
 }
 
 fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     hope(|| {
-        let result = unsafe { &mut *result };
         // TODO: this can still have side-effects on the compiler state tho :(
-        let saved_res = result.clone();
         let before = compile.debug_trace.len();
         unsafe {
             EXPECT_ERR_DEPTH.fetch_add(1, Ordering::SeqCst);
         }
-        let res = compile.compile_expr(result, &mut arg, None);
+        let res = compile.compile_expr(&mut arg, None);
         unsafe {
             EXPECT_ERR_DEPTH.fetch_sub(1, Ordering::SeqCst);
         }
         assert!(res.is_err());
-        *result = saved_res;
         while compile.debug_trace.len() > before {
             compile.debug_trace.pop();
         }
@@ -740,23 +718,18 @@ fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExp
         Ok(())
     });
 
-    compile.pending_ffi.push(Some(result));
     arg
 }
 
 fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
-    let result = compile.pending_ffi.pop().unwrap().unwrap();
     hope(|| {
-        let result = unsafe { &mut *result };
-
         // Note: this does not evaluate the expression.
         // TODO: warning if it has side effects. especially if it does const stuff.
-        let ty = compile.compile_expr(result, &mut arg, None)?;
+        let ty = compile.compile_expr(&mut arg, None)?;
         compile.set_literal(&mut arg, ty)?;
         Ok(())
     });
 
-    compile.pending_ffi.push(Some(result));
     arg
 }
 

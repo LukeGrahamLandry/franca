@@ -5,25 +5,19 @@ use crate::ast::{
     Expr, FatExpr, Flag, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TargetArch, TypeId, Var, VarType,
 };
 use crate::bc::{Value, Values};
-use crate::compiler::{Compile, DebugState, ExecTime, FnWip, Res};
+use crate::compiler::{Compile, DebugState, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap};
 use std::mem;
 use std::ops::DerefMut;
 
 impl<'a, 'p> Compile<'a, 'p> {
-    pub fn maybe_direct_fn(
-        &mut self,
-        result: &mut FnWip<'p>,
-        f: &mut FatExpr<'p>,
-        arg: &mut FatExpr<'p>,
-        ret: Option<TypeId>,
-    ) -> Res<'p, Option<FuncId>> {
+    pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
                 if i.kind == VarType::Const {
-                    let id = self.resolve_function(result, i, arg, ret)?; // TODO: error here is probably fine, just return None
+                    let id = self.resolve_function(i, arg, ret)?; // TODO: error here is probably fine, just return None
                     Some(id)
                 } else {
                     None
@@ -34,14 +28,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ..
             }
             | &mut Expr::WipFunc(id) => {
-                self.named_args_to_tuple(result, arg, id)?;
+                self.named_args_to_tuple(arg, id)?;
                 Some(id)
             }
             &mut Expr::Value {
                 value: Values::One(Value::OverloadSet(i)),
                 ..
             } => {
-                let id = self.resolve_in_overload_set(result, arg, ret, i)?;
+                let id = self.resolve_in_overload_set(arg, ret, i)?;
                 Some(id)
             }
             // TODO: this shouldn't be nessisary. Values::Many should collapse. You get here when a macro tries to literal_ast(OverloadSet)!unquote?
@@ -54,9 +48,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Closure(_) => {
                 // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
-                let arg_ty = self.compile_expr(result, arg, ret)?;
-                let id = self.promote_closure(result, f, Some(arg_ty), ret)?;
-                self.named_args_to_tuple(result, arg, id)?;
+                let arg_ty = self.compile_expr(arg, ret)?;
+                let id = self.promote_closure(f, Some(arg_ty), ret)?;
+                self.named_args_to_tuple(arg, id)?;
                 Some(id)
             }
             &mut Expr::GetNamed(i) => {
@@ -68,13 +62,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // TODO: rename this, it means resolve overloads, not resovle variables which is ambigous now that they happen together sometimes.
     // TODO: better error messages
-    pub fn resolve_function(
-        &mut self,
-        result: &mut FnWip<'p>,
-        name: Var<'p>,
-        arg: &mut FatExpr<'p>,
-        requested_ret: Option<TypeId>,
-    ) -> Res<'p, FuncId> {
+    pub fn resolve_function(&mut self, name: Var<'p>, arg: &mut FatExpr<'p>, requested_ret: Option<TypeId>) -> Res<'p, FuncId> {
         let state = DebugState::ResolveFnRef(name);
         self.push_state(&state);
 
@@ -86,7 +74,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some((value, _)) = self.find_const(name)? {
             match value {
                 Values::One(Value::GetFn(f)) => {
-                    self.named_args_to_tuple(result, arg, f)?;
+                    self.named_args_to_tuple(arg, f)?;
                     self.pop_state(state);
                     Ok(f)
                 }
@@ -94,7 +82,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     err!("TODO: const GetNativeFnPtr?",)
                 }
                 Values::One(Value::OverloadSet(i)) => {
-                    let out = self.resolve_in_overload_set(result, arg, requested_ret, i)?;
+                    let out = self.resolve_in_overload_set(arg, requested_ret, i)?;
                     self.pop_state(state);
                     Ok(out)
                 }
@@ -106,13 +94,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn resolve_in_overload_set(
-        &mut self,
-        result: &mut FnWip<'p>,
-        arg: &mut FatExpr<'p>,
-        requested_ret: Option<TypeId>,
-        i: OverloadSetId,
-    ) -> Res<'p, FuncId> {
+    pub fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: Option<TypeId>, i: OverloadSetId) -> Res<'p, FuncId> {
         let name = self.program[i].name;
         self.compute_new_overloads(i)?;
         let mut overloads = self.program[i].clone(); // Sad
@@ -122,7 +104,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: my named args test doesn't work without this
             if overloads.ready.len() == 1 {
                 let id = overloads.ready[0].func;
-                self.named_args_to_tuple(result, arg, id)?;
+                self.named_args_to_tuple(arg, id)?;
                 return Ok(id);
             }
         }
@@ -131,7 +113,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
         }
 
-        match self.type_of(result, arg) {
+        match self.type_of(arg) {
             Ok(Some(arg_ty)) => {
                 // TODO: need to factor this part out so that 'const F: <> = some_overload_set' works properly.
 
@@ -212,7 +194,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 if overloads.ready.len() == 1 {
                     let id = overloads.ready[0].func;
-                    self.named_args_to_tuple(result, arg, id)?;
+                    self.named_args_to_tuple(arg, id)?;
                     return Ok(id);
                 }
 
@@ -226,7 +208,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     )
                 };
 
-                // TODO: cleanup include ct vs rt split
                 // TODO: put the message in the error so !assert_compile_error doesn't print it.
                 let mut msg = String::new();
                 use std::fmt::Write;
@@ -331,7 +312,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    fn named_args_to_tuple(&mut self, _result: &mut FnWip<'p>, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
+    fn named_args_to_tuple(&mut self, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             let expected = &self.program[f].arg;
             assert_eq!(expected.bindings.len(), pattern.bindings.len());

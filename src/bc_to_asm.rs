@@ -1296,10 +1296,13 @@ pub mod jit {
             &map[0..len]
         }
 
+        // This is a better marker for not compiled yet so you can recognise when you hit it in a debugger.
+        const EMPTY: usize = 0x1337;
+
         pub fn reserve(&mut self, func_count: usize) {
             assert!(func_count < (1 << 12), "TODO: not enough bits for indirect call");
             for _ in self.dispatch.len()..func_count {
-                self.dispatch.push(null());
+                self.dispatch.push(Self::EMPTY as *const u8);
                 self.ranges.push(&[] as *const [u8])
             }
         }
@@ -1310,7 +1313,9 @@ pub mod jit {
         }
 
         pub fn get_fn(&self, f: FuncId) -> Option<*const u8> {
-            self.dispatch.get(f.as_index()).and_then(|f| if f.is_null() { None } else { Some(*f) })
+            self.dispatch
+                .get(f.as_index())
+                .and_then(|f| if *f as usize == Self::EMPTY { None } else { Some(*f) })
         }
 
         #[allow(clippy::not_unsafe_ptr_arg_deref)]

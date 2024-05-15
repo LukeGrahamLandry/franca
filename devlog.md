@@ -1,4 +1,7 @@
-## stop committing generated stuff (May 14)
+- got rid of FnWip. cause i wasnt using it right with constexprs anyway.
+  now just tracking var types in the global thing.
+
+## stop committing generated stuff & do u8 strings (May 14)
 
 If I can't have a self-hosted compiler yet, I should at least get the benifit of being able to build from source directly.
 Rn I generate instruction encoding stuff so there's a sad amount of code there that i barely use.
