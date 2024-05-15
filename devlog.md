@@ -7,6 +7,14 @@
   new system is emit_bc never sees a GetVar, the frontend inserts `&[]` every time so it goes through the normal logic
   that might replace that with the intrinsic load/store.
   but now there's the u8/i64 types problem, so i guess i have to say zero extend on every load.
+  oh they have a special uload8 that does that.
+- next problem is the reverse, in my test, the store has to store 1 byte
+  but then it has to read back the whole word without assuming its the same as it just stored.
+  so it needs to see the value being stored as a u8 even if it started as an i64 (like a constant).
+  so truncate the value first. that works.
+- perhaps this shows that my bytecode should keep better track of things.
+  cause it did know which was float/i64/u8/ptr/unit and im just painfully reconstructing what i threw away.
+  presumably you want to help it be fast by giving it fewer redundant bit size casts to optimise out.
 
 ## stop committing generated stuff & do u8 strings (May 14)
 

@@ -10,14 +10,13 @@ use cranelift::{
         settings::Flags,
         CodegenError,
     },
-    frontend::FuncInstBuilder,
     prelude::*,
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, ModuleError};
 
 use crate::{
-    ast::{Flag, FnType, FuncId, Program, TypeId, TypeInfo},
+    ast::{CallConv, Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{Bc, FnBody},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, Res},
@@ -30,10 +29,24 @@ use crate::{
 pub struct JittedCl {
     module: JITModule,
     funcs: Vec<Option<cranelift_module::FuncId>>,
+    // can't just use funcs[i].is_some because it might just be a forward declaration.
+    funcs_done: BitSet,
 }
 
 pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) -> Res<'p, ()> {
+    if compile.program[f].body.is_none() || compile.cranelift.funcs_done.get(f.as_index()) {
+        return Ok(());
+    }
     let ctx = compile.cranelift.module.make_context();
+
+    let mut flat_sig = Signature::new(compile.cranelift.module.target_config().default_call_conv);
+    flat_sig.params.push(AbiParam::new(I64));
+    flat_sig.params.push(AbiParam::new(R64));
+    flat_sig.params.push(AbiParam::new(I64));
+    flat_sig.params.push(AbiParam::new(R64));
+    flat_sig.params.push(AbiParam::new(I64));
+
+    let is_flat = compile.program[f].cc.unwrap() == CallConv::Flat;
     let mut e = Emit {
         body,
         blocks: vec![],
@@ -48,8 +61,11 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
         program: compile.program,
         asm: &mut compile.aarch64,
         cl: &mut compile.cranelift,
+        flat_sig,
+        is_flat,
     };
     e.emit_func(f, FunctionBuilderContext::new(), ctx)?;
+    compile.cranelift.funcs_done.insert(f.as_index(), true);
     Ok(())
 }
 
@@ -61,7 +77,11 @@ impl Default for JittedCl {
         let isa = isa.finish(Flags::new(flags));
         let builder = JITBuilder::with_isa(isa.unwrap(), cranelift_module::default_libcall_names());
         let module = JITModule::new(builder);
-        JittedCl { module, funcs: vec![] }
+        JittedCl {
+            module,
+            funcs: vec![],
+            funcs_done: BitSet::empty(),
+        }
     }
 }
 
@@ -86,35 +106,37 @@ struct Emit<'z, 'p> {
     flat_args_already_offset: Vec<Value>,
     vars: Vec<StackSlot>,
     f: FuncId,
+    flat_sig: Signature,
+    is_flat: bool,
 }
 
 impl<'z, 'p> Emit<'z, 'p> {
     fn emit_func(&mut self, f: FuncId, mut builder_ctx: FunctionBuilderContext, mut ctx: codegen::Context) -> Res<'p, ()> {
         self.f = f;
         let f_ty = self.program[f].unwrap_ty();
-        ctx.func.signature = self.make_sig(f_ty, true);
-
-        let linkage = if self.program[f].comptime_addr.is_some() {
-            Linkage::Import
-        } else {
-            Linkage::Export
-        };
 
         let name = format!("FN{}", f.as_index());
-        let id = self.cl.module.declare_function(&name, linkage, &ctx.func.signature).map_err(wrap)?;
-
-        if let Some(_addr) = self.program[f].comptime_addr {
+        ctx.func.signature = if self.is_flat {
+            self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
         } else {
-            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
-            self.emit_body(&mut builder)?;
-            if self.program[f].has_tag(Flag::Log_Cl) {
-                println!("=== Cranelift IR for {f:?}: {} ===", self.program.pool.get(self.program[f].name));
-                println!("{}", builder.func.display());
-                println!("===");
-            }
-            builder.finalize();
-            self.cl.module.define_function(id, &mut ctx).map_err(wrap)?;
+            self.make_sig(f_ty, true)
+        };
+
+        let id = self
+            .cl
+            .module
+            .declare_function(&name, Linkage::Export, &ctx.func.signature)
+            .map_err(wrap)?;
+
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        self.emit_body(&mut builder)?;
+        if self.program[f].has_tag(Flag::Log_Cl) {
+            println!("=== Cranelift IR for {f:?}: {} ===", self.program.pool.get(self.program[f].name));
+            println!("{}", builder.func.display());
+            println!("===");
         }
+        builder.finalize();
+        self.cl.module.define_function(id, &mut ctx).map_err(wrap)?;
 
         extend_options(&mut self.cl.funcs, f.as_index());
         self.cl.funcs[f.as_index()] = Some(id);
@@ -133,18 +155,27 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         self.blocks.clear();
         self.block_done.clear();
-        self.flat_arg_addr = None;
         self.flat_args_already_offset.clear();
-        for _ in 0..self.body.blocks.len() {
-            self.blocks.push(builder.create_block());
-        }
+        if self.is_flat {
+            let entry = builder.create_block();
+            builder.switch_to_block(entry);
 
-        builder.append_block_params_for_function_params(self.blocks[0]);
-        let f_ty = self.program[self.f].unwrap_ty();
-        if self.program.slot_count(f_ty.ret) > 1 {
-            self.indirect_ret_addr = Some(*builder.block_params(self.blocks[0]).last().unwrap());
+            builder.append_block_params_for_function_params(entry);
+            self.indirect_ret_addr = Some(builder.block_params(entry)[3]);
+            self.flat_arg_addr = Some(builder.block_params(entry)[1]);
+
+            for _ in 0..self.body.blocks.len() {
+                self.blocks.push(builder.create_block());
+            }
+            builder.ins().jump(self.blocks[0], &[]);
+            builder.seal_block(entry);
         } else {
+            for _ in 0..self.body.blocks.len() {
+                self.blocks.push(builder.create_block());
+            }
+            builder.append_block_params_for_function_params(self.blocks[0]);
             self.indirect_ret_addr = None;
+            self.flat_arg_addr = None;
         }
 
         self.emit_block(0, builder)?;
@@ -256,9 +287,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     if let Some(addr) = addr {
                         let callee = builder.ins().iconst(I64, addr as i64);
                         let ty = self.program[f].unwrap_ty();
-                        // TODO: flat_call needs different sig!
-                        let sig = self.make_sig(ty, false);
-                        let sig = builder.import_signature(sig);
+                        let sig = builder.import_signature(self.flat_sig.clone());
                         builder.ins().call_indirect(sig, callee, args);
                     } else {
                         // TODO: flat_call needs different sig!
@@ -309,6 +338,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         .map(|a| a as i64)
                         .or_else(|| self.cl.get_ptr(f).map(|a| a as i64))
                         .or_else(|| self.asm.get_fn(f).map(|a| a as i64));
+                    // builder.ins().func_addr(iAddr, FN)
                     let addr = unwrap!(addr, "fn not ready");
                     self.stack.push(builder.ins().iconst(I64, addr));
                 }
@@ -415,7 +445,8 @@ impl<'z, 'p> Emit<'z, 'p> {
         }
 
         let arg = self.program.raw_type(t.arg);
-        if let TypeInfo::Tuple(types) = self.program[arg].clone() {
+        if let Some(types) = self.program.tuple_types(arg) {
+            let types = types.to_vec();
             for t in types {
                 let slots = self.program.slot_count(t);
                 let purpose = if slots == 1 {
@@ -463,6 +494,7 @@ impl<'z, 'p> Emit<'z, 'p> {
     }
 }
 
+#[track_caller]
 fn wrap(e: ModuleError) -> Box<CompileError<'static>> {
     make_err(CErr::Fatal(match e {
         ModuleError::Compilation(CodegenError::Verifier(e)) => format!("cranelift: {}", e),
@@ -526,10 +558,11 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
         Some(builder.ins().bnot(v[0]))
     }),
     ("fn load(_: *u8) u8;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        Some(builder.ins().load(I8, MemFlags::new(), v[0], 0))
+        Some(builder.ins().uload8(I64, MemFlags::new(), v[0], 0))
     }),
     ("fn store(_: *u8, val: u8) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        builder.ins().store(MemFlags::new(), v[1], v[0], 0);
+        let val = builder.ins().ireduce(I8, v[1]);
+        builder.ins().store(MemFlags::new(), val, v[0], 0);
         None
     }),
 ];
