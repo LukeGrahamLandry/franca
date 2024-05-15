@@ -472,22 +472,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
             }
             Expr::GetVar(var) => {
-                if result_location == Discard {
-                    return Ok(());
-                }
-                let id = *unwrap!(
-                    self.var_lookup.get(var),
-                    "(emit_bc) Missing resolved variable {:?}",
+                err!(
+                    "var loads should be converted to addrs so smaller loads happen properly. {}",
                     var.log(self.program.pool)
-                );
-
-                let slots = self.slot_count(result.vars[id as usize]);
-                result.push(Bc::AddrVar { id });
-                if result_location == ResAddr {
-                    result.push(Bc::CopyToFrom { slots });
-                } else {
-                    result.push(Bc::Load { slots });
-                }
+                )
             }
             Expr::Value { value } => match result_location {
                 PushStack => {
@@ -610,9 +598,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // field accesses should have been desugared.
             err!("took address of r-value",)
         };
-        assert_eq!(
+        // TODO: this shouldn't allow let either but i changed how variable refs work for :SmallTypes
+        assert_ne!(
             var.kind,
-            VarType::Var,
+            VarType::Const,
             "Can only take address of var (not let/const) {}",
             var.log(self.program.pool)
         );

@@ -1,5 +1,12 @@
 - got rid of FnWip. cause i wasnt using it right with constexprs anyway.
   now just tracking var types in the global thing.
+  the other thing they did was tracking callees so you could try to emit them first.
+- trying to make small_types test work on cranelift.
+  revealed problem of using normal loads for implicit access to vars that should be u8,
+  so then really you should zero the stack slot at the beginning which i wasn't doing so i guess it worked by luck.
+  new system is emit_bc never sees a GetVar, the frontend inserts `&[]` every time so it goes through the normal logic
+  that might replace that with the intrinsic load/store.
+  but now there's the u8/i64 types problem, so i guess i have to say zero extend on every load.
 
 ## stop committing generated stuff & do u8 strings (May 14)
 

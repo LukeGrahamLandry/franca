@@ -4,7 +4,7 @@ use cranelift::{
     codegen::{
         ir::{
             stackslot::StackSize,
-            types::{F64, I64, R64},
+            types::{F64, I64, I8, R64},
             ArgumentExtension, ArgumentPurpose, StackSlot,
         },
         settings::Flags,
@@ -189,8 +189,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                     let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
                     if let Some(emit) = self.program[f].cl_emit_fn_ptr {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
-                        let v = emit(builder.ins(), args);
+                        let v = emit(builder, args);
                         pops(&mut self.stack, slots as usize);
+                        // None == unit
+                        let v = v.unwrap_or_else(|| builder.ins().iconst(I64, 0));
                         self.stack.push(v);
                         if tail {
                             builder.ins().return_(&[v]);
@@ -476,23 +478,23 @@ fn pops<T>(v: &mut Vec<T>, count: usize) {
 
 macro_rules! inst {
     ($name:ident) => {
-        |builder: FuncInstBuilder, v: &[Value]| builder.$name(v[0], v[1])
+        |builder: &mut FunctionBuilder, v: &[Value]| Some(builder.ins().$name(v[0], v[1]))
     };
 }
 
 macro_rules! icmp {
     ($name:ident) => {
-        |builder: FuncInstBuilder, v: &[Value]| builder.icmp(IntCC::$name, v[0], v[1])
+        |builder: &mut FunctionBuilder, v: &[Value]| Some(builder.ins().icmp(IntCC::$name, v[0], v[1]))
     };
 }
 
 macro_rules! fcmp {
     ($name:ident) => {
-        |builder: FuncInstBuilder, v: &[Value]| builder.fcmp(FloatCC::$name, v[0], v[1])
+        |builder: &mut FunctionBuilder, v: &[Value]| Some(builder.ins().fcmp(FloatCC::$name, v[0], v[1]))
     };
 }
 
-pub type CfEmit = fn(FuncInstBuilder, &[Value]) -> Value;
+pub type CfEmit = fn(&mut FunctionBuilder, &[Value]) -> Option<Value>;
 
 // TODO: still emit these as real functions if you take a pointer to one.
 pub const BUILTINS: &[(&str, CfEmit)] = &[
@@ -520,5 +522,14 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn bit_and(_: i64, __: i64) i64;", inst!(band)),
     ("fn shift_left(_: i64, __: i64) i64;", inst!(ishl)),
     ("fun offset(_: rawptr, bytes: i64) i64;", inst!(iadd)),
-    ("fn bit_not(_: i64) i64;", |builder: FuncInstBuilder, v: &[Value]| builder.bnot(v[0])),
+    ("fn bit_not(_: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        Some(builder.ins().bnot(v[0]))
+    }),
+    ("fn load(_: *u8) u8;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        Some(builder.ins().load(I8, MemFlags::new(), v[0], 0))
+    }),
+    ("fn store(_: *u8, val: u8) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().store(MemFlags::new(), v[1], v[0], 0);
+        None
+    }),
 ];

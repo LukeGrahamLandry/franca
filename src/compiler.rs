@@ -1263,9 +1263,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::GetVar(var) => {
                 if let Some(ty) = self[var.scope].rt_types.get(var).cloned() {
+                    // Reading a variable. Convert it to `var&[]` so compiling it checks for smaller loads (u8, etc).
                     expr.ty = ty;
+                    expr.done = true; // don't recurse on the var expr again.
+                    let loc = expr.loc;
+                    let ptr_ty = self.program.ptr_type(ty);
+                    *expr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(expr))), loc, ptr_ty);
+                    expr.ty = ptr_ty;
                     expr.done = true;
-                    ty
+                    // Note: not using deref_one, because don't want to just remove the ref, we want raw variable expressions to not exist. kinda HACK
+                    *expr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(expr))), loc, ty);
+                    self.compile_expr(expr, requested)?
                 } else if let Some((value, ty)) = self.find_const(*var)? {
                     expr.set(value.clone(), ty);
                     expr.done = true;
@@ -1649,7 +1657,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         // but the only thing you can do for a var is <var>!addr, so you get stuck in a loop nesting !addr.  -- May 12
         if let Expr::GetVar(var) = arg.deref_mut().deref_mut() {
             let value_ty = *unwrap!(self[var.scope].rt_types.get(var), "Missing var {} (in !addr)", var.log(self.pool));
-            if var.kind != VarType::Var {
+            // TODO: this shouldn't allow let either but i changed how variable refs work for :SmallTypes
+            if var.kind == VarType::Const {
                 err!("Can only take address of vars not {:?} {}.", var.kind, var.log(self.pool))
             }
             let ptr_ty = self.program.ptr_type(value_ty);
@@ -2536,8 +2545,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
                 if want_deref {
-                    // Note: not using deref_one, becuase you want to use this to create var& expressions sometimes. kinda HACK
-                    *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(place))), loc, val_ty);
+                    self.deref_one(place)?;
                 }
                 place.done = true;
             }
@@ -2562,6 +2570,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 let (i, field_val_ty) = self.field_access_expr(container, *name)?;
                 let field_ptr_ty = self.program.ptr_type(field_val_ty);
+                debug_assert!(!matches!(container.expr, Expr::GetVar(_)));
                 place.expr = Expr::PtrOffset {
                     ptr: Box::new(mem::take(container)),
                     index: i,
@@ -2582,6 +2591,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let i: i64 = self.immediate_eval_expr_known(*index.clone())?;
                 self.set_literal(index, i)?;
                 let field_ptr_ty = self.index_expr(ptr.ty, i as usize)?;
+                debug_assert!(!matches!(ptr.expr, Expr::GetVar(_)));
                 place.expr = Expr::PtrOffset {
                     ptr: Box::new(mem::take(ptr)),
                     index: i as usize,
@@ -2632,11 +2642,19 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("expected ptr",)
         };
 
-        // Avoid reduntant var&[]. this allows auto deref to work on let ptr vars.
         if let Some(arg) = ptr.as_suffix_macro_mut(Flag::Addr) {
-            *ptr = mem::take(arg);
-            if ptr.ty.is_unknown() {
-                ptr.ty = inner; // TODO: this shouldn't happen
+            // this allows auto deref to work on let ptr vars.
+            if matches!(arg.expr, Expr::GetVar(_)) {
+                // :SmallTypes
+                // raw var expr is no longer allowed because we want to intercept and override the dereference operator.
+                let loc = ptr.loc;
+                *ptr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(ptr))), loc, inner);
+            } else {
+                // Avoid reduntant (whatever)&[].
+                *ptr = mem::take(arg);
+                if ptr.ty.is_unknown() {
+                    ptr.ty = inner; // TODO: this shouldn't happen
+                }
             }
         } else {
             let loc = ptr.loc;
@@ -3010,20 +3028,29 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
             //       it recurses and has to emit other asm first but they don't get put in dispatch,
             //       becuase they don't have a thing in the result stack to do callees first.
-            // println!("in: {}", asm.log(self.pool));
-            // self.compile_expr(asm, None)?;
-            // println!("out: {}", asm.log(self.pool));
-            let ops = if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
-                let mut ops = Vec::with_capacity(parts.len());
-                for int in parts {
-                    let i: i64 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
-                    ops.push(i as u32);
+            let ops = 'o: {
+                if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
+                    let mut ops = Vec::with_capacity(parts.len());
+                    for int in parts {
+                        let i: i64 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
+                        ops.push(i as u32);
+                    }
+                    break 'o ops;
                 }
-                ops
-            } else {
-                // println!("A");
+
+                let ty = self.type_of(asm)?;
+                if let Some(ty) = ty {
+                    if let TypeInfo::Tuple(parts) = &self.program[ty] {
+                        let is_ints = parts.iter().all(|t| matches!(self.program[*t], TypeInfo::Int(_)));
+                        if is_ints {
+                            let ints = self.immediate_eval_expr(asm.clone(), ty)?;
+                            let ints = ints.vec().into_iter().map(|i| i as u32).collect();
+                            break 'o ints;
+                        }
+                    }
+                }
+
                 let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
-                // println!("B");
                 ops
             };
             self.program[f].jitted_code = Some(ops.clone());
