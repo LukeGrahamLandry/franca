@@ -362,18 +362,6 @@ fn run_one(comp: &mut Compile, f: FuncId) {
     let code = comp.aarch64.get_fn(f).unwrap();
 
     let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
-    let indirect_fns = comp.aarch64.get_dispatch();
-    unsafe {
-        asm!(
-        "mov x21, {fns}",
-        fns = in(reg) indirect_fns,
-        // I'm hoping this is how I declare that I intend to clobber the register.
-        // https://doc.rust-lang.org/reference/inline-assembly.html
-        // "[...] the contents of the register to be discarded at the end of the asm code"
-        // I imagine that means they just don't put it anywhere, not that they zero it for spite reasons.
-        out("x21") _
-        );
-    }
     let result = code(arg);
     debug_assert_eq!(result, arg);
 }

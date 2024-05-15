@@ -427,15 +427,6 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
     let mut arg = arg.vec();
     debugln!("IN: {arg:?}");
     let mut ret = vec![0i64; ret_count];
-    let indirect_fns = compile.aarch64.get_dispatch();
-    // TODO: im breaking the cc
-    unsafe {
-        asm!(
-        "mov x21, {fns}",
-        fns = in(reg) indirect_fns,
-        out("x21") _
-        );
-    }
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     debugln!("OUT: {ret:?}");
     Ok(if ret_count == 1 {
@@ -523,6 +514,10 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     (
         "#macro #outputs(i64) fun BITS(parts: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, bits_macro),
+    ),
+    (
+        "fn __get_comptime_dispatch_ptr() **i64",
+        bounce_flat_call!((), *mut i64, get_dispatch_ptr),
     ),
 ];
 
@@ -780,4 +775,8 @@ extern "C-unwind" fn shift_or_slice(compilerctx: usize, ptr: *const i64, len: us
         acc |= x << sh;
     }
     acc
+}
+
+fn get_dispatch_ptr(comp: &mut Compile, _: ()) -> *mut i64 {
+    comp.aarch64.get_dispatch() as usize as *mut i64
 }

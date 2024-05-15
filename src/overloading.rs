@@ -380,17 +380,3 @@ pub fn has_arch_split<'p>(program: &Program<'p>, overloads: &OverloadSet<'p>) ->
 
     false
 }
-
-pub fn filter_arch<'p>(program: &Program<'p>, overloads: &mut OverloadSet<'p>, when: ExecTime) {
-    let target = match when {
-        ExecTime::Comptime => program.comptime_arch,
-        ExecTime::Runtime => program.runtime_arch,
-        ExecTime::Both => unreachable!(),
-    };
-
-    // TODO: kinda cringe.
-    match target {
-        TargetArch::Aarch64 => overloads.ready.retain(|f| !program[f.func].has_tag(Flag::Llvm)),
-        TargetArch::Llvm => overloads.ready.retain(|f| !program[f.func].has_tag(Flag::Aarch64)),
-    }
-}

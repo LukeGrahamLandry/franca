@@ -22,7 +22,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{__clear_cache, do_flat_call, do_flat_call_values};
+use crate::export_ffi::{__clear_cache, do_flat_call_values};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
@@ -315,47 +315,51 @@ impl<'a, 'p> Compile<'a, 'p> {
         unsafe { STATS.jit_call += 1 };
         let state2 = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state2);
+        self.compile(f, when)?;
+
         let arch = match when {
             ExecTime::Comptime => self.program.comptime_arch,
             ExecTime::Runtime => self.program.runtime_arch,
             ExecTime::Both => todo!(),
         };
         let ty = self.program[f].unwrap_ty();
-        let result = match arch {
-            TargetArch::Aarch64 => {
-                let addr = if let Some(addr) = self.program[f].comptime_addr {
-                    // we might be doing ffi at comptime, thats fine
-                    addr as *const u8
-                } else {
-                    unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}")
-                };
 
-                let cc = self.program[f].cc.unwrap();
-                let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
-                let flat_call = cc == CallConv::Flat;
-
-                // symptom if you forget: bus error
-                self.aarch64.make_exec();
-                self.flush_cpu_instruction_cache();
-                debug_assert_eq!(addr as usize % 4, 0);
-                debugln!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
-                // TODO: not setting x21 !!! -- Apr 30
-                if flat_call {
-                    do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
-                } else if c_call {
-                    assert!(!flat_call);
-                    let ints = arg.vec();
-                    debugln!("IN: {ints:?}");
-                    let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
-                    debugln!("OUT: {r}");
-                    let mut out = vec![];
-                    values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
-                    Ok(out.into())
-                } else {
-                    todo!()
+        let addr = if let Some(addr) = self.program[f].comptime_addr {
+            // we might be doing ffi at comptime, thats fine
+            addr as *const u8
+        } else {
+            match arch {
+                TargetArch::Aarch64 => {
+                    // symptom if you forget: bus error
+                    let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}");
+                    self.aarch64.make_exec();
+                    self.flush_cpu_instruction_cache();
+                    addr
                 }
+                TargetArch::Llvm => todo!(),
+                TargetArch::Cranelift => todo!(),
             }
-            TargetArch::Llvm => todo!(),
+        };
+
+        let cc = self.program[f].cc.unwrap();
+        let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
+        let flat_call = cc == CallConv::Flat;
+
+        debug_assert_eq!(addr as usize % 4, 0);
+        debugln!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
+        let result = if flat_call {
+            do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
+        } else if c_call {
+            assert!(!flat_call);
+            let ints = arg.vec();
+            debugln!("IN: {ints:?}");
+            let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
+            debugln!("OUT: {r}");
+            let mut out = vec![];
+            values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
+            Ok(out.into())
+        } else {
+            todo!()
         };
 
         let result = self.tag_err(result);
@@ -365,49 +369,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         result
     }
 
-    // very similar to the above but nicer api without going though Values for flat_call.
     pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, when: ExecTime, arg: Arg) -> Res<'p, Ret> {
-        unsafe { STATS.jit_call += 1 };
-        let state = DebugState::RunInstLoop(f, self.program[f].name);
-        self.push_state(&state);
-        self.compile(f, when)?;
-        let addr = if let Some(addr) = self.program[f].comptime_addr {
-            // it might be a builtin macro that's part of the compiler but is resolved like normal for consistancy (like @enum).
-            addr as *const u8
-        } else {
-            unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}")
-        };
-
+        self.ensure_compiled(f, when)?;
         let ty = self.program[f].unwrap_ty();
-        let cc = self.program[f].cc.unwrap();
-        let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct);
-        let flat_call = cc == CallConv::Flat;
-
         let arg_ty = Arg::get_type(self.program);
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
         let ret_ty = Ret::get_type(self.program);
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
-
-        // symptom if you forget: bus error
-        self.aarch64.make_exec();
-        self.flush_cpu_instruction_cache();
-        let res = if flat_call {
-            Ok(do_flat_call(self, unsafe { transmute(addr) }, arg))
-        } else if c_call {
-            assert!(addr as usize % 4 == 0);
-            let arg = arg.serialize_to_ints_one();
-            // TODO: not setting x21 !!!
-            let r = ffi::c::call(self, addr as usize, ty, arg, cc == CallConv::Arg8Ret1Ct)?;
-            let r = Ret::deserialize_from_ints(&mut [r].into_iter());
-            Ok(unwrap!(r, ""))
+        let arg = if Arg::SIZE == 1 {
+            // TODO: this is dumb. i make the vec here anyway, then throw it away, then remake it on the other side.
+            Values::One(int_to_value(self, arg_ty, arg.serialize_to_ints_one()[0])?)
         } else {
-            todo!()
+            Values::Many(arg.serialize_to_ints_one())
         };
-        if res.is_ok() {
-            self.pop_state(state);
-        }
-
-        res
+        let ret = self.run(f, arg, when)?;
+        // TODO: this is also dumb, another double vec.
+        Ok(unwrap!(Ret::deserialize_from_ints(&mut ret.vec().into_iter()), ""))
     }
 
     // This is much less painful than threading it through the macros

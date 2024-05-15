@@ -1677,6 +1677,7 @@ impl TypeId {
 pub enum TargetArch {
     Aarch64 = Flag::Aarch64 as u8,
     Llvm = Flag::Llvm as u8,
+    Cranelift = Flag::Cranelift as u8,
 }
 
 /// I don't require the values be stable, it just needs to be fixed within one run of the compiler so I can avoid a billion hash lookups.
@@ -1688,6 +1689,7 @@ pub enum Flag {
     _Reserved_Null_,
     Aarch64,
     Llvm,
+    Cranelift,
     _Reserved_End_Arch_, // It's important which are above and below this point.
     Comptime,
     Generic,

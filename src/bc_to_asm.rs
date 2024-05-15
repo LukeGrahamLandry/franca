@@ -54,13 +54,11 @@ const x5: i64 = 5;
 // const x6: i64 = 6;
 // const x7: i64 = 7;
 const x8: i64 = 8;
-// const x9: i64 = 9;
 /// c_call: "intra-procedure-call scratch register"
 const x16: i64 = 16;
 /// c_call: "intra-procedure-call scratch register"
 const x17: i64 = 17;
 
-const x21: i64 = 21;
 const fp: i64 = 29;
 const lr: i64 = 30;
 const sp: i64 = 31;
@@ -420,9 +418,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 } else {
                     assert!(f.as_index() < 4096);
                     let reg = self.get_free_reg();
-                    // you don't really need to do this but i dont trust it cause im not following the calling convention
-                    self.load_imm(x21, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
-                    self.asm.push(ldr_uo(X64, reg, x21, f.as_index() as i64));
+                    self.load_imm(reg, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
+                    self.asm.push(ldr_uo(X64, reg, reg, f.as_index() as i64));
                     self.state.stack.push(Val::Increment { reg, offset_bytes: 0 })
                 }
             }
@@ -1174,17 +1171,17 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             // TODO: have a mapping. funcs take up slots even if never indirect called.
             assert!(f.as_index() < 4096);
             // you don't really need to do this but i dont trust it cause im not following the calling convention
-            self.load_imm(x21, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
-            self.asm.push(ldr_uo(X64, x16, x21, f.as_index() as i64));
+            self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
+            self.asm.push(ldr_uo(X64, x16, x16, f.as_index() as i64));
         }
 
         self.asm.push(br(x16, with_link as i64))
     }
 
+    // Now have to be careful about trying to use x17
     fn drop_slot(&mut self, slot: SpOffset, bytes: u16) {
         self.state.open_slots.push((slot, bytes, self.clock)); // TODO: keep this sorted by count?
         if ZERO_DROPPED_SLOTS {
-            // todo this wont work now that i try to use x17
             self.load_imm(x17, 0);
             for i in 0..(bytes / 8) {
                 self.store_u64(x17, sp, slot.0 + (i * 8));
@@ -1307,8 +1304,8 @@ pub mod jit {
             }
         }
 
+        #[track_caller]
         pub fn get_dispatch(&self) -> *const *const u8 {
-            debug_assert!(self.map_exec.is_some(), "dont try to use the dispatch table while writing.");
             self.dispatch.as_ptr()
         }
 

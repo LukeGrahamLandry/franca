@@ -254,6 +254,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         }
                         call
                     } else {
+                        // TODO: actually forward declare if none to make mutual recursion work.
                         let func_id = self.cl.funcs[f.as_index()].unwrap();
                         let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
                         if tail {
@@ -338,6 +339,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         .map(|a| a as i64)
                         .or_else(|| self.cl.get_ptr(f).map(|a| a as i64))
                         .or_else(|| self.asm.get_fn(f).map(|a| a as i64));
+                    // TODO: use this instead so less mmap. and also make it deal with mutual recursion. so just forward declare and emit later.
                     // builder.ins().func_addr(iAddr, FN)
                     let addr = unwrap!(addr, "fn not ready");
                     self.stack.push(builder.ins().iconst(I64, addr));
