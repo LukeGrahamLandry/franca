@@ -246,10 +246,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 assert!(arg_size < (1 << 12));
                 assert!(ret_size < (1 << 12));
                 self.asm.push(cmp_im(X64, x2, arg_size as i64, 0));
-                self.asm.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
                 self.asm.push(cmp_im(X64, x4, ret_size as i64, 0));
-                self.asm.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
 
                 // Save the result pointer.
@@ -290,13 +290,13 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             let offset = self.asm.offset_words(inst, false_ip);
             debug_assert!(reg < 32);
             debug_assert_ne!(offset, 0, "!if ice: while(1);");
-            self.asm.patch(inst, cbz(X64, signed_truncate(offset, 19), reg));
+            self.asm.patch(inst, cbz(X64, offset, reg));
         }
         for (from_inst, to_ip) in self.patch_b.drain(0..) {
             let to_ip = self.block_ips[to_ip.0 as usize].unwrap();
             let dist = self.asm.offset_words(from_inst, to_ip);
             debug_assert_ne!(dist, 0, "while(1);");
-            self.asm.patch(from_inst, b(signed_truncate(dist, 26), 0));
+            self.asm.patch(from_inst, b(dist, 0));
         }
 
         let mut slots = self.next_slot.0; //self.compile.ready[self.f].as_ref().unwrap().stack_slots * 8;
@@ -555,7 +555,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.load_u64(working, reg, offset_bytes); // working = *ptr
 
                 self.asm.push(cmp_im(X64, working, expected as i64, 0));
-                self.asm.push(b_cond(2, CmpFlags::EQ as i64)); // TODO: do better
+                self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbeef));
                 self.drop_reg(working);
                 // don't drop <reg>, we just peeked it
@@ -1112,7 +1112,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             offset /= 4;
             // TODO: use adr/adrp
             if offset.abs() < (1 << 25) {
-                offset = signed_truncate(offset, 26);
                 self.asm.push(b(offset, with_link as i64));
                 return;
             }
@@ -1129,7 +1128,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             // If its a comptime_addr into the compiler, (which happens a lot because of assert_eq and tag_value),
             //     aslr might be our friend and just put the mmaped pages near where it originally loaded the compiler.
             if offset.abs() < (1 << 25) {
-                offset = signed_truncate(offset, 26);
                 self.asm.push(b(offset, with_link as i64));
                 return;
             } else {
@@ -1185,7 +1183,6 @@ impl Val {
 }
 
 use crate::ffi::InterpSend;
-#[cfg(target_arch = "aarch64")]
 pub use jit::Jitted;
 
 pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
@@ -1218,7 +1215,6 @@ impl Value {
     }
 }
 
-//#[cfg(target_arch = "aarch64")]
 pub mod jit {
     use crate::ast::FuncId;
     use crate::bc_to_asm::brk;
@@ -1377,30 +1373,23 @@ pub mod jit {
     }
 }
 
-/// https://developer.arm.com/documentation/100076/0100/A32-T32-Instruction-Set-Reference/Condition-Codes/Condition-code-suffixes-and-related-flags?lang=en
-#[derive(Debug, Copy, Clone)]
-enum CmpFlags {
-    EQ = 0b0000,
-}
-
-// There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
-/// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
-pub fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
-    debug_assert!(x > -(1 << (bit_count)) && (x < (1 << (bit_count))));
-    let mask = (1 << bit_count) - 1;
-    if x < 0 {
-        x *= -1;
-        x = !x;
-        x += 1;
-        x &= mask;
-    }
-    x
-}
+const CMP_EQ: i64 = 0b0000;
 
 use encoding::*;
-
 mod encoding {
-    use crate::bc_to_asm::signed_truncate;
+    // There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
+    /// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
+    fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
+        debug_assert!(x > -(1 << (bit_count)) && (x < (1 << (bit_count))));
+        let mask = (1 << bit_count) - 1;
+        if x < 0 {
+            x *= -1;
+            x = !x;
+            x += 1;
+            x &= mask;
+        }
+        x
+    }
 
     pub fn add_im(sf: i64, dest: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
         sf << 31 | 0b100010 << 23 | lsl_12 << 22 | imm << 10 | src << 5 | dest

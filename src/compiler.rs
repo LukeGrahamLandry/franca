@@ -294,14 +294,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 #[cfg(feature = "cranelift")]
                 let aarch = {
-                    let use_cl = self.program[f].has_tag(Flag::Use_Cranelift);
+                    let use_cl = self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift;
                     if use_cl {
                         let res = crate::cranelift::emit_cl(self, &body, f);
                         self.tag_err(res)?;
-                        self.aarch64.extend_blanks(f);
-                        // TODO: this is dumb hyper mmaping, just flush as needed
-                        let p = self.cranelift.get_ptr(f).unwrap();
-                        self.aarch64.dispatch[f.as_index()] = p;
                     }
                     !use_cl
                 };
@@ -332,28 +328,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state2);
         self.compile(f, when)?;
 
-        let arch = match when {
-            ExecTime::Comptime => self.program.comptime_arch,
-            ExecTime::Runtime => self.program.runtime_arch,
-            ExecTime::Both => todo!(),
-        };
         let ty = self.program[f].unwrap_ty();
+
+        #[cfg(feature = "cranelift")]
+        {
+            self.cranelift.flush_pending_defs(&mut self.aarch64)?;
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.aarch64.make_exec();
+        }
+
+        self.flush_cpu_instruction_cache();
 
         let addr = if let Some(addr) = self.program[f].comptime_addr {
             // we might be doing ffi at comptime, thats fine
             addr as *const u8
         } else {
-            match arch {
-                TargetArch::Aarch64 => {
-                    // symptom if you forget: bus error
-                    let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}");
-                    self.aarch64.make_exec();
-                    self.flush_cpu_instruction_cache();
-                    addr
-                }
-                TargetArch::Llvm => todo!(),
-                TargetArch::Cranelift => todo!(),
-            }
+            // cranelift puts stuff here too
+            unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}")
         };
 
         let cc = self.program[f].cc.unwrap();
@@ -1027,11 +1021,12 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let func = &self.program[id];
 
-        if func.has_tag(Flag::Test) {
+        let is_cl = self.program.comptime_arch == TargetArch::Cranelift;
+        if func.has_tag(Flag::Test) && (!is_cl || !func.has_tag(Flag::Skip_Cranelift)) {
             // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests.push(id);
         }
-        if func.has_tag(Flag::Test_Broken) {
+        if func.has_tag(Flag::Test_Broken) && (!is_cl || !func.has_tag(Flag::Skip_Cranelift)) {
             // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests_broken.push(id);
         }

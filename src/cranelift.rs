@@ -1,7 +1,13 @@
+//! TODO:
+//! - tail calls
+//! - backtrace needs to deal with pointer authentication
+//! - soemthing makes it jump into garbage when you run too many tests
+
 use std::mem;
 
 use cranelift::{
     codegen::{
+        control::ControlPlane,
         ir::{
             stackslot::StackSize,
             types::{F64, I64, I8},
@@ -31,6 +37,7 @@ pub struct JittedCl {
     funcs: Vec<Option<cranelift_module::FuncId>>,
     // can't just use funcs[i].is_some because it might just be a forward declaration.
     funcs_done: BitSet,
+    pending: Vec<FuncId>,
 }
 
 pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) -> Res<'p, ()> {
@@ -73,7 +80,8 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 impl Default for JittedCl {
     fn default() -> Self {
         let isa = cranelift_native::builder().unwrap();
-        let flags = settings::builder();
+        let mut flags = settings::builder();
+        flags.set("preserve_frame_pointers", "true").unwrap();
 
         // TODO: want to let comptime control settings...
         // flags.set("opt_level", "speed").unwrap();
@@ -85,14 +93,24 @@ impl Default for JittedCl {
             module,
             funcs: vec![],
             funcs_done: BitSet::empty(),
+            pending: vec![],
         }
     }
 }
 
 impl JittedCl {
-    pub fn get_ptr(&mut self, f: FuncId) -> Option<*const u8> {
+    pub fn flush_pending_defs(&mut self, aarch64: &mut Jitted) -> Res<'static, ()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
         self.module.finalize_definitions().unwrap();
-        self.funcs[f.as_index()].map(|f| self.module.get_finalized_function(f))
+        for f in self.pending.drain(0..) {
+            aarch64.extend_blanks(f);
+            let ff = self.funcs[f.as_index()].unwrap();
+            let addr = self.module.get_finalized_function(ff);
+            aarch64.dispatch[f.as_index()] = addr;
+        }
+        Ok(())
     }
 }
 
@@ -120,7 +138,6 @@ impl<'z, 'p> Emit<'z, 'p> {
         let f_ty = self.program[f].unwrap_ty();
 
         let name = format!("FN{}", f.as_index());
-        // ctx.want_disasm = true; // TODO
         ctx.func.signature = if self.is_flat {
             self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
         } else {
@@ -138,7 +155,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
         self.emit_body(&mut builder)?;
-        if self.program[f].has_tag(Flag::Log_Asm) {
+        if self.program[f].has_tag(Flag::Log_Ir) {
             println!("=== Cranelift IR for {f:?}: {} ===", self.program.pool.get(self.program[f].name));
             println!("{}", builder.func.display());
             println!("===");
@@ -146,7 +163,14 @@ impl<'z, 'p> Emit<'z, 'p> {
         builder.finalize();
         self.cl.module.define_function(id, &mut ctx).map_err(wrap)?;
 
+        if self.program[f].has_tag(Flag::Log_Asm) {
+            ctx.want_disasm = true;
+            let code = ctx.compile_stencil(self.cl.module.isa(), &mut ControlPlane::default()).map_err(wrapg)?;
+            println!("{}", code.vcode.unwrap());
+        }
+
         self.cl.module.clear_context(&mut ctx);
+        self.cl.pending.push(f);
 
         Ok(())
     }
@@ -429,15 +453,17 @@ impl<'z, 'p> Emit<'z, 'p> {
                     break;
                 }
                 Bc::GetNativeFnPtr(f) => {
-                    let addr = self.program[f]
-                        .comptime_addr
-                        .map(|a| a as i64)
-                        .or_else(|| self.cl.get_ptr(f).map(|a| a as i64))
-                        .or_else(|| self.asm.get_fn(f).map(|a| a as i64));
-                    // TODO: use this instead so less mmap. and also make it deal with mutual recursion. so just forward declare and emit later.
-                    // builder.ins().func_addr(iAddr, FN)
-                    let addr = unwrap!(addr, "fn not ready");
-                    self.stack.push(builder.ins().iconst(I64, addr));
+                    if let Some(&Some(id)) = self.cl.funcs.get(f.as_index()) {
+                        let id = self.cl.module.declare_func_in_func(id, builder.func);
+                        self.stack.push(builder.ins().func_addr(I64, id));
+                    } else {
+                        let addr = self.program[f]
+                            .comptime_addr
+                            .map(|a| a as i64)
+                            .or_else(|| self.asm.get_fn(f).map(|a| a as i64));
+                        let addr = unwrap!(addr, "fn not ready");
+                        self.stack.push(builder.ins().iconst(I64, addr));
+                    }
                 }
                 Bc::Load { slots } => {
                     debug_assert_ne!(slots, 0);
@@ -633,6 +659,16 @@ fn wrap(e: ModuleError) -> Box<CompileError<'static>> {
         ModuleError::Compilation(CodegenError::Verifier(e)) => format!("cranelift: {}", e),
         _ => format!("cranelift: {:?}", e),
     }))
+}
+
+#[track_caller]
+fn wrapc(e: cranelift::codegen::CompileError) -> Box<CompileError<'static>> {
+    make_err(CErr::Fatal(format!("cranelift: {:?}", e)))
+}
+
+#[track_caller]
+fn wrapg(e: cranelift::codegen::CodegenError) -> Box<CompileError<'static>> {
+    make_err(CErr::Fatal(format!("cranelift: {:?}", e)))
 }
 
 fn pops<T>(v: &mut Vec<T>, count: usize) {

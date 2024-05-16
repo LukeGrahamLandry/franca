@@ -296,7 +296,10 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
 extern "C-unwind" fn symbol_to_cstr(program: &mut &mut Program, symbol: i64) -> *const u8 {
     let symbol = symbol as u32;
     hope(|| {
-        let symbol = unwrap!(program.pool.upcast(symbol), "invalid symbol {symbol}");
+        let symbol = program
+            .pool
+            .upcast(symbol) // TODO: return an error instead.
+            .unwrap_or_else(|| program.pool.intern(&format!("invalid symbol {symbol}")));
         let s = program.pool.get_c_str(symbol);
         Ok(s)
     })

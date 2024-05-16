@@ -4,6 +4,7 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
+    bc::Value,
     compiler::{Compile, ExecTime, Res},
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib,
@@ -18,7 +19,7 @@ use std::{
     env,
     fs::{self, File},
     io::{Read, Write},
-    mem::{self, transmute},
+    mem::{self},
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
@@ -61,48 +62,75 @@ fn main() {
         eprintln!("Standard library not found.");
         exit(1);
     }
+
+    let mut no_fork = false;
+    let mut do_60fps_ = false;
+    let mut path = None;
     let mut args = env::args();
-    if let Some(name) = args.nth(1) {
+    args.next().unwrap(); // exe path
+
+    let mut arch = TargetArch::Aarch64;
+
+    for name in args {
         if name == "--" {
             panic!("dont put double dash to seperate args");
         }
-        if name == "log_export_ffi" {
-            println!("{}", get_include_std("compiler").unwrap());
-            println!("{}", get_include_std("libc").unwrap());
 
-            let pool = Box::leak(Box::<StringPool>::default());
-            let program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
-            println!("{}", program.ffi_definitions);
-            return;
-        }
+        if let Some(name) = name.strip_prefix("--") {
+            match name {
+                "no-fork" => no_fork = true,
+                "60fps" => do_60fps_ = true,
+                #[cfg(feature = "cranelift")]
+                "cranelift" => arch = TargetArch::Cranelift,
+                #[cfg(not(feature = "cranelift"))]
+                "cranelift" => panic!("recompile the compiler with cranelift feature enabled. "),
+                #[cfg(target_arch = "aarch64")]
+                "aarch64" => arch = TargetArch::Aarch64,
+                #[cfg(not(target_arch = "aarch64"))]
+                "aarch64" => {
+                    panic!("TODO: direct aarch64 backend cannot cross compile because its just jit because i put the addresses in the code...")
+                }
+                "log_export_ffi" => {
+                    println!("{}", get_include_std("compiler").unwrap());
+                    println!("{}", get_include_std("libc").unwrap());
 
-        if name == "--no-fork" {
-            run_tests_serial();
-            println!("{:#?}", unsafe { &STATS });
-            return;
+                    let pool = Box::leak(Box::<StringPool>::default());
+                    let program = Program::new(pool, arch, arch);
+                    println!("{}", program.ffi_definitions);
+                }
+                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi"),
+                _ => panic!("unknown argument --{name}"),
+            }
+        } else {
+            assert!(path.is_none(), "please specify only one input file");
+            path = Some(name);
         }
-        if name == "--60fps" {
-            do_60fps();
-            return;
-        }
+    }
 
+    if no_fork {
+        run_tests_serial(arch);
+        println!("{:#?}", unsafe { &STATS });
+        return;
+    }
+    if do_60fps_ {
+        do_60fps(arch);
+        return;
+    }
+
+    if let Some(name) = path {
         let pool = Box::leak(Box::<StringPool>::default());
         let path = PathBuf::from(format!("tests/{name}.fr"));
-        let mut src = if name == "_" {
-            "".to_string()
-        } else {
-            match fs::read_to_string(path) {
-                Ok(src) => src,
-                Err(_) => fs::read_to_string(&name).unwrap(),
-            }
+        let src = match fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(_) => fs::read_to_string(&name).unwrap(),
         };
-
-        for a in args {
-            src += &a;
-        }
+        // TODO
+        // for a in args {
+        //     src += &a;
+        // }
 
         let start = timestamp();
-        let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+        let mut program = Program::new(pool, arch, arch);
         let mut comp = Compile::new(pool, &mut program);
 
         load_all_toplevel(&mut comp, &[(name, src)]).unwrap_or_else(|e| {
@@ -134,8 +162,8 @@ fn main() {
             eprint!("Directory 'tests' does not exist in cwd");
             exit(1);
         }
-        run_tests_find_failures();
-        check_broken();
+        run_tests_find_failures(arch);
+        check_broken(arch);
     }
 }
 
@@ -146,9 +174,9 @@ fn main() {
 /// (unless they're like trying to use the write files or something, which like... don't do that then I guess).
 /// My way has higher overhead per test but it feels worth it.
 
-fn run_tests_find_failures() {
+fn run_tests_find_failures(arch: TargetArch) {
     // If we can run all the tests without crashing, cool, we're done.
-    let (success, out, err) = fork_and_catch(run_tests_serial);
+    let (success, out, err) = fork_and_catch(|| run_tests_serial(arch));
     if success {
         println!("{out}");
         println!("{err}");
@@ -157,16 +185,16 @@ fn run_tests_find_failures() {
 
     println!("TESTS FAILED. Running separately...");
     println!("=================================");
-    forked_swallow_passes();
+    forked_swallow_passes(arch);
 }
 
 // forking a bunch confuses the profiler.
 // also it seems like a good idea to make sure nothing gets weird when you compile a bunch of stuff on the same compiler instance.
-fn run_tests_serial() {
+fn run_tests_serial(arch: TargetArch) {
     let beg = MEM.get();
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
-    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+    let mut program = Program::new(pool, arch, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -182,11 +210,11 @@ fn run_tests_serial() {
     let mut last = String::new();
     let test_count = comp.tests.len();
     for f in comp.tests.clone() {
+        let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
+        let fname = comp.pool.get(comp.program[f].name);
+
         run_one(&mut comp, f);
 
-        let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
-
-        let fname = comp.pool.get(comp.program[f].name);
         if file != last {
             println!();
             set_colour(0, 255, 0);
@@ -227,9 +255,9 @@ fn run_tests_serial() {
     // println!("{:#?}", unsafe { &STATS });
 }
 
-fn forked_swallow_passes() {
+fn forked_swallow_passes(arch: TargetArch) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+    let mut program = Program::new(pool, arch, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -274,9 +302,9 @@ fn forked_swallow_passes() {
     unset_colour();
 }
 
-fn check_broken() {
+fn check_broken(arch: TargetArch) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+    let mut program = Program::new(pool, arch, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -355,14 +383,7 @@ fn run_one(comp: &mut Compile, f: FuncId) {
 
     let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
 
-    comp.aarch64.reserve(comp.program.funcs.len()); // Need to allocate for all, not just up to the one being compiled because backtrace gets the len of array from the program func count not from asm.
-    comp.aarch64.make_exec();
-    comp.flush_cpu_instruction_cache();
-    let code = comp.aarch64.get_fn(f).unwrap();
-
-    let code: extern "C-unwind" fn(i64) -> i64 = unsafe { transmute(code) };
-    let result = code(arg);
-    debug_assert_eq!(result, arg);
+    comp.run(f, Value::I64(arg).into(), ExecTime::Runtime).unwrap();
 }
 
 fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
@@ -422,7 +443,7 @@ fn unset_colour() {
     print!("[0m");
 }
 
-fn do_60fps() {
+fn do_60fps(arch: TargetArch) {
     let name = "examples/mandelbrot.fr";
     let src = fs::read_to_string(name).unwrap();
     let mut src_parts = src.split("// @InsertConfig");
@@ -455,7 +476,7 @@ fn do_60fps() {
         src.push_str(&src2);
 
         let pool = Box::leak(Box::<StringPool>::default());
-        let mut program = Program::new(pool, TargetArch::Aarch64, TargetArch::Aarch64);
+        let mut program = Program::new(pool, arch, arch);
         let mut comp = Compile::new(pool, &mut program);
 
         let file = comp

@@ -1,3 +1,22 @@
+## compiling the compiler for blink
+
+https://betterprogramming.pub/cross-compiling-rust-from-mac-to-linux-7fad5a454ab1
+
+in `.cargo/config.toml`
+
+```
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+```
+
+```
+rustup target add x86_64-unknown-linux-musl
+brew install FiloSottile/musl-cross/musl-cross
+cargo build --target x86_64-unknown-linux-musl
+```
+
+ok that worked on my mandelbrot demo.
+
 ## finishing cranelift backend (May 16)
 
 - floats on cranelift. im being dumb and not tracking types so doing a bunch of bit casts.
@@ -30,6 +49,9 @@
 - emitting an unreachable and abandoning that block after you call something that returns Never.
 - fixed bc emitting StorePre of size 0 when assigning to a var from an if with a Never branch.
 - thats everything working except backtrace.
+- unwind on cranelift gets messed up by it doing pointer integrety things? pacibsp and retabsp.
+  so when it saves the return address its infact some different thing you can trade for the return address?
+  https://devblogs.microsoft.com/oldnewthing/20220819-00/?p=107020
 
 ## small types on cranelift (May 15)
 
