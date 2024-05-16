@@ -294,7 +294,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 #[cfg(feature = "cranelift")]
                 let aarch = {
-                    let use_cl = true | self.program[f].has_tag(Flag::Use_Cranelift);
+                    let use_cl = self.program[f].has_tag(Flag::Use_Cranelift);
                     if use_cl {
                         let res = crate::cranelift::emit_cl(self, &body, f);
                         self.tag_err(res)?;

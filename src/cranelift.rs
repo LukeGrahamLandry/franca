@@ -74,7 +74,9 @@ impl Default for JittedCl {
     fn default() -> Self {
         let isa = cranelift_native::builder().unwrap();
         let flags = settings::builder();
+
         // TODO: want to let comptime control settings...
+        // flags.set("opt_level", "speed").unwrap();
         let isa = isa.finish(Flags::new(flags));
 
         let builder = JITBuilder::with_isa(isa.unwrap(), cranelift_module::default_libcall_names());
@@ -136,7 +138,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
         self.emit_body(&mut builder)?;
-        if self.program[f].has_tag(Flag::Log_Cl) {
+        if self.program[f].has_tag(Flag::Log_Asm) {
             println!("=== Cranelift IR for {f:?}: {} ===", self.program.pool.get(self.program[f].name));
             println!("{}", builder.func.display());
             println!("===");
@@ -178,13 +180,15 @@ impl<'z, 'p> Emit<'z, 'p> {
             builder.seal_block(entry);
         } else {
             // TODO: copy-paste
-            for block in &self.body.blocks {
+            for (i, block) in self.body.blocks.iter().enumerate() {
                 self.blocks.push(builder.create_block());
-                for _ in 0..block.arg_slots {
-                    builder.append_block_param(*self.blocks.last().unwrap(), I64);
+                if i != 0 {
+                    for _ in 0..block.arg_slots {
+                        builder.append_block_param(*self.blocks.last().unwrap(), I64);
+                    }
                 }
             }
-            // builder.append_block_params_for_function_params(self.blocks[0]);
+            builder.append_block_params_for_function_params(self.blocks[0]);
             self.indirect_ret_addr = None;
             self.flat_arg_addr = None;
         }
@@ -219,6 +223,13 @@ impl<'z, 'p> Emit<'z, 'p> {
             let v = args[i as usize];
             self.stack.push(v)
         }
+        if b == 0 && !self.is_flat {
+            let arg = self.program[self.f].finished_arg.unwrap();
+            let slots = self.program.slot_count(arg);
+            debug_assert_eq!(slots, block.arg_slots);
+            let float_mask = self.program.float_mask_one(arg);
+            self.cast_ret_from_float(builder, slots, float_mask);
+        }
 
         for inst in &block.insts {
             match *inst {
@@ -251,6 +262,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         // None == unit
                         let v = v.unwrap_or_else(|| builder.ins().iconst(I64, 0));
                         self.stack.push(v);
+                        self.cast_ret_from_float(builder, 1, floats.ret);
                         if tail {
                             builder.ins().return_(&[v]);
                             break;
@@ -262,6 +274,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
                     // without slowing compilation for all of them. So when trying to call something, check if my asm backend has it.
 
+                    let ty = self.program[f].unwrap_ty();
                     // Note: check cl funcs first because ptrs go in the asm dispatch table anyway.
                     // TODO: actually forward declare if none to make mutual recursion work.
                     let call = if let Some(&Some(func_id)) = self.cl.funcs.get(f.as_index()) {
@@ -271,16 +284,29 @@ impl<'z, 'p> Emit<'z, 'p> {
                             // builder.ins().return_call(callee, args);
                             // TODO: cranelift wants to do real tailcalls which changes the abi.
                             let call = builder.ins().call(callee, args);
+                            if ty.ret.is_never() {
+                                builder.ins().trap(TrapCode::UnreachableCodeReached);
+                                break;
+                            }
                             let ret = builder.inst_results(call).to_vec();
                             builder.ins().return_(&ret);
                             break;
                         }
                         builder.ins().call(callee, args)
                     } else {
-                        let addr = self.program[f].comptime_addr.or_else(|| self.asm.get_fn(f).map(|a| a as u64)).unwrap();
+                        let callee = self.program[f]
+                            .comptime_addr
+                            .or_else(|| self.asm.get_fn(f).map(|a| a as u64))
+                            .map(|addr| builder.ins().iconst(I64, addr as i64))
+                            .unwrap_or_else(|| {
+                                // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
+                                //       its just annoying because then i need to make sure i know if im supposed to be declaring
+                                //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
 
-                        let callee = builder.ins().iconst(I64, addr as i64);
-                        let ty = self.program[f].unwrap_ty();
+                                let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
+                                builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                            });
+
                         let comp_ctx = self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct;
                         let sig = self.make_sig(ty, false, comp_ctx);
                         let sig = builder.import_signature(sig);
@@ -288,6 +314,10 @@ impl<'z, 'p> Emit<'z, 'p> {
 
                         let call = builder.ins().call_indirect(sig, callee, args);
                         if tail {
+                            if ty.ret.is_never() {
+                                builder.ins().trap(TrapCode::UnreachableCodeReached);
+                                break;
+                            }
                             // I guess we don't trust rustc to agree with cranelift about what a tail call means?
                             // and they want to be fancier than me about skipping adjusting sp?
                             // TODO: track whether this was a required tail call or just a friendly one and maybe give an error?
@@ -317,7 +347,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                     let ret_count = self.program.slot_count(f_ty.ret);
                     let ret_count = builder.ins().iconst(I64, ret_count as i64);
 
-                    let addr = self.program[f].comptime_addr.or_else(|| self.asm.get_fn(f).map(|a| a as u64));
                     let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
                     // flat_call result goes into a variable somewhere, already setup by bc. so don't worry about return value here.
                     // need to check cl.funcs first because we put our functions in .dispatch too.
@@ -325,10 +354,24 @@ impl<'z, 'p> Emit<'z, 'p> {
                         let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
                         builder.ins().call(callee, args);
                     } else {
-                        let addr = unwrap!(addr, "fn not compiled {f:?}");
-                        let callee = builder.ins().iconst(I64, addr as i64);
+                        let callee = self.program[f]
+                            .comptime_addr
+                            .or_else(|| self.asm.get_fn(f).map(|a| a as u64))
+                            .map(|addr| builder.ins().iconst(I64, addr as i64))
+                            .unwrap_or_else(|| {
+                                // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
+                                //       its just annoying because then i need to make sure i know if im supposed to be declaring
+                                //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
+
+                                let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
+                                builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                            });
                         let sig = builder.import_signature(self.flat_sig.clone());
                         builder.ins().call_indirect(sig, callee, args);
+                    }
+                    if f_ty.ret.is_never() {
+                        builder.ins().trap(TrapCode::UnreachableCodeReached);
+                        break;
                     }
                 }
                 Bc::CallFnPtr { ty, comp_ctx } => {
@@ -510,7 +553,15 @@ impl<'z, 'p> Emit<'z, 'p> {
         //       but that disagrees with c calling convention so need to have another round of clarifying that.
         fn push(s: &mut Emit, arg: TypeId, sig: &mut Signature) {
             let arg = s.program.raw_type(arg);
-            if let Some(types) = s.program.tuple_types(arg) {
+            if let TypeInfo::Tagged { .. } = &s.program[arg] {
+                for _ in 0..s.program.slot_count(arg) {
+                    sig.params.push(AbiParam {
+                        value_type: I64,
+                        purpose: ArgumentPurpose::Normal,
+                        extension: ArgumentExtension::None,
+                    })
+                }
+            } else if let Some(types) = s.program.tuple_types(arg) {
                 let types = types.to_vec();
                 for t in types {
                     let t = s.program.raw_type(t);
@@ -551,9 +602,9 @@ impl<'z, 'p> Emit<'z, 'p> {
         sig
     }
 
+    // TODO: #ct
     fn cast_args_to_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
         // TODO: this is super dumb. I should really just track types through the whole thing properly.
-
         for slot_index in 0..slots as usize {
             let is_float = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
             let s = self.stack.len() - (slots as usize) + slot_index;
@@ -565,7 +616,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
     fn cast_ret_from_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
         // TODO: this is super dumb. I should really just track types through the whole thing properly.
-
+        debug_assert!(slots <= self.stack.len() as u16);
         for slot_index in 0..slots as usize {
             let is_float = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
             let s = self.stack.len() - (slots as usize) + slot_index;

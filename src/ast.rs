@@ -1466,7 +1466,8 @@ impl<'p> Program<'p> {
                 let mut mask = 0;
                 for t in types {
                     let m = self.float_mask_one(*t);
-                    mask <<= 1; // TODO: HACK: wrong!!!!!!! size_of. -- May 3
+                    let slots = self.slot_count(*t);
+                    mask <<= slots;
                     mask |= m;
                 }
                 mask
@@ -1790,7 +1791,6 @@ pub enum Flag {
     Return,
     Cranelift_Emit,
     Use_Cranelift,
-    Log_Cl,
     Tail,
     __Shift_Or_Slice,
     No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!

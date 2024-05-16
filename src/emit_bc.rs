@@ -255,10 +255,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // TODO: check if any args are pointers cause they might be to the stack and then you probably can't tail call.
             result.push(Bc::CallDirect { f, tail: can_tail });
             let slots = self.slot_count(f_ty.ret);
-            match result_location {
-                PushStack => {}
-                ResAddr => result.push(Bc::StorePre { slots }),
-                Discard => result.push(Bc::Pop { slots }),
+            if slots > 0 {
+                match result_location {
+                    PushStack => {}
+                    ResAddr => result.push(Bc::StorePre { slots }),
+                    Discard => result.push(Bc::Pop { slots }),
+                }
             }
         }
         if func.finished_ret.unwrap().is_never() {
@@ -372,11 +374,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         comp_ctx: false, // TODO
                     });
                     let slots = self.slot_count(f_ty.ret);
-
-                    match result_location {
-                        PushStack => {}
-                        ResAddr => result.push(Bc::StorePre { slots }),
-                        Discard => result.push(Bc::Pop { slots }),
+                    if slots > 0 {
+                        match result_location {
+                            PushStack => {}
+                            ResAddr => result.push(Bc::StorePre { slots }),
+                            Discard => result.push(Bc::Pop { slots }),
+                        }
                     }
                     return Ok(());
                 }

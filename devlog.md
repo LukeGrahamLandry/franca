@@ -1,3 +1,5 @@
+## finishing cranelift backend (May 16)
+
 - floats on cranelift. im being dumb and not tracking types so doing a bunch of bit casts.
 - have to be able to call comp_ctx functions on cranelift for macros.
   might as well just make that a normal part of the bytecode instead of special thing in the backends.
@@ -15,6 +17,19 @@
   for now i guess just giveup on that and try again later when the normal stuff works.
 - need to forward declare func ids for recursion.
 - thats enough for 100/116 to pass on cranelift (comptime+runtime)
+- next problem is entry block args being floats instead of ints because i stopped using append_block_params_for_function_params.
+  cause i want them to be ints so i dont have to deal with it but then it doesn't match signeture which it rightly complains about.
+  doing that and then casting from float fixed another 6.
+- mandelbrot floats mask was wrong. lol `// TODO: HACK: wrong!!!!!!! size_of. -- May 3`.
+  when making the mask, i was always shifting by one for each tuple element even if it took up more slots.
+  and it mostly didn't matter cause the only one where i passed a struct of floats was mandelbrot and that didn't do
+  try to pass it to the compiler so it didn't matter that i wasn't using the float registers, cause both sides made the same mistake.
+- the 2 mutual recursion tests need forward declare. on asm i just look it up from the dispatch table but cranelift has fancy relocation stuff so why not use it.
+  but im lazy and just want to see it work first so using table for now.
+- need to say right number of block params for @tagged, even tho they don't have Some(tuple_types).
+- emitting an unreachable and abandoning that block after you call something that returns Never.
+- fixed bc emitting StorePre of size 0 when assigning to a var from an if with a Never branch.
+- thats everything working except backtrace.
 
 ## small types on cranelift (May 15)
 
