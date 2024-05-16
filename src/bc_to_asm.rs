@@ -71,7 +71,6 @@ pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime
     let mut a = BcToAsm::new(compile, when, body);
     a.compile(f)?;
     assert!(a.wip.is_empty());
-    compile.program[f].asm_done = true;
     Ok(())
 }
 
@@ -141,70 +140,57 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.asm.make_write();
 
         self.wip.push(f);
-        if let Some(addr) = self.program[f].comptime_addr {
-            self.asm.dispatch[f.as_index()] = addr as *const u8;
-        } else {
-            let func = &self.program[f];
-            if let Some(insts) = func.jitted_code.as_ref() {
-                // TODO: i dont like that the other guy leaked the box for the jitted_code ptr. i'd rather everything share the one Jitted instance.
-                // TODO: this needs to be aware of the distinction between comptime and runtime target.
-                for op in insts {
-                    let op = *op as i64;
-                    self.asm.push(op);
-                }
-                self.asm.save_current(f);
-                if func.cc.unwrap() == CallConv::OneRetPic {
-                    self.program[f].aarch64_stack_bytes = Some(0);
-                }
-            } else {
-                if TRACE_ASM {
-                    println!();
-                    println!("=== Bytecode for {f:?}: {} ===", self.program.pool.get(func.name));
-                    for (b, insts) in self.body.blocks.iter().enumerate() {
-                        println!("[b{b}({})]: ({} incoming)", insts.arg_slots, insts.incoming_jumps);
-                        for (i, op) in insts.insts.iter().enumerate() {
-                            println!("    {i}. {op:?}");
-                        }
-                    }
-                    println!("===")
-                }
 
-                self.log_asm_bc = func.has_tag(Flag::Log_Asm_Bc);
-                self.bc_to_asm(f)?;
-                self.asm.save_current(f);
-                // if cfg!(feature = "llvm_dis_debug") {
-                let asm = self.asm.get_fn(f).unwrap();
+        let func = &self.program[f];
+        assert!(func.jitted_code.is_none());
+        assert!(func.comptime_addr.is_none());
 
-                let func = &self.program[f];
-                if TRACE_ASM || self.log_asm_bc || func.has_tag(Flag::Log_Asm) {
-                    let asm = unsafe { &*self.asm.ranges[f.as_index()] };
-                    let hex: String = asm
-                        .iter()
-                        .copied()
-                        .array_chunks::<4>()
-                        .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
-                        .collect();
-                    let path = "target/temp.asm".to_string();
-                    fs::write(&path, hex).unwrap();
-                    let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
-                    println!();
-                    println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
-
-                    let mut it = dis.split('\n');
-                    it.nth(1);
-                    for (i, line) in it.enumerate() {
-                        for (s, offset) in &self.markers {
-                            if *offset == i {
-                                println!("{s}");
-                            }
-                        }
-                        println!("{line}");
-                    }
-                    println!("===")
+        if TRACE_ASM {
+            println!();
+            println!("=== Bytecode for {f:?}: {} ===", self.program.pool.get(func.name));
+            for (b, insts) in self.body.blocks.iter().enumerate() {
+                println!("[b{b}({})]: ({} incoming)", insts.arg_slots, insts.incoming_jumps);
+                for (i, op) in insts.insts.iter().enumerate() {
+                    println!("    {i}. {op:?}");
                 }
-                // }
             }
+            println!("===")
         }
+
+        self.log_asm_bc = func.has_tag(Flag::Log_Asm_Bc);
+        self.bc_to_asm(f)?;
+        self.asm.save_current(f);
+        // if cfg!(feature = "llvm_dis_debug") {
+        let asm = self.asm.get_fn(f).unwrap();
+
+        let func = &self.program[f];
+        if TRACE_ASM || self.log_asm_bc || func.has_tag(Flag::Log_Asm) {
+            let asm = unsafe { &*self.asm.ranges[f.as_index()] };
+            let hex: String = asm
+                .iter()
+                .copied()
+                .array_chunks::<4>()
+                .map(|b| format!("{:#02x} {:#02x} {:#02x} {:#02x} ", b[0], b[1], b[2], b[3]))
+                .collect();
+            let path = "target/temp.asm".to_string();
+            fs::write(&path, hex).unwrap();
+            let dis = String::from_utf8(Command::new("llvm-mc").arg("--disassemble").arg(&path).output().unwrap().stdout).unwrap();
+            println!();
+            println!("=== Asm for {f:?}: {} ===", self.program.pool.get(func.name));
+
+            let mut it = dis.split('\n');
+            it.nth(1);
+            for (i, line) in it.enumerate() {
+                for (s, offset) in &self.markers {
+                    if *offset == i {
+                        println!("{s}");
+                    }
+                }
+                println!("{line}");
+            }
+            println!("===")
+        }
+        // }
 
         self.wip.retain(|c| c != &f);
         Ok(())
@@ -324,7 +310,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.asm.patch(snd, ldp_so(X64, fp, lr, sp, 0)); // get our return address
             self.asm.patch(thd, add_im(X64, sp, sp, 16, 0));
         }
-        self.program[f].aarch64_stack_bytes = Some(slots);
         Ok(())
     }
 
@@ -1274,6 +1259,15 @@ pub mod jit {
                 dispatch: Vec::with_capacity(99999), // Dont ever resize!
                 ranges: vec![],
             }
+        }
+
+        pub fn copy_inline_asm(&mut self, f: FuncId, insts: &[u32]) {
+            self.make_write();
+            for op in insts {
+                let op = *op as i64;
+                self.push(op);
+            }
+            self.save_current(f);
         }
 
         pub fn bytes(&self) -> &[u8] {

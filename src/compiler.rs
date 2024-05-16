@@ -31,7 +31,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
+use crate::{bc::*, ffi, impl_index, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
@@ -278,13 +278,23 @@ impl<'a, 'p> Compile<'a, 'p> {
                 i += 1;
             }
 
-            if self.program[f].cc.unwrap() != CallConv::Inline {
+            if let Some(addr) = self.program[f].comptime_addr {
+                self.aarch64.extend_blanks(f);
+                self.aarch64.dispatch[f.as_index()] = addr as *const u8;
+            }
+
+            // TODO: explicit call for moving the jitted_code to the mmap.
+            if let Some(code) = &self.program[f].jitted_code {
+                self.aarch64.copy_inline_asm(f, code);
+            }
+
+            if self.program[f].cc.unwrap() != CallConv::Inline && self.program[f].body.is_some() {
                 let body = emit_bc(self, f)?;
                 // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
 
                 #[cfg(feature = "cranelift")]
                 let aarch = {
-                    let use_cl = cfg!(feature = "cranelift") && self.program[f].has_tag(Flag::Use_Cranelift);
+                    let use_cl = true | self.program[f].has_tag(Flag::Use_Cranelift);
                     if use_cl {
                         let res = crate::cranelift::emit_cl(self, &body, f);
                         self.tag_err(res)?;
@@ -312,6 +322,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.pop_state(state);
             // self.currently_compiling.retain(|check| *check != f);
         }
+        self.program[f].asm_done = true;
         result
     }
 
@@ -2375,6 +2386,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+        assert!(found.is_valid(), "invalid type: {} {msg}", found.0);
+        assert!(expected.is_valid(), "invalid type: {} {msg}", expected.0);
+
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);

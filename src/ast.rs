@@ -23,7 +23,11 @@ use std::{
 
 impl std::fmt::Debug for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Ty{}", self.as_index())
+        if self.is_valid() {
+            write!(f, "Ty{}", self.as_index())
+        } else {
+            write!(f, "Ty_BAD_{}", self.0)
+        }
     }
 }
 
@@ -726,7 +730,6 @@ pub struct Func<'p> {
     pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
     pub asm_done: bool,
     pub ensured_compiled: bool,
-    pub aarch64_stack_bytes: Option<u16>,
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
     pub cl_emit_fn_ptr: Option<usize>, // TODO: Option<CfEmit>
@@ -1134,7 +1137,7 @@ impl<'p> Program<'p> {
 
     #[track_caller]
     pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
-        debug_assert!(ty.is_valid(), "{}", ty.0);
+        debug_assert!(ty.is_valid(), "invalid type: {}", ty.0);
 
         while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) | &TypeInfo::Enum { raw: inner, .. } = &self[ty] {
             ty = inner
@@ -1641,7 +1644,6 @@ impl<'p> Default for Func<'p> {
             scope: None,
             args_block: None,
             high_jitted_callee: 0,
-            aarch64_stack_bytes: None,
             cl_emit_fn_ptr: None,
         }
     }
@@ -1851,7 +1853,7 @@ macro_rules! tagged_index {
             #[track_caller]
             pub fn from_raw(value: i64) -> Self {
                 let s = Self(value as u32);
-                debug_assert!(s.is_valid());
+                debug_assert!(s.is_valid(), "{value}");
                 s
             }
 

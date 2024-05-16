@@ -21,7 +21,7 @@ use crate::{
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
-    logging::make_err,
+    logging::{make_err, PoolLog},
     reflect::BitSet,
     unwrap,
 };
@@ -46,6 +46,7 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
     flat_sig.params.push(AbiParam::new(I64));
     flat_sig.params.push(AbiParam::new(I64));
 
+    compile.last_loc = Some(compile.program[f].loc);
     let is_flat = compile.program[f].cc.unwrap() == CallConv::Flat;
     let mut e = Emit {
         body,
@@ -87,7 +88,6 @@ impl Default for JittedCl {
 }
 
 impl JittedCl {
-    // TODO: :ClDispatchTable
     pub fn get_ptr(&mut self, f: FuncId) -> Option<*const u8> {
         self.module.finalize_definitions().unwrap();
         self.funcs[f.as_index()].map(|f| self.module.get_finalized_function(f))
@@ -118,7 +118,7 @@ impl<'z, 'p> Emit<'z, 'p> {
         let f_ty = self.program[f].unwrap_ty();
 
         let name = format!("FN{}", f.as_index());
-        ctx.want_disasm = true; // TODO
+        // ctx.want_disasm = true; // TODO
         ctx.func.signature = if self.is_flat {
             self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
         } else {
@@ -131,6 +131,8 @@ impl<'z, 'p> Emit<'z, 'p> {
             .module
             .declare_function(&name, Linkage::Export, &ctx.func.signature)
             .map_err(wrap)?;
+        extend_options(&mut self.cl.funcs, f.as_index());
+        self.cl.funcs[f.as_index()] = Some(id);
 
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
         self.emit_body(&mut builder)?;
@@ -142,8 +144,6 @@ impl<'z, 'p> Emit<'z, 'p> {
         builder.finalize();
         self.cl.module.define_function(id, &mut ctx).map_err(wrap)?;
 
-        extend_options(&mut self.cl.funcs, f.as_index());
-        self.cl.funcs[f.as_index()] = Some(id);
         self.cl.module.clear_context(&mut ctx);
 
         Ok(())
@@ -168,16 +168,23 @@ impl<'z, 'p> Emit<'z, 'p> {
             self.indirect_ret_addr = Some(builder.block_params(entry)[3]);
             self.flat_arg_addr = Some(builder.block_params(entry)[1]);
 
-            for _ in 0..self.body.blocks.len() {
+            for block in &self.body.blocks {
                 self.blocks.push(builder.create_block());
+                for _ in 0..block.arg_slots {
+                    builder.append_block_param(*self.blocks.last().unwrap(), I64);
+                }
             }
             builder.ins().jump(self.blocks[0], &[]);
             builder.seal_block(entry);
         } else {
-            for _ in 0..self.body.blocks.len() {
+            // TODO: copy-paste
+            for block in &self.body.blocks {
                 self.blocks.push(builder.create_block());
+                for _ in 0..block.arg_slots {
+                    builder.append_block_param(*self.blocks.last().unwrap(), I64);
+                }
             }
-            builder.append_block_params_for_function_params(self.blocks[0]);
+            // builder.append_block_params_for_function_params(self.blocks[0]);
             self.indirect_ret_addr = None;
             self.flat_arg_addr = None;
         }
@@ -201,7 +208,13 @@ impl<'z, 'p> Emit<'z, 'p> {
         let block = &self.body.blocks[b];
         builder.switch_to_block(self.blocks[b]);
         let args = builder.block_params(self.blocks[b]);
-        debug_assert_eq!(args.len(), block.arg_slots as usize);
+        debug_assert_eq!(
+            args.len(),
+            block.arg_slots as usize,
+            "block:{b} \n{}\n{}",
+            builder.func.display(),
+            self.body.log(self.program.pool)
+        );
         for i in 0..block.arg_slots {
             let v = args[i as usize];
             self.stack.push(v)
@@ -248,11 +261,24 @@ impl<'z, 'p> Emit<'z, 'p> {
 
                     // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
                     // without slowing compilation for all of them. So when trying to call something, check if my asm backend has it.
-                    // TODO: if i start putting finished fn ptrs from cranelift in dispatch table for asm,
-                    //       should prioratise doing the call from cranelift fn table here. :ClDispatchTable
-                    let addr = self.program[f].comptime_addr.or_else(|| self.asm.get_fn(f).map(|a| a as u64));
 
-                    let call = if let Some(addr) = addr {
+                    // Note: check cl funcs first because ptrs go in the asm dispatch table anyway.
+                    // TODO: actually forward declare if none to make mutual recursion work.
+                    let call = if let Some(&Some(func_id)) = self.cl.funcs.get(f.as_index()) {
+                        let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
+                        if tail {
+                            // TODO: have to deal with floats.
+                            // builder.ins().return_call(callee, args);
+                            // TODO: cranelift wants to do real tailcalls which changes the abi.
+                            let call = builder.ins().call(callee, args);
+                            let ret = builder.inst_results(call).to_vec();
+                            builder.ins().return_(&ret);
+                            break;
+                        }
+                        builder.ins().call(callee, args)
+                    } else {
+                        let addr = self.program[f].comptime_addr.or_else(|| self.asm.get_fn(f).map(|a| a as u64)).unwrap();
+
                         let callee = builder.ins().iconst(I64, addr as i64);
                         let ty = self.program[f].unwrap_ty();
                         let comp_ctx = self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct;
@@ -270,16 +296,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                             break;
                         }
                         call
-                    } else {
-                        // TODO: actually forward declare if none to make mutual recursion work.
-                        let func_id = self.cl.funcs[f.as_index()].unwrap();
-                        let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
-                        if tail {
-                            // TODO: have to deal with floats.
-                            builder.ins().return_call(callee, args);
-                            break;
-                        }
-                        builder.ins().call(callee, args)
                     };
 
                     let ret = builder.inst_results(call);
@@ -303,16 +319,16 @@ impl<'z, 'p> Emit<'z, 'p> {
 
                     let addr = self.program[f].comptime_addr.or_else(|| self.asm.get_fn(f).map(|a| a as u64));
                     let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
-                    // flat_call result goes into a variable somewhere, already setup by bc.
-                    if let Some(addr) = addr {
+                    // flat_call result goes into a variable somewhere, already setup by bc. so don't worry about return value here.
+                    // need to check cl.funcs first because we put our functions in .dispatch too.
+                    if let Some(&Some(func_id)) = self.cl.funcs.get(f.as_index()) {
+                        let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
+                        builder.ins().call(callee, args);
+                    } else {
+                        let addr = unwrap!(addr, "fn not compiled {f:?}");
                         let callee = builder.ins().iconst(I64, addr as i64);
                         let sig = builder.import_signature(self.flat_sig.clone());
                         builder.ins().call_indirect(sig, callee, args);
-                    } else {
-                        // TODO: flat_call needs different sig!
-                        let func_id = self.cl.funcs[f.as_index()].unwrap();
-                        let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
-                        builder.ins().call(callee, args);
                     }
                 }
                 Bc::CallFnPtr { ty, comp_ctx } => {
@@ -468,19 +484,19 @@ impl<'z, 'p> Emit<'z, 'p> {
             | TypeInfo::OverloadSet
             | TypeInfo::Int(_)
             | TypeInfo::Fn(_)
+            | TypeInfo::Scope
             | TypeInfo::Bool => I64,
             TypeInfo::Tuple(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => I64,
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr => I64,
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-            TypeInfo::Scope => todo!(),
         }
     }
 
     fn make_sig(&mut self, t: FnType, internal: bool, comp_ctx: bool) -> Signature {
         let mut sig = self.cl.module.make_signature();
-        if internal {
-            sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
-        }
+        // if internal {
+        //     sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
+        // }
         if comp_ctx {
             // TODO: should bring this all the way out into bc eventually
             sig.params.push(AbiParam {

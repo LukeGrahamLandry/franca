@@ -4,6 +4,17 @@
   for now just made an inst to push the ctx, but it still needs to know on the call inst to add an extra argument,
   so it didn't really make it simpler. would be good if i just actaully put that info in the function type.
 - dont put a return val for sig when its Never.
+- forgetting to set asm_done breaks comptime_float_call which is weird.
+  but you want it in a more central place so you never forget anyway so not a huge deal?
+  creepy tho. why does trying to compile the same thing multiple times make you try to call something with a different calling convention.
+- when returning an if expr, it does a jump with block args, so needed to tell cranelift about them.
+  thought it would be annoying because types but since i cast floats for ::ret already, i can just use ints everywhere.
+  that seems to have fixed pack_i64 too.
+- can't try to do a tail call from cranelift to a rust c abi function.
+  and can't use cranelift tail abi if its something the compiler wants to call.
+  for now i guess just giveup on that and try again later when the normal stuff works.
+- need to forward declare func ids for recursion.
+- thats enough for 100/116 to pass on cranelift (comptime+runtime)
 
 ## small types on cranelift (May 15)
 
