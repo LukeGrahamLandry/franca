@@ -1,3 +1,12 @@
+- floats on cranelift. im being dumb and not tracking types so doing a bunch of bit casts.
+- have to be able to call comp_ctx functions on cranelift for macros.
+  might as well just make that a normal part of the bytecode instead of special thing in the backends.
+  for now just made an inst to push the ctx, but it still needs to know on the call inst to add an extra argument,
+  so it didn't really make it simpler. would be good if i just actaully put that info in the function type.
+- dont put a return val for sig when its Never.
+
+## small types on cranelift (May 15)
+
 - got rid of FnWip. cause i wasnt using it right with constexprs anyway.
   now just tracking var types in the global thing.
   the other thing they did was tracking callees so you could try to emit them first.
@@ -15,6 +24,12 @@
 - perhaps this shows that my bytecode should keep better track of things.
   cause it did know which was float/i64/u8/ptr/unit and im just painfully reconstructing what i threw away.
   presumably you want to help it be fast by giving it fewer redundant bit size casts to optimise out.
+- not following the calling convention with x21 is creepy.
+  and i was already reloading it every time cause i didn't trust, so just stop using it at all.
+  had to adjust unwind.fr to use a new builtin to the compiler to get the dispatch table.
+- was a pain dealing with R64 vs I64 in cranelift, but it seems i can just make everything I64 and dereference it just fine,
+  so i don't understand why R64 exists.
+- for using results of comparison as values, had to uextend to i64. eventually should just be a byte (or bit??)
 
 ## stop committing generated stuff & do u8 strings (May 14)
 

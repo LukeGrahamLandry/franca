@@ -15,7 +15,6 @@ use franca::{
     timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
-    arch::asm,
     env,
     fs::{self, File},
     io::{Read, Write},

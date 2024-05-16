@@ -4,7 +4,7 @@ use cranelift::{
     codegen::{
         ir::{
             stackslot::StackSize,
-            types::{F64, I64, I8, R64},
+            types::{F64, I64, I8},
             ArgumentExtension, ArgumentPurpose, StackSlot,
         },
         settings::Flags,
@@ -41,9 +41,9 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 
     let mut flat_sig = Signature::new(compile.cranelift.module.target_config().default_call_conv);
     flat_sig.params.push(AbiParam::new(I64));
-    flat_sig.params.push(AbiParam::new(R64));
     flat_sig.params.push(AbiParam::new(I64));
-    flat_sig.params.push(AbiParam::new(R64));
+    flat_sig.params.push(AbiParam::new(I64));
+    flat_sig.params.push(AbiParam::new(I64));
     flat_sig.params.push(AbiParam::new(I64));
 
     let is_flat = compile.program[f].cc.unwrap() == CallConv::Flat;
@@ -75,6 +75,7 @@ impl Default for JittedCl {
         let flags = settings::builder();
         // TODO: want to let comptime control settings...
         let isa = isa.finish(Flags::new(flags));
+
         let builder = JITBuilder::with_isa(isa.unwrap(), cranelift_module::default_libcall_names());
         let module = JITModule::new(builder);
         JittedCl {
@@ -86,6 +87,7 @@ impl Default for JittedCl {
 }
 
 impl JittedCl {
+    // TODO: :ClDispatchTable
     pub fn get_ptr(&mut self, f: FuncId) -> Option<*const u8> {
         self.module.finalize_definitions().unwrap();
         self.funcs[f.as_index()].map(|f| self.module.get_finalized_function(f))
@@ -116,10 +118,12 @@ impl<'z, 'p> Emit<'z, 'p> {
         let f_ty = self.program[f].unwrap_ty();
 
         let name = format!("FN{}", f.as_index());
+        ctx.want_disasm = true; // TODO
         ctx.func.signature = if self.is_flat {
             self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
         } else {
-            self.make_sig(f_ty, true)
+            assert!(self.program[f].cc.unwrap() != CallConv::Arg8Ret1Ct);
+            self.make_sig(f_ty, true, false)
         };
 
         let id = self
@@ -205,18 +209,27 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         for inst in &block.insts {
             match *inst {
+                Bc::GetCompCtx => {
+                    let v = builder.ins().iconst(I64, self.compile_ctx_ptr as i64);
+                    self.stack.push(v);
+                }
                 Bc::NameFlatCallArg { id, offset } => {
                     let Some(ptr) = self.flat_arg_addr else { err!("not flat call",) };
                     debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
                     let offset = builder.ins().iconst(I64, offset as i64 * 8);
-                    let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
                     let ptr = builder.ins().iadd(ptr, offset);
-                    let ptr = builder.ins().bitcast(R64, MemFlags::new(), ptr);
                     self.flat_args_already_offset.push(ptr);
                 }
                 Bc::CallDirect { f, tail } => {
                     let f_ty = self.program[f].unwrap_ty();
-                    let slots = self.program.slot_count(f_ty.arg);
+                    let mut slots = self.program.slot_count(f_ty.arg);
+                    if self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct {
+                        // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
+                        slots += 1;
+                    }
+                    let floats = self.program.float_mask(f_ty);
+                    self.cast_args_to_float(builder, slots, floats.arg);
+
                     let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
                     if let Some(emit) = self.program[f].cl_emit_fn_ptr {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
@@ -235,12 +248,15 @@ impl<'z, 'p> Emit<'z, 'p> {
 
                     // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
                     // without slowing compilation for all of them. So when trying to call something, check if my asm backend has it.
+                    // TODO: if i start putting finished fn ptrs from cranelift in dispatch table for asm,
+                    //       should prioratise doing the call from cranelift fn table here. :ClDispatchTable
                     let addr = self.program[f].comptime_addr.or_else(|| self.asm.get_fn(f).map(|a| a as u64));
 
                     let call = if let Some(addr) = addr {
                         let callee = builder.ins().iconst(I64, addr as i64);
                         let ty = self.program[f].unwrap_ty();
-                        let sig = self.make_sig(ty, false);
+                        let comp_ctx = self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct;
+                        let sig = self.make_sig(ty, false, comp_ctx);
                         let sig = builder.import_signature(sig);
                         let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
 
@@ -248,6 +264,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         if tail {
                             // I guess we don't trust rustc to agree with cranelift about what a tail call means?
                             // and they want to be fancier than me about skipping adjusting sp?
+                            // TODO: track whether this was a required tail call or just a friendly one and maybe give an error?
                             let ret = builder.inst_results(call).to_vec();
                             builder.ins().return_(&ret);
                             break;
@@ -258,6 +275,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         let func_id = self.cl.funcs[f.as_index()].unwrap();
                         let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
                         if tail {
+                            // TODO: have to deal with floats.
                             builder.ins().return_call(callee, args);
                             break;
                         }
@@ -269,6 +287,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     for v in ret {
                         self.stack.push(*v);
                     }
+                    self.cast_ret_from_float(builder, ret.len() as u16, floats.ret);
                 }
                 Bc::CallDirectFlat { f } => {
                     let f_ty = &self.program[f].unwrap_ty();
@@ -287,7 +306,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                     // flat_call result goes into a variable somewhere, already setup by bc.
                     if let Some(addr) = addr {
                         let callee = builder.ins().iconst(I64, addr as i64);
-                        let ty = self.program[f].unwrap_ty();
                         let sig = builder.import_signature(self.flat_sig.clone());
                         builder.ins().call_indirect(sig, callee, args);
                     } else {
@@ -297,7 +315,22 @@ impl<'z, 'p> Emit<'z, 'p> {
                         builder.ins().call(callee, args);
                     }
                 }
-                Bc::CallFnPtr { ty: _, comp_ctx: _ } => todo!(),
+                Bc::CallFnPtr { ty, comp_ctx } => {
+                    assert!(!comp_ctx);
+                    let sig = builder.import_signature(self.make_sig(ty, false, comp_ctx));
+                    let slots = self.program.slot_count(ty.arg);
+                    let floats = self.program.float_mask(ty);
+                    self.cast_args_to_float(builder, slots, floats.arg);
+                    let callee = self.stack[self.stack.len() - slots as usize - 1];
+                    let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
+                    let call = builder.ins().call_indirect(sig, callee, args);
+                    pops(&mut self.stack, slots as usize + 1);
+                    let ret = builder.inst_results(call);
+                    for v in ret {
+                        self.stack.push(*v);
+                    }
+                    self.cast_ret_from_float(builder, ret.len() as u16, floats.ret);
+                }
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::JumpIf { true_ip, false_ip, slots } => {
                     let cond = self.stack.pop().unwrap();
@@ -326,7 +359,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                         debug_assert!(self.flat_arg_addr.is_some());
                         builder.ins().return_(&[]);
                     } else {
-                        let slots = self.program.slot_count(self.program[self.f].finished_ret.unwrap());
+                        let ret_ty = self.program[self.f].finished_ret.unwrap();
+                        let slots = self.program.slot_count(ret_ty);
+                        let floats = self.program.float_mask_one(ret_ty);
+                        self.cast_args_to_float(builder, slots, floats);
                         let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
                         builder.ins().return_(args);
                         pops(&mut self.stack, slots as usize);
@@ -375,7 +411,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         self.stack.push(ptr);
                     } else {
                         let slot = self.vars[id as usize];
-                        self.stack.push(builder.ins().stack_addr(R64, slot, 0));
+                        self.stack.push(builder.ins().stack_addr(I64, slot, 0));
                     }
                 }
                 Bc::IncPtr { offset } => {
@@ -383,7 +419,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     let offset = builder.ins().iconst(I64, offset as i64 * 8);
                     let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
                     let res = builder.ins().iadd(ptr, offset);
-                    let res = builder.ins().bitcast(R64, MemFlags::new(), res);
+                    let res = builder.ins().bitcast(I64, MemFlags::new(), res);
                     self.stack.push(res);
                 }
                 Bc::Pop { slots } => {
@@ -433,66 +469,94 @@ impl<'z, 'p> Emit<'z, 'p> {
             | TypeInfo::Int(_)
             | TypeInfo::Fn(_)
             | TypeInfo::Bool => I64,
-            TypeInfo::Tuple(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => R64,
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr => R64,
+            TypeInfo::Tuple(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => I64,
+            TypeInfo::Ptr(_) | TypeInfo::VoidPtr => I64,
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             TypeInfo::Scope => todo!(),
         }
     }
 
-    fn make_sig(&mut self, t: FnType, internal: bool) -> Signature {
+    fn make_sig(&mut self, t: FnType, internal: bool, comp_ctx: bool) -> Signature {
         let mut sig = self.cl.module.make_signature();
         if internal {
             sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
         }
-
-        let arg = self.program.raw_type(t.arg);
-        if let Some(types) = self.program.tuple_types(arg) {
-            let types = types.to_vec();
-            for t in types {
-                let slots = self.program.slot_count(t);
-                let purpose = if slots == 1 {
-                    ArgumentPurpose::Normal
-                } else {
-                    ArgumentPurpose::StructArgument(slots as u32 * 8)
-                };
-                sig.params.push(AbiParam {
-                    value_type: self.make_type(t),
-                    purpose,
-                    extension: ArgumentExtension::Sext,
-                })
-            }
-        } else {
-            let slots = self.program.slot_count(arg);
-            let purpose = if slots == 1 {
-                ArgumentPurpose::Normal
-            } else {
-                ArgumentPurpose::StructArgument(slots as u32 * 8)
-            };
+        if comp_ctx {
+            // TODO: should bring this all the way out into bc eventually
             sig.params.push(AbiParam {
-                value_type: self.make_type(arg),
-                purpose,
-                extension: ArgumentExtension::Sext,
+                value_type: I64,
+                purpose: ArgumentPurpose::Normal,
+                extension: ArgumentExtension::None,
             })
         }
+
+        // TODO: this is wrong. you can have nested things. i pass (Str, Str) as (*i,i,*i,i).
+        //       but that disagrees with c calling convention so need to have another round of clarifying that.
+        fn push(s: &mut Emit, arg: TypeId, sig: &mut Signature) {
+            let arg = s.program.raw_type(arg);
+            if let Some(types) = s.program.tuple_types(arg) {
+                let types = types.to_vec();
+                for t in types {
+                    let t = s.program.raw_type(t);
+                    push(s, t, sig);
+                }
+            } else {
+                let extension = if arg == TypeId::f64() {
+                    ArgumentExtension::None
+                } else {
+                    ArgumentExtension::Sext
+                };
+                sig.params.push(AbiParam {
+                    value_type: s.make_type(arg),
+                    purpose: ArgumentPurpose::Normal,
+                    extension,
+                })
+            }
+        }
+
+        push(self, t.arg, &mut sig);
+
         // TODO: unit. TODO: multiple returns tuple?
         let ret = self.program.raw_type(t.ret);
-        let slots = self.program.slot_count(ret);
-        if slots == 1 {
+        if !ret.is_never() {
+            // TODO: ArgumentPurpose::StructReturn for real c abi. dont just slots==1 because never (and eventually unit) are 0
+            let extension = if ret == TypeId::f64() {
+                ArgumentExtension::None
+            } else {
+                ArgumentExtension::Sext
+            };
             sig.returns.push(AbiParam {
                 value_type: self.make_type(ret),
                 purpose: ArgumentPurpose::Normal,
-                extension: ArgumentExtension::Sext,
+                extension,
             });
-        } else {
-            sig.params.push(AbiParam {
-                value_type: R64,
-                purpose: ArgumentPurpose::StructReturn,
-                extension: ArgumentExtension::Sext,
-            })
-        };
+        }
 
         sig
+    }
+
+    fn cast_args_to_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
+        // TODO: this is super dumb. I should really just track types through the whole thing properly.
+
+        for slot_index in 0..slots as usize {
+            let is_float = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
+            let s = self.stack.len() - (slots as usize) + slot_index;
+            if is_float {
+                self.stack[s] = builder.ins().bitcast(F64, MemFlags::new(), self.stack[s]);
+            }
+        }
+    }
+
+    fn cast_ret_from_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
+        // TODO: this is super dumb. I should really just track types through the whole thing properly.
+
+        for slot_index in 0..slots as usize {
+            let is_float = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
+            let s = self.stack.len() - (slots as usize) + slot_index;
+            if is_float {
+                self.stack[s] = builder.ins().bitcast(I64, MemFlags::new(), self.stack[s]);
+            }
+        }
     }
 }
 
@@ -518,13 +582,21 @@ macro_rules! inst {
 
 macro_rules! icmp {
     ($name:ident) => {
-        |builder: &mut FunctionBuilder, v: &[Value]| Some(builder.ins().icmp(IntCC::$name, v[0], v[1]))
+        |builder: &mut FunctionBuilder, v: &[Value]| {
+            let cond = builder.ins().icmp(IntCC::$name, v[0], v[1]);
+            let cond = builder.ins().uextend(I64, cond);
+            Some(cond)
+        }
     };
 }
 
 macro_rules! fcmp {
     ($name:ident) => {
-        |builder: &mut FunctionBuilder, v: &[Value]| Some(builder.ins().fcmp(FloatCC::$name, v[0], v[1]))
+        |builder: &mut FunctionBuilder, v: &[Value]| {
+            let cond = builder.ins().fcmp(FloatCC::$name, v[0], v[1]);
+            let cond = builder.ins().uextend(I64, cond);
+            Some(cond)
+        }
     };
 }
 

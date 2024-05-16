@@ -1,11 +1,9 @@
 use codemap::Span;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{
-    Expr, FatExpr, Flag, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TargetArch, TypeId, Var, VarType,
-};
+use crate::ast::{Expr, FatExpr, Flag, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, Program, TypeId, Var, VarType};
 use crate::bc::{Value, Values};
-use crate::compiler::{Compile, DebugState, ExecTime, Res};
+use crate::compiler::{Compile, DebugState, Res};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap};
 use std::mem;

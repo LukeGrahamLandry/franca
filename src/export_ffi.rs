@@ -10,7 +10,6 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
 use crate::{err, ice};
-use std::arch::asm;
 use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::transmute;

@@ -63,7 +63,7 @@ fn get_definition(data: &Data) -> TokenStream {
     match data {
         syn::Data::Struct(data) => get_definition_fields(&data.fields, false),
         syn::Data::Enum(data) => {
-            let s = format!("@enum(\n{})", "    {}: {},\n".repeat(data.variants.len()));
+            let s = format!("@tagged(\n{})", "    {}: {},\n".repeat(data.variants.len()));
             let name_field = data.variants.iter().map(|f| {
                 let name = &f.ident;
                 let fields = get_definition_fields(&f.fields, true);

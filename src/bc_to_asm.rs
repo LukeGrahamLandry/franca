@@ -280,7 +280,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // Note: we rely on NameFlagArgOffset or whatever to remember how to actually access the parts you're interested in.
             }
             CallConv::Arg8Ret1 => {
-                debug_assert!(arg_size <= 7, "c_call only supports 7 arguments. TODO: pass on stack");
+                debug_assert!(arg_size <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
                 let floats = self.program.float_mask_one(arg_ty);
                 self.ccall_reg_to_stack(arg_size, floats);
 
@@ -376,6 +376,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
         }
         match inst {
+            Bc::GetCompCtx => self.state.stack.push(Val::Literal(self.compile_ctx_ptr as i64)),
             Bc::NameFlatCallArg { id, offset } => {
                 if let Some(slot) = self.flat_arg {
                     assert_eq!(id, self.flat_arg_offsets.len() as u16);
@@ -466,12 +467,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::CallDirect { f, tail } => {
                 let target = &self.program[f];
-                let comp_ctx = match self.program[f].cc.unwrap() {
-                    CallConv::Arg8Ret1Ct => true,
-                    CallConv::Arg8Ret1 | CallConv::OneRetPic => false,
-                    _ => err!("expected c_call",),
-                };
                 let f_ty = target.unwrap_ty();
+                let comp_ctx = target.cc.unwrap() == CallConv::Arg8Ret1Ct;
 
                 // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
                 // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
@@ -653,7 +650,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     // TODO: refactor this. its a problem that im afraid of it! -- May 8
     #[track_caller]
     fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
-        debug_assert!((slots as u32 - float_mask.count_ones()) < 8);
+        debug_assert!((slots as u32 - float_mask.count_ones()) <= 8);
         debug_assert!(self.state.stack.len() >= slots as usize);
         let mut next_int = 0;
         let mut next_float = 0;
@@ -779,7 +776,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // TODO: floats -- May 1
     fn ccall_reg_to_stack(&mut self, slots: u16, float_mask: u32) {
-        debug_assert!((slots as u32 - float_mask.count_ones()) < 8);
+        debug_assert!((slots as u32 - float_mask.count_ones()) <= 8);
         let mut next_float = 0;
         let mut next_int = 0;
         for i in 0..slots {
@@ -1029,28 +1026,20 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
     }
 
+    // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
     /// <arg:n> -> <ret:m>
     fn dyn_c_call(&mut self, f_ty: FnType, comp_ctx: bool, do_call: impl FnOnce(&mut Self)) {
+        // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
         let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
-        let arg_count = self.program.slot_count(f_ty.arg);
+        let arg_count = self.program.slot_count(f_ty.arg) + reg_offset;
         let ret_count = self.program.slot_count(f_ty.ret);
-        assert!(
-            (arg_count + reg_offset) <= 7,
-            "indirect c_call only supports 7 arguments. TODO: pass on stack"
-        );
-        assert!(ret_count <= 7, "indirect c_call only supports 7 returns. TODO: pass on stack");
-
-        if comp_ctx {
-            let first_arg_index = self.state.stack.len() - arg_count as usize;
-            // TODO: this has gotta be UB
-            let c = self.compile_ctx_ptr as u64;
-            // put it on the stack as though it were a normal argument so the cc assigner doesn't need a special case
-            self.state.stack.insert(first_arg_index, Val::Literal(c as i64));
-        }
+        assert!((arg_count) <= 8, "indirect c_call only supports 8 arguments. TODO: pass on stack");
+        // TODO: this isn't the normal c abi
+        assert!(ret_count <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
 
         // TODO: if i always just recompute liek this, dont bother putting it on the bc ibstructions -- May 3
         let floats = self.program.float_mask_one(f_ty.arg);
-        self.stack_to_ccall_reg(arg_count + reg_offset, floats);
+        self.stack_to_ccall_reg(arg_count, floats);
         self.spill_abi_stompable();
         do_call(self);
         let floats = self.program.float_mask_one(f_ty.ret);
@@ -1294,7 +1283,7 @@ pub mod jit {
         }
 
         // This is a better marker for not compiled yet so you can recognise when you hit it in a debugger.
-        const EMPTY: usize = 0x1337;
+        pub const EMPTY: usize = 0x1337;
 
         pub fn reserve(&mut self, func_count: usize) {
             assert!(func_count < (1 << 12), "TODO: not enough bits for indirect call");
@@ -1344,11 +1333,20 @@ pub mod jit {
         // Recursion shouldn't have to slowly lookup the start address.
         pub fn mark_start(&mut self, f: FuncId) {
             debug_assert_eq!(self.current_start as usize % 4, 0);
+            self.extend_blanks(f);
             self.dispatch[f.as_index()] = self.current_start;
+        }
+
+        pub fn extend_blanks(&mut self, f: FuncId) {
+            while self.dispatch.len() < f.as_index() + 1 {
+                self.dispatch.push(Jitted::EMPTY as *const u8);
+                self.ranges.push(&[]);
+            }
         }
 
         pub fn save_current(&mut self, f: FuncId) {
             debug_assert!(self.map_mut.is_some());
+            self.extend_blanks(f);
             unsafe {
                 // TODO: make sure there's not an off by one thing here.
                 let range = slice::from_raw_parts(self.current_start, self.next.offset_from(self.current_start) as usize);

@@ -210,6 +210,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = self.program[f].cc.unwrap() == CallConv::Flat;
+        if self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct {
+            result.push(Bc::GetCompCtx);
+        }
         let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
         let func = &self.program[f];
         assert!(func.capture_vars.is_empty());
@@ -335,7 +338,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
 
         debug_assert!(
-            self.slot_count(expr.ty) < 8 || result_location != PushStack,
+            self.slot_count(expr.ty) <= 8 || result_location != PushStack,
             "{}",
             expr.log(self.program.pool)
         );

@@ -526,6 +526,7 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 pub mod c {
     use crate::compiler::Compile;
     use crate::compiler::Res;
+    use crate::err;
     use std::arch::global_asm;
 
     // NOTE: you have to put this in the same module ::c! you cant put it outside and then import it .
@@ -547,15 +548,53 @@ pub mod c {
     "#
     );
 
+    // TODO: generate these dynamically. the backend knows the calling convention anyway.
+    //       but for now this is so easy. and all ints or all floats cover the most common cases anyway.
+    global_asm!(
+        r#"
+        _arg8ret1_all_floats:
+        sub sp, sp, #16
+        stp lr, fp, [sp]
+        
+        mov x16, x0 ; save callee since we need to use this register for args
+        mov x17, x1
+        ldr d0, [x17, #0]
+        ldr d1, [x17, #8]
+        ldr d2, [x17, #16]
+        ldr d3, [x17, #24]
+        ldr d4, [x17, #32]
+        ldr d5, [x17, #40]
+        ldr d6, [x17, #48]
+        ldr d7, [x17, #56]
+        mov x8, #0 ; extra debug check: set indirect return ptr to null so they segfault if they try to return a struct. 
+        blr x16
+        
+        ldp lr, fp, [sp]
+        add sp, sp, #16
+        fmov x0, d0
+        ret
+    "#
+    );
+
     extern "C" {
         // loads 8 words from args into x0-x7 then calls fnptr
         fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+        // loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
+        fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
     }
 
     pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
         let floats = program.program.float_mask(f_ty);
-        assert!(floats.arg == 0 && floats.ret == 0, "ICE: i dont do the float registers but backend does");
-        assert!(program.slot_count(f_ty.ret) <= 1, "i dont do struct calling convention yet");
+        let arg_slots = program.slot_count(f_ty.arg);
+        let ret_slots = program.slot_count(f_ty.ret);
+        let bounce = if floats.arg == 0 && floats.ret == 0 {
+            arg8ret1
+        } else if floats.arg.count_ones() == arg_slots as u32 && floats.ret.count_ones() == ret_slots as u32 {
+            arg8ret1_all_floats
+        } else {
+            err!("ICE: i dont do mixed int/float registers but backend does",)
+        };
+        assert!(ret_slots <= 1, "i dont do struct calling convention yet");
         if comp_ctx {
             args.insert(0, program as *mut Compile as i64);
         }
@@ -570,7 +609,7 @@ pub mod c {
                 args.push(0);
             }
         }
-        let ret: i64 = unsafe { arg8ret1(ptr, args.as_mut_ptr()) };
+        let ret: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
         Ok(ret)
     }
 }

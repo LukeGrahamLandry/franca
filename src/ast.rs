@@ -17,6 +17,7 @@ use std::{
     cell::RefCell,
     hash::Hash,
     mem::{self, transmute},
+    num::NonZeroU16,
     ops::{Deref, DerefMut},
 };
 
@@ -700,7 +701,6 @@ pub struct Func<'p> {
     pub arg: Pattern<'p>,
     pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
-    pub local_constants: Vec<Var<'p>>,
     pub loc: Span,
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
@@ -729,7 +729,7 @@ pub struct Func<'p> {
     pub aarch64_stack_bytes: Option<u16>,
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
-    pub cl_emit_fn_ptr: Option<usize>,
+    pub cl_emit_fn_ptr: Option<usize>, // TODO: Option<CfEmit>
     pub callees: Vec<FuncId>,
 }
 
@@ -906,6 +906,7 @@ pub struct Program<'p> {
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
     pub sizes: RefCell<Vec<Option<u16>>>,
+    pub alignment: RefCell<Vec<Option<NonZeroU16>>>,
     // :SmallTypes
     pub special_pointer_fns: BitSet, // TODO: HACK. u8
 }
@@ -994,6 +995,7 @@ impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
             sizes: Default::default(),
+            alignment: Default::default(),
             // these are hardcoded numbers in TypeId constructors
             types: vec![
                 TypeInfo::Unknown,
@@ -1412,6 +1414,40 @@ impl<'p> Program<'p> {
         size
     }
 
+    // TODO: this is dumb, should be one struct with sizes. always need them both
+    pub fn byte_alignment(&self, ty: TypeId) -> u16 {
+        extend_options(self.alignment.borrow_mut().deref_mut(), ty.as_index());
+        if let Some(align) = self.alignment.borrow_mut().deref_mut()[ty.as_index()] {
+            return align.into();
+        }
+        let ty = self.raw_type(ty);
+        extend_options(self.sizes.borrow_mut().deref_mut(), ty.as_index());
+        let align = match &self[ty] {
+            TypeInfo::Unknown => 9999,
+            TypeInfo::Never => 1,
+            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).max().expect("no empty tuple"),
+            TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(f.ty)).max().expect("no empty struct"),
+            TypeInfo::Tagged { cases, .. } => 8.max(cases.iter().map(|(_, ty)| self.slot_count(*ty)).max().expect("no empty enum")),
+            TypeInfo::F64 | TypeInfo::VoidPtr | TypeInfo::Ptr(_) | TypeInfo::FnPtr(_) => 8,
+            // TODO: these should be u32
+            TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type => 8,
+            // TODO: this should be 1
+            TypeInfo::Bool => 8,
+            TypeInfo::Int(int) => {
+                // TODO: other small ints
+                if int.bit_count == 8 {
+                    1
+                } else {
+                    8
+                }
+            }
+            TypeInfo::Unit => 1,
+            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+        };
+        self.alignment.borrow_mut().deref_mut()[ty.as_index()] = Some(NonZeroU16::new(align).unwrap());
+        align
+    }
+
     // TODO: cache these on the Func
     pub fn float_mask(&self, ty: FnType) -> FloatMask {
         let arg = self.float_mask_one(ty.arg);
@@ -1590,7 +1626,6 @@ impl<'p> Default for Func<'p> {
             },
             ret: LazyType::Infer,
             capture_vars: vec![],
-            local_constants: vec![],
             loc: garbage_loc(),
             finished_arg: None,
             finished_ret: None,
@@ -1754,6 +1789,7 @@ pub enum Flag {
     Cranelift_Emit,
     Use_Cranelift,
     Log_Cl,
+    Tail,
     __Shift_Or_Slice,
     No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
     __Return,

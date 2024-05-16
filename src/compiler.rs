@@ -31,7 +31,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, ffi, impl_index, Map, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
@@ -226,13 +226,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some(ty) = self.program[f].finished_ty() {
-            let is_big = self.slot_count(ty.arg) >= 7 || self.slot_count(ty.ret) > 1;
+            let comp_ctx = self.program[f].has_tag(Flag::Ct);
+            let args = self.slot_count(ty.arg);
+            let is_big = (args > 8) || (args == 8 && comp_ctx) || self.slot_count(ty.ret) > 1;
             if self.program[f].has_tag(Flag::Flat_Call) || is_big {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 // TODO: my c_Call can;t handle agragates
                 self.program[f].set_cc(CallConv::Flat)?;
                 self.program[f].add_tag(Flag::Ct);
-            } else if self.program[f].has_tag(Flag::Ct) {
+            } else if comp_ctx {
                 // currently I redundantly add it to #macro but that's always flat_call anyway
                 // assert!(
                 //     self.program[f].comptime_addr.is_some(),
@@ -286,8 +288,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if use_cl {
                         let res = crate::cranelift::emit_cl(self, &body, f);
                         self.tag_err(res)?;
+                        self.aarch64.extend_blanks(f);
                         // TODO: this is dumb hyper mmaping, just flush as needed
-                        self.aarch64.dispatch[f.as_index()] = self.cranelift.get_ptr(f).unwrap();
+                        let p = self.cranelift.get_ptr(f).unwrap();
+                        self.aarch64.dispatch[f.as_index()] = p;
                     }
                     !use_cl
                 };
@@ -458,7 +462,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(!self.program[f].evil_uninit);
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
-        debug_assert!(self.program[f].local_constants.is_empty());
         assert!(!self.program[f].has_tag(Flag::Comptime));
 
         let mut special = false;
@@ -506,7 +509,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let has_body = self.program[f].body.is_some();
-        debug_assert!(self.program[f].local_constants.is_empty());
         assert!(!self.program[f].has_tag(Flag::Comptime));
         let arguments = self.program[f].arg.flatten();
         for (name, ty, kind) in arguments {
@@ -789,7 +791,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
         let mut func = self.program[template_f].clone();
-        debug_assert!(func.local_constants.is_empty());
         ResolveScope::resolve_body(&mut func, self)?;
         func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
 
@@ -1622,6 +1623,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         let info = TypeInfo::Enum { raw: ty, fields };
         let unique_ty = self.program.intern_type(info);
+
         self.as_literal(unique_ty, loc)
     }
 
@@ -2161,7 +2163,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
         let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false, false);
-        debug_assert!(fake_func.local_constants.is_empty());
         fake_func.resolved_body = true;
         fake_func.resolved_sign = true;
         fake_func.finished_arg = Some(TypeId::unit);
@@ -2906,7 +2907,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Some part of the argument must be known at comptime.
         // You better hope compile_expr noticed and didn't put it in a stack slot.
         let mut new_func = self.program[original_f].clone();
-        debug_assert!(new_func.local_constants.is_empty());
         // Closures always resolve up front, so they need to renumber the clone.
         // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
         if self.program[original_f].allow_rt_capture {

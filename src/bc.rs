@@ -46,6 +46,7 @@ pub enum Bc {
     NameFlatCallArg { id: u16, offset: u16 },             // _ -> _
     LastUse { id: u16 },                                  // _ -> _
     Unreachable,                                          // _ -> !
+    GetCompCtx,                                           // _ -> <ptr:1>
     NoCompile,
     Noop,
 }
