@@ -28,13 +28,13 @@ use crate::{
     compiler::{CErr, Compile, CompileError, Res},
     emit_bc::EmitBc,
     err, extend_options,
-    logging::{make_err, PoolLog},
+    logging::make_err,
     reflect::BitSet,
     unwrap,
 };
 
 pub struct JittedCl {
-    module: JITModule,
+    pub module: JITModule,
     funcs: Vec<Option<cranelift_module::FuncId>>,
     // can't just use funcs[i].is_some because it might just be a forward declaration.
     funcs_done: BitSet,
@@ -81,13 +81,12 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, f: FuncId) -> Res<'p, ()> {
     let mut body = EmitBc::empty_fn(compile.program, f);
     body.func = f;
-    let f_ty = compile.program[f].finished_ty().unwrap();
-    let arg_slots = compile.program.slot_count(f_ty.arg);
-    let arg_float_mask = compile.program.float_mask_one(f_ty.arg);
+    let arg = compile.program[f].finished_arg.unwrap();
+    let arg = compile.program.get_info(arg);
     body.blocks.push(BasicBlock {
         insts: vec![Bc::CallDirect { f, tail: true }],
-        arg_slots,
-        arg_float_mask,
+        arg_slots: arg.size_slots,
+        arg_float_mask: arg.float_mask,
         incoming_jumps: 0,
         clock: 0,
         height: 0,
@@ -100,6 +99,7 @@ impl Default for JittedCl {
         let isa = cranelift_native::builder().unwrap();
         let mut flags = settings::builder();
         flags.set("preserve_frame_pointers", "true").unwrap();
+        flags.set("unwind_info", "false").unwrap();
 
         // TODO: want to let comptime control settings...
         // flags.set("opt_level", "speed").unwrap();
@@ -259,23 +259,15 @@ impl<'z, 'p> Emit<'z, 'p> {
         let block = &self.body.blocks[b];
         builder.switch_to_block(self.blocks[b]);
         let args = builder.block_params(self.blocks[b]);
-        debug_assert_eq!(
-            args.len(),
-            block.arg_slots as usize,
-            "block:{b} \n{}\n{}",
-            builder.func.display(),
-            self.body.log(self.program.pool)
-        );
+        debug_assert_eq!(args.len(), block.arg_slots as usize);
         for i in 0..block.arg_slots {
             let v = args[i as usize];
             self.stack.push(v)
         }
         if b == 0 && !self.is_flat {
-            let arg = self.program[self.f].finished_arg.unwrap();
-            let slots = self.program.slot_count(arg);
-            debug_assert_eq!(slots, block.arg_slots);
-            let float_mask = self.program.float_mask_one(arg);
-            self.cast_ret_from_float(builder, slots, float_mask);
+            let arg = self.program.get_info(self.program[self.f].finished_arg.unwrap());
+            debug_assert_eq!(arg.size_slots, block.arg_slots);
+            self.cast_ret_from_float(builder, arg.size_slots, arg.float_mask);
         }
 
         for inst in &block.insts {
@@ -293,23 +285,21 @@ impl<'z, 'p> Emit<'z, 'p> {
                 }
                 Bc::CallDirect { f, tail } => {
                     let f_ty = self.program[f].unwrap_ty();
-                    let mut slots = self.program.slot_count(f_ty.arg);
+                    let (mut arg, ret) = self.program.get_infos(f_ty);
                     if self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct {
                         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
-                        slots += 1;
+                        arg.size_slots += 1;
                     }
-                    let floats = self.program.float_mask(f_ty);
-                    self.cast_args_to_float(builder, slots, floats.arg);
+                    self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
-                    let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
+                    let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
                     if let Some(emit) = self.program[f].cl_emit_fn_ptr {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
                         let v = emit(builder, args);
-                        pops(&mut self.stack, slots as usize);
-                        // None == unit
-                        let v = v.unwrap_or_else(|| builder.ins().iconst(I64, 0));
+                        pops(&mut self.stack, arg.size_slots as usize);
                         self.stack.push(v);
-                        self.cast_ret_from_float(builder, 1, floats.ret);
+                        debug_assert_eq!(ret.size_slots, 1);
+                        self.cast_ret_from_float(builder, ret.size_slots, ret.float_mask);
                         if tail {
                             builder.ins().return_(&[v]);
                             break;
@@ -358,7 +348,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         let comp_ctx = self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct;
                         let sig = self.make_sig(ty, false, comp_ctx);
                         let sig = builder.import_signature(sig);
-                        let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
+                        let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
 
                         let call = builder.ins().call_indirect(sig, callee, args);
                         if tail {
@@ -376,12 +366,12 @@ impl<'z, 'p> Emit<'z, 'p> {
                         call
                     };
 
-                    let ret = builder.inst_results(call);
-                    pops(&mut self.stack, slots as usize);
-                    for v in ret {
+                    let ret_val = builder.inst_results(call);
+                    pops(&mut self.stack, arg.size_slots as usize);
+                    for v in ret_val {
                         self.stack.push(*v);
                     }
-                    self.cast_ret_from_float(builder, ret.len() as u16, floats.ret);
+                    self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
                 Bc::CallDirectFlat { f } => {
                     let f_ty = &self.program[f].unwrap_ty();
@@ -426,18 +416,18 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::CallFnPtr { ty, comp_ctx } => {
                     assert!(!comp_ctx);
                     let sig = builder.import_signature(self.make_sig(ty, false, comp_ctx));
-                    let slots = self.program.slot_count(ty.arg);
-                    let floats = self.program.float_mask(ty);
-                    self.cast_args_to_float(builder, slots, floats.arg);
-                    let callee = self.stack[self.stack.len() - slots as usize - 1];
-                    let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
+                    let (arg, ret) = self.program.get_infos(ty);
+                    self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
+                    let first_arg = self.stack.len() - arg.size_slots as usize;
+                    let callee = self.stack[first_arg - 1];
+                    let args = &self.stack[first_arg..self.stack.len()];
                     let call = builder.ins().call_indirect(sig, callee, args);
-                    pops(&mut self.stack, slots as usize + 1);
-                    let ret = builder.inst_results(call);
-                    for v in ret {
+                    pops(&mut self.stack, arg.size_slots as usize + 1);
+                    let ret_val = builder.inst_results(call);
+                    for v in ret_val {
                         self.stack.push(*v);
                     }
-                    self.cast_ret_from_float(builder, ret.len() as u16, floats.ret);
+                    self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::JumpIf { true_ip, false_ip, slots } => {
@@ -467,13 +457,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                         debug_assert!(self.flat_arg_addr.is_some());
                         builder.ins().return_(&[]);
                     } else {
-                        let ret_ty = self.program[self.f].finished_ret.unwrap();
-                        let slots = self.program.slot_count(ret_ty);
-                        let floats = self.program.float_mask_one(ret_ty);
-                        self.cast_args_to_float(builder, slots, floats);
-                        let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
+                        let ret = self.program.get_info(self.program[self.f].finished_ret.unwrap());
+                        self.cast_args_to_float(builder, ret.size_slots, ret.float_mask);
+                        let args = &self.stack[self.stack.len() - ret.size_slots as usize..self.stack.len()];
                         builder.ins().return_(args);
-                        pops(&mut self.stack, slots as usize);
+                        pops(&mut self.stack, ret.size_slots as usize);
                     }
                     break;
                 }
@@ -684,11 +672,6 @@ fn wrap(e: ModuleError) -> Box<CompileError<'static>> {
 }
 
 #[track_caller]
-fn wrapc(e: cranelift::codegen::CompileError) -> Box<CompileError<'static>> {
-    make_err(CErr::Fatal(format!("cranelift: {:?}", e)))
-}
-
-#[track_caller]
 fn wrapg(e: cranelift::codegen::CodegenError) -> Box<CompileError<'static>> {
     make_err(CErr::Fatal(format!("cranelift: {:?}", e)))
 }
@@ -701,7 +684,7 @@ fn pops<T>(v: &mut Vec<T>, count: usize) {
 
 macro_rules! inst {
     ($name:ident) => {
-        |builder: &mut FunctionBuilder, v: &[Value]| Some(builder.ins().$name(v[0], v[1]))
+        |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().$name(v[0], v[1])
     };
 }
 
@@ -709,8 +692,7 @@ macro_rules! icmp {
     ($name:ident) => {
         |builder: &mut FunctionBuilder, v: &[Value]| {
             let cond = builder.ins().icmp(IntCC::$name, v[0], v[1]);
-            let cond = builder.ins().uextend(I64, cond);
-            Some(cond)
+            builder.ins().uextend(I64, cond)
         }
     };
 }
@@ -719,13 +701,12 @@ macro_rules! fcmp {
     ($name:ident) => {
         |builder: &mut FunctionBuilder, v: &[Value]| {
             let cond = builder.ins().fcmp(FloatCC::$name, v[0], v[1]);
-            let cond = builder.ins().uextend(I64, cond);
-            Some(cond)
+            builder.ins().uextend(I64, cond)
         }
     };
 }
 
-pub type CfEmit = fn(&mut FunctionBuilder, &[Value]) -> Option<Value>;
+pub type CfEmit = fn(&mut FunctionBuilder, &[Value]) -> Value;
 
 // TODO: still emit these as real functions if you take a pointer to one.
 pub const BUILTINS: &[(&str, CfEmit)] = &[
@@ -754,20 +735,22 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn shift_left(_: i64, __: i64) i64;", inst!(ishl)),
     ("fun offset(_: rawptr, bytes: i64) rawptr;", inst!(iadd)),
     ("fn bit_not(_: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        Some(builder.ins().bnot(v[0]))
+        builder.ins().bnot(v[0])
     }),
     ("fn load(_: *u8) u8;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        Some(builder.ins().uload8(I64, MemFlags::new(), v[0], 0))
+        builder.ins().uload8(I64, MemFlags::new(), v[0], 0)
     }),
     ("fn store(_: *u8, val: u8) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
         let val = builder.ins().ireduce(I8, v[1]);
         builder.ins().store(MemFlags::new(), val, v[0], 0);
-        None
+        builder.ins().iconst(I64, 0)
     }),
-    ("fn ptr_to_int(_: rawptr) i64;", |_: &mut FunctionBuilder, v: &[Value]| Some(v[0])),
-    ("fn int_to_ptr(_: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| Some(v[0])),
+    ("fn ptr_to_int(_: rawptr) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
+    ("fn int_to_ptr(_: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
+    // it seems this matches what i do.
+    // https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/aarch64/inst/emit.rs#L2183
     ("fun int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        Some(builder.ins().bitcast(I64, MemFlags::new(), v[0]))
+        builder.ins().fcvt_to_sint_sat(I64, v[0])
     }),
-    ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| Some(v[0])),
+    ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
 ];

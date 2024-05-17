@@ -15,20 +15,46 @@ struct MyAllocator;
 
 pub const ARENA_SIZE: usize = 1 << 30;
 
+#[cfg(feature = "be_thread_safe")]
 thread_local! {
-     pub static MEM: Cell<*mut u8> = Cell::new(unsafe{libc::mmap(
-         null_mut(),
-         ARENA_SIZE,
-         libc::PROT_WRITE | libc::PROT_READ,
-         libc::MAP_ANON | libc::MAP_PRIVATE,
-         -1,
-         0,
-     )} as *mut u8);
+     pub static MEM: Cell<*mut u8> = Cell::new(alloc_arena());
+}
+
+#[cfg(not(feature = "be_thread_safe"))]
+pub static MEM: NotThreadSafe = NotThreadSafe(UnsafeCell::new(null_mut()));
+
+pub struct NotThreadSafe(UnsafeCell<*mut u8>);
+unsafe impl Sync for NotThreadSafe {}
+
+impl NotThreadSafe {
+    pub fn get(&self) -> *mut u8 {
+        unsafe { *self.0.get() }
+    }
+
+    pub fn set(&self, v: *mut u8) {
+        unsafe { *self.0.get() = v };
+    }
+}
+
+fn alloc_arena() -> *mut u8 {
+    unsafe {
+        libc::mmap(
+            null_mut(),
+            ARENA_SIZE,
+            libc::PROT_WRITE | libc::PROT_READ,
+            libc::MAP_ANON | libc::MAP_PRIVATE,
+            -1,
+            0,
+        ) as *mut u8
+    }
 }
 
 unsafe impl GlobalAlloc for MyAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = MEM.get();
+        let mut ptr = MEM.get();
+        if cfg!(not(feature = "be_thread_safe")) && ptr.is_null() {
+            ptr = alloc_arena();
+        }
         let ptr = ptr.add(ptr.align_offset(layout.align()));
         MEM.set(ptr.add(layout.size()));
         ptr
@@ -66,7 +92,7 @@ macro_rules! debugln {
 
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
-use std::cell::Cell;
+use std::cell::UnsafeCell;
 use std::env;
 use std::path::PathBuf;
 use std::ptr::null_mut;
@@ -271,9 +297,7 @@ pub fn find_std_lib() -> bool {
 pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     println!("ERROR");
 
-    if cfg!(feature = "trace_errors") {
-        println!("Internal: {}", e.internal_loc.unwrap());
-    }
+    println!("Internal: {}", e.internal_loc.unwrap());
     if let CErr::Diagnostic(diagnostic) = &e.reason {
         emit_diagnostic(&interp.parsing.codemap, diagnostic);
     } else if let Some(loc) = e.loc {

@@ -532,19 +532,15 @@ pub mod c {
 
     pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
         debug_assert_ne!(ptr, Jitted::EMPTY);
-        let floats = program.program.float_mask(f_ty);
-        let arg_slots = program.slot_count(f_ty.arg);
-        let ret_slots = program.slot_count(f_ty.ret);
-        let bounce = if floats.arg == 0 && floats.ret == 0 {
+        let (arg, ret) = program.program.get_infos(f_ty);
+        let bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1
-        } else if floats.arg.count_ones() == arg_slots as u32 && floats.ret.count_ones() == ret_slots as u32 {
-            #[cfg(target_arch = "x86_64")]
-            todo!();
+        } else if arg.float_mask.count_ones() == arg.size_slots as u32 && ret.float_mask.count_ones() == ret.size_slots as u32 {
             arg8ret1_all_floats
         } else {
             err!("ICE: i dont do mixed int/float registers but backend does",)
         };
-        assert!(ret_slots <= 1, "i dont do struct calling convention yet");
+        assert!(ret.size_slots <= 1, "i dont do struct calling convention yet");
         if comp_ctx {
             args.insert(0, program as *mut Compile as i64);
         }
@@ -621,8 +617,7 @@ pub mod c {
     );
 
     // args 1-6: RDI, RSI, RDX, RCX, R8, R9; then stack
-    // floats: XMM0 - XMM7
-    //
+    // floats: xmm0 - xmm7
     #[cfg(target_arch = "x86_64")]
     #[naked]
     extern "C" fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64 {
@@ -641,7 +636,7 @@ pub mod c {
             push [r11 + 48]
             push [r11 + 56]
             call rax
-            add sp, 16 // i have to fix the stack pointer? 
+            add sp, 16 // i have to fix the stack pointer
             ret
             "#,
                 options(noreturn)
@@ -656,7 +651,17 @@ pub mod c {
         unsafe {
             asm!(
                 r#"
-                    ret
+                movq xmm0, [rsi]
+                movq xmm1, [rsi + 8]
+                movq xmm2, [rsi + 16]
+                movq xmm3, [rsi + 24]
+                movq xmm4, [rsi + 32]
+                movq xmm5, [rsi + 40]
+                movq xmm6, [rsi + 48]
+                movq xmm7, [rsi + 56]
+                call rdi
+                movq rax, xmm0
+                ret
                 "#,
                 options(noreturn)
             )

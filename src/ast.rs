@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, FloatMask, Value, Values},
+    bc::{Bc, Value, Values},
     compiler::{CErr, Compile, CompileError, Res},
     err,
     export_ffi::RsResolvedSymbol,
@@ -8,7 +8,7 @@ use crate::{
     ffi::{init_interp_send, InterpSend},
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
-    reflect::{BitSet, Reflect, RsType},
+    reflect::{Reflect, RsType},
     unwrap, Map, STATS,
 };
 use codemap::Span;
@@ -17,7 +17,6 @@ use std::{
     cell::RefCell,
     hash::Hash,
     mem::{self, transmute},
-    num::NonZeroU16,
     ops::{Deref, DerefMut},
 };
 
@@ -83,6 +82,27 @@ pub enum TypeInfo<'p> {
     Scope,
     Label(TypeId),
 }
+
+#[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
+pub struct TypeMeta {
+    pub size_slots: u16,
+    pub align_bytes: u16,
+    // TODO: can this be a u16 so this struct + option bit could fit in a word if we really wanted?
+    pub float_mask: u32,
+    pub has_special_pointer_fns: bool,
+}
+
+impl TypeMeta {
+    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool) -> Self {
+        Self {
+            size_slots,
+            align_bytes,
+            float_mask,
+            has_special_pointer_fns,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 pub struct Field<'p> {
@@ -908,10 +928,7 @@ pub struct Program<'p> {
     pub ffi_definitions: String,
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
-    pub sizes: RefCell<Vec<Option<u16>>>,
-    pub alignment: RefCell<Vec<Option<NonZeroU16>>>,
-    // :SmallTypes
-    pub special_pointer_fns: BitSet, // TODO: HACK. u8
+    pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -997,8 +1014,6 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
-            sizes: Default::default(),
-            alignment: Default::default(),
             // these are hardcoded numbers in TypeId constructors
             types: vec![
                 TypeInfo::Unknown,
@@ -1027,7 +1042,7 @@ impl<'p> Program<'p> {
             type_lookup: Default::default(),
             ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
-            special_pointer_fns: BitSet::empty(),
+            types_extra: Default::default(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1232,16 +1247,6 @@ impl<'p> Program<'p> {
             self.types.push(ty.clone());
             let id = TypeId::from_index(id);
             self.type_lookup.insert(ty, id);
-
-            // :SmallTypes
-            let raw = self.raw_type(id);
-            let is_small = if let TypeInfo::Int(int) = &self[raw] {
-                int.bit_count == 8
-            } else {
-                false
-            };
-            self.special_pointer_fns.insert(id.as_index(), is_small);
-
             id
         })
     }
@@ -1386,109 +1391,79 @@ impl<'p> Program<'p> {
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
-    pub fn slot_count(&self, ty: TypeId) -> u16 {
-        extend_options(self.sizes.borrow_mut().deref_mut(), ty.as_index());
-        if let Some(size) = self.sizes.borrow_mut().deref_mut()[ty.as_index()] {
-            return size;
+    pub fn get_info(&self, ty: TypeId) -> TypeMeta {
+        extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
+        if let Some(info) = self.types_extra.borrow_mut().deref_mut()[ty.as_index()] {
+            return info;
         }
         let ty = self.raw_type(ty);
-        extend_options(self.sizes.borrow_mut().deref_mut(), ty.as_index());
-        let size = match &self[ty] {
-            TypeInfo::Unknown => 9999,
-            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).sum(),
-            TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(f.ty)).sum(),
-            TypeInfo::Tagged { cases, .. } => 1 + cases.iter().map(|(_, ty)| self.slot_count(*ty)).max().expect("no empty enum"),
-            TypeInfo::Never => 0,
-            TypeInfo::Scope
-            | TypeInfo::Int(_)
-            | TypeInfo::Label(_)
-            | TypeInfo::F64
-            | TypeInfo::Bool
-            | TypeInfo::Fn(_)
-            | TypeInfo::Ptr(_)
-            | TypeInfo::VoidPtr
-            | TypeInfo::FnPtr(_)
-            | TypeInfo::Type
-            | TypeInfo::OverloadSet
-            | TypeInfo::Unit => 1,
-            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-        };
-        self.sizes.borrow_mut().deref_mut()[ty.as_index()] = Some(size);
-        size
-    }
-
-    // TODO: this is dumb, should be one struct with sizes. always need them both
-    pub fn byte_alignment(&self, ty: TypeId) -> u16 {
-        extend_options(self.alignment.borrow_mut().deref_mut(), ty.as_index());
-        if let Some(align) = self.alignment.borrow_mut().deref_mut()[ty.as_index()] {
-            return align.into();
-        }
-        let ty = self.raw_type(ty);
-        extend_options(self.sizes.borrow_mut().deref_mut(), ty.as_index());
-        let align = match &self[ty] {
-            TypeInfo::Unknown => 9999,
-            TypeInfo::Never => 1,
-            TypeInfo::Tuple(args) => args.iter().map(|t| self.slot_count(*t)).max().expect("no empty tuple"),
-            TypeInfo::Struct { fields, .. } => fields.iter().map(|f| self.slot_count(f.ty)).max().expect("no empty struct"),
-            TypeInfo::Tagged { cases, .. } => 8.max(cases.iter().map(|(_, ty)| self.slot_count(*ty)).max().expect("no empty enum")),
-            TypeInfo::F64 | TypeInfo::VoidPtr | TypeInfo::Ptr(_) | TypeInfo::FnPtr(_) => 8,
-            // TODO: these should be u32
-            TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type => 8,
-            // TODO: this should be 1
-            TypeInfo::Bool => 8,
-            TypeInfo::Int(int) => {
-                // TODO: other small ints
-                if int.bit_count == 8 {
-                    1
-                } else {
-                    8
-                }
-            }
-            TypeInfo::Unit => 1,
-            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-        };
-        self.alignment.borrow_mut().deref_mut()[ty.as_index()] = Some(NonZeroU16::new(align).unwrap());
-        align
-    }
-
-    // TODO: cache these on the Func
-    pub fn float_mask(&self, ty: FnType) -> FloatMask {
-        let arg = self.float_mask_one(ty.arg);
-        let ret = self.float_mask_one(ty.ret);
-        FloatMask { arg, ret }
-    }
-
-    pub fn float_mask_one(&self, ty: TypeId) -> u32 {
-        let ty = self.raw_type(ty);
-        match &self[ty] {
-            TypeInfo::F64 => 1, // base case
-            TypeInfo::Tuple(types) => {
+        extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
+        let info = match &self[ty] {
+            TypeInfo::Unknown => TypeMeta::new(1, 1, 0, false),
+            TypeInfo::Tuple(args) => {
+                let mut size = 0;
+                let mut align = 0;
                 let mut mask = 0;
-                for t in types {
-                    let m = self.float_mask_one(*t);
-                    let slots = self.slot_count(*t);
-                    mask <<= slots;
-                    mask |= m;
+
+                for arg in args {
+                    let info = self.get_info(*arg);
+                    size += info.size_slots;
+                    align = align.max(info.align_bytes);
+                    if size > 16 {
+                        // you only actually care about floats for passing in registers so if its bigger than 16, wont matter anyway?
+                        // until i do struct c abi properly and tuples mean args in a different way.
+                        mask = 0;
+                    } else {
+                        mask <<= info.size_slots;
+                        mask |= info.float_mask;
+                    }
                 }
-                mask
+
+                // TODO: two u8s should have special load like a u16 (eventually).
+                TypeMeta::new(size, align, mask, false)
             }
-            TypeInfo::Unknown => todo!(),
-            &TypeInfo::Struct { as_tuple, .. } => self.float_mask_one(as_tuple),
-            TypeInfo::Tagged { .. } => 0, // the varients can be different, never use float reg.
-            TypeInfo::Never
-            | TypeInfo::Ptr(_)
-            | TypeInfo::Int(_)
+            &TypeInfo::Struct { as_tuple, .. } => self.get_info(as_tuple),
+            TypeInfo::Tagged { cases, .. } => {
+                let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
+                // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
+                //       even without that, if i add 16 byte align, need to check the fields too.
+                TypeMeta::new(size, 8, 0, false)
+            }
+            TypeInfo::Never => TypeMeta::new(0, 1, 0, false),
+            TypeInfo::Int(int) => {
+                // TODO: u16, u32
+                // TODO: track sizes in bytes, not slots.
+                if int.bit_count == 8 {
+                    // :SmallTypes
+                    TypeMeta::new(1, 1, 0, true)
+                } else {
+                    TypeMeta::new(1, 8, 0, false)
+                }
+            }
+            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false),
+            // TODO: bool should be a byte. indexes should be u32
+            TypeInfo::Scope
+            | TypeInfo::Label(_)
             | TypeInfo::Bool
             | TypeInfo::Fn(_)
-            | TypeInfo::FnPtr(_)
-            | TypeInfo::Label(_)
-            | TypeInfo::Type
-            | TypeInfo::Unit
+            | TypeInfo::Ptr(_)
             | TypeInfo::VoidPtr
+            | TypeInfo::FnPtr(_)
+            | TypeInfo::Type
             | TypeInfo::OverloadSet
-            | TypeInfo::Scope => 0,
-            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!("raw"),
-        }
+            | TypeInfo::Unit => TypeMeta::new(1, 8, 0, false),
+            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+        };
+        self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
+        info
+    }
+
+    pub fn get_infos(&self, ty: FnType) -> (TypeMeta, TypeMeta) {
+        (self.get_info(ty.arg), self.get_info(ty.ret))
+    }
+
+    pub fn slot_count(&self, ty: TypeId) -> u16 {
+        self.get_info(ty).size_slots
     }
 }
 

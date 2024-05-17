@@ -14,12 +14,6 @@ use crate::{
 use crate::{unwrap, Map};
 use interp_derive::InterpSend;
 
-#[derive(Copy, Clone, InterpSend, Debug)]
-pub struct FloatMask {
-    pub arg: u32,
-    pub ret: u32,
-}
-
 #[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 
@@ -192,19 +186,17 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
             Value::I64(n)
         }
         &TypeInfo::Ptr(_) => Value::Heap(n as *mut i64),
-        // TODO: remove any? its a boxed Value
         TypeInfo::Scope | TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
     })
 }
 
-pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
+pub fn values_from_ints(compile: &Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
     let ty = compile.program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
     match &compile.program[ty] {
         &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
         TypeInfo::Tuple(types) => {
-            // TODO: no clone
-            for ty in types.clone() {
-                values_from_ints(compile, ty, ints, out)?;
+            for ty in types {
+                values_from_ints(compile, *ty, ints, out)?;
             }
         }
         TypeInfo::Tagged { cases } => {
@@ -220,10 +212,6 @@ pub fn values_from_ints(compile: &mut Compile, ty: TypeId, ints: &mut impl Itera
                 // NOTE: the other guy must have already put padding there, so we have to pop that, not just add our own.
                 // TODO: should preserve the value so you can do weird void cast tricks but meh until i remove the interp since I can't reconstruct the right types anyway.
                 let _padding = unwrap!(ints.next(), "");
-                // debug_assert!(
-                //     padding == 88888 || padding == 99999,
-                //     "TODO: this can be removed if you don't want to require specific padding values anymore. {padding}"
-                // );
                 out.push(Value::I64(99999));
             }
             let end = out.len();

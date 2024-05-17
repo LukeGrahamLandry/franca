@@ -15,8 +15,9 @@
 
 - aarch64 machine code.
   - i put the bytes in memory, i mark it executable, and i jump there. no assembler, no linker, no problems.
-  - used for comptime execution so the compiler can only run on aarch64 currently :(
+  - tested rust targets: aarch64-apple-darwin
 - cranelift
+  - tested rust targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-musl
 
 ## Progress
 

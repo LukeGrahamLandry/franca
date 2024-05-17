@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{CallConv, Flag, FnType, Func, FuncId, TypeId, TypeInfo};
-use crate::bc::{BbId, Bc, FloatMask, Value, Values};
+use crate::bc::{BbId, Bc, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
 use crate::unwrap;
@@ -131,7 +131,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
     }
 
-    // TODO: i cant keep copy pasting this shape. gonna cry.
+    // Note: you can only use Self once because this doesn't reset fields.
     fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
         if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
             return Ok(());
@@ -159,7 +159,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.log_asm_bc = func.has_tag(Flag::Log_Asm_Bc);
         self.bc_to_asm(f)?;
         self.asm.save_current(f);
-        // if cfg!(feature = "llvm_dis_debug") {
         let asm = self.asm.get_fn(f).unwrap();
 
         let func = &self.program[f];
@@ -189,42 +188,24 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             println!("===")
         }
-        // }
 
         self.wip.retain(|c| c != &f);
         Ok(())
     }
 
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
-        let a = self.program[f].finished_arg.unwrap();
-        let r = self.program[f].finished_ret.unwrap();
-
         let ff = &self.program[f];
         let is_flat_call = ff.cc == Some(CallConv::Flat);
         debugln!("=== {f:?} {} flat:{is_flat_call} ===", self.program.pool.get(self.program[f].name));
         debugln!("{}", self.program[f].body.as_ref().unwrap().log(self.program.pool));
 
-        let arg_ty = ff.finished_arg.unwrap();
-        let ret_ty = ff.finished_ret.unwrap();
-        let arg_size = self.program.slot_count(arg_ty);
-        let ret_size = self.program.slot_count(ret_ty);
+        let (arg, ret) = self.program.get_infos(ff.unwrap_ty());
         let func = self.body;
         self.f = f;
         self.next_slot = SpOffset(0);
-        self.vars.clear();
         self.vars.extend(vec![None; func.vars.len()]);
-        self.state.open_slots.clear();
-        self.patch_cbz.clear();
-        self.patch_b.clear();
-        self.release_stack.clear();
-        self.flat_arg = None;
-        self.flat_arg_offsets.clear();
-        self.block_ips.clear();
-        self.markers.clear();
-        self.clock = 0;
         let block_count = self.body.blocks.len();
         self.block_ips.extend(vec![None; block_count]);
-        self.state = Default::default();
 
         self.asm.mark_start(f);
         self.asm.push(sub_im(X64, sp, sp, 16, 0));
@@ -233,8 +214,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.asm.push(brk(0));
         let reserve_stack = self.asm.prev();
 
-        self.flat_result = None;
-
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
         let cc = unwrap!(self.program[func.func].cc, "ICE: missing calling convention");
         match cc {
@@ -242,12 +221,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
                 // Runtime check that caller agrees on type sizes.
                 // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
-                assert!(arg_size < (1 << 12));
-                assert!(ret_size < (1 << 12));
-                self.asm.push(cmp_im(X64, x2, arg_size as i64, 0));
+                assert!(arg.size_slots < (1 << 12));
+                assert!(ret.size_slots < (1 << 12));
+                self.asm.push(cmp_im(X64, x2, arg.size_slots as i64, 0));
                 self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
-                self.asm.push(cmp_im(X64, x4, ret_size as i64, 0));
+                self.asm.push(cmp_im(X64, x4, ret.size_slots as i64, 0));
                 self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
 
@@ -265,18 +244,14 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // Note: we rely on NameFlagArgOffset or whatever to remember how to actually access the parts you're interested in.
             }
             CallConv::Arg8Ret1 => {
-                debug_assert!(arg_size <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-                let floats = self.program.float_mask_one(arg_ty);
-                self.ccall_reg_to_stack(arg_size, floats);
-
-                let float_count = floats.count_ones();
-                let int_count = arg_size as u32 - float_count;
-
+                debug_assert!(arg.size_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
+                self.ccall_reg_to_stack(arg.size_slots, arg.float_mask);
+                let int_count = arg.size_slots as u32 - arg.float_mask.count_ones();
                 // Any registers not containing args can be used.
                 for i in int_count..8 {
                     self.state.free_reg.push(i as i64);
                 }
-                debug_assert_eq!(self.state.stack.len() as u16, arg_size);
+                debug_assert_eq!(self.state.stack.len() as u16, arg.size_slots);
             }
             CallConv::Inline | CallConv::OneRetPic | CallConv::Arg8Ret1Ct => unreachable!("unsupported cc {cc:?}"),
         }
@@ -468,25 +443,21 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::Ret => {
                 let ff = &self.program[self.f];
                 let cc = ff.cc.unwrap();
-                let ret_ty = ff.finished_ret.unwrap();
-                let arg_size = self.program.slot_count(ff.finished_arg.unwrap());
-                let ret_size = self.program.slot_count(ret_ty);
                 match cc {
                     CallConv::Arg8Ret1 => {
+                        let ret_ty = ff.finished_ret.unwrap();
+                        let ret = self.program.get_info(ret_ty);
                         // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
-                        let floats = self.program.float_mask_one(ret_ty);
-                        self.stack_to_ccall_reg(ret_size, floats)
+                        self.stack_to_ccall_reg(ret.size_slots, ret.float_mask)
                     }
-                    CallConv::Flat => {
-                        // We now require the bytecode to deal with putting values in the result address.
-                        // so nothing to do here.
-                    }
-                    CallConv::Inline | CallConv::OneRetPic | CallConv::Arg8Ret1Ct => unreachable!("unsupported cc {cc:?}"),
+                    // We now require the bytecode to deal with putting values in the result address.
+                    // so nothing to do here.
+                    CallConv::Flat => {}
+                    _ => unreachable!("unsupported cc {cc:?}"),
                 }
                 // debug_assert!(self.state.stack.is_empty()); // todo
 
                 self.emit_stack_fixup();
-                // Do the return
                 self.asm.push(ret(()));
                 return Ok(true);
             }
@@ -756,7 +727,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
     }
 
-    // TODO: floats -- May 1
     fn ccall_reg_to_stack(&mut self, slots: u16, float_mask: u32) {
         debug_assert!((slots as u32 - float_mask.count_ones()) <= 8);
         let mut next_float = 0;
@@ -1013,22 +983,21 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     fn dyn_c_call(&mut self, f_ty: FnType, comp_ctx: bool, do_call: impl FnOnce(&mut Self)) {
         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
         let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
-        let arg_count = self.program.slot_count(f_ty.arg) + reg_offset;
-        let ret_count = self.program.slot_count(f_ty.ret);
-        assert!((arg_count) <= 8, "indirect c_call only supports 8 arguments. TODO: pass on stack");
+        let (arg, ret) = self.program.get_infos(f_ty);
+        assert!(
+            (arg.size_slots + reg_offset) <= 8,
+            "indirect c_call only supports 8 arguments. TODO: pass on stack"
+        );
         // TODO: this isn't the normal c abi
-        assert!(ret_count <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
+        assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
 
-        // TODO: if i always just recompute liek this, dont bother putting it on the bc ibstructions -- May 3
-        let floats = self.program.float_mask_one(f_ty.arg);
-        self.stack_to_ccall_reg(arg_count, floats);
+        self.stack_to_ccall_reg(arg.size_slots + reg_offset, arg.float_mask);
         self.spill_abi_stompable();
         do_call(self);
-        let floats = self.program.float_mask_one(f_ty.ret);
-        self.ccall_reg_to_stack(ret_count, floats);
+        self.ccall_reg_to_stack(ret.size_slots, ret.float_mask);
 
-        let float_count = floats.count_ones();
-        let int_count = ret_count as u32 - float_count;
+        let float_count = ret.float_mask.count_ones();
+        let int_count = ret.size_slots as u32 - float_count;
 
         for i in int_count..7 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
@@ -1233,6 +1202,7 @@ pub mod jit {
         }
 
         pub fn copy_inline_asm(&mut self, f: FuncId, insts: &[u32]) {
+            self.mark_start(f);
             self.make_write();
             for op in insts {
                 let op = *op as i64;

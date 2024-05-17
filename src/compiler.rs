@@ -161,9 +161,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
     pub fn log_trace(&self) -> String {
         let mut out = String::new();
-        if !cfg!(feature = "some_log") {
-            return out;
-        }
         writeln!(out, "=== TRACE ===").unwrap();
         // writeln!(out, "{}", Location::caller()).unwrap();  // Always called from the same place now so this is useless
 
@@ -281,12 +278,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 i += 1;
             }
 
-            if let Some(addr) = self.program[f].comptime_addr {
-                self.aarch64.extend_blanks(f);
-                self.aarch64.dispatch[f.as_index()] = addr as *const u8;
-            }
-
-            // TODO: explicit call for moving the jitted_code to the mmap.
             if let Some(code) = &self.program[f].jitted_code {
                 self.aarch64.copy_inline_asm(f, code);
             }
@@ -296,10 +287,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             #[cfg(feature = "cranelift")]
             if use_cl && cl.is_some() {
                 crate::cranelift::emit_cl_intrinsic(self, cl.unwrap(), f)?
-            }
-
-            if let Some(code) = &self.program[f].jitted_code {
-                self.aarch64.copy_inline_asm(f, code);
             }
 
             if self.program[f].cc.unwrap() != CallConv::Inline && self.program[f].body.is_some() {
@@ -416,12 +403,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // This is much less painful than threading it through the macros
-    pub fn tag_err<T>(&self, mut res: Res<'p, T>) -> Res<'p, T> {
-        if let Err(err) = &mut res {
+    pub fn tag_err<T>(&self, res: Res<'p, T>) -> Res<'p, T> {
+        res.map_err(|mut err| {
             err.trace = self.log_trace();
-            err.loc = self.last_loc;
-        }
-        res
+            err.loc = err.loc.or(self.last_loc);
+            err
+        })
     }
 
     pub fn hoist_constants(&mut self, body: &mut [FatStmt<'p>]) -> Res<'p, ()> {
@@ -1365,7 +1352,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
-                        if self.program.special_pointer_fns.get(ty.as_index()) {
+                        if self.program.get_info(ty).has_special_pointer_fns {
                             // :SmallTypes
                             // Replace with a call to fn load to handle types smaller than a word.
                             // TODO: this is really stupid
@@ -2515,7 +2502,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let oldty = place.ty;
                 let value_ty = self.compile_expr(value, Some(oldty))?;
                 self.type_check_arg(value_ty, oldty, "reassign var")?;
-                if self.program.special_pointer_fns.get(oldty.as_index()) {
+                if self.program.get_info(oldty).has_special_pointer_fns {
                     // :SmallTypes
                     // Replace with a call to fn store to handle types smaller than a word.
                     self.underef_one(place)?;

@@ -1,3 +1,5 @@
+- in the backend you mostly need size and float_mask at the same time so put them together so its less verbose.
+
 ## compiling the compiler for blink
 
 https://betterprogramming.pub/cross-compiling-rust-from-mac-to-linux-7fad5a454ab1
@@ -58,7 +60,8 @@ thats so strange. its in the same module which was the problem last time.
   DAMN IT. i typo-ed the return type of offset as i64.
   ok so i should really consider reworking my overloading system to catch that sort of thing.
   at the very least typecheck my hard coded string signetures somehow. fuck.
-- well anyway now all that fails is floats.fr and libc.fr/open_dynamic_library
+- well anyway now all that fails is floats.fr (only comptime stuff cause mandelbrot works)
+  and libc.fr/open_dynamic_library (which wont work cause im running it in blink which doesn't have dynamic libraries).
 
 ## finishing cranelift backend (May 16)
 

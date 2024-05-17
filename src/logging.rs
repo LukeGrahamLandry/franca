@@ -15,11 +15,7 @@ pub fn break_here(e: &CErr) {
 #[track_caller]
 pub fn make_err(reason: CErr) -> Box<CompileError> {
     Box::new(CompileError {
-        internal_loc: if cfg!(feature = "trace_errors") {
-            Some(std::panic::Location::caller())
-        } else {
-            None
-        },
+        internal_loc: Some(std::panic::Location::caller()),
         loc: None,
         reason,
         trace: String::new(),
@@ -464,9 +460,7 @@ impl<'p> Debug for CompileError<'p> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "COMPILATION ERROR:")?;
         writeln!(f, "{:?}", self.reason)?;
-        if cfg!(feature = "trace_errors") {
-            writeln!(f, "Internal: {}", self.internal_loc.unwrap())?;
-        }
+        writeln!(f, "Internal: {}", self.internal_loc.unwrap())?;
         write!(f, "{}", self.trace)
     }
 }

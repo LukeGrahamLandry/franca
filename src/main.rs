@@ -19,7 +19,7 @@ use std::{
     env,
     fs::{self, File},
     io::{Read, Write},
-    mem::{self},
+    mem,
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
@@ -388,9 +388,7 @@ fn run_one(comp: &mut Compile, f: FuncId) {
     }
 
     let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
-    println!("run");
     comp.run(f, Value::I64(arg).into(), ExecTime::Runtime).unwrap();
-    println!("done");
 }
 
 fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
@@ -516,8 +514,17 @@ fn do_60fps(arch: TargetArch) {
         }
 
         let mut temp = memmap2::MmapOptions::new().len(0).map_anon().unwrap().make_exec().unwrap();
+        comp.aarch64.make_exec(); // if we were using cranelift backend, it might be write the first time.
         mem::swap(comp.aarch64.map_exec.as_mut().unwrap(), &mut temp);
         // TODO: unmap constant data in pool.rs
+
+        // TODO
+        // #[cfg(feature = "cranelift")]
+        // {
+        //     unsafe {
+        //         comp.cranelift.module.free_memory();
+        //     }
+        // }
 
         mem::forget(comp);
         mem::forget(program);

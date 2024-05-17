@@ -1016,11 +1016,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             self.spans[self.spans.len() - 1]
         };
 
-        let internal_loc = if cfg!(feature = "trace_errors") {
-            Some(std::panic::Location::caller())
-        } else {
-            None
-        };
+        let internal_loc = Some(std::panic::Location::caller());
         let diagnostic = vec![Diagnostic {
             level: Level::Error,
             message,

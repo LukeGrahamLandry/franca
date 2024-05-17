@@ -132,9 +132,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.is_flat_call = is_flat_call;
         let has_body = func.body.is_some();
 
-        let arg = func.finished_arg.unwrap();
-        let slots = if is_flat_call { 0 } else { self.slot_count(arg) };
-        let floats = if is_flat_call { 0 } else { self.program.float_mask_one(arg) };
+        let f_ty = func.unwrap_ty();
+        let (arg, ret) = self.program.get_infos(f_ty);
+        let slots = if is_flat_call { 0 } else { arg.size_slots };
+        let floats = if is_flat_call { 0 } else { arg.float_mask };
         let entry_block = result.push_block(slots, floats);
 
         if !has_body {
@@ -149,9 +150,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             err!("called function without body: {f:?} {}", self.program.pool.get(func.name));
         }
 
-        let ret_slots = self.slot_count(func.finished_ret.unwrap());
-        let ret_floats = self.program.float_mask_one(func.finished_ret.unwrap());
-
         // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
         if let Expr::Value { .. } = &func.body.as_ref().unwrap().expr {
         } else {
@@ -159,12 +157,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
         let body = func.body.as_ref().unwrap();
 
-        debug_assert!(is_flat_call || ret_slots <= 1); // change ret handling if fix real c_call?
+        debug_assert!(is_flat_call || ret.size_slots <= 1); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
-        let return_block = result.push_block(ret_slots, ret_floats);
-        // result
-        //     .inlined_return_addr
-        //     .insert(self.program[f].return_var.unwrap(), (return_block, result_location));
+        let return_block = result.push_block(ret.size_slots, ret.float_mask);
+
         result.current_block = entry_block;
         if result_location == ResAddr {
             result.push(Bc::AddrFnResult);
@@ -175,18 +171,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
             result.push(Bc::Goto {
                 ip: return_block,
-                slots: ret_slots,
+                slots: ret.size_slots,
             });
             result.blocks[return_block.0 as usize].incoming_jumps += 1;
             result.current_block = return_block;
         } else {
             result.push_to(return_block, Bc::NoCompile);
         }
-        // result.inlined_return_addr.remove(&f);
 
-        for _id in self.locals.pop().unwrap() {
-            // result.push(Bc::LastUse { id }); // TODO: why bother, we're returning anyway -- May 1
-        }
+        self.locals.pop().unwrap();
         assert!(self.locals.is_empty());
 
         if !body.ty.is_never() {
@@ -417,14 +410,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 ..
             } => {
                 self.locals.push(vec![]);
-                let slots = self.slot_count(expr.ty);
-                debug_assert!(slots < 8 || result_location != PushStack);
+                let out = self.program.get_info(expr.ty);
+                debug_assert!(out.size_slots < 8 || result_location != PushStack);
 
                 if let Some(ret_var) = ret_label {
-                    let floats = self.program.float_mask_one(expr.ty);
                     let entry_block = result.current_block;
                     let return_block = if result_location == PushStack {
-                        result.push_block(slots, floats)
+                        result.push_block(out.size_slots, out.float_mask)
                     } else {
                         result.push_block(0, 0)
                     };
@@ -631,25 +623,20 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.compile_expr(result, &parts[0], PushStack, false)?; // cond
         let (if_true, if_false) = (&parts[1], &parts[2]);
 
-        let slots = self.slot_count(if_true.ty);
-        debug_assert!(slots < 8 || result_location != PushStack); // now its the callers problem to deal with this case
+        let out = self.program.get_info(if_true.ty);
+        debug_assert!(out.size_slots < 8 || result_location != PushStack); // now its the callers problem to deal with this case
 
         let branch_block = result.current_block;
         let true_ip = result.push_block(0, 0);
-        result.current_block = true_ip;
         self.compile_expr(result, if_true, result_location, can_tail)?;
         let end_true_block = result.current_block;
         let false_ip = result.push_block(0, 0);
-        result.current_block = false_ip;
         self.compile_expr(result, if_false, result_location, can_tail)?;
         let end_false_block = result.current_block;
 
-        let floats = self.program.float_mask_one(if_true.ty);
-
-        let block_slots = if result_location == PushStack { slots } else { 0 };
-        let block_floats = if result_location == PushStack { floats } else { 0 };
+        let block_slots = if result_location == PushStack { out.size_slots } else { 0 };
+        let block_floats = if result_location == PushStack { out.float_mask } else { 0 };
         let ip = result.push_block(block_slots, block_floats);
-        result.current_block = ip;
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
         result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
         // TODO: hack
