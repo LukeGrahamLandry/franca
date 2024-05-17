@@ -259,7 +259,7 @@ impl<'z, 'p> Emit<'z, 'p> {
         let block = &self.body.blocks[b];
         builder.switch_to_block(self.blocks[b]);
         let args = builder.block_params(self.blocks[b]);
-        debug_assert_eq!(args.len(), block.arg_slots as usize);
+        debug_assert_eq!(args.len(), block.arg_slots as usize, "b:{b}");
         for i in 0..block.arg_slots {
             let v = args[i as usize];
             self.stack.push(v)
@@ -297,14 +297,24 @@ impl<'z, 'p> Emit<'z, 'p> {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
                         let v = emit(builder, args);
                         pops(&mut self.stack, arg.size_slots as usize);
-                        self.stack.push(v);
-                        debug_assert_eq!(ret.size_slots, 1);
-                        self.cast_ret_from_float(builder, ret.size_slots, ret.float_mask);
-                        if tail {
-                            builder.ins().return_(&[v]);
-                            break;
+                        if ret.size_slots == 0 {
+                            // Unit is zero sized.
+                            if tail {
+                                builder.ins().return_(&[]);
+                                break;
+                            } else {
+                                continue;
+                            }
                         } else {
-                            continue;
+                            self.stack.push(v);
+                            debug_assert_eq!(ret.size_slots, 1);
+                            self.cast_ret_from_float(builder, ret.size_slots, ret.float_mask);
+                            if tail {
+                                builder.ins().return_(&[v]);
+                                break;
+                            } else {
+                                continue;
+                            }
                         }
                     }
 
@@ -603,6 +613,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     let t = s.program.raw_type(t);
                     push(s, t, sig);
                 }
+            } else if let TypeInfo::Unit = &s.program[arg] {
             } else {
                 let extension = if arg == TypeId::f64() {
                     ArgumentExtension::None
@@ -621,7 +632,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         // TODO: unit. TODO: multiple returns tuple?
         let ret = self.program.raw_type(t.ret);
-        if !ret.is_never() {
+        if !ret.is_never() && !ret.is_unit() {
             // TODO: ArgumentPurpose::StructReturn for real c abi. dont just slots==1 because never (and eventually unit) are 0
             let extension = if ret == TypeId::f64() {
                 ArgumentExtension::None
@@ -753,4 +764,10 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
         builder.ins().fcvt_to_sint_sat(I64, v[0])
     }),
     ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
+    ("fn load(_: *Unit) Unit;", |builder: &mut FunctionBuilder, _: &[Value]| {
+        builder.ins().iconst(I64, 0)
+    }),
+    ("fn store(_: *Unit, val: Unit) Unit;", |builder: &mut FunctionBuilder, _: &[Value]| {
+        builder.ins().iconst(I64, 0)
+    }),
 ];

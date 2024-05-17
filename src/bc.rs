@@ -174,7 +174,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
         TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
         &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
-        TypeInfo::Unit => Value::Unit,
+        TypeInfo::Unit => unreachable!(),
         TypeInfo::F64 => Value::F64(n as u64), // TODO: high bit?
         TypeInfo::Bool => Value::Bool(n != 0),
         TypeInfo::Fn(_) => Value::GetFn(FuncId::from_raw(n)),
@@ -217,6 +217,7 @@ pub fn values_from_ints(compile: &Compile, ty: TypeId, ints: &mut impl Iterator<
             let end = out.len();
             assert_eq!(end - start, payload_size as usize + 1, "{out:?}");
         }
+        TypeInfo::Unit => out.push(Value::Unit),
         info => {
             let n = unwrap!(ints.next(), "");
             let v = unwrap!(int_to_value_inner(info, n), "");

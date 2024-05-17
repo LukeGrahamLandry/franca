@@ -169,7 +169,7 @@ pub enum Expr<'p> {
     GetVar(Var<'p>),
     GetNamed(Ident<'p>),
     String(Ident<'p>),
-    // This is what TupleAccess and FieldAccess both desugar to.
+    // This is what TupleAccess and FieldAccess both desugar to. Even for tagged unions!
     PtrOffset {
         ptr: Box<FatExpr<'p>>,
         index: usize,
@@ -1214,7 +1214,8 @@ impl<'p> Program<'p> {
             TypeInfo::F64 => "double",
             TypeInfo::Unknown | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
-            TypeInfo::OverloadSet | TypeInfo::Unit | TypeInfo::Type | TypeInfo::Int(_) => "i64",
+            TypeInfo::Unit => todo!(),
+            TypeInfo::OverloadSet | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
             TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => {
@@ -1441,6 +1442,7 @@ impl<'p> Program<'p> {
                 }
             }
             TypeInfo::F64 => TypeMeta::new(1, 8, 1, false),
+            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true),
             // TODO: bool should be a byte. indexes should be u32
             TypeInfo::Scope
             | TypeInfo::Label(_)
@@ -1450,8 +1452,7 @@ impl<'p> Program<'p> {
             | TypeInfo::VoidPtr
             | TypeInfo::FnPtr(_)
             | TypeInfo::Type
-            | TypeInfo::OverloadSet
-            | TypeInfo::Unit => TypeMeta::new(1, 8, 0, false),
+            | TypeInfo::OverloadSet => TypeMeta::new(1, 8, 0, false),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);

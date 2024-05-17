@@ -211,8 +211,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
 
                 let payload_size = Self::SIZE - 1;
                 for _ in 0..(payload_size-varient_size) {
-                    let unit = values.next()?;
-                    //debug_assert_eq!(unit, Value::I64(123));
+                    let _pad = values.next()?;
                 }
 
                 result
@@ -252,8 +251,6 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
         }
         syn::Fields::Unit => {
             quote! {{
-                let unit = values.next()?;
-                //debug_assert_eq!(unit, crate::bc::Value::Unit);
                 let val = #prefix;
                 Some(val)
             }}
@@ -376,9 +373,7 @@ fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream) ->
             }
         }
         syn::Fields::Unit => {
-            quote! {
-                values.push(55555);
-            }
+            quote! {}
         }
     }
 }
@@ -431,7 +426,7 @@ fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
                 0 #(+ #recurse)*
             }
         }
-        syn::Fields::Unit => quote! { 1 },
+        syn::Fields::Unit => quote! { 0 },
     }
 }
 

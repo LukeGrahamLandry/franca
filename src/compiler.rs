@@ -2542,10 +2542,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ptr_ty = self.program.ptr_type(val_ty);
 
                 *place = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Addr.ident(), Box::new(mem::take(place))), loc, ptr_ty);
+                place.done = true;
                 if want_deref {
                     self.deref_one(place)?;
+                    // Don't set done again because you want to go around the main compile_expr another time so special load/store overloads get processed.
+                    // TODO: maybe its better to just do that here too and not waste an extra recursion.
                 }
-                place.done = true;
             }
             Expr::FieldAccess(container, name) => {
                 // TODO: could lookup field and pass down requested
@@ -2573,15 +2575,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ptr: Box::new(mem::take(container)),
                     index: i,
                 };
+                place.done = true;
                 if want_deref {
                     place.ty = field_ptr_ty;
-                    place.done = true;
                     // Now we have the offset-ed ptr, add back the deref
                     self.deref_one(place)?;
+                    // Don't set done again because you want to go around the main compile_expr another time so special load/store overloads get processed.
                 } else {
+                    // place.done = true;
                     place.ty = field_ptr_ty;
                 }
-                place.done = true;
             }
             Expr::TupleAccess { ptr, index } => {
                 self.compile_place_expr(ptr, None, false)?;
@@ -2595,12 +2598,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     index: i as usize,
                 };
                 place.ty = field_ptr_ty;
+                place.done = true;
+
                 if want_deref {
-                    place.done = true;
                     // Now we have the offset-ed ptr, add back the deref
                     self.deref_one(place)?;
+                    // Don't set again done because you want to go around the main compile_expr another time so special load/store overloads get processed.
+                    // place.done = true;
                 }
-                place.done = true;
             }
             Expr::SuffixMacro(macro_name, arg) => {
                 let name = Flag::try_from(*macro_name)?;
@@ -2614,7 +2619,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         } else {
                             *place = mem::take(arg);
                         }
-                        place.done = true;
+                        // Don't set done because you want to go around the main compile_expr another time so special load/store overloads get processed.
+                        // place.done = true;
                     }
                     _ => err!("other place expr: {}!{}", arg.log(self.pool), self.pool.get(*macro_name)),
                 }

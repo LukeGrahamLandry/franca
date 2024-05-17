@@ -25,7 +25,7 @@ pub trait InterpSend<'p>: Sized {
     fn serialize_to_ints_one(self) -> Vec<i64> {
         let mut values = Vec::with_capacity(Self::SIZE);
         self.serialize_to_ints(&mut values);
-        debug_assert_eq!(values.len(), Self::SIZE);
+        // debug_assert_eq!(values.len(), Self::SIZE); // not true because Unit
         values
     }
 
@@ -161,7 +161,7 @@ impl<'p> InterpSend<'p> for bool {
 }
 
 impl<'p> InterpSend<'p> for () {
-    const SIZE: usize = 1;
+    const SIZE: usize = 0;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -174,12 +174,9 @@ impl<'p> InterpSend<'p> for () {
         TypeId::unit
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(77777)
-    }
+    fn serialize_to_ints(self, _: &mut Vec<i64>) {}
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        values.next()?;
+    fn deserialize_from_ints(_: &mut impl Iterator<Item = i64>) -> Option<Self> {
         Some(())
     }
 
@@ -548,8 +545,9 @@ pub mod c {
         // not doing this is ub but like... meh.
         // if something interesting happens to be after the args and you call with the wrong signature you could read it.
         // its fine to read garbage memory and put it in the registers you know callee will ignore (if types are right).
+        // However, now that unit is zero sized, the vec may have no allocation, so you get a segfault trying to load from it.
         const READ_GARBAGE: bool = true;
-        if !READ_GARBAGE {
+        if !READ_GARBAGE || args.is_empty() {
             args.reserve_exact(8 - args.len());
             while args.len() < 8 {
                 args.push(0);

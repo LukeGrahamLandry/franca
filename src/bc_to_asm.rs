@@ -753,6 +753,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     /// <ptr:1> -> <?:n>
     fn emit_load(&mut self, slots: u16) {
+        debug_assert_ne!(slots, 0);
         debug_assert!(!self.state.stack.is_empty());
         debug!("LOAD: [{:?}] to ", self.state.stack.last().unwrap());
         // TODO: really you want to suspend this too because the common case is probably that the next thing is a store but thats harder to think about so just gonna start with the dumb thing i was doing before -- May 1
@@ -779,6 +780,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     /// <?:n> <ptr:1> -> _
     #[track_caller]
     fn emit_store(&mut self, slots: u16) {
+        debug_assert_ne!(slots, 0);
         debug_assert!(self.state.stack.len() > slots as usize, "want store {slots} slots");
         debugln!(
             "STORE: ({:?}) to [{:?}]",
@@ -1132,7 +1134,9 @@ pub use jit::Jitted;
 pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
     let mut out = vec![];
     for value in values {
-        out.push(value.as_raw_int());
+        if *value != Value::Unit {
+            out.push(value.as_raw_int());
+        }
     }
     out
 }
@@ -1148,7 +1152,7 @@ impl Value {
             &Value::Symbol(i) => i as i64,
             &Value::Type(ty) => ty.as_raw(),
             &Value::Label(return_from) => return_from.as_raw(),
-            Value::Unit => 0, // TODO
+            Value::Unit => unreachable!(),
             &Value::Heap(ptr) => ptr as usize as i64,
             &Value::GetNativeFnPtr(i) => {
                 // TODO: not sure if we want to preserve the id or use the actual address

@@ -1,4 +1,20 @@
 - in the backend you mostly need size and float_mask at the same time so put them together so its less verbose.
+- want zero sized Unit so you don't spend instructions moving around garbage.
+  removed places that pushed/popped a zero to Vec<i64>/v-stack.
+  had to check for it in c::call because you can't just read garbage if the vec doesn't have an allocation.
+  special case in cranelift signetures / intrinsics.
+  last that fail are `match_macro` and `tagged_unions` trying to load a zero sized thing.
+  strangly adding a check for zero size in emit_bc Deref fixes those but breaks `test_string_pool`.
+  but why am i even getting there? i gave Unit a special load/store that do nothing.
+  so enums are adding loads without checking overloads.
+  ah, it happens if i have a Unit struct field too.
+  so place exprs like that don't go through the compile deref that checks the overload.
+  nice i caught that now cause it would be a problem when i tried to make small types take the right amount of space in structs.
+  so thats mostly easy to fix by just not setting `.done` in compile_place_expr.
+  but @tagged are still wierd because if you load the whole thing that includes padding so you have to get that off the stack before treating it as a smaller varient.
+  but no, thats not true, you always access specific fields on it from memory and only load the whole enum type if you're going to store the whole enum type.
+
+TODO: it should know Unit load/store does nothing so my backend doesn't save registers before doing the garbage call!
 
 ## compiling the compiler for blink
 

@@ -113,8 +113,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let slots = self.slot_count(ty);
 
-                result.push(Bc::AddrVar { id });
-                result.push(Bc::StorePost { slots });
+                if slots != 0 {
+                    result.push(Bc::AddrVar { id });
+                    result.push(Bc::StorePost { slots });
+                }
 
                 self.locals.last_mut().unwrap().push(id);
                 if let Some(name) = name {
@@ -329,7 +331,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     // if result_location==true, the top of the stack on entry to this function has the pointer where the result should be stored.
     // otherwise, just push it to the stack.
-    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
+    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, mut result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
         assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
 
         debug_assert!(
@@ -527,6 +529,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     Flag::Deref => {
                         self.compile_expr(result, arg, PushStack, false)?; // get the pointer
                         let slots = self.slot_count(expr.ty);
+                        debug_assert!(!self.program.get_info(expr.ty).has_special_pointer_fns);
+                        if slots == 0 {
+                            result_location = Discard;
+                        }
                         match result_location {
                             PushStack => result.push(Bc::Load { slots }),
                             ResAddr => result.push(Bc::CopyToFrom { slots }),
@@ -706,6 +712,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     // :PlaceExpr
     fn set_deref(&mut self, result: &mut FnBody<'p>, place: &FatExpr<'p>, value: &FatExpr<'p>) -> Res<'p, ()> {
+        debug_assert!(!self.program.get_info(value.ty).has_special_pointer_fns);
         match place.deref() {
             Expr::GetVar(_) => unreachable!("var set should be converted to place expr"),
             Expr::SuffixMacro(macro_name, arg) => {

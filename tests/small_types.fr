@@ -19,3 +19,38 @@ fn load_store_u8() = {
     //       but really you don't want to allow #ct at runtime at all and it should notice that this is constant. 
     assert_eq(:: u8.size_of(), 1); 
 }
+
+#test fn unit_field() = {
+    Data :: @struct(a: i64, b: Unit, c: i64);
+    d: Data = (a = 123, b = (), c = 456);
+    assert_eq(d.a, 123);
+    assert_eq(d.b, unit);
+    assert_eq(d.c, 456);
+}
+
+#test fn u8_field() = {
+    Data :: @struct(a: u8, b: i64);  // Note: wierd alignment :)
+    d: Data = (a = @as(u8) 5, b = 456);
+    assert_eq(true, eq(d.a, @as(u8) 5));
+    assert_eq(d.b, 456);
+}
+
+// Its probably fine if you break this test for a better enum repr, but not if its by accident!
+// If this stops being well defined behaviour, should give reflection info so you can do similar things. 
+#test fn dont_change_tagged_padding() = {
+    Data :: @tagged(small: u8, big: i64, extra_big: Str);
+    d: Data = (big = 0xFFFFFFFFFFFFFFFF);
+    
+    d&!tag[] = tag_value(Data, @symbol small);
+    d.small = @as(u8) 0;  // Here we only set one byte
+    assert_eq(@as(i64) d.small, 0);
+    
+    d&!tag[] = tag_value(Data, @symbol big);
+    assert_eq(d.big, @as(i64) 0xFFFFFFFFFFFFFF00); // So the padding should be unchanged. 
+    
+    // even if we do a copy while its in small mode. 
+    d&!tag[] = tag_value(Data, @symbol small);
+    d2 := d;
+    d2&!tag[] = tag_value(Data, @symbol big);
+    assert_eq(d2.big, @as(i64) 0xFFFFFFFFFFFFFF00);
+}
