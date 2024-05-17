@@ -51,7 +51,14 @@ thats so strange. its in the same module which was the problem last time.
   where it uses the dispatch table when you try to GetNativeFnPtr and it wasnt even doing that bc inst....
   but i was still embeding the dispatch ptr when trying to CallDirect to something that wasnt ready yet,
   hoping it would get filled in later, so thats why it wasnt trigging the check in get_fn.
-  so problem was my mutual recursion hack meant i couldn't catch the error of trying to
+  so problem was my mutual recursion hack meant i couldn't catch the error of trying to.
+  but even with emit_cl_intrinsic, it doesn't get there.
+  maybe its like its added to callees of something that doesn't end up having compile called on it before getting popped off the stack,
+  and it works on aarch because the merge causes special_body to be evaluated directly?
+  DAMN IT. i typo-ed the return type of offset as i64.
+  ok so i should really consider reworking my overloading system to catch that sort of thing.
+  at the very least typecheck my hard coded string signetures somehow. fuck.
+- well anyway now all that fails is floats.fr and libc.fr/open_dynamic_library
 
 ## finishing cranelift backend (May 16)
 

@@ -79,11 +79,6 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 }
 
 pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, f: FuncId) -> Res<'p, ()> {
-    println!(
-        "emit_cl_intrinsic: {:x} {}",
-        f.as_index(),
-        compile.program.pool.get(compile.program[f].name)
-    );
     let mut body = EmitBc::empty_fn(compile.program, f);
     body.func = f;
     let f_ty = compile.program[f].finished_ty().unwrap();
@@ -346,7 +341,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                         }
                         builder.ins().call(callee, args)
                     } else {
-                        println!("late indirect: {}", self.program.pool.get(self.program[f].name));
                         let callee = self
                             .asm
                             .get_fn(f)
@@ -408,9 +402,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                         let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
                         builder.ins().call(callee, args);
                     } else {
-                        let callee = self.program[f]
-                            .comptime_addr
-                            .or_else(|| self.asm.get_fn(f).map(|a| a as u64))
+                        let callee = self
+                            .asm
+                            .get_fn(f)
+                            .map(|a| a as u64)
                             .map(|addr| builder.ins().iconst(I64, addr as i64))
                             .unwrap_or_else(|| {
                                 // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
@@ -487,10 +482,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         let id = self.cl.module.declare_func_in_func(id, builder.func);
                         self.stack.push(builder.ins().func_addr(I64, id));
                     } else {
-                        let addr = self.program[f]
-                            .comptime_addr
-                            .map(|a| a as i64)
-                            .or_else(|| self.asm.get_fn(f).map(|a| a as i64));
+                        let addr = self.asm.get_fn(f).map(|a| a as i64);
                         let addr = unwrap!(addr, "fn not ready");
                         self.stack.push(builder.ins().iconst(I64, addr));
                     }
@@ -760,7 +752,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn bit_or(_: i64, __: i64) i64;", inst!(bor)),
     ("fn bit_and(_: i64, __: i64) i64;", inst!(band)),
     ("fn shift_left(_: i64, __: i64) i64;", inst!(ishl)),
-    ("fun offset(_: rawptr, bytes: i64) i64;", inst!(iadd)),
+    ("fun offset(_: rawptr, bytes: i64) rawptr;", inst!(iadd)),
     ("fn bit_not(_: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         Some(builder.ins().bnot(v[0]))
     }),

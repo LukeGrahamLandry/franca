@@ -358,23 +358,3 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 }
-
-pub fn has_arch_split<'p>(program: &Program<'p>, overloads: &OverloadSet<'p>) -> bool {
-    // TODO
-    // if program.comptime_arch == program.runtime_arch {
-    //     // Sure but we don't care
-    //     return false;
-    // }
-
-    for o in &overloads.ready {
-        for a in &program[o.func].annotations {
-            if let Ok(flag) = a.name.try_into() {
-                if matches!(flag, Flag::Llvm | Flag::Aarch64) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}

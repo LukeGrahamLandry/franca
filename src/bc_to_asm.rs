@@ -398,8 +398,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
                 if let Some(ptr) = self.asm.get_fn(f) {
                     self.state.stack.push(Val::Literal(ptr as i64));
-                } else if let Some(addr) = self.program[f].comptime_addr {
-                    self.state.stack.push(Val::Literal(addr as i64));
                 } else {
                     assert!(f.as_index() < 4096);
                     let reg = self.get_free_reg();
@@ -1046,7 +1044,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         debugln!("flat_call");
         // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
 
-        let addr = target.comptime_addr.or_else(|| self.asm.get_fn(f).map(|v| v as u64));
+        let addr = self.asm.get_fn(f).map(|v| v as u64);
 
         let arg_ptr = self.state.stack.pop().unwrap();
         let ret_ptr = self.state.stack.pop().unwrap();
@@ -1104,7 +1102,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         // If we already emitted the target function, can just branch there directly.
         // This covers the majority of cases because I try to handle callees first.
-        // Note: checking this before comptime_addr means we handle inline asm as a normal function.
         if let Some(bytes) = self.asm.get_fn(f) {
             let mut offset = bytes as i64 - self.asm.next as i64;
             debug_assert!(offset % 4 == 0, "instructions are u32 but {offset}%4");
@@ -1116,35 +1113,14 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
         }
 
-        // TODO: maybe its prefereable to use the dispatch table even when its const because then runtime code could setup the pointers with dlopen,
-        //       and could reuse the same code for comptime and runtime.
-        if let Some(bytes) = self.program[f].comptime_addr {
-            debug_assert!(self.program[f].jitted_code.is_none(), "inline asm should be emitted normally");
-            let mut offset = bytes as i64 - self.asm.next as i64;
-            debug_assert!(offset % 4 == 0, "instructions are u32 but {offset}%4");
-            offset /= 4;
-
-            // If its a comptime_addr into the compiler, (which happens a lot because of assert_eq and tag_value),
-            //     aslr might be our friend and just put the mmaped pages near where it originally loaded the compiler.
-            if offset.abs() < (1 << 25) {
-                self.asm.push(b(offset, with_link as i64));
-                return;
-            } else {
-                // If its a comptime_addr into libc, its probably far away, but that's fine, we're not limited to one instruction.
-                let f = &self.program[f];
-                self.load_imm(x16, bytes);
-                // fall though to finish the indirect call
-            }
-        } else {
-            // It's a function we haven't emitted yet, so we don't know where to jump to.
-            // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
-            // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
-            // TODO: have a mapping. funcs take up slots even if never indirect called.
-            assert!(f.as_index() < 4096);
-            // you don't really need to do this but i dont trust it cause im not following the calling convention
-            self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
-            self.asm.push(ldr_uo(X64, x16, x16, f.as_index() as i64));
-        }
+        // It's a function we haven't emitted yet, so we don't know where to jump to. (or we do know but it's far away)
+        // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
+        // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
+        // TODO: have a mapping. funcs take up slots even if never indirect called.
+        assert!(f.as_index() < 4096);
+        // you don't really need to do this but i dont trust it cause im not following the calling convention
+        self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
+        self.asm.push(ldr_uo(X64, x16, x16, f.as_index() as i64));
 
         self.asm.push(br(x16, with_link as i64))
     }

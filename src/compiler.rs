@@ -1002,15 +1002,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let var = func.var_name;
-        let any_reg_template = func.has_tag(Flag::Any_Reg);
         if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
             func.set_cc(CallConv::Flat)?;
         }
 
         let referencable_name = func.referencable_name;
-
-        assert!(!any_reg_template, "not yet implemented");
 
         let public = func.has_tag(Flag::Pub);
         let id = self.add_func(func)?;
