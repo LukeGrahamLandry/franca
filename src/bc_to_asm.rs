@@ -1001,7 +1001,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let float_count = ret.float_mask.count_ones();
         let int_count = ret.size_slots as u32 - float_count;
 
-        for i in int_count..7 {
+        for i in int_count..8 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
         }
     }
@@ -1033,7 +1033,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.spill_abi_stompable();
         self.branch_func(f, true);
 
-        for i in 0..7 {
+        for i in 0..8 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
         }
 

@@ -1,6 +1,6 @@
 //! Low level instructions
 
-use crate::ast::{LabelId, OverloadSetId, TypeInfo};
+use crate::ast::{LabelId, OverloadSetId, TypeInfo, Var};
 use crate::bc_to_asm::store_to_ints;
 use crate::compiler::Compile;
 use crate::emit_bc::ResultLoc;
@@ -59,6 +59,7 @@ pub struct BasicBlock {
 pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
+    pub var_names: Vec<Option<Var<'p>>>,
     pub when: ExecTime,
     pub func: FuncId,
     pub aarch64_stack_bytes: Option<u16>,
@@ -66,6 +67,7 @@ pub struct FnBody<'p> {
     pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,
     pub clock: u16,
     pub name: Ident<'p>,
+    pub want_log: bool,
 }
 
 impl<'p> FnBody<'p> {

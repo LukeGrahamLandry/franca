@@ -422,11 +422,11 @@ impl<'p> PoolLog<'p> for Func<'p> {
     }
 }
 
-impl<'p> PoolLog<'p> for FnBody<'p> {
-    fn log(&self, pool: &StringPool<'p>) -> String {
+impl<'p> FnBody<'p> {
+    pub fn log(&self, program: &Program<'p>) -> String {
         let mut f = String::new();
 
-        writeln!(f, "=== Bytecode for {} ===", pool.get(self.name));
+        writeln!(f, "=== Bytecode for {} ===", program.pool.get(self.name));
         for (b, insts) in self.blocks.iter().enumerate() {
             if insts.insts.len() == 1 && insts.insts[0] == Bc::NoCompile && insts.incoming_jumps == 0 {
                 continue;
@@ -437,7 +437,24 @@ impl<'p> PoolLog<'p> for FnBody<'p> {
                 insts.arg_slots, insts.incoming_jumps, insts.height
             );
             for (i, op) in insts.insts.iter().enumerate() {
-                writeln!(f, "    {i}. {op:?}");
+                write!(f, "    {i}. {op:?}");
+                match *op {
+                    Bc::CallDirect { f: id, .. } | Bc::CallDirectFlat { f: id } => writeln!(
+                        f,
+                        "; {}", //({}) -> {} ",
+                        program.pool.get(program[id].name),
+                        // program.log_type(program[id].finished_arg.unwrap()),
+                        // program.log_type(program[id].finished_ret.unwrap())
+                    ),
+                    Bc::AddrVar { id } => {
+                        if let Some(&Some(name)) = self.var_names.get(id as usize) {
+                            writeln!(f, "; {}", program.pool.get(name.name))
+                        } else {
+                            writeln!(f)
+                        }
+                    }
+                    _ => writeln!(f),
+                };
             }
         }
         writeln!(f, "===");

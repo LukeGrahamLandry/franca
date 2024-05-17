@@ -11,7 +11,7 @@ use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
-use crate::{bc::*, Map};
+use crate::{bc::*, extend_options, Map};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
@@ -53,6 +53,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let mut jump_targets = BitSet::empty();
         jump_targets.set(0); // entry is the first instruction
         FnBody {
+            var_names: vec![],
             vars: Default::default(),
             when: ExecTime::Comptime, // TODO
             func,
@@ -61,6 +62,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             aarch64_stack_bytes: None,
             current_block: BbId(0),
             inlined_return_addr: Default::default(),
+            want_log: program[func].has_tag(Flag::Log_Bc),
             clock: 0,
         }
     }
@@ -187,8 +189,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if !body.ty.is_never() {
             result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
         }
-        if func.has_tag(Flag::Log_Bc) {
-            println!("{}", result.log(self.program.pool));
+        if result.want_log {
+            println!("{}", result.log(self.program));
         }
 
         Ok(())
@@ -256,6 +258,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     ResAddr => result.push(Bc::StorePre { slots }),
                     Discard => result.push(Bc::Pop { slots }),
                 }
+            } else if result_location == ResAddr {
+                // pop dest!
+                result.push(Bc::Pop { slots: 1 });
             }
         }
         if func.finished_ret.unwrap().is_never() {
@@ -276,6 +281,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let ty = ty.unwrap();
 
                 let id = result.add_var(ty);
+                if result.want_log {
+                    extend_options(&mut result.var_names, id as usize);
+                    result.var_names[id as usize] = Some(*name);
+                }
                 result.push(Bc::AddrVar { id });
                 self.compile_expr(result, value, ResAddr, false)?;
                 let prev = self.var_lookup.insert(*name, id);
@@ -306,6 +315,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn do_binding(&mut self, result: &mut FnBody<'p>, name: Option<Var<'p>>, ty: TypeId, value: &FatExpr<'p>) -> Res<'p, ()> {
         let id = result.add_var(ty);
+        if result.want_log {
+            extend_options(&mut result.var_names, id as usize);
+            result.var_names[id as usize] = name;
+        }
         result.push(Bc::AddrVar { id });
         self.compile_expr(result, value, ResAddr, false)?;
         self.locals.last_mut().unwrap().push(id);
@@ -375,6 +388,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             ResAddr => result.push(Bc::StorePre { slots }),
                             Discard => result.push(Bc::Pop { slots }),
                         }
+                    } else if result_location == ResAddr {
+                        todo!("untested. assign to variable a call that returns unit through a function ptr");
+                        // pop the dest!
+                        result.push(Bc::Pop { slots: 1 })
                     }
                     return Ok(());
                 }
@@ -531,13 +548,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let slots = self.slot_count(expr.ty);
                         debug_assert!(!self.program.get_info(expr.ty).has_special_pointer_fns);
                         if slots == 0 {
-                            result_location = Discard;
+                            match result_location {
+                                ResAddr => result.push(Bc::Pop { slots: 2 }), // pop dest too!
+                                PushStack | Discard => result.push(Bc::Pop { slots: 1 }),
+                            };
+                        } else {
+                            match result_location {
+                                PushStack => result.push(Bc::Load { slots }),
+                                ResAddr => result.push(Bc::CopyToFrom { slots }),
+                                Discard => result.push(Bc::Pop { slots: 1 }),
+                            };
                         }
-                        match result_location {
-                            PushStack => result.push(Bc::Load { slots }),
-                            ResAddr => result.push(Bc::CopyToFrom { slots }),
-                            Discard => result.push(Bc::Pop { slots: 1 }),
-                        };
                     }
                     Flag::Tag => {
                         debug_assert_eq!(self.program[expr.ty], TypeInfo::Ptr(TypeId::i64()));
