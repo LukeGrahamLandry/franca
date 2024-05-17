@@ -524,12 +524,55 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 }
 
 pub mod c {
+    use crate::bc_to_asm::Jitted;
     use crate::compiler::Compile;
     use crate::compiler::Res;
     use crate::err;
     use std::arch::global_asm;
 
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
+        debug_assert_ne!(ptr, Jitted::EMPTY);
+        let floats = program.program.float_mask(f_ty);
+        let arg_slots = program.slot_count(f_ty.arg);
+        let ret_slots = program.slot_count(f_ty.ret);
+        let bounce = if floats.arg == 0 && floats.ret == 0 {
+            arg8ret1
+        } else if floats.arg.count_ones() == arg_slots as u32 && floats.ret.count_ones() == ret_slots as u32 {
+            #[cfg(target_arch = "x86_64")]
+            todo!();
+            arg8ret1_all_floats
+        } else {
+            err!("ICE: i dont do mixed int/float registers but backend does",)
+        };
+        assert!(ret_slots <= 1, "i dont do struct calling convention yet");
+        if comp_ctx {
+            args.insert(0, program as *mut Compile as i64);
+        }
+        assert!(args.len() <= 8);
+        // not doing this is ub but like... meh.
+        // if something interesting happens to be after the args and you call with the wrong signature you could read it.
+        // its fine to read garbage memory and put it in the registers you know callee will ignore (if types are right).
+        const READ_GARBAGE: bool = true;
+        if !READ_GARBAGE {
+            args.reserve_exact(8 - args.len());
+            while args.len() < 8 {
+                args.push(0);
+            }
+        }
+        let ret: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
+        Ok(ret)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    extern "C" {
+        // loads 8 words from args into x0-x7 then calls fnptr
+        fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+        // loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
+        fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+    }
+
     // NOTE: you have to put this in the same module ::c! you cant put it outside and then import it .
+    #[cfg(target_arch = "aarch64")]
     global_asm!(
         r#"
         _arg8ret1:
@@ -550,6 +593,7 @@ pub mod c {
 
     // TODO: generate these dynamically. the backend knows the calling convention anyway.
     //       but for now this is so easy. and all ints or all floats cover the most common cases anyway.
+    #[cfg(target_arch = "aarch64")]
     global_asm!(
         r#"
         _arg8ret1_all_floats:
@@ -576,41 +620,47 @@ pub mod c {
     "#
     );
 
-    extern "C" {
-        // loads 8 words from args into x0-x7 then calls fnptr
-        fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
-        // loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
-        fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+    // args 1-6: RDI, RSI, RDX, RCX, R8, R9; then stack
+    // floats: XMM0 - XMM7
+    //
+    #[cfg(target_arch = "x86_64")]
+    #[naked]
+    extern "C" fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64 {
+        use std::arch::asm;
+        unsafe {
+            asm!(
+                r#"
+            mov rax, rdi
+            mov r11, rsi
+            mov rdi, [r11]
+            mov rsi, [r11 + 8]
+            mov rdx, [r11 + 16]
+            mov rcx, [r11 + 24]
+            mov r8,  [r11 + 32]
+            mov r9,  [r11 + 40]
+            push [r11 + 48]
+            push [r11 + 56]
+            call rax
+            add sp, 16 // i have to fix the stack pointer? 
+            ret
+            "#,
+                options(noreturn)
+            )
+        }
     }
 
-    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
-        let floats = program.program.float_mask(f_ty);
-        let arg_slots = program.slot_count(f_ty.arg);
-        let ret_slots = program.slot_count(f_ty.ret);
-        let bounce = if floats.arg == 0 && floats.ret == 0 {
-            arg8ret1
-        } else if floats.arg.count_ones() == arg_slots as u32 && floats.ret.count_ones() == ret_slots as u32 {
-            arg8ret1_all_floats
-        } else {
-            err!("ICE: i dont do mixed int/float registers but backend does",)
-        };
-        assert!(ret_slots <= 1, "i dont do struct calling convention yet");
-        if comp_ctx {
-            args.insert(0, program as *mut Compile as i64);
+    #[cfg(target_arch = "x86_64")]
+    #[naked]
+    extern "C" fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64 {
+        use std::arch::asm;
+        unsafe {
+            asm!(
+                r#"
+                    ret
+                "#,
+                options(noreturn)
+            )
         }
-        assert!(args.len() <= 8);
-        // not doing this is ub but like... meh.
-        // if something interesting happens to be after the args and you call with the wrong signature you could read it.
-        // its fine to read garbage memory and put it in the registers you know callee will ignore (if types are right).
-        const READ_GARBAGE: bool = true;
-        if !READ_GARBAGE {
-            args.reserve_exact(8 - args.len());
-            while args.len() < 8 {
-                args.push(0);
-            }
-        }
-        let ret: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
-        Ok(ret)
     }
 }
 

@@ -74,17 +74,22 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ),
     ("fn munmap(addr: rawptr, len: i64) i64", libc::munmap as *const u8),
     ("fn mprotect(addr: rawptr, len: i64, prot: i64) i64", libc::mprotect as *const u8),
+    #[cfg(target_arch = "aarch64")]
     ("fn __clear_cache(beg: rawptr, beg: rawptr) Unit", __clear_cache as *const u8),
     (
         "fn clock_gettime(clock_id: i64, time_spec: rawptr) Unit",
         libc::clock_gettime as *const u8,
     ),
+    #[cfg(target_os = "macos")]
     ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
+    #[cfg(target_os = "macos")]
     ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
     ("fn read(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::read as *const u8),
+    ("fn c_memcpy(dest: rawptr, src: rawptr, n: i64) i64", libc::memcpy as *const u8),
 ];
 
 // thank you rust very cool. TODO: non-macos
+#[cfg(target_os = "macos")]
 extern "C" {
     // These functions are in crt_externs.h.
     fn _NSGetArgc() -> *mut libc::c_int;
@@ -92,6 +97,8 @@ extern "C" {
 }
 
 // TODO: do this myself
+// x86 doesn't need this and x86_64-unknown-linux-musl doesn't give me a fake one to link against
+#[cfg(target_arch = "aarch64")]
 extern "C" {
     pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 }

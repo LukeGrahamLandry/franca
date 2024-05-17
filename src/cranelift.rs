@@ -23,9 +23,10 @@ use cranelift_module::{Linkage, Module, ModuleError};
 
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, Program, TypeId, TypeInfo},
-    bc::{Bc, FnBody},
+    bc::{BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, Res},
+    emit_bc::EmitBc,
     err, extend_options,
     logging::{make_err, PoolLog},
     reflect::BitSet,
@@ -41,7 +42,7 @@ pub struct JittedCl {
 }
 
 pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) -> Res<'p, ()> {
-    if compile.program[f].body.is_none() || compile.cranelift.funcs_done.get(f.as_index()) {
+    if compile.cranelift.funcs_done.get(f.as_index()) {
         return Ok(());
     }
     let ctx = compile.cranelift.module.make_context();
@@ -77,6 +78,28 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
     Ok(())
 }
 
+pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, f: FuncId) -> Res<'p, ()> {
+    println!(
+        "emit_cl_intrinsic: {:x} {}",
+        f.as_index(),
+        compile.program.pool.get(compile.program[f].name)
+    );
+    let mut body = EmitBc::empty_fn(compile.program, f);
+    body.func = f;
+    let f_ty = compile.program[f].finished_ty().unwrap();
+    let arg_slots = compile.program.slot_count(f_ty.arg);
+    let arg_float_mask = compile.program.float_mask_one(f_ty.arg);
+    body.blocks.push(BasicBlock {
+        insts: vec![Bc::CallDirect { f, tail: true }],
+        arg_slots,
+        arg_float_mask,
+        incoming_jumps: 0,
+        clock: 0,
+        height: 0,
+    });
+    emit_cl(compile, &body, f)
+}
+
 impl Default for JittedCl {
     fn default() -> Self {
         let isa = cranelift_native::builder().unwrap();
@@ -87,7 +110,12 @@ impl Default for JittedCl {
         // flags.set("opt_level", "speed").unwrap();
         let isa = isa.finish(Flags::new(flags));
 
-        let builder = JITBuilder::with_isa(isa.unwrap(), cranelift_module::default_libcall_names());
+        let calls = cranelift_module::default_libcall_names();
+        let mut builder = JITBuilder::with_isa(isa.unwrap(), calls);
+        builder.symbol_lookup_fn(Box::new(|name| match name {
+            "memcpy" => Some(libc::memcpy as *const u8),
+            _ => None,
+        }));
         let module = JITModule::new(builder);
         JittedCl {
             module,
@@ -318,9 +346,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                         }
                         builder.ins().call(callee, args)
                     } else {
-                        let callee = self.program[f]
-                            .comptime_addr
-                            .or_else(|| self.asm.get_fn(f).map(|a| a as u64))
+                        println!("late indirect: {}", self.program.pool.get(self.program[f].name));
+                        let callee = self
+                            .asm
+                            .get_fn(f)
+                            .map(|a| a as u64)
                             .map(|addr| builder.ins().iconst(I64, addr as i64))
                             .unwrap_or_else(|| {
                                 // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
@@ -742,4 +772,10 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
         builder.ins().store(MemFlags::new(), val, v[0], 0);
         None
     }),
+    ("fn ptr_to_int(_: rawptr) i64;", |_: &mut FunctionBuilder, v: &[Value]| Some(v[0])),
+    ("fn int_to_ptr(_: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| Some(v[0])),
+    ("fun int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        Some(builder.ins().bitcast(I64, MemFlags::new(), v[0]))
+    }),
+    ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| Some(v[0])),
 ];

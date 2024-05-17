@@ -49,7 +49,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     #[track_caller]
-    fn empty_fn(&mut self, func: FuncId) -> FnBody<'p> {
+    pub fn empty_fn(program: &Program<'p>, func: FuncId) -> FnBody<'p> {
         let mut jump_targets = BitSet::empty();
         jump_targets.set(0); // entry is the first instruction
         FnBody {
@@ -57,7 +57,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             when: ExecTime::Comptime, // TODO
             func,
             blocks: vec![],
-            name: self.program[func].name,
+            name: program[func].name,
             aarch64_stack_bytes: None,
             current_block: BbId(0),
             inlined_return_addr: Default::default(),
@@ -72,7 +72,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         self.locals.clear();
         self.locals.push(vec![]);
-        let mut result = self.empty_fn(f);
+        let mut result = Self::empty_fn(self.program, f);
         match self.emit_body(&mut result, f) {
             Ok(_) => Ok(result),
             Err(mut e) => {

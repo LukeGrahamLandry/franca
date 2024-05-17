@@ -69,7 +69,13 @@ fn main() {
     let mut args = env::args();
     args.next().unwrap(); // exe path
 
+    #[cfg(target_arch = "aarch64")]
     let mut arch = TargetArch::Aarch64;
+    #[cfg(not(target_arch = "aarch64"))]
+    let mut arch = TargetArch::Cranelift;
+
+    #[cfg(all(not(target_arch = "aarch64"), not(feature = "cranelift")))]
+    compile_error!("no backend available");
 
     for name in args {
         if name == "--" {
@@ -382,8 +388,9 @@ fn run_one(comp: &mut Compile, f: FuncId) {
     }
 
     let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
-
+    println!("run");
     comp.run(f, Value::I64(arg).into(), ExecTime::Runtime).unwrap();
+    println!("done");
 }
 
 fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {

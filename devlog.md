@@ -17,6 +17,42 @@ cargo build --target x86_64-unknown-linux-musl
 
 ok that worked on my mandelbrot demo.
 
+so now i have to write the c_call shim for x86.
+i don't understand why it can't find my function!
+is it because of changing whos doing the linking?
+it works if i make it a `#[naked]` function with an asm block, but not if i make it a global_asm function...
+thats so strange. its in the same module which was the problem last time.
+
+- https://en.wikipedia.org/wiki/X86_calling_conventions#System_V_AMD64_ABI
+- https://stackoverflow.com/questions/18024672/what-registers-are-preserved-through-a-linux-x86-64-function-call
+- https://en.wikipedia.org/wiki/X86_assembly_language
+- https://en.wikipedia.org/wiki/X86_instruction_listings
+
+- i have to restore the stack pointer after pushed args, callee just reads them.
+- cranelift: can't resolve libcall memcpy. fair, there's no dynamic libc for it.
+  so how do i tell it the fn ptr to use.
+  JitBuilder::symbol_lookup_fn lets me just switch on the name and give it a pointer to my staticlly linked memcpy, cool.
+- `debug_assert_eq!(addr as usize % 4, 0);` x86 has variable length encoding so does't force an alignment i guess.
+- hitting a SEGSEV somewhere. i wonder if its something aarch64 inline asm that i forgot.
+  yep. skipped any #aarch64 functions and now it segsevs with rip=0x1337.
+  ah ptr_to_int, int_to_ptr and fn int(f64) i64.
+  that wasnt the problem but still good to have fixed.
+- turning off VERBOSE_ASSERT helps for now.
+- `not compiled Fn286 gt`. oh for value of a constant the compiler needs to call it so need to emit the cl intrinsics as thier own functions.
+  but just try a different example for now.
+- its definitly trying to jump to a missing function, the address changes if I change Jitted:EMPTY.
+  but wheres it getting it from??.
+  even without fixing that, passing 79/112.
+  tried writing the func id in the empty slot.
+  for generics it seems that its trying to call `$eval_0$Fn%73Cs1b3([Unit%3Cs1b3, Unit%3Cs1b3])$` through the dispatch table.
+  fuck no im an idiot, thats putting the f that extend_blanks is going up to, its actually trying to call offset,
+  which makes sense that doesn't exist cause its one of the intrinsics i just skipped. sigh.
+  AAAAA, i was so confused about how it was getting the ptr because i thought i took out the thing
+  where it uses the dispatch table when you try to GetNativeFnPtr and it wasnt even doing that bc inst....
+  but i was still embeding the dispatch ptr when trying to CallDirect to something that wasnt ready yet,
+  hoping it would get filled in later, so thats why it wasnt trigging the check in get_fn.
+  so problem was my mutual recursion hack meant i couldn't catch the error of trying to
+
 ## finishing cranelift backend (May 16)
 
 - floats on cranelift. im being dumb and not tracking types so doing a bunch of bit casts.

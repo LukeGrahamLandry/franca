@@ -22,7 +22,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{__clear_cache, do_flat_call_values};
+use crate::export_ffi::do_flat_call_values;
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
@@ -259,6 +259,9 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+        // TODO: this is a little sketchy. can one merged arch cause asm_done to be set and then other arches don't get processed?
+        //       i dont think so cause overloading short circuits, and what ever arch did happen will be in the dispatch table.
+        //       need to revisit when not jitting tho.   -- May 16
         if self.program[f].asm_done || self.currently_compiling.contains(&f) {
             return Ok(());
         }
@@ -287,6 +290,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             if let Some(code) = &self.program[f].jitted_code {
                 self.aarch64.copy_inline_asm(f, code);
             }
+            let use_cl = self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift;
+
+            let cl = self.program[f].cl_emit_fn_ptr;
+            #[cfg(feature = "cranelift")]
+            if use_cl && cl.is_some() {
+                crate::cranelift::emit_cl_intrinsic(self, cl.unwrap(), f)?
+            }
+
+            if let Some(code) = &self.program[f].jitted_code {
+                self.aarch64.copy_inline_asm(f, code);
+            }
 
             if self.program[f].cc.unwrap() != CallConv::Inline && self.program[f].body.is_some() {
                 let body = emit_bc(self, f)?;
@@ -294,7 +308,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 #[cfg(feature = "cranelift")]
                 let aarch = {
-                    let use_cl = self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift;
                     if use_cl {
                         let res = crate::cranelift::emit_cl(self, &body, f);
                         self.tag_err(res)?;
@@ -341,20 +354,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         self.flush_cpu_instruction_cache();
+        // cranelift puts stuff here too and so does comptime_addr
+        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
+        debug_assert!(addr as usize != Jitted::EMPTY);
 
-        let addr = if let Some(addr) = self.program[f].comptime_addr {
-            // we might be doing ffi at comptime, thats fine
-            addr as *const u8
-        } else {
-            // cranelift puts stuff here too
-            unwrap!(self.aarch64.get_fn(f), "not compiled {f:?}")
-        };
+        for c in &self.program[f].callees {
+            // TODO: emit cl_emit_fn_ptr as function
+            debug_assert!(
+                self.aarch64.get_fn(*c).is_some() || self.program[*c].cl_emit_fn_ptr.is_some(),
+                "missing callee {}",
+                self.pool.get(self.program[*c].name)
+            )
+        }
 
         let cc = self.program[f].cc.unwrap();
         let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
         let flat_call = cc == CallConv::Flat;
 
+        #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
+
         debugln!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
         let result = if flat_call {
             do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
@@ -486,6 +505,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
             let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
             self.program[f].comptime_addr = Some(addr.to_bytes());
+            self.aarch64.extend_blanks(f);
+            self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             special = true;
         }
 
@@ -963,6 +984,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn decl_func(&mut self, mut func: Func<'p>) -> Res<'p, (Option<FuncId>, Option<OverloadSetId>)> {
+        // TODO: cross compiling.
+        #[cfg(not(target_arch = "aarch64"))]
+        if func.has_tag(Flag::Aarch64) {
+            return Ok((None, None));
+        }
+
         debug_assert!(!func.evil_uninit);
         let loc = func.loc;
         // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
@@ -2137,7 +2164,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         debug_assert!(!self.program[f].evil_uninit);
                         // TODO: try to compile it now.
                         // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
-                        let is_ready = self.program[f].comptime_addr.is_some() || self.program[f].asm_done;
+                        let is_ready = self.program[f].asm_done;
                         if is_ready && !self.program[f].any_const_args() {
                             // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
                             let arg_ty = self.program[f].finished_arg.unwrap();
@@ -3241,19 +3268,23 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn flush_cpu_instruction_cache(&mut self) {
-        // This fixes 'illegal hardware instruction'.
-        // sleep(Duration::from_millis(1)) also works (in debug mode). That's really cool, it gives it time to update the other cache because instructions and data are seperate?!
-        // Especially fun becuase if you run it in lldb so you break on the error and disassemble... you get perfectly valid instructions because it reads the data cache!
-        // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
-        // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
-        // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
-        // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
-        // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
-        // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
+        // x86 doesn't this. TODO: what about riscv?
+        #[cfg(target_arch = "aarch64")]
+        {
+            // This fixes 'illegal hardware instruction'.
+            // sleep(Duration::from_millis(1)) also works (in debug mode). That's really cool, it gives it time to update the other cache because instructions and data are seperate?!
+            // Especially fun becuase if you run it in lldb so you break on the error and disassemble... you get perfectly valid instructions because it reads the data cache!
+            // https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
+            // https://stackoverflow.com/questions/35741814/how-does-builtin-clear-cache-work
+            // https://stackoverflow.com/questions/10522043/arm-clear-cache-equivalent-for-ios-devices
+            // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/clear_cache.c
+            // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
+            // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
 
-        let (beg, end) = self.aarch64.bump_dirty();
-        if beg != end {
-            unsafe { __clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
+            let (beg, end) = self.aarch64.bump_dirty();
+            if beg != end {
+                unsafe { crate::export_ffi::__clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
+            }
         }
     }
 

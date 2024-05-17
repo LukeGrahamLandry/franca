@@ -67,7 +67,7 @@ const X64: i64 = 0b1;
 
 pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime, body: &FnBody<'p>) -> Res<'p, ()> {
     debug_assert!(!compile.program[f].asm_done, "ICE: tried to double compile?");
-    compile.aarch64.reserve(compile.program.funcs.len());
+    compile.aarch64.extend_blanks(f);
     let mut a = BcToAsm::new(compile, when, body);
     a.compile(f)?;
     assert!(a.wip.is_empty());
@@ -133,7 +133,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // TODO: i cant keep copy pasting this shape. gonna cry.
     fn compile(&mut self, f: FuncId) -> Res<'p, ()> {
-        self.asm.reserve(f.as_index());
         if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
             return Ok(());
         }
@@ -1275,14 +1274,6 @@ pub mod jit {
         // This is a better marker for not compiled yet so you can recognise when you hit it in a debugger.
         pub const EMPTY: usize = 0x1337;
 
-        pub fn reserve(&mut self, func_count: usize) {
-            assert!(func_count < (1 << 12), "TODO: not enough bits for indirect call");
-            for _ in self.dispatch.len()..func_count {
-                self.dispatch.push(Self::EMPTY as *const u8);
-                self.ranges.push(&[] as *const [u8])
-            }
-        }
-
         #[track_caller]
         pub fn get_dispatch(&self) -> *const *const u8 {
             self.dispatch.as_ptr()
@@ -1291,7 +1282,7 @@ pub mod jit {
         pub fn get_fn(&self, f: FuncId) -> Option<*const u8> {
             self.dispatch
                 .get(f.as_index())
-                .and_then(|f| if *f as usize == Self::EMPTY { None } else { Some(*f) })
+                .and_then(|f| if (*f) as usize <= Self::EMPTY { None } else { Some(*f) })
         }
 
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -1329,7 +1320,8 @@ pub mod jit {
 
         pub fn extend_blanks(&mut self, f: FuncId) {
             while self.dispatch.len() < f.as_index() + 1 {
-                self.dispatch.push(Jitted::EMPTY as *const u8);
+                // Jitted::EMPTY
+                self.dispatch.push(self.dispatch.len() as *const u8);
                 self.ranges.push(&[]);
             }
         }
