@@ -40,19 +40,6 @@ pub trait InterpSend<'p>: Sized {
     fn add_child_ffi_definitions(_: Program<'p>) {}
 }
 
-macro_rules! init_interp_send {
-    ($program:expr,) => {};
-    ($program:expr, $ty:ty) => {
-        <$ty>::get_type($program);
-    };
-    ($program:expr, $ty:ty, $($arg:ty)*) => {
-        init_interp_send!($program, $ty);
-        init_interp_send!($program, $($arg)*);
-    }
-}
-
-pub(crate) use init_interp_send;
-
 pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = i64>) -> Option<T> {
     T::deserialize_from_ints(values)
 }
@@ -144,6 +131,10 @@ impl<'p> InterpSend<'p> for bool {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
     fn create_type(_program: &mut Program<'p>) -> TypeId {
+        TypeId::bool()
+    }
+
+    fn get_type(_program: &mut Program<'p>) -> TypeId {
         TypeId::bool()
     }
 
@@ -321,6 +312,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn create_type(program: &mut Program<'p>) -> TypeId {
         let ty = T::get_type(program);
+        println!("ffi Vec({})", program.log_type(ty));
         let ty = program.intern_type(TypeInfo::Ptr(ty));
         program.intern_type(TypeInfo::Tuple(vec![ty, TypeId::i64()]))
     }

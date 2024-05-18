@@ -337,6 +337,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 self.pop_block();
             }
             Expr::String(_) => {}
+            Expr::Cast(v) => {
+                self.resolve_expr(v)?;
+                todo!("probably never get here cause its added by compiler");
+            }
         }
         Ok(())
     }

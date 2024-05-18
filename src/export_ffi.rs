@@ -12,7 +12,7 @@ use crate::pool::Ident;
 use crate::{err, ice};
 use std::fmt::Write;
 use std::hint::black_box;
-use std::mem::transmute;
+use std::mem::{self, transmute};
 use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
@@ -77,7 +77,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     #[cfg(target_arch = "aarch64")]
     ("fn __clear_cache(beg: rawptr, beg: rawptr) Unit", __clear_cache as *const u8),
     (
-        "fn clock_gettime(clock_id: i64, time_spec: rawptr) Unit",
+        "fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) Unit",
         libc::clock_gettime as *const u8,
     ),
     #[cfg(target_os = "macos")]
@@ -147,7 +147,13 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
+    ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
 ];
+
+extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
+    println!("saved Slice(T)!");
+    compiler.make_slice_t = Some(f);
+}
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
     let raw = compiler.program.raw_type(ty);
@@ -195,6 +201,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             )
             .unwrap();
             writeln!(out, "const DlHandle = rawptr; const CStr = Unique$Ptr(u8);").unwrap();
+            writeln!(out, "TimeSpec :: @struct(seconds: i64, nanoseconds: i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#pub #comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }
@@ -611,7 +618,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
     })
 }
 
-fn literal_ast<'p>(compile: &mut Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
+fn literal_ast<'p>(compile: &Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
     let slots = compile.slot_count(ty) as usize;
     let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
     let mut out = vec![];
@@ -755,7 +762,7 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         if let Some((_, v)) = bit_literal(&int, compile.pool) {
             int = compile.as_literal(v, loc).unwrap();
         }
-        int.ty = TypeId::i64();
+        int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
         new_args.push(int);
         let mut sh = compile.as_literal(shift, loc).unwrap();
         sh.ty = TypeId::i64();

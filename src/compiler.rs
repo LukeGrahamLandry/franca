@@ -22,10 +22,11 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::do_flat_call_values;
+use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
+use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -75,6 +76,7 @@ pub struct Compile<'a, 'p> {
     pub wip_stack: Vec<FuncId>,
     #[cfg(feature = "cranelift")]
     pub cranelift: crate::cranelift::JittedCl,
+    pub make_slice_t: Option<FuncId>,
 }
 
 #[derive(Debug)]
@@ -118,6 +120,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         let parsing = ParseTasks::new(pool);
         let mut c = Self {
+            make_slice_t: None,
             wip_stack: vec![],
             pool,
             debug_trace: vec![],
@@ -155,6 +158,32 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         println!("{:?}", value);
         Some(T::deserialize_from_ints(&mut value.clone().vec().into_iter()).unwrap())
+    }
+
+    fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
+        // TODO: really check_quick_eval should do this.
+        let value = Values::One(Value::Type(expect));
+        if let Some(res) = self.program.generics_memo.get(&(self.make_slice_t.unwrap(), value.clone())) {
+            if let Values::One(Value::Type(t)) = res.0 {
+                return Ok(t);
+            }
+            unreachable!()
+        }
+
+        let ty = self.program.intern_type(TypeInfo::Fn(FnType {
+            arg: TypeId::ty,
+            ret: TypeId::ty,
+        }));
+        let f = FatExpr::synthetic_ty(
+            Expr::Value {
+                value: Values::One(Value::GetFn(self.make_slice_t.unwrap())),
+            },
+            loc,
+            ty,
+        );
+        let a = FatExpr::synthetic_ty(Expr::Value { value }, loc, TypeId::ty);
+        let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);
+        self.immediate_eval_expr_known(s_ty)
     }
 }
 impl<'a, 'p> Compile<'a, 'p> {
@@ -1143,7 +1172,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.last_loc = Some(expr.loc);
             // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
 
-            self.type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
+            self.coerce_type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
         }
         if let Some(requested) = requested {
             debug_assert!(requested.is_valid());
@@ -1155,13 +1184,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       -- Apr 19
 
             // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
-            self.type_check_arg(res, requested, "sanity ICE req_expr")?;
+            self.coerce_type_check_arg(res, requested, "sanity ICE req_expr")?;
         }
 
         expr.ty = res;
         if !old.is_unknown() {
             // TODO: cant just assert_eq because it does change for rawptr.
-            self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
+            self.coerce_type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
         }
         Ok(res)
     }
@@ -1180,6 +1209,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.last_loc = Some(expr.loc);
 
         Ok(match expr.deref_mut() {
+            Expr::Cast(inner) => {
+                // TODO: you probably never get here cause .done should be set?
+                let requested = if inner.ty.is_unknown() { None } else { Some(inner.ty) };
+                self.compile_expr(inner, requested)?;
+                expr.ty
+            }
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::Closure(_) => {
@@ -1336,17 +1371,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let expect = if let Some(types) = ty {
                             let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
                             for t in types {
-                                // TODO: ODODODOdododododo this doesn't work when new @BITS -- May 14
-                                // self.type_check_arg(*t, expect, "match slice types")?;
+                                self.type_check_arg(*t, expect, "match slice types")?;
                             }
                             expect
                         } else {
                             container
                         };
-                        let ptr_ty = self.program.slice_type(expect);
+                        let s_ty = self.create_slice_type(expect, arg.loc)?;
                         expr.done = arg.done;
-                        expr.ty = ptr_ty;
-                        ptr_ty
+                        expr.ty = s_ty;
+                        s_ty
                     }
                     Flag::Deref => {
                         let requested = requested.map(|t| self.program.ptr_type(t));
@@ -1531,9 +1565,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 let bytes = self.pool.get(i);
                 self.set_literal(expr, (bytes.as_ptr() as *mut i64, bytes.len() as i64))?;
-                if let Some(requested) = requested {
-                    expr.ty = requested; // hack? :StrVarType
-                }
+                let byte = u8::get_type(self.program);
+                expr.ty = self.create_slice_type(byte, expr.loc)?;
                 expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
@@ -1606,20 +1639,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty: TypeId = self.immediate_eval_expr_known(ty)?;
         self.type_check_arg(requested, ty, "macro #outputs")?;
         Ok(())
-    }
-
-    // TODO: I think this can just be (arg, target) = '{ let v: <arg> = <target>; v }'
-    //       but it still has special handling in type_of to stop early.
-    //       would need better type inference to make that the same, but probably want that anyway.
-    //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
-    pub fn as_cast_macro(&mut self, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
-        self.compile_expr(&mut arg, Some(TypeId::ty))?;
-        let ty: TypeId = self.immediate_eval_expr_known(arg)?;
-        assert!(!ty.is_unknown());
-        target.ty = ty;
-        // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
-        self.compile_expr(&mut target, Some(ty))?;
-        Ok(target)
     }
 
     pub fn enum_constant_macro(&mut self, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
@@ -1705,6 +1724,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
             Expr::WipFunc(_) => return Ok(None),
+            Expr::Cast(_) => unreachable!("@as puts type"),
             Expr::Value { value } => unreachable!("{value:?} requires type"),
             Expr::Call(f, arg) => {
                 if let Some(id) = f.as_fn() {
@@ -1882,7 +1902,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 unwrap!(ty, "type check missing var {:?}", var.log(self.pool))
                 //TODO: else return Ok(None)?
             }
-            Expr::String(_) => <(*mut u8, i64)>::get_type(self.program),
+            Expr::String(_) => {
+                let byte = u8::get_type(self.program);
+                self.create_slice_type(byte, expr.loc)?
+            }
         }))
     }
 
@@ -1937,6 +1960,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             "Symbol" => ffi_type!(Ident),
             "FatExpr" => ffi_type!(FatExpr),
             "Var" => ffi_type!(Var),
+            "FatStmt" => ffi_type!(FatStmt),
+            "TypeInfo" => ffi_type!(TypeInfo),
+            "IntTypeInfo" => ffi_type!(IntTypeInfo),
+            "RsResolvedSymbol" => (Value::Type(self.program.get_rs_type(RsResolvedSymbol::get_ty())), TypeId::ty),
             _ => {
                 let name = self.pool.intern(name);
                 if let Some(ty) = self.program.find_ffi_type(name) {
@@ -2390,16 +2417,40 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(TypeId::unit)
     }
 
+    // TODO: I think this can just be (arg, target) = '{ let v: <arg> = <target>; v }'
+    //       but it still has special handling in type_of to stop early.
+    //       would need better type inference to make that the same, but probably want that anyway.
+    //       ideally would also allow macros to infer a type even if they can't run all the way?    -- Apr 21
+    pub fn as_cast_macro(&mut self, mut arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+        self.compile_expr(&mut arg, Some(TypeId::ty))?;
+        let ty: TypeId = self.immediate_eval_expr_known(arg)?;
+        assert!(!ty.is_unknown());
+        // target.ty = ty;
+        // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
+        // but not calling the normal compile_expr because it has stricter typechecking on the requested type.
+        let found = self.compile_expr_inner(&mut target, Some(ty))?;
+        self.coerce_type_check_arg(found, ty, "@as")?;
+        target.ty = found;
+        if found != ty {
+            let loc = target.loc;
+            let done = target.done;
+            target = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut target))), loc, ty);
+            target.done = done;
+        }
+        // println!("{} vs {}", self.program.log_type(found), self.program.log_type(ty));
+        // println!("{}", target.log(self.program.pool));
+
+        Ok(target)
+    }
+
     #[track_caller]
-    pub fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+    pub fn coerce_type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
         assert!(found.is_valid(), "invalid type: {} {msg}", found.0);
         assert!(expected.is_valid(), "invalid type: {} {msg}", expected.0);
 
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
-        // println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
-
         if found == expected {
             Ok(())
         } else {
@@ -2414,7 +2465,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
                     if f.len() == e.len() {
-                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.type_check_arg(*f, *e, msg).is_ok());
+                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.coerce_type_check_arg(*f, *e, msg).is_ok());
                         if ok {
                             return Ok(());
                         }
@@ -2422,7 +2473,83 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 // TODO: only allow destructuring in some contexts.
                 (&TypeInfo::Struct { as_tuple, .. }, TypeInfo::Tuple(_)) => {
-                    return self.type_check_arg(as_tuple, expected, msg);
+                    return self.coerce_type_check_arg(as_tuple, expected, msg);
+                }
+                (TypeInfo::Tuple(_), &TypeInfo::Struct { as_tuple, .. }) => {
+                    return self.coerce_type_check_arg(found, as_tuple, msg);
+                }
+                (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
+                    if self.coerce_type_check_arg(f, e, msg).is_ok() {
+                        return Ok(());
+                    }
+                }
+                (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
+                (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
+                (TypeInfo::Tuple(found_elements), TypeInfo::Type) => {
+                    // :Coercion
+                    if found_elements.iter().all(|e| self.coerce_type_check_arg(*e, TypeId::ty, msg).is_ok()) {
+                        return Ok(());
+                    }
+                }
+
+                (TypeInfo::Type, TypeInfo::Tuple(_expected_elements)) => {
+                    err!("TODO: expand out a tuple type?",)
+                }
+
+                (TypeInfo::Unit, TypeInfo::Type) => {
+                    // :Coercion
+                    // TODO: more consistant handling of empty tuple?
+                    return Ok(());
+                }
+                // TODO: correct varience
+                // TODO: calling convention for FnPtr
+                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) | (&TypeInfo::FnPtr(f), &TypeInfo::FnPtr(e)) => {
+                    if self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok() {
+                        return Ok(());
+                    }
+                }
+                (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => {
+                    // :Coercion
+                    // scary because relies on custom handling for constdecls?
+                    return Ok(());
+                }
+                _ => {}
+            }
+
+            err!(CErr::TypeCheck(found, expected, msg))
+        }
+    }
+
+    #[track_caller]
+    pub fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
+        assert!(found.is_valid(), "invalid type: {} {msg}", found.0);
+        assert!(expected.is_valid(), "invalid type: {} {msg}", expected.0);
+
+        // TODO: dont do this. fix ffi types.
+        let found = self.program.raw_type(found);
+        let expected = self.program.raw_type(expected);
+
+        if found == expected {
+            Ok(())
+        } else {
+            match (&self.program[found], &self.program[expected]) {
+                // :Coercion // TODO: only one direction makes sense
+                (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
+                (TypeInfo::Int(a), TypeInfo::Int(b)) => {
+                    // :Coercion
+                    if a.bit_count == b.bit_count || a.bit_count == 64 || b.bit_count == 64 {
+                        return Ok(()); // TODO: not this!
+                    }
+                }
+                (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
+                    // println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
+                    // where_the_fuck_am_i(self, self.last_loc.unwrap());
+                    if f.len() == e.len() {
+                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.type_check_arg(*f, *e, msg).is_ok());
+                        if ok {
+                            return Ok(());
+                        }
+                    }
                 }
                 (TypeInfo::Tuple(_), &TypeInfo::Struct { as_tuple, .. }) => {
                     return self.type_check_arg(found, as_tuple, msg);
@@ -2441,26 +2568,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
 
-                (TypeInfo::Type, TypeInfo::Tuple(_expected_elements)) => {
-                    err!("TODO: expand out a tuple type?",)
-                }
-
-                (TypeInfo::Unit, TypeInfo::Type) => {
-                    // :Coercion
-                    // TODO: more consistant handling of empty tuple?
-                    return Ok(());
-                }
                 // TODO: correct varience
                 // TODO: calling convention for FnPtr
                 (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) | (&TypeInfo::FnPtr(f), &TypeInfo::FnPtr(e)) => {
                     if self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
                         return Ok(());
                     }
-                }
-                (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => {
-                    // :Coercion
-                    // scary because relies on custom handling for constdecls?
-                    return Ok(());
                 }
                 _ => {}
             }
@@ -3061,7 +3174,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
             // TODO: if its a string literal just take it
             // TODO: check if they tried to give you something from the stack
-            let ir: (*mut u8, i64) = self.immediate_eval_expr_known(asm.clone())?;
+
+            // this is really annoying cause i can only refer to the (_, _) version of Str but it already has a cast to Str
+            let ty = <(*mut u8, i64) as InterpSend>::get_type(self.program);
+            let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(asm.clone())), asm.loc, ty);
+
+            let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
             let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
             let Ok(ir) = std::str::from_utf8(ir) else { err!("wanted utf8 llvmir",) };
             self.program[f].llvm_ir = Some(self.pool.intern(ir));

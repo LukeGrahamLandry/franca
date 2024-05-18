@@ -344,7 +344,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     // if result_location==true, the top of the stack on entry to this function has the pointer where the result should be stored.
     // otherwise, just push it to the stack.
-    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, mut result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
+    fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
         assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
 
         debug_assert!(
@@ -366,6 +366,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 unreachable!("didn't desugar: {}", expr.log(self.program.pool))
             }
             Expr::Poison => ice!("POISON",),
+            Expr::Cast(v) => self.compile_expr(result, v, result_location, can_tail)?,
             Expr::Call(f, arg) => {
                 assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.program.pool));
                 assert!(!arg.ty.is_unknown(), "Not typechecked: {}", arg.log(self.program.pool));
@@ -546,7 +547,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     Flag::Deref => {
                         self.compile_expr(result, arg, PushStack, false)?; // get the pointer
                         let slots = self.slot_count(expr.ty);
-                        debug_assert!(!self.program.get_info(expr.ty).has_special_pointer_fns);
+                        // we care about the type of the pointer, not the value because there might be a cast.
+                        debug_assert!(!self.program.get_info(self.program.unptr_ty(arg.ty).unwrap()).has_special_pointer_fns);
                         if slots == 0 {
                             match result_location {
                                 ResAddr => result.push(Bc::Pop { slots: 2 }), // pop dest too!
@@ -733,7 +735,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     // :PlaceExpr
     fn set_deref(&mut self, result: &mut FnBody<'p>, place: &FatExpr<'p>, value: &FatExpr<'p>) -> Res<'p, ()> {
-        debug_assert!(!self.program.get_info(value.ty).has_special_pointer_fns);
+        // we care about the type of the pointer, not the value because there might be a cast.
+        debug_assert!(!self.program.get_info(place.ty).has_special_pointer_fns,);
         match place.deref() {
             Expr::GetVar(_) => unreachable!("var set should be converted to place expr"),
             Expr::SuffixMacro(macro_name, arg) => {

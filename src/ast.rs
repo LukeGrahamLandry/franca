@@ -1,14 +1,12 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Bc, Value, Values},
+    bc::{Value, Values},
     compiler::{CErr, Compile, CompileError, Res},
-    err,
-    export_ffi::RsResolvedSymbol,
-    extend_options,
-    ffi::{init_interp_send, InterpSend},
+    err, extend_options,
+    ffi::InterpSend,
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
-    reflect::{Reflect, RsType},
+    reflect::RsType,
     unwrap, Map, STATS,
 };
 use codemap::Span;
@@ -179,6 +177,7 @@ pub enum Expr<'p> {
         index: Box<FatExpr<'p>>,
     },
     GetParsed(usize),
+    Cast(Box<FatExpr<'p>>),
 }
 
 impl<'p> FatExpr<'p> {
@@ -218,6 +217,9 @@ pub trait WalkAst<'p> {
             Expr::Call(fst, snd) | Expr::TupleAccess { ptr: fst, index: snd } => {
                 self.expr(fst);
                 self.expr(snd);
+            }
+            Expr::Cast(v) => {
+                self.expr(v);
             }
             Expr::PtrOffset { ptr, .. } => {
                 self.expr(ptr);
@@ -1049,11 +1051,6 @@ impl<'p> Program<'p> {
             program.type_lookup.insert(ty.clone(), TypeId::from_index(i));
         }
 
-        init_interp_send!(&mut program, FatStmt, TypeInfo);
-        init_interp_send!(&mut program, Bc, IntTypeInfo); // TODO: aaaa
-
-        program.get_rs_type(RsResolvedSymbol::get_ty());
-
         program
     }
 
@@ -1774,7 +1771,6 @@ pub enum Flag {
     __Shift_Or_Slice,
     No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
     __Return,
-    __String_Literal_Type_Hack,
     __Get_Assertions_Passed,
     Test_Broken,
     Load,

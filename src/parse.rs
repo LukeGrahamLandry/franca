@@ -323,18 +323,9 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
             Quoted(i) => {
                 self.start_subexpr();
-                self.start_subexpr();
-                self.start_subexpr();
-                self.start_subexpr();
                 self.pop();
                 // TODO: maybe its wrong to both putting everything in the pool
-
-                let target = Box::new(self.expr(Expr::String(i)));
-                let arg = Box::new(self.expr(Expr::GetNamed(Flag::__String_Literal_Type_Hack.ident())));
-                let handler = Box::new(self.expr(Expr::GetNamed(Flag::As.ident())));
-                let s = self.expr(Expr::PrefixMacro { handler, arg, target });
-
-                Ok(s)
+                Ok(self.expr(Expr::String(i)))
             }
             // TODO: allow this as a raw statement, currently it will get parsed as an annotation on a noop.
             // TODO: should i allow the payload to be statement too?

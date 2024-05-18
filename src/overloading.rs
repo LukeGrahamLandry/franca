@@ -1,5 +1,5 @@
 use codemap::Span;
-use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
+use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{Expr, FatExpr, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, Var, VarType};
 use crate::bc::{Value, Values};
@@ -240,21 +240,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 writeln!(msg, "Maybe you forgot to instantiate a generic?").unwrap();
 
-                fn _where_the_fuck_am_i(comp: &Compile, loc: Span) {
-                    let diagnostic = Diagnostic {
-                        level: Level::Error,
-                        message: String::from("???"),
-                        code: None,
-                        spans: vec![SpanLabel {
-                            span: loc,
-                            label: None,
-                            style: SpanStyle::Primary,
-                        }],
-                    };
-                    let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(&comp.parsing.codemap));
-                    emitter.emit(&[diagnostic]);
-                }
-
                 // where_the_fuck_am_i(self, arg.loc);
                 self.last_loc = Some(arg.loc);
                 err!("AmbiguousCall: {}\n{}", log_goal(self), msg)
@@ -357,4 +342,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         });
         Ok(())
     }
+}
+
+pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
+    let diagnostic = Diagnostic {
+        level: Level::Error,
+        message: String::from("???"),
+        code: None,
+        spans: vec![SpanLabel {
+            span: loc,
+            label: None,
+            style: SpanStyle::Primary,
+        }],
+    };
+    let mut out = vec![];
+    let mut emitter = Emitter::vec(&mut out, Some(&comp.parsing.codemap));
+    emitter.emit(&[diagnostic]);
+    drop(emitter);
+    println!("{}", String::from_utf8(out).unwrap())
 }

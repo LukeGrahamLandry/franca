@@ -1,3 +1,13 @@
+- want to clean up type checking / coercion stuff.
+  so I want @as to be the only one that does the current loose `type_check_arg` where you can assign structs to tuples.
+- @as can't just change the type on the node because `c: i64 = 0; d := @as(u8) c`,
+  makes emit_bc debug check see that as a u8 load without calling fn load.
+  it does work if you take that out but i don't really want to remove that check.
+  but doing it on the pointer type instead of the value type makes sense to me.
+- made it give the compiler access to fn Slice(T) so strings and !slice can have the right type less painfully.
+
+## zero size unit (May 17)
+
 - in the backend you mostly need size and float_mask at the same time so put them together so its less verbose.
 - want zero sized Unit so you don't spend instructions moving around garbage.
   removed places that pushed/popped a zero to Vec<i64>/v-stack.
