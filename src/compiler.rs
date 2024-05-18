@@ -77,6 +77,7 @@ pub struct Compile<'a, 'p> {
     #[cfg(feature = "cranelift")]
     pub cranelift: crate::cranelift::JittedCl,
     pub make_slice_t: Option<FuncId>,
+    pending_redirects: Vec<(FuncId, FuncId)>,
 }
 
 #[derive(Debug)]
@@ -120,6 +121,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         let parsing = ParseTasks::new(pool);
         let mut c = Self {
+            pending_redirects: vec![],
             make_slice_t: None,
             wip_stack: vec![],
             pool,
@@ -285,6 +287,11 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+        let r = self.compile_inner(f, when);
+        self.tag_err(r)
+    }
+
+    pub fn compile_inner(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         // TODO: this is a little sketchy. can one merged arch cause asm_done to be set and then other arches don't get processed?
         //       i dont think so cause overloading short circuits, and what ever arch did happen will be in the dispatch table.
         //       need to revisit when not jitting tho.   -- May 16
@@ -295,63 +302,69 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.push_state(&state);
         let before = self.debug_trace.len();
         debug_assert!(!self.program[f].evil_uninit);
-        let result = self.ensure_compiled(f, when);
-        if result.is_ok() {
-            let mut i = 0;
-            while let Some(&id) = &self.program[f].callees.get(i) {
-                if id == f {
-                    continue;
-                }
-                let res = self.compile(id, when);
-                self.tag_err(res)?;
-                i += 1;
+        self.ensure_compiled(f, when)?;
+        if let Some(target) = self.program[f].redirect {
+            self.compile(target, when)?;
+        }
+        let mut i = 0;
+        while let Some(&id) = &self.program[f].callees.get(i) {
+            if id == f {
+                continue;
             }
+            let res = self.compile(id, when);
+            self.tag_err(res)?;
+            i += 1;
+        }
+        self.last_loc = Some(self.program[f].loc);
 
-            if let Some(code) = &self.program[f].jitted_code {
-                self.aarch64.copy_inline_asm(f, code);
-            }
-            let use_cl = self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift;
+        if let Some(code) = &self.program[f].jitted_code {
+            self.aarch64.copy_inline_asm(f, code);
+        }
+        let use_cl = self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift;
 
-            let cl = self.program[f].cl_emit_fn_ptr;
+        let cl = self.program[f].cl_emit_fn_ptr;
+        #[cfg(feature = "cranelift")]
+        if use_cl && cl.is_some() {
+            crate::cranelift::emit_cl_intrinsic(self, cl.unwrap(), f)?
+        }
+
+        if self.program[f].cc.unwrap() != CallConv::Inline && self.program[f].body.is_some() {
+            let body = emit_bc(self, f)?;
+            // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
+
             #[cfg(feature = "cranelift")]
-            if use_cl && cl.is_some() {
-                crate::cranelift::emit_cl_intrinsic(self, cl.unwrap(), f)?
-            }
-
-            if self.program[f].cc.unwrap() != CallConv::Inline && self.program[f].body.is_some() {
-                let body = emit_bc(self, f)?;
-                // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
-
-                #[cfg(feature = "cranelift")]
-                let aarch = {
-                    if use_cl {
-                        let res = crate::cranelift::emit_cl(self, &body, f);
-                        self.tag_err(res)?;
-                    }
-                    !use_cl
-                };
-                #[cfg(not(feature = "cranelift"))]
-                let aarch = true;
-
-                if aarch {
-                    let res = emit_aarch64(self, f, when, &body);
+            let aarch = {
+                if use_cl {
+                    let res = crate::cranelift::emit_cl(self, &body, f);
                     self.tag_err(res)?;
                 }
+                !use_cl
+            };
+            #[cfg(not(feature = "cranelift"))]
+            let aarch = true;
+
+            if aarch {
+                let res = emit_aarch64(self, f, when, &body);
+                self.tag_err(res)?;
             }
         }
 
-        let result = self.tag_err(result);
-        let after = self.debug_trace.len();
-        if result.is_ok() {
-            debug_assert_eq!(before, after);
-            self.pop_state(state);
-            // self.currently_compiling.retain(|check| *check != f);
+        if let Some(target) = self.program[f].redirect {
+            self.pending_redirects.push((f, target));
         }
+
+        let after = self.debug_trace.len();
+        debug_assert_eq!(before, after);
+        self.pop_state(state);
+        // self.currently_compiling.retain(|check| *check != f);
         self.program[f].asm_done = true;
-        result
+
+        self.last_loc = Some(self.program[f].loc);
+        Ok(())
     }
 
     pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
+        let loc = self.last_loc;
         unsafe { STATS.jit_call += 1 };
         let state2 = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state2);
@@ -369,15 +382,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.aarch64.make_exec();
         }
 
+        for (from, to) in self.pending_redirects.drain(0..) {
+            self.last_loc = Some(self.program[to].loc);
+            let ptr = unwrap!(
+                self.aarch64.get_fn(to),
+                "redirect target not ready {from:?} -> {to:?} {:#?}",
+                self.program[to]
+            );
+            self.aarch64.dispatch[from.as_index()] = ptr;
+        }
+
+        self.last_loc = loc;
         self.flush_cpu_instruction_cache();
         // cranelift puts stuff here too and so does comptime_addr
         let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
         debug_assert!(addr as usize != Jitted::EMPTY);
 
         for c in &self.program[f].callees {
-            // TODO: emit cl_emit_fn_ptr as function
             debug_assert!(
-                self.aarch64.get_fn(*c).is_some() || self.program[*c].cl_emit_fn_ptr.is_some(),
+                self.aarch64.get_fn(*c).is_some(),
                 "missing callee {}",
                 self.pool.get(self.program[*c].name)
             )
@@ -503,6 +526,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
         assert!(!self.program[f].has_tag(Flag::Comptime));
+        self.last_loc = Some(self.program[f].loc);
 
         let mut special = false;
         if let Some(body) = &mut self.program[f].body {
@@ -516,6 +540,22 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(self.program[f].finished_ty().is_some(), "fn without body needs type annotations.");
             assert!(self.program[f].referencable_name, "fn no body needs name");
             special = true;
+        }
+
+        if let Some(types) = self.program[f].get_tag_mut(Flag::Redirect).cloned() {
+            let (arg, ret, os): (TypeId, TypeId, OverloadSetId) = self.immediate_eval_expr_known(types.args.unwrap())?;
+            // TODO: this wont work cause you can get here while working on the overload set so its order dependednt.
+            let mut found: Vec<_> = self.program[os]
+                .ready
+                .iter()
+                .filter(|o| o.arg == arg && o.ret == Some(ret))
+                .cloned()
+                .collect();
+            if found.len() > 1 {
+                self.do_merges(&mut found, os)?;
+            }
+            assert!(found.len() == 1);
+            self.program[f].redirect = Some(found[0].func);
         }
 
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
@@ -1056,6 +1096,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set, loc)?;
                     out = (Some(id), Some(index));
                 }
+
+                let loc = self.program[id].loc;
+                if self.program[id].has_tag(Flag::Redirect) {
+                    // dman it bnoarow chekcser
+                    let os = self.as_literal(out.1.unwrap(), loc)?;
+                    if let Some(types) = self.program[id].get_tag_mut(Flag::Redirect) {
+                        let Expr::Tuple(parts) = &mut types.args.as_mut().unwrap().expr else {
+                            err!("bad",)
+                        };
+                        parts.push(os);
+                    }
+                }
             }
         }
 
@@ -1444,8 +1496,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 // TODO: for now you just need to not make a mistake lol
                                 //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
                                 self.add_callee(id);
-                                self.compile(id, ExecTime::Both)?; // TODO
-                                                                   // The backend still needs to do something with this, so just leave it
+                                self.ensure_compiled(id, ExecTime::Both)?; // TODO
+                                                                           // The backend still needs to do something with this, so just leave it
                                 let fn_ty = self.program.func_type(id);
                                 let ty = self.program.fn_ty(fn_ty).unwrap();
                                 let ty = self.program.intern_type(TypeInfo::FnPtr(ty)); // TODO: callconv as part of type
@@ -1546,6 +1598,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert!(container != TypeId::scope, "dot syntax on module must be const",);
                 // Otherwise its a normal struct/tagged field.
                 self.compile_place_expr(expr, requested, true)?;
+                self.compile_expr(expr, requested)?; // TODO: this is dumb. its just to get the load/store applied/
                 expr.ty
             }
             // :PlaceExpr
@@ -2693,6 +2746,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     place.ty = field_ptr_ty;
                     // Now we have the offset-ed ptr, add back the deref
                     self.deref_one(place)?;
+
                     // Don't set done again because you want to go around the main compile_expr another time so special load/store overloads get processed.
                 } else {
                     // place.done = true;

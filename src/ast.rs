@@ -756,6 +756,7 @@ pub struct Func<'p> {
     pub return_var: Option<Var<'p>>,
     pub cl_emit_fn_ptr: Option<usize>, // TODO: Option<CfEmit>
     pub callees: Vec<FuncId>,
+    pub redirect: Option<FuncId>,
 }
 
 #[repr(C)]
@@ -844,6 +845,11 @@ impl<'p> Func<'p> {
         if self.cc == Some(CallConv::OneRetPic) && cc == CallConv::Arg8Ret1 {
             // TODO: HACK. now with merging. the aarch64 version says OneRetPic and llvm version says Arg8Ret1 but thats fine cause really they're different functions.
             //       so treating them as the same one is kinda but also the old SplitFunc system was more dumb.
+            return Ok(());
+        }
+        if self.cc == Some(CallConv::Arg8Ret1) && cc == CallConv::OneRetPic {
+            // TODO: HACK.
+            self.cc = Some(CallConv::OneRetPic);
             return Ok(());
         }
         match self.cc {
@@ -1588,6 +1594,7 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            redirect: None,
             ensured_compiled: false,
             callees: vec![],
             return_var: None,
@@ -1768,6 +1775,7 @@ pub enum Flag {
     Force_Cranelift,
     Force_Aarch64,
     Tail,
+    Redirect,
     __Shift_Or_Slice,
     No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
     __Return,

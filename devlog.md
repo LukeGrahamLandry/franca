@@ -8,6 +8,8 @@
 - made bool take one byte. interestingly that made @bits break in emit_bc debug check
   because it was using !if instead of fn if, so the cond didn't go through the normal deref thingy so didn't get converted to a load call.
   thats pretty janky.
+- i feel like its important that eq/ne/load/store know that they can call the same function for most unique types of i64 or whatever.
+  so i can use types for enum tags and just forward those functions to the int versions but not say you can call fn add on an enum tag.
 
 ## zero size unit (May 17)
 

@@ -756,14 +756,6 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
         builder.ins().store(MemFlags::new(), val, v[0], 0);
         builder.ins().iconst(I64, 0)
     }),
-    ("fn load(_: *bool) bool;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        builder.ins().uload8(I64, MemFlags::new(), v[0], 0)
-    }),
-    ("fn store(_: *bool, val: bool) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        let val = builder.ins().ireduce(I8, v[1]);
-        builder.ins().store(MemFlags::new(), val, v[0], 0);
-        builder.ins().iconst(I64, 0)
-    }),
     ("fn ptr_to_int(_: rawptr) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
     ("fn int_to_ptr(_: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
     // it seems this matches what i do.

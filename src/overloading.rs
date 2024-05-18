@@ -26,7 +26,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 ..
             }
             | &mut Expr::WipFunc(id) => {
-                self.named_args_to_tuple(arg, id)?;
+                self.adjust_call(arg, id)?;
                 Some(id)
             }
             &mut Expr::Value {
@@ -48,7 +48,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
                 let arg_ty = self.compile_expr(arg, ret)?;
                 let id = self.promote_closure(f, Some(arg_ty), ret)?;
-                self.named_args_to_tuple(arg, id)?;
+                self.adjust_call(arg, id)?;
                 Some(id)
             }
             &mut Expr::GetNamed(i) => {
@@ -72,7 +72,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some((value, _)) = self.find_const(name)? {
             match value {
                 Values::One(Value::GetFn(f)) => {
-                    self.named_args_to_tuple(arg, f)?;
+                    self.adjust_call(arg, f)?;
                     self.pop_state(state);
                     Ok(f)
                 }
@@ -102,7 +102,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: my named args test doesn't work without this
             if overloads.ready.len() == 1 {
                 let id = overloads.ready[0].func;
-                self.named_args_to_tuple(arg, id)?;
+                self.adjust_call(arg, id)?;
                 return Ok(id);
             }
         }
@@ -127,72 +127,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 overloads.ready.retain(|check| accept(check.arg, check.ret));
 
                 if overloads.ready.len() > 1 {
-                    let special = self.emit_special_body(overloads.ready[0].func)?;
-                    if !special {
-                        println!("warn: this does not bode well")
-                    }
-
-                    // It could be a builtin (like add) that exists for different architectures. Merge them into one.
-                    for j in (1..overloads.ready.len()).rev() {
-                        assert!(
-                            overloads.ready[j].arg == overloads.ready[0].arg && overloads.ready[j].ret == overloads.ready[0].ret,
-                            "overload missmatch. unreachable?"
-                        );
-
-                        let f = overloads.ready[j].func;
-                        // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.
-                        let special = self.emit_special_body(f)?;
-                        if !special {
-                            println!("warn: this does not bode well")
-                        }
-
-                        macro_rules! merge {
-                            ($field:ident) => {{
-                                let func = &self.program[f];
-                                if let Some(val) = func.$field.clone() {
-                                    self.last_loc = Some(self.program[f].loc);
-                                    let tags = self.program[f].annotations.clone();
-                                    let target = &mut self.program[overloads.ready[0].func];
-                                    // assert!(
-                                    //     target.$field.is_none(),
-                                    //     "tried to merge overwrite. {} {} {:?} <- {:?}",
-                                    //     self.pool.get(target.name),
-                                    //     stringify!($field),
-                                    //     overloads.ready[0].func,
-                                    //     overloads.ready[j].func
-                                    // );
-                                    // TODO: it shouldn't happen twice. i guess it happens on emit_body? but how can that happen before this and still have two of the same overload.
-                                    if let Some(prev) = &target.$field {
-                                        assert_eq!(
-                                            prev,
-                                            &val,
-                                            "tried to merge overwrite. {} {} {:?} <- {:?}",
-                                            self.pool.get(target.name),
-                                            stringify!($field),
-                                            overloads.ready[0].func,
-                                            overloads.ready[j].func
-                                        );
-                                    }
-                                    target.$field = Some(val);
-                                    target.annotations.extend(tags);
-                                    true
-                                } else {
-                                    false
-                                }
-                            }};
-                        }
-
-                        if merge!(llvm_ir) | merge!(cl_emit_fn_ptr) | merge!(jitted_code) | merge!(comptime_addr) {
-                            // TODO: remove from program as well?
-                            overloads.ready.remove(j); // iter rev so its fine
-                            self.program[i].ready.retain(|o| o.func != f); // we cloned, so change the original too.
-                        }
-                    }
+                    self.do_merges(&mut overloads.ready, i)?;
                 }
-
                 if overloads.ready.len() == 1 {
                     let id = overloads.ready[0].func;
-                    self.named_args_to_tuple(arg, id)?;
+                    self.adjust_call(arg, id)?;
                     return Ok(id);
                 }
 
@@ -295,7 +234,78 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    fn named_args_to_tuple(&mut self, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
+    pub(crate) fn do_merges(&mut self, overloads: &mut Vec<OverloadOption>, i: OverloadSetId) -> Res<'p, ()> {
+        let special = self.emit_special_body(overloads[0].func)?;
+        if !special {
+            println!("warn: this does not bode well")
+        }
+
+        // It could be a builtin (like add) that exists for different architectures. Merge them into one.
+        for j in (1..overloads.len()).rev() {
+            assert!(
+                overloads[j].arg == overloads[0].arg && overloads[j].ret == overloads[0].ret,
+                "overload missmatch. unreachable?"
+            );
+
+            let f = overloads[j].func;
+            // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.
+            let special = self.emit_special_body(f)?;
+            if !special {
+                println!("warn: this does not bode well")
+            }
+
+            macro_rules! merge {
+                    ($field:ident) => {{
+                        let func = &self.program[f];
+                        if let Some(val) = func.$field.clone() {
+                            self.last_loc = Some(self.program[f].loc);
+                            let tags = self.program[f].annotations.clone();
+                            let target = &mut self.program[overloads[0].func];
+                            // assert!(
+                            //     target.$field.is_none(),
+                            //     "tried to merge overwrite. {} {} {:?} <- {:?}",
+                            //     self.pool.get(target.name),
+                            //     stringify!($field),
+                            //     overloads[0].func,
+                            //     overloads[j].func
+                            // );
+                            // TODO: it shouldn't happen twice. i guess it happens on emit_body? but how can that happen before this and still have two of the same overload.
+                            if let Some(prev) = &target.$field {
+                                assert_eq!(
+                                    prev,
+                                    &val,
+                                    "tried to merge overwrite. {} {} {:?} <- {:?}",
+                                    self.pool.get(target.name),
+                                    stringify!($field),
+                                    overloads[0].func,
+                                    overloads[j].func
+                                );
+                            }
+                            target.$field = Some(val);
+                            target.annotations.extend(tags);
+                            true
+                        } else {
+                            false
+                        }
+                    }};
+                }
+
+            if merge!(llvm_ir) | merge!(cl_emit_fn_ptr) | merge!(jitted_code) | merge!(comptime_addr) {
+                // TODO: remove from program as well?
+                // iter rev so its fine
+                overloads.remove(j);
+                // we cloned, so change the original too.
+                self.program[i].ready.retain(|o| o.func != f);
+                // assert!(self.program[f].redirect.is_none());
+                // probably does nothing.
+                // self.program[f].redirect = Some(overloads[0].func);
+            }
+        }
+        Ok(())
+    }
+
+    // - convert named arg to a tuple
+    fn adjust_call(&mut self, arg: &mut FatExpr<'p>, f: FuncId) -> Res<'p, ()> {
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             let expected = &self.program[f].arg;
             assert_eq!(expected.bindings.len(), pattern.bindings.len());
@@ -318,6 +328,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 _ => arg.expr = Expr::Tuple(parts),
             }
         }
+
         Ok(())
     }
 

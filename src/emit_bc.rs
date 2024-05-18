@@ -199,11 +199,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn emit_runtime_call(
         &mut self,
         result: &mut FnBody<'p>,
-        f: FuncId,
+        mut f: FuncId,
         arg_expr: &FatExpr<'p>,
         result_location: ResultLoc,
         mut can_tail: bool,
     ) -> Res<'p, ()> {
+        // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
+        if let Some(target) = self.program[f].redirect {
+            f = target;
+        }
+
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = self.program[f].cc.unwrap() == CallConv::Flat;
@@ -548,7 +553,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         self.compile_expr(result, arg, PushStack, false)?; // get the pointer
                         let slots = self.slot_count(expr.ty);
                         // we care about the type of the pointer, not the value because there might be a cast.
-                        debug_assert!(
+                        assert!(
                             !self.program.get_info(self.program.unptr_ty(arg.ty).unwrap()).has_special_pointer_fns,
                             "{}",
                             expr.log(self.program.pool)

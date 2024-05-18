@@ -304,6 +304,36 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     }
 }
 
+impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p> for (A, B, C) {
+    const SIZE: usize = A::SIZE + B::SIZE;
+    fn get_type_key() -> u128 {
+        mix::<(A, B), C>(87986)
+    }
+    fn create_type(program: &mut Program<'p>) -> TypeId {
+        let a = A::get_type(program);
+        let b = B::get_type(program);
+        let c = C::get_type(program);
+        program.tuple_of(vec![a, b, c])
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        self.0.serialize_to_ints(values);
+        self.1.serialize_to_ints(values);
+        self.2.serialize_to_ints(values);
+    }
+
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        let a = A::deserialize_from_ints(values)?;
+        let b = B::deserialize_from_ints(values)?;
+        let c = C::deserialize_from_ints(values)?;
+        Some((a, b, c))
+    }
+
+    fn name() -> String {
+        format!("Ty(Ty({}, {}), {})", A::name(), B::name(), C::name()) // TODO: unnest
+    }
+}
+
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     const SIZE: usize = 2;
     fn get_type_key() -> u128 {

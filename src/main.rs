@@ -382,7 +382,7 @@ fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)])
 
 fn run_one(comp: &mut Compile, f: FuncId) {
     let result = comp.compile(f, ExecTime::Runtime);
-    if let Err(e) = result {
+    if let Err(e) = comp.tag_err(result) {
         log_err(comp, *e);
         exit(1);
     }

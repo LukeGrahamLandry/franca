@@ -1270,8 +1270,7 @@ pub mod jit {
 
         pub fn extend_blanks(&mut self, f: FuncId) {
             while self.dispatch.len() < f.as_index() + 1 {
-                // Jitted::EMPTY
-                self.dispatch.push(self.dispatch.len() as *const u8);
+                self.dispatch.push(Self::EMPTY as *const u8);
                 self.ranges.push(&[]);
             }
         }
