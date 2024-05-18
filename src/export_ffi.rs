@@ -151,7 +151,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
 ];
 
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
-    println!("saved Slice(T)!");
     compiler.make_slice_t = Some(f);
 }
 
@@ -160,8 +159,11 @@ extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
     if let TypeInfo::Int(int) = compiler.program[raw] {
         // :SmallTypes
         if int.bit_count == 8 {
-            return 1;
+            return 1; // HACK
         }
+    }
+    if raw == TypeId::bool() {
+        return 1; // HACK
     }
     compiler.slot_count(ty) as i64 * 8
 }

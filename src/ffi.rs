@@ -312,7 +312,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn create_type(program: &mut Program<'p>) -> TypeId {
         let ty = T::get_type(program);
-        println!("ffi Vec({})", program.log_type(ty));
         let ty = program.intern_type(TypeInfo::Ptr(ty));
         program.intern_type(TypeInfo::Tuple(vec![ty, TypeId::i64()]))
     }

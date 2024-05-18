@@ -5,6 +5,9 @@
   it does work if you take that out but i don't really want to remove that check.
   but doing it on the pointer type instead of the value type makes sense to me.
 - made it give the compiler access to fn Slice(T) so strings and !slice can have the right type less painfully.
+- made bool take one byte. interestingly that made @bits break in emit_bc debug check
+  because it was using !if instead of fn if, so the cond didn't go through the normal deref thingy so didn't get converted to a load call.
+  thats pretty janky.
 
 ## zero size unit (May 17)
 

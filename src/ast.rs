@@ -1440,10 +1440,10 @@ impl<'p> Program<'p> {
             }
             TypeInfo::F64 => TypeMeta::new(1, 8, 1, false),
             TypeInfo::Unit => TypeMeta::new(0, 1, 0, true),
-            // TODO: bool should be a byte. indexes should be u32
+            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true), // :SmallTypes
+            // TODO:  indexes should be u32
             TypeInfo::Scope
             | TypeInfo::Label(_)
-            | TypeInfo::Bool
             | TypeInfo::Fn(_)
             | TypeInfo::Ptr(_)
             | TypeInfo::VoidPtr

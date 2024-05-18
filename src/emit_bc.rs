@@ -548,7 +548,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         self.compile_expr(result, arg, PushStack, false)?; // get the pointer
                         let slots = self.slot_count(expr.ty);
                         // we care about the type of the pointer, not the value because there might be a cast.
-                        debug_assert!(!self.program.get_info(self.program.unptr_ty(arg.ty).unwrap()).has_special_pointer_fns);
+                        debug_assert!(
+                            !self.program.get_info(self.program.unptr_ty(arg.ty).unwrap()).has_special_pointer_fns,
+                            "{}",
+                            expr.log(self.program.pool)
+                        );
                         if slots == 0 {
                             match result_location {
                                 ResAddr => result.push(Bc::Pop { slots: 2 }), // pop dest too!
