@@ -387,6 +387,11 @@ fn run_one(comp: &mut Compile, f: FuncId) {
         exit(1);
     }
 
+    println!("compiled {f:?}");
+    for indirect in mem::take(&mut comp.aarch64.pending_indirect).drain(0..) {
+        debug_assert!(comp.aarch64.get_fn(indirect).is_some());
+    }
+
     let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
     comp.run(f, Value::I64(arg).into(), ExecTime::Runtime).unwrap();
 }

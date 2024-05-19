@@ -6,7 +6,7 @@ use codemap::Span;
 use std::ops::Deref;
 use std::usize;
 
-use crate::ast::{CallConv, Expr, FatExpr, FuncId, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{CallConv, Expr, FatExpr, FuncId, FuncImpl, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, ExecTime, Res};
 use crate::logging::PoolLog;
@@ -134,7 +134,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let func = &self.program[f];
         let is_flat_call = func.cc.unwrap() == CallConv::Flat;
         self.is_flat_call = is_flat_call;
-        let has_body = func.body.is_some();
+
+        let FuncImpl::Normal(body) = &func.body else {
+            // You should never actually try to run this code, the caller should have just done the call,
+            // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
+            // just too ways of emitting the call.
+            result.push(Bc::NoCompile);
+            return Ok(());
+        };
 
         let f_ty = func.unwrap_ty();
         let (arg, ret) = self.program.get_infos(f_ty);
@@ -142,24 +149,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let floats = if is_flat_call { 0 } else { arg.float_mask };
         let entry_block = result.push_block(slots, floats);
 
-        if !has_body {
-            // These are handled at the callsite, they don't need to emit a bytecode body.
-            if func.comptime_addr.is_some() || func.llvm_ir.is_some() || func.jitted_code.is_some() {
-                // You should never actually try to run this code, the caller should have just done the call,
-                // so there isn't an extra indirection and I don't have to deal with two bodies for comptime vs runtime,
-                // just too ways of emitting the call.
-                result.push(Bc::NoCompile);
-                return Ok(());
-            }
-            err!("called function without body: {f:?} {}", self.program.pool.get(func.name));
-        }
-
         // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
-        if let Expr::Value { .. } = &func.body.as_ref().unwrap().expr {
+        if let Expr::Value { .. } = &body.expr {
         } else {
             self.bind_args(result, &func.arg)?;
         }
-        let body = func.body.as_ref().unwrap();
 
         debug_assert!(is_flat_call || ret.size_slots <= 1); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
@@ -205,7 +199,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         mut can_tail: bool,
     ) -> Res<'p, ()> {
         // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
-        if let Some(target) = self.program[f].redirect {
+        if let FuncImpl::Redirect(target) = self.program[f].body {
             f = target;
         }
 

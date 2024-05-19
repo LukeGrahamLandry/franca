@@ -102,7 +102,7 @@ macro_rules! unwrap {
 
 pub use unwrap;
 
-use crate::ast::{FatStmt, Pattern};
+use crate::ast::{FatStmt, FuncImpl, Pattern};
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
@@ -401,11 +401,11 @@ impl<'p> PoolLog<'p> for Func<'p> {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
-            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}llvm={}, aarch64={}\n",
+            "[fn {} {:?} {} = \n \nBODY: \n{}\nEND\nARG: {}\n A:{:?}]\n{}\n",
             pool.get(self.name),
             self.name,
             self.ret.log(pool),
-            self.body.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| "@NO_BODY@".to_owned()),
+            self.body.log(pool),
             self.arg.log(pool), // TODO: better formatting.
             self.annotations.iter().map(|i| pool.get(i.name)),
             if self.capture_vars.is_empty() {
@@ -416,8 +416,6 @@ impl<'p> PoolLog<'p> for Func<'p> {
                     self.capture_vars.iter().map(|v| v.log(pool)).collect::<Vec<_>>()
                 )
             },
-            self.llvm_ir.is_some(),
-            self.jitted_code.is_some(),
         )
     }
 }
@@ -551,5 +549,22 @@ impl Debug for Values {
 impl Debug for FuncId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Fn{}", self.as_index())
+    }
+}
+
+impl<'p> PoolLog<'p> for FuncImpl<'p> {
+    fn log(&self, pool: &StringPool<'p>) -> String {
+        match self {
+            FuncImpl::Normal(e) => e.log(pool),
+            FuncImpl::DynamicImport(_) => todo!(),
+            FuncImpl::ComptimeAddr(n) => format!("ComptimeAddr({n})"),
+            FuncImpl::JittedAarch64(c) => format!("JittedAarch64({c:?})"),
+            &FuncImpl::LlvmIr(ir) => pool.get(ir).to_string(),
+            FuncImpl::EmitCranelift(n) => format!("EmitCranelift({n})"),
+            FuncImpl::PendingRedirect { arg, ret, os } => todo!(),
+            FuncImpl::Redirect(n) => format!("Redirect({n:?})"),
+            FuncImpl::Merged(parts) => parts.iter().map(|p| p.log(pool)).collect(),
+            FuncImpl::Empty => String::from("Unknown"),
+        }
     }
 }

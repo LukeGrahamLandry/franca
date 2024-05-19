@@ -260,7 +260,7 @@ pub trait WalkAst<'p> {
         self.pre_walk_func(func);
         self.pattern(&mut func.arg);
         self.ty(&mut func.ret);
-        if let Some(body) = &mut func.body {
+        if let FuncImpl::Normal(body) = &mut func.body {
             self.expr(body);
         }
     }
@@ -723,7 +723,6 @@ pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub name: Ident<'p>,           // it might be an annonomus closure
     pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
-    pub body: Option<FatExpr<'p>>, // It might be a forward declaration / ffi.
     pub arg: Pattern<'p>,
     pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
@@ -731,20 +730,9 @@ pub struct Func<'p> {
     pub finished_arg: Option<TypeId>,
     pub finished_ret: Option<TypeId>,
 
-    /// Implies body.is_none(). For native targets this is the symbol to put in the indirect table for this forward declaration.
-    /// This can be used for calling at runtime but not at comptime because we can't just ask the linker for the address.
-    pub dynamic_import_symbol: Option<Ident<'p>>,
-    /// An address to call this function. Body may be None or this could be jitted.
-    /// It might correspond to dynamic_import_symbol (for libc things that you can call at runtime or comptime).
-    pub comptime_addr: Option<u64>, // TODO: NonZero for niche
-    /// Inline assembly will be saved here.
-    // TODO: Maybe body should always be none? or maybe you want to allow composing !asm by calling the !asm again to inline with different offsets.
-    pub jitted_code: Option<Vec<u32>>,
-    pub llvm_ir: Option<Ident<'p>>,
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
     pub args_block: Option<usize>,
-    pub high_jitted_callee: usize,
     pub resolved_body: bool,
     pub resolved_sign: bool,
     pub evil_uninit: bool,
@@ -754,9 +742,8 @@ pub struct Func<'p> {
     pub ensured_compiled: bool,
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
-    pub cl_emit_fn_ptr: Option<usize>, // TODO: Option<CfEmit>
     pub callees: Vec<FuncId>,
-    pub redirect: Option<FuncId>,
+    pub body: FuncImpl<'p>,
 }
 
 #[repr(C)]
@@ -775,7 +762,7 @@ pub enum CallConv {
 // TODO: use this instead of having a billion fields.
 #[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
-enum FuncImpl<'p> {
+pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
     /// An external symbol to be resolved by the dynamic loader at runtime.
     /// Libc functions (prefixed with '_') are a safe bet.
@@ -785,14 +772,18 @@ enum FuncImpl<'p> {
     /// Some opcodes to be emitted directly as the function body.
     /// They had better be position independent and follow the expected calling convention.
     JittedAarch64(Vec<u32>),
-    /// A function the compiler can call with which registers it wants to use and get back some machine code.
-    /// This allows core operations to be written as functions but leave some freedom to the register allocator.
-    AnyRegTemplate(FuncId),
     /// Lines of llvm ir text to be concatenated as the body of a function.
     /// The compiler creates the signeture, prefix arg ssa references with '%', you cant declare globals.
-    LlvmIr(Vec<Ident<'p>>),
-    /// Purely a forward declaration. Perhaps an interp builtin.  
-    None,
+    LlvmIr(Ident<'p>),
+    EmitCranelift(usize), // CfEmit
+    PendingRedirect {
+        arg: TypeId,
+        ret: TypeId,
+        os: OverloadSetId,
+    },
+    Redirect(FuncId),
+    Merged(Vec<FuncImpl<'p>>),
+    Empty,
 }
 
 impl<'p> Func<'p> {
@@ -809,7 +800,7 @@ impl<'p> Func<'p> {
             name,
             arg,
             ret,
-            body,
+            body: body.map(FuncImpl::Normal).unwrap_or(FuncImpl::Empty),
             loc,
             referencable_name,
             allow_rt_capture,
@@ -1195,7 +1186,10 @@ impl<'p> Program<'p> {
         for f in self.inline_llvm_ir.clone() {
             let arg = self.funcs[f.as_index()].arg.clone();
             let ret = self.funcs[f.as_index()].finished_ret.unwrap();
-            let body = self.funcs[f.as_index()].llvm_ir.map(|n| self.pool.get(n).to_string()).unwrap();
+            let FuncImpl::LlvmIr(n) = self.funcs[f.as_index()].body else {
+                unreachable!()
+            };
+            let body = self.pool.get(n).to_string();
             let args = arg
                 .flatten()
                 .into_iter()
@@ -1594,7 +1588,6 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
-            redirect: None,
             ensured_compiled: false,
             callees: vec![],
             return_var: None,
@@ -1603,7 +1596,7 @@ impl<'p> Default for Func<'p> {
             annotations: vec![],
             name: Ident::null(),
             var_name: None,
-            body: None,
+            body: FuncImpl::Empty,
             arg: Pattern {
                 bindings: vec![],
                 loc: garbage_loc(),
@@ -1615,17 +1608,11 @@ impl<'p> Default for Func<'p> {
             finished_ret: None,
             referencable_name: false,
             evil_uninit: true,
-            dynamic_import_symbol: None,
-            comptime_addr: None,
-            jitted_code: None,
-            llvm_ir: None,
             allow_rt_capture: false,
             resolved_sign: false,
             resolved_body: false,
             scope: None,
             args_block: None,
-            high_jitted_callee: 0,
-            cl_emit_fn_ptr: None,
         }
     }
 }
@@ -1879,3 +1866,33 @@ pub struct OverloadSetId(u32);
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend, Debug)]
 pub struct LabelId(u32);
+
+macro_rules! func_impl_getter {
+    ($s:ident, $varient:ident) => {
+        match &$s {
+            FuncImpl::$varient(c) => Some(c),
+            FuncImpl::Merged(parts) => {
+                for p in parts {
+                    if let FuncImpl::$varient(c) = p {
+                        return Some(c);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    };
+}
+impl<'p> FuncImpl<'p> {
+    pub fn jitted_aarch64(&self) -> Option<&Vec<u32>> {
+        func_impl_getter!(self, JittedAarch64)
+    }
+
+    pub fn cranelift_emit(&self) -> Option<&usize> {
+        func_impl_getter!(self, EmitCranelift)
+    }
+
+    pub fn comptime_addr(&self) -> Option<&usize> {
+        func_impl_getter!(self, ComptimeAddr)
+    }
+}

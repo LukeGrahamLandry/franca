@@ -4,7 +4,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
 
-use crate::ast::{CallConv, Flag, FnType, Func, FuncId, TypeId, TypeInfo};
+use crate::ast::{CallConv, Flag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
 use crate::bc::{BbId, Bc, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
@@ -141,8 +141,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.wip.push(f);
 
         let func = &self.program[f];
-        assert!(func.jitted_code.is_none());
-        assert!(func.comptime_addr.is_none());
+        assert!(!matches!(func.body, FuncImpl::JittedAarch64(_) | FuncImpl::ComptimeAddr(_)));
 
         if TRACE_ASM {
             println!();
@@ -197,7 +196,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let ff = &self.program[f];
         let is_flat_call = ff.cc == Some(CallConv::Flat);
         debugln!("=== {f:?} {} flat:{is_flat_call} ===", self.program.pool.get(self.program[f].name));
-        debugln!("{}", self.program[f].body.as_ref().unwrap().log(self.program.pool));
+        debugln!("{}", self.program[f].body.log(self.program.pool));
 
         let (arg, ret) = self.program.get_infos(ff.unwrap_ty());
         let func = self.body;
@@ -376,6 +375,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 } else {
                     assert!(f.as_index() < 4096);
                     let reg = self.get_free_reg();
+                    self.asm.pending_indirect.push(f);
                     self.load_imm(reg, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
                     self.asm.push(ldr_uo(X64, reg, reg, f.as_index() as i64));
                     self.state.stack.push(Val::Increment { reg, offset_bytes: 0 })
@@ -1047,7 +1047,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     fn branch_func(&mut self, f: FuncId, with_link: bool) {
         if Self::DO_BASIC_ASM_INLINE {
             // TODO: save result on the function so dont have to recheck every time?
-            if let Some(code) = &self.program[f].jitted_code {
+            if let Some(code) = &self.program[f].body.jitted_aarch64() {
                 if self.program[f].cc == Some(CallConv::OneRetPic) {
                     // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
                     if code.len() == 2 && code[0] as i64 == ret(()) && code[1] as i64 == ret(()) {
@@ -1089,6 +1089,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
         // TODO: have a mapping. funcs take up slots even if never indirect called.
         assert!(f.as_index() < 4096);
+        self.asm.pending_indirect.push(f);
         // you don't really need to do this but i dont trust it cause im not following the calling convention
         self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
         self.asm.push(ldr_uo(X64, x16, x16, f.as_index() as i64));
@@ -1183,6 +1184,7 @@ pub mod jit {
         old: *mut u8,
         pub low: usize,
         pub high: usize,
+        pub pending_indirect: Vec<FuncId>,
     }
 
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
@@ -1202,6 +1204,7 @@ pub mod jit {
                 map_exec: None,
                 dispatch: Vec::with_capacity(99999), // Dont ever resize!
                 ranges: vec![],
+                pending_indirect: vec![],
             }
         }
 

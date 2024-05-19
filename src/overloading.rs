@@ -1,9 +1,9 @@
 use codemap::Span;
 use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Expr, FatExpr, FuncId, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, Var, VarType};
+use crate::ast::{Expr, FatExpr, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, Var, VarType};
 use crate::bc::{Value, Values};
-use crate::compiler::{Compile, DebugState, Res};
+use crate::compiler::{Compile, DebugState, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap};
 use std::mem;
@@ -235,72 +235,44 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub(crate) fn do_merges(&mut self, overloads: &mut Vec<OverloadOption>, i: OverloadSetId) -> Res<'p, ()> {
-        let special = self.emit_special_body(overloads[0].func)?;
-        if !special {
-            println!("warn: this does not bode well")
-        }
-
+        let mut merged = vec![];
+        let output = overloads[0].clone();
         // It could be a builtin (like add) that exists for different architectures. Merge them into one.
-        for j in (1..overloads.len()).rev() {
-            assert!(
-                overloads[j].arg == overloads[0].arg && overloads[j].ret == overloads[0].ret,
-                "overload missmatch. unreachable?"
-            );
+        for opt in overloads.drain(0..) {
+            assert!(opt.arg == output.arg && opt.ret == output.ret, "overload missmatch. unreachable?");
 
-            let f = overloads[j].func;
+            let f = opt.func;
             // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.
-            let special = self.emit_special_body(f)?;
-            if !special {
-                println!("warn: this does not bode well")
-            }
+            self.ensure_compiled(f, ExecTime::Both)?;
 
-            macro_rules! merge {
-                    ($field:ident) => {{
-                        let func = &self.program[f];
-                        if let Some(val) = func.$field.clone() {
-                            self.last_loc = Some(self.program[f].loc);
-                            let tags = self.program[f].annotations.clone();
-                            let target = &mut self.program[overloads[0].func];
-                            // assert!(
-                            //     target.$field.is_none(),
-                            //     "tried to merge overwrite. {} {} {:?} <- {:?}",
-                            //     self.pool.get(target.name),
-                            //     stringify!($field),
-                            //     overloads[0].func,
-                            //     overloads[j].func
-                            // );
-                            // TODO: it shouldn't happen twice. i guess it happens on emit_body? but how can that happen before this and still have two of the same overload.
-                            if let Some(prev) = &target.$field {
-                                assert_eq!(
-                                    prev,
-                                    &val,
-                                    "tried to merge overwrite. {} {} {:?} <- {:?}",
-                                    self.pool.get(target.name),
-                                    stringify!($field),
-                                    overloads[0].func,
-                                    overloads[j].func
-                                );
-                            }
-                            target.$field = Some(val);
-                            target.annotations.extend(tags);
-                            true
-                        } else {
-                            false
-                        }
-                    }};
+            match &self.program[f].body {
+                FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => err!("ambigous overload",),
+                FuncImpl::Merged(parts) => {
+                    merged.extend(parts.iter().cloned());
                 }
+                _ => {
+                    // let tags = self.program[f].annotations.clone();
+                    // target.annotations.extend(tags); // TODO: ?
+                    // let mut new = FuncImpl::Empty;
+                    let mut new = FuncImpl::Redirect(output.func);
+                    mem::swap(&mut self.program[f].body, &mut new);
+                    merged.push(new);
+                    // self.program[f].annotations.clear();
 
-            if merge!(llvm_ir) | merge!(cl_emit_fn_ptr) | merge!(jitted_code) | merge!(comptime_addr) {
-                // TODO: remove from program as well?
-                // iter rev so its fine
-                overloads.remove(j);
-                // we cloned, so change the original too.
-                self.program[i].ready.retain(|o| o.func != f);
-                // assert!(self.program[f].redirect.is_none());
-                // probably does nothing.
-                // self.program[f].redirect = Some(overloads[0].func);
+                    // TODO: remove from program as well?
+                    // we cloned, so change the original too.
+                    self.program[i].ready.retain(|o| o.func != f);
+                    // assert!(self.program[f].redirect.is_none());
+                    // probably does nothing.
+                    // self.program[f].redirect = Some(overloads[0].func);
+                }
             }
         }
+        self.program[output.func].annotations.clear(); // TODO: this prevents it from tring to emit_special body multiple times.
+        self.program[output.func].body = FuncImpl::Merged(merged);
+        overloads.push(output.clone());
+        self.program[i].ready.push(output);
+
         Ok(())
     }
 

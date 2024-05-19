@@ -16,8 +16,8 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, CallConv, FatStmt, Field, Flag, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars, ScopeId,
-    TargetArch, Var, VarType, WalkAst,
+    Annotation, Binding, CallConv, FatStmt, Field, Flag, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
+    ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -303,8 +303,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         let before = self.debug_trace.len();
         debug_assert!(!self.program[f].evil_uninit);
         self.ensure_compiled(f, when)?;
-        if let Some(target) = self.program[f].redirect {
+
+        if let FuncImpl::Redirect(target) = self.program[f].body {
+            debug_assert_ne!(f, target);
             self.compile(target, when)?;
+            self.pending_redirects.push((f, target));
         }
         let mut i = 0;
         while let Some(&id) = &self.program[f].callees.get(i) {
@@ -317,41 +320,42 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         self.last_loc = Some(self.program[f].loc);
 
-        if let Some(code) = &self.program[f].jitted_code {
+        if let Some(code) = &self.program[f].body.jitted_aarch64() {
             self.aarch64.copy_inline_asm(f, code);
         }
-        let use_cl = self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift;
+        let use_cl =
+            cfg!(feature = "cranelift") && (self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift);
 
-        let cl = self.program[f].cl_emit_fn_ptr;
         #[cfg(feature = "cranelift")]
-        if use_cl && cl.is_some() {
-            crate::cranelift::emit_cl_intrinsic(self, cl.unwrap(), f)?
-        }
-
-        if self.program[f].cc.unwrap() != CallConv::Inline && self.program[f].body.is_some() {
-            let body = emit_bc(self, f)?;
-            // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
-
-            #[cfg(feature = "cranelift")]
-            let aarch = {
-                if use_cl {
-                    let res = crate::cranelift::emit_cl(self, &body, f);
-                    self.tag_err(res)?;
-                }
-                !use_cl
-            };
-            #[cfg(not(feature = "cranelift"))]
-            let aarch = true;
-
-            if aarch {
-                let res = emit_aarch64(self, f, when, &body);
-                self.tag_err(res)?;
+        if use_cl {
+            if let Some(&cl) = self.program[f].body.cranelift_emit() {
+                crate::cranelift::emit_cl_intrinsic(self, cl, f)?
             }
         }
 
-        if let Some(target) = self.program[f].redirect {
-            self.pending_redirects.push((f, target));
+        if self.program[f].cc.unwrap() != CallConv::Inline {
+            if let FuncImpl::Normal(_) = self.program[f].body {
+                let body = emit_bc(self, f)?;
+                // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
+
+                #[cfg(feature = "cranelift")]
+                let aarch = {
+                    if use_cl {
+                        let res = crate::cranelift::emit_cl(self, &body, f);
+                        self.tag_err(res)?;
+                    }
+                    !use_cl
+                };
+                #[cfg(not(feature = "cranelift"))]
+                let aarch = true;
+
+                if aarch {
+                    let res = emit_aarch64(self, f, when, &body);
+                    self.tag_err(res)?;
+                }
+            }
         }
+        // TODO: assert that if body is ::merged, none are Redirect/Normal/ComptimeAddr cause that doesn't really make sense.
 
         let after = self.debug_trace.len();
         debug_assert_eq!(before, after);
@@ -360,6 +364,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program[f].asm_done = true;
 
         self.last_loc = Some(self.program[f].loc);
+
+        assert!(!matches!(self.program[f].body, FuncImpl::Empty));
         Ok(())
     }
 
@@ -369,6 +375,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state2 = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state2);
         self.compile(f, when)?;
+        assert!(!matches!(self.program[f].body, FuncImpl::Empty));
 
         let ty = self.program[f].unwrap_ty();
 
@@ -376,6 +383,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         {
             self.cranelift.flush_pending_defs(&mut self.aarch64)?;
         }
+
+        self.aarch64
+            .pending_indirect
+            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::EMPTY);
+        if !self.aarch64.pending_indirect.is_empty() {
+            println!("run {f:?} pending:{:?}", self.aarch64.pending_indirect);
+        }
+        for f in self.aarch64.pending_indirect.clone() {
+            debug_assert!(!self.program[f].asm_done);
+            self.compile(f, when)?;
+            println!("{}", self.program[f].body.log(self.pool));
+        }
+        self.aarch64
+            .pending_indirect
+            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::EMPTY);
+        assert!(self.aarch64.pending_indirect.is_empty());
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -389,6 +412,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 "redirect target not ready {from:?} -> {to:?} {:#?}",
                 self.program[to]
             );
+            debug_assert!(self.aarch64.get_fn(from).is_none());
             self.aarch64.dispatch[from.as_index()] = ptr;
         }
 
@@ -437,7 +461,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, when: ExecTime, arg: Arg) -> Res<'p, Ret> {
-        self.ensure_compiled(f, when)?;
+        self.compile(f, when)?;
         let ty = self.program[f].unwrap_ty();
         let arg_ty = Arg::get_type(self.program);
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
@@ -487,7 +511,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
-    fn ensure_compiled(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+    pub fn ensure_compiled(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         if self.program[f].ensured_compiled {
             return Ok(());
         }
@@ -521,7 +545,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn emit_special_body(&mut self, f: FuncId) -> Res<'p, bool> {
+    pub fn emit_special_body(&mut self, f: FuncId, no_redirect: bool) -> Res<'p, bool> {
         debug_assert!(!self.program[f].evil_uninit);
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
@@ -529,11 +553,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.last_loc = Some(self.program[f].loc);
 
         let mut special = false;
-        if let Some(body) = &mut self.program[f].body {
+        if let FuncImpl::Normal(body) = &mut self.program[f].body {
             if let Some(arg) = body.as_suffix_macro_mut(Flag::Asm) {
                 let mut a = arg.clone();
-                self.inline_asm_body(f, &mut a)?;
-                self.program[f].body = None;
+                self.program[f].body = self.inline_asm_body(f, &mut a)?;
                 special = true;
             }
         } else {
@@ -543,24 +566,29 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some(types) = self.program[f].get_tag_mut(Flag::Redirect).cloned() {
+            assert!(!no_redirect);
+
             let (arg, ret, os): (TypeId, TypeId, OverloadSetId) = self.immediate_eval_expr_known(types.args.unwrap())?;
             // TODO: this wont work cause you can get here while working on the overload set so its order dependednt.
+            self.compute_new_overloads(os)?;
             let mut found: Vec<_> = self.program[os]
                 .ready
                 .iter()
                 .filter(|o| o.arg == arg && o.ret == Some(ret))
                 .cloned()
                 .collect();
-            if found.len() > 1 {
-                self.do_merges(&mut found, os)?;
-            }
+            self.do_merges(&mut found, os)?;
             assert!(found.len() == 1);
-            self.program[f].redirect = Some(found[0].func);
+            assert!(matches!(self.program[f].body, FuncImpl::Empty));
+            debug_assert_ne!(f, found[0].func);
+            self.program[f].body = FuncImpl::Redirect(found[0].func);
+            self.program[f].cc = self.program[found[0].func].cc;
         }
 
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
             let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
-            self.program[f].comptime_addr = Some(addr.to_bytes());
+            assert!(matches!(self.program[f].body, FuncImpl::Empty));
+            self.program[f].body = FuncImpl::ComptimeAddr(addr as usize);
             self.aarch64.extend_blanks(f);
             self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             special = true;
@@ -570,12 +598,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(addr) = self.program[f].get_tag(Flag::Cranelift_Emit) {
             let arg = unwrap!(addr.args.clone(), "Cranelift_Emit needs arg");
             let addr: usize = self.immediate_eval_expr_known(arg)?;
-            self.program[f].cl_emit_fn_ptr = Some(addr);
+            assert!(matches!(self.program[f].body, FuncImpl::Empty));
+            self.program[f].body = FuncImpl::EmitCranelift(addr);
             special = true;
         }
 
         if special {
             assert!(self.program[f].finished_ty().is_some(), "special def needs known type");
+            self.update_cc(f)?;
         }
 
         Ok(special)
@@ -585,12 +615,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::EmitBody(f, self.program[f].name);
         self.push_state(&state);
 
-        if self.emit_special_body(f)? {
+        if self.emit_special_body(f, false)? {
             self.pop_state(state);
             return Ok(self.program[f].finished_ret.unwrap());
         }
 
-        let has_body = self.program[f].body.is_some();
         assert!(!self.program[f].has_tag(Flag::Comptime));
         let arguments = self.program[f].arg.flatten();
         for (name, ty, kind) in arguments {
@@ -603,8 +632,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        assert!(has_body, "");
-        let mut body_expr = self.program[f].body.clone().unwrap(); // TODO: no clone. make errors recoverable. no mut_replace -- Apr 24
+        // TODO: no clone. make errors recoverable. no mut_replace -- Apr 24
+        let FuncImpl::Normal(mut body_expr) = self.program[f].body.clone() else {
+            err!("expected normal body",)
+        };
 
         debug_assert!(body_expr.as_suffix_macro_mut(Flag::Asm).is_none(), "special should handle");
 
@@ -641,7 +672,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].finished_ret = Some(ret_ty);
             self.program[f].ret = LazyType::Finished(ret_ty);
         }
-        self.program[f].body = Some(body_expr);
+        self.program[f].body = FuncImpl::Normal(body_expr);
 
         let func = &self.program[f];
         self.type_check_arg(ret_ty, func.finished_ret.unwrap(), "bad return value")?;
@@ -723,6 +754,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let ret_label = LabelId::from_index(self.next_label);
         self.next_label += 1;
+        let FuncImpl::Normal(body) = &func.body else { unreachable!() };
         expr_out.expr = Expr::Block {
             body: vec![FatStmt {
                 stmt: Stmt::DeclVarPattern {
@@ -732,7 +764,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 annotations: vec![],
                 loc,
             }],
-            result: Box::new(func.body.as_ref().unwrap().clone()),
+            result: Box::new(body.clone()),
             ret_label: Some(ret_label),
             hoisted_constants: false, // TODO
         };
@@ -921,8 +953,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Drop the instantiation of the function specialized to this call's arguments.
         // We cache the result and will never need to call it again.
         let mut func = mem::take(&mut self.program[f]);
-        let body = func.body.take();
-        let body = unwrap!(body, "builtin?");
+        let FuncImpl::Normal(body) = func.body else { unreachable!() };
+
         let result = self.immediate_eval_expr(body, ret)?;
 
         if !no_memo {
@@ -2150,10 +2182,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func_id = self.make_lit_function(e, ret_ty)?;
         // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
         //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
-        let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
-        if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
-            return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
-        }
+        // TODO: bring back? idk bro. dont want to deal with while doing `body: FuncImpl` -- May 18
+        // let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
+        // if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
+        //     return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
+        // }
 
         self.call_jitted(func_id, ExecTime::Comptime, ())
     }
@@ -2282,10 +2315,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
         //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
-        let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
-        if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
-            return Ok(res);
-        }
+        // let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
+        // if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
+        //     return Ok(res);
+        // }
 
         self.run(func_id, Value::Unit.into(), ExecTime::Comptime)
     }
@@ -2303,6 +2336,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let scope = func.scope.unwrap();
         let id = self.program.add_func(func);
         self[scope].funcs.push(id);
+        // println!("{:?} {}", id, self.pool.get(self.program[id].name));
         Ok(id)
     }
 
@@ -2328,7 +2362,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if self.infer_types(f)?.is_none() {
             // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
-            if let Some(body) = &mut self.program[f].body.clone() {
+            if let FuncImpl::Normal(body) = &mut self.program[f].body.clone() {
                 // debug_
                 assert!(self.program[f].resolved_body, "ICE: closures aren't lazy currently. missing =>?");
                 // TODO: this is very suspisious! what if it has captures
@@ -2978,7 +3012,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
         let func = &self.program[fid];
-        if will_inline && func.body.is_some() {
+        if will_inline {
             // TODO: check that you're calling from the same place as the definition.
             Ok((self.emit_capturing_call(fid, expr)?, true))
         } else {
@@ -3111,7 +3145,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
             renumber.pattern(&mut new_func.arg);
             renumber.ty(&mut new_func.ret);
-            renumber.expr(new_func.body.as_mut().unwrap());
+            if let FuncImpl::Normal(body) = &mut new_func.body {
+                renumber.expr(body);
+            } else {
+                unreachable!()
+            }
         }
         new_func.referencable_name = false;
         let scope = new_func.scope.unwrap();
@@ -3185,7 +3223,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - tuple of string literals -> llvm-ir
     /// - tuple of 32-bit int literals -> aarch64 asm ops
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
-    pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, ()> {
+    pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, FuncImpl<'p>> {
         self.last_loc = Some(self.program[f].loc);
 
         assert!(
@@ -3193,7 +3231,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "inline asm msut specify calling convention. but just: {:?}",
             self.program[f].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
         );
-        if self.program[f].has_tag(Flag::Aarch64) && self.program[f].jitted_code.is_none() {
+        if self.program[f].has_tag(Flag::Aarch64) {
             // TODO: :PushConstFnCtx
             // TODO: you can't just compile here because then trying to imm_eval hits a not read asm func i think because of ^ callees.
             //       it recurses and has to emit other asm first but they don't get put in dispatch,
@@ -3223,8 +3261,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                 ops
             };
-            self.program[f].jitted_code = Some(ops.clone());
-        } else if self.program[f].has_tag(Flag::Llvm) && self.program[f].llvm_ir.is_none() {
+            Ok(FuncImpl::JittedAarch64(ops))
+        } else if self.program[f].has_tag(Flag::Llvm) {
             // TODO: an erorr message here gets swollowed because you're probably in the type_of shit. this is really confusing. need to do beter
             // TODO: if its a string literal just take it
             // TODO: check if they tried to give you something from the stack
@@ -3236,13 +3274,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
             let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
             let Ok(ir) = std::str::from_utf8(ir) else { err!("wanted utf8 llvmir",) };
-            self.program[f].llvm_ir = Some(self.pool.intern(ir));
             self.program.inline_llvm_ir.push(f);
-        } else if self.program[f].jitted_code.is_none() && self.program[f].llvm_ir.is_none() {
+            Ok(FuncImpl::LlvmIr(self.pool.intern(ir)))
+        } else {
             err!("!asm require arch tag",)
         }
-
-        Ok(())
     }
 
     fn construct_struct(&mut self, requested: Option<TypeId>, pattern: &mut Pattern<'p>) -> Res<'p, TypeId> {

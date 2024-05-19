@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, LazyType, Name, ScopeId, Stmt, Var, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err, ice,
     logging::PoolLog,
@@ -126,7 +126,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         }
         self.push_scope(None);
         func.resolved_body = true;
-        if let Some(body) = &mut func.body {
+        if let FuncImpl::Normal(body) = &mut func.body {
             func.return_var = Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
             self.resolve_expr(body)?;
         }

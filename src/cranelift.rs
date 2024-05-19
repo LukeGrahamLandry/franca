@@ -22,7 +22,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, ModuleError};
 
 use crate::{
-    ast::{CallConv, Flag, FnType, FuncId, Program, TypeId, TypeInfo},
+    ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
     bc::{BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, Res},
@@ -293,7 +293,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
                     let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
-                    if let Some(emit) = self.program[f].cl_emit_fn_ptr {
+                    if let FuncImpl::EmitCranelift(emit) = self.program[f].body {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
                         let v = emit(builder, args);
                         pops(&mut self.stack, arg.size_slots as usize);
@@ -350,7 +350,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                                 // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
                                 //       its just annoying because then i need to make sure i know if im supposed to be declaring
                                 //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
-
+                                self.asm.pending_indirect.push(f);
                                 let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
                                 builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
                             });
@@ -411,7 +411,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                                 // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
                                 //       its just annoying because then i need to make sure i know if im supposed to be declaring
                                 //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
-
+                                self.asm.pending_indirect.push(f);
                                 let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
                                 builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
                             });
