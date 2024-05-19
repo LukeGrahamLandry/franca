@@ -38,8 +38,9 @@ fun interpret(self: *Vm, chunk: *Chunk) InterpretResult = {
 
 fn run(self: *Vm) InterpretResult = {
     return :: __return; // Note: outside the loop call
-    var out = InterpretResult.RuntimeError;
-    var debug: List$u8 = list();
+    
+    out := InterpretResult.RuntimeError;
+    debug: List$u8 = list();
     
     // TODO: this should work without type hint
     loop {()Unit|
@@ -72,31 +73,37 @@ fn run(self: *Vm) InterpretResult = {
                 return(.Ok);
             };
             @case(OpCode.Negate) => {
-                self.push(self.pop().neg());
+                val := self.pop();
+                if(val.is_number().not()){|
+                    self.runtime_error("Operand must be a number.");
+                    return(.RuntimeError);
+                };
+                self.push(val.to_number().neg().to_value());
             };
             // TODO: without the ret type annotation you get err walkwip, but only when it couldn't find the function to call? so just need better error message. 
-            @case(OpCode.Add) => self.binary_op(add); 
-            @case(OpCode.Subtract) => self.binary_op(sub); 
-            @case(OpCode.Multiply) => self.binary_op(mul); 
-            @case(OpCode.Divide) => self.binary_op(div);  
+            @case(OpCode.Add) => binary_op(add); 
+            @case(OpCode.Subtract) => binary_op(sub); 
+            @case(OpCode.Multiply) => binary_op(mul); 
+            @case(OpCode.Divide) => binary_op(div);  
             @default() fn(_: u8) => {
                 return(.RuntimeError);
             };
         }
     };
     
+    binary_op :: fn(const op: OverloadSet) Unit => {
+        // TODO: you can't put `Fn(Ty(f64, f64), f64)` as the argument type because it wont find the overload because it thinks the arg is a OverloadSet. 
+        rhs := self.pop();
+        lhs := self.pop();
+        if(rhs.is_number().and(lhs.is_number()).not()){|
+            self.runtime_error("Operands must be numbers.");
+            return(.RuntimeError); // non-local returns baby~
+        };
+        result := op(lhs.to_number(), rhs.to_number()).to_value();
+        self.push(result);
+    };
+    
     out
-}
-
-// TODO: closures with const arguments. I'd rather just have this in the main loop function. but they rely on resolving working in different ways currently. 
-#inline fn binary_op(self: *Vm, const op: OverloadSet) Unit = {
-    // TODO: you can't put this in the argument type because it wont find the overload because it thinks the arg is a OverloadSet. 
-    // TODO: you cant name this var and the arg the same thing. shadowing doesn't work. 
-    // TODO: you can't do this because it doesn't filter arch? but not a big deal because you can just call the overload set directly. 
-    // f : Fn(Ty(f64, f64), f64) : op;  
-    rhs := self.pop();
-    lhs := self.pop();
-    self.push(op(lhs, rhs));
 }
 
 // TODO: I could expose the dereference and increment instruction but presumably if you want it to be fast you'd just use llvm anyway. 
@@ -124,6 +131,14 @@ fun pop(self: *Vm) Value = {
 
 fn reset_stack(self: *Vm) Unit = {
     self.stack_top = self.stack&.as_ptr();
+}
+
+fn runtime_error(self: *Vm, msg: Str) Unit = {
+    p := self.chunk.code&.as_ptr();
+    i := p.ptr_diff(self.ip);
+    line := self.chunk.lines[i];
+    
+
 }
 
 ::ptr_utils(u8);

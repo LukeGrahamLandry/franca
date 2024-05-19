@@ -326,9 +326,16 @@ impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
         if let Some(name) = &mut func.var_name {
             if let Some(new) = self.mapping.get(name) {
                 *name = *new;
+            } else {
+                self.decl(name);
             }
         }
         for name in &mut func.capture_vars {
+            if let Some(new) = self.mapping.get(name) {
+                *name = *new;
+            }
+        }
+        if let Some(name) = &mut func.return_var {
             if let Some(new) = self.mapping.get(name) {
                 *name = *new;
             }

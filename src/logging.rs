@@ -463,9 +463,7 @@ impl<'p> FnBody<'p> {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::F64(v) => write!(f, "{v}"),
             Value::I64(v) => write!(f, "{v}"),
-            Value::Bool(v) => write!(f, "{v}"),
             _ => write!(f, "{self:?}"),
         }
     }
@@ -522,18 +520,13 @@ impl<'p> FatStmt<'p> {
 
 impl Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            &Value::F64(v) => write!(f, "{}", f64::from_bits(v)),
-            &Value::I64(v) => write!(f, "{}", v),
-            &Value::Bool(v) => write!(f, "{}", v),
-            &Value::Type(v) => write!(f, "{:?}", v),
-            &Value::GetFn(v) => write!(f, "{:?}", v),
-            &Value::Unit => write!(f, "unit"),
-            Value::Heap(ptr) => write!(f, "{:p}", ptr),
-            &Value::Symbol(v) => write!(f, "sym{v}"),
-            &Value::OverloadSet(v) => write!(f, "os{v:?}"),
-            &Value::GetNativeFnPtr(v) => write!(f, "{v:?}&"),
-            &Value::Label(return_from) => write!(f, "{return_from:?}"),
+        match *self {
+            Value::I64(v) => write!(f, "{}", v),
+            Value::Type(v) => write!(f, "{:?}", v),
+            Value::GetFn(v) => write!(f, "{:?}", v),
+            Value::Unit => write!(f, "unit"),
+            Value::OverloadSet(v) => write!(f, "os{v:?}"),
+            Value::Label(return_from) => write!(f, "{return_from:?}"),
         }
     }
 }

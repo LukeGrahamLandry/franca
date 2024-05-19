@@ -404,7 +404,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         todo!()
                     };
                     // result_location is the result of the ret() expression, which is Never and we don't care.
-                    let (ip, res_loc) = *result.inlined_return_addr.get(&return_from).unwrap();
+                    let (ip, res_loc) = *unwrap!(
+                        result.inlined_return_addr.get(&return_from),
+                        "missing return label. forgot '=>' on function?"
+                    );
                     let slots = match res_loc {
                         PushStack => self.slot_count(ret_ty),
                         ResAddr => {

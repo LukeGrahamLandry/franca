@@ -1,3 +1,7 @@
+- got rid of ::F64, ::Heap. ::Bool, and ::Symbol Value varients, because the compiler doesn't care about them other than type.
+
+## (May 18)
+
 - want to clean up type checking / coercion stuff.
   so I want @as to be the only one that does the current loose `type_check_arg` where you can assign structs to tuples.
 - @as can't just change the type on the node because `c: i64 = 0; d := @as(u8) c`,

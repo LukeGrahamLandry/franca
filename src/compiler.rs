@@ -649,18 +649,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         let hint = self.program[f].finished_ret;
         if let Some(return_var) = self.program[f].return_var {
             if let Some(ret_ty) = hint {
-                let ret = LabelId::from_index(self.next_label);
-                self.next_label += 1;
-                let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
-                self.save_const(
-                    return_var,
-                    Expr::Value {
-                        value: Values::One(Value::Label(ret)),
-                    },
-                    label_ty,
-                    self.program[f].loc,
-                )?;
                 if let Expr::Block { ret_label, .. } = &mut body_expr.expr {
+                    let ret = LabelId::from_index(self.next_label);
+                    self.next_label += 1;
+                    let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
+                    self.save_const(
+                        return_var,
+                        Expr::Value {
+                            value: Values::One(Value::Label(ret)),
+                        },
+                        label_ty,
+                        self.program[f].loc,
+                    )?;
                     *ret_label = Some(ret);
                 }
             }
@@ -777,6 +777,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         let mut mapping = Map::<Var, Var>::default();
         mapping.insert(old_ret_var, new_ret_var);
+        // println!("renumber ret: {} to {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
         self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
 
         self.currently_inlining.retain(|check| *check != f);
@@ -1550,9 +1551,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 expr.ty = ty;
                                 ty
                             }
-                            Values::One(Value::GetNativeFnPtr(_)) => {
-                                err!("redundant use of !fn_ptr",)
-                            }
                             _ => err!("!fn_ptr expected const fn not {fn_val:?}",),
                         }
                     }
@@ -2053,8 +2051,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         Some(match name {
-            "true" => (Value::Bool(true), TypeId::bool()),
-            "false" => (Value::Bool(false), TypeId::bool()),
+            "true" => (Value::I64(1), TypeId::bool()),
+            "false" => (Value::I64(0), TypeId::bool()),
             "Symbol" => ffi_type!(Ident),
             "FatExpr" => ffi_type!(FatExpr),
             "Var" => ffi_type!(Var),
@@ -2428,10 +2426,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         // If its constant, don't even bother emitting the other branch
         // TODO: option to toggle this off for testing.
         if let Some(val) = parts[0].as_const() {
-            let Value::Bool(cond) = val.single()? else {
+            let Value::I64(cond) = val.single()? else {
                 err!("expected !if cond: bool",)
             };
-            let cond_index = if cond { 1 } else { 2 };
+            let cond_index = match cond {
+                0 => 2,
+                1 => 1,
+                n => err!("bool must be 0 or 1 not {n}",),
+            };
             let Some(branch_body) = self.maybe_direct_fn(&mut parts[cond_index], &mut unit_expr, requested)? else {
                 ice!("!if arg must be func not {:?}", parts[cond_index]);
             };
@@ -3026,10 +3028,16 @@ impl<'a, 'p> Compile<'a, 'p> {
         let force_inline = func.cc == Some(CallConv::Inline);
         let deny_inline = func.has_tag(Flag::NoInline);
         assert!(!(force_inline && deny_inline), "{fid:?} is both @inline and @noinline");
-        let will_inline = force_inline || !func.capture_vars.is_empty();
+        let will_inline = force_inline || func.get_flag(FuncFlags::AllowRtCapture) || !func.capture_vars.is_empty();
         assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
         if will_inline {
+            // If we're just inlining for #inline, compile first so some work on the ast is only done once.
+            // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
+            if !func.get_flag(FuncFlags::AllowRtCapture) && func.capture_vars.is_empty() {
+                self.compile(fid, ExecTime::Both)?;
+            }
+
             // TODO: check that you're calling from the same place as the definition.
             Ok((self.emit_capturing_call(fid, expr)?, true))
         } else {
@@ -3502,10 +3510,17 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
+    #[track_caller]
     fn save_const(&mut self, name: Var<'p>, val_expr: Expr<'p>, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
+        let pool = self.pool; // me when im referential transparency maxing
         if let Some((val, ty)) = self[name.scope].constants.get_mut(&name) {
             if matches!(ty, LazyType::Finished(_)) {
-                ice!("tried to re-save constant {}", name.log(self.pool));
+                ice!(
+                    "tried to re-save constant {}. \nOLD: {}\nNEW: {}",
+                    name.log(pool),
+                    val.log(pool),
+                    val_expr.log(self.pool)
+                );
             }
             if !matches!(val.expr, Expr::Poison) {
                 ice!("tried to stomp constant {}", name.log(self.pool));

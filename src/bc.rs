@@ -79,21 +79,14 @@ impl<'p> FnBody<'p> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub enum Value {
-    F64(u64), // TODO: hash
     I64(i64),
-    Bool(bool),
     // Both closures and types don't have values at runtime, all uses must be inlined.
     Type(TypeId),
     GetFn(FuncId),
     Label(LabelId),
     /// The empty tuple.
     Unit,
-    // Note: you can't just put these in a function's arena because they get copied by value.
-    Heap(*mut i64),
-    Symbol(u32), // TODO: this is an Ident<'p> but i really dont want the lifetime
     OverloadSet(OverloadSetId),
-    /// TODO: Different from GetFn because this must be compiled and produces a real native function pointer that can be passed to ffi code.
-    GetNativeFnPtr(FuncId),
 }
 
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
@@ -177,8 +170,6 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
         &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
         TypeInfo::Unit => unreachable!(),
-        TypeInfo::F64 => Value::F64(n as u64), // TODO: high bit?
-        TypeInfo::Bool => Value::Bool(n != 0),
         TypeInfo::Fn(_) => Value::GetFn(FuncId::from_raw(n)),
         TypeInfo::Label(_) => Value::Label(LabelId::from_raw(n)),
         TypeInfo::Type => Value::Type(TypeId::from_raw(n)),
@@ -188,8 +179,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
             debug_assert!(n % 4 == 0);
             Value::I64(n)
         }
-        &TypeInfo::Ptr(_) => Value::Heap(n as *mut i64),
-        TypeInfo::Scope | TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
+        TypeInfo::Bool | TypeInfo::Ptr(_) | TypeInfo::F64 | TypeInfo::Scope | TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
     })
 }
 

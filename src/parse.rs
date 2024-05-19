@@ -290,7 +290,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.pop();
                 let mut e = self.expr(Expr::Value {
-                    value: Value::F64(f.to_bits()).into(),
+                    value: Value::I64(f.to_bits() as i64).into(),
                 });
                 e.ty = TypeId::f64();
                 Ok(e)

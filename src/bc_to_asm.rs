@@ -1146,21 +1146,12 @@ pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
 impl Value {
     pub fn as_raw_int(&self) -> i64 {
         match self {
-            Value::F64(f) => i64::from_le_bytes(f.to_le_bytes()),
             &Value::I64(i) => i,
-            &Value::Bool(i) => i as i64,
             &Value::OverloadSet(i) => i.as_raw(),
             &Value::GetFn(i) => i.as_raw(),
-            &Value::Symbol(i) => i as i64,
             &Value::Type(ty) => ty.as_raw(),
             &Value::Label(return_from) => return_from.as_raw(),
             Value::Unit => unreachable!(),
-            &Value::Heap(ptr) => ptr as usize as i64,
-            &Value::GetNativeFnPtr(i) => {
-                // TODO: not sure if we want to preserve the id or use the actual address
-                i.as_raw()
-                // todo!()
-            }
         }
     }
 }

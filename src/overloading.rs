@@ -76,9 +76,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.pop_state(state);
                     Ok(f)
                 }
-                Values::One(Value::GetNativeFnPtr(_)) => {
-                    err!("TODO: const GetNativeFnPtr?",)
-                }
                 Values::One(Value::OverloadSet(i)) => {
                     let out = self.resolve_in_overload_set(arg, requested_ret, i)?;
                     self.pop_state(state);
