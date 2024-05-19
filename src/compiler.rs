@@ -113,6 +113,7 @@ pub enum DebugState<'p> {
     EmitCapturingCall(FuncId, Ident<'p>),
     ResolveFnRef(Var<'p>),
     TypeOf,
+    ResolveConstant(Var<'p>),
 }
 
 pub static mut EXPECT_ERR_DEPTH: AtomicIsize = AtomicIsize::new(0);
@@ -386,19 +387,23 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.aarch64
             .pending_indirect
-            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::EMPTY);
+            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::empty());
         if !self.aarch64.pending_indirect.is_empty() {
             println!("run {f:?} pending:{:?}", self.aarch64.pending_indirect);
-        }
-        for f in self.aarch64.pending_indirect.clone() {
-            debug_assert!(!self.program[f].asm_done);
-            self.compile(f, when)?;
-            println!("{}", self.program[f].body.log(self.pool));
+            for f in self.aarch64.pending_indirect.clone() {
+                debug_assert!(!self.program[f].asm_done);
+                self.compile(f, when)?;
+                println!("{}", self.program[f].body.log(self.pool));
+            }
+            #[cfg(feature = "cranelift")]
+            {
+                self.cranelift.flush_pending_defs(&mut self.aarch64)?;
+            }
         }
         self.aarch64
             .pending_indirect
-            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::EMPTY);
-        assert!(self.aarch64.pending_indirect.is_empty());
+            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::empty());
+        // debug_assert!(self.aarch64.pending_indirect.is_empty());
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -420,7 +425,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.flush_cpu_instruction_cache();
         // cranelift puts stuff here too and so does comptime_addr
         let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
-        debug_assert!(addr as usize != Jitted::EMPTY);
+        debug_assert!(addr as usize != Jitted::empty());
 
         for c in &self.program[f].callees {
             debug_assert!(
@@ -577,7 +582,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 .filter(|o| o.arg == arg && o.ret == Some(ret))
                 .cloned()
                 .collect();
-            self.do_merges(&mut found, os)?;
+            if found.len() > 1 {
+                self.do_merges(&mut found, os)?;
+            }
             assert!(found.len() == 1);
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
             debug_assert_ne!(f, found[0].func);
@@ -952,7 +959,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // Drop the instantiation of the function specialized to this call's arguments.
         // We cache the result and will never need to call it again.
-        let mut func = mem::take(&mut self.program[f]);
+        let func = mem::take(&mut self.program[f]);
         let FuncImpl::Normal(body) = func.body else { unreachable!() };
 
         let result = self.immediate_eval_expr(body, ret)?;
@@ -1174,11 +1181,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(None);
             }
 
+            let state = DebugState::ResolveConstant(name);
+            self.push_state(&state);
             let (mut val, mut ty) = mem::take(self[name.scope].constants.get_mut(&name).unwrap());
             // println!("- {} {} {}", name.log(self.pool), ty.log(self.pool), val.log(self.pool));
             self[name.scope].constants.get_mut(&name).unwrap().1 = LazyType::Infer;
             self.infer_types_progress(&mut ty)?;
             self.decl_const(name, &mut ty, &mut val)?;
+            self.pop_state(state);
             return self.find_const(name);
         }
         Ok(None)
@@ -1528,8 +1538,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 // TODO: for now you just need to not make a mistake lol
                                 //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
                                 self.add_callee(id);
-                                self.ensure_compiled(id, ExecTime::Both)?; // TODO
-                                                                           // The backend still needs to do something with this, so just leave it
+                                // self.ensure_compiled(id, ExecTime::Both)?; // TODO
+                                // The backend still needs to do something with this, so just leave it
                                 let fn_ty = self.program.func_type(id);
                                 let ty = self.program.fn_ty(fn_ty).unwrap();
                                 let ty = self.program.intern_type(TypeInfo::FnPtr(ty)); // TODO: callconv as part of type
@@ -1984,7 +1994,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     self[var.scope].rt_types.get(var).cloned()
                 };
-                unwrap!(ty, "type check missing var {:?}", var.log(self.pool))
+                unwrap!(ty, "type check missing var {:?} (circular dependency:?)", var.log(self.pool))
                 //TODO: else return Ok(None)?
             }
             Expr::String(_) => {
@@ -2285,8 +2295,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn make_lit_function(&mut self, e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, FuncId> {
         debug_assert!(!(e.as_suffix_macro(Flag::Slice).is_some() || e.as_suffix_macro(Flag::Addr).is_some()));
         unsafe { STATS.make_lit_fn += 1 };
-        let name = if ANON_BODY_AS_NAME {
-            let name = format!("$eval_{}${}$", self.anon_fn_counter, e.deref().log(self.pool));
+        let name = if unsafe { ANON_BODY_AS_NAME } {
+            let mut name = e.deref().log(self.pool);
+            name.truncate(100);
+            let name = format!("$eval_{}${}$", self.anon_fn_counter, name);
             self.pool.intern(&name)
         } else {
             Flag::Anon.ident()
@@ -3011,7 +3023,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let will_inline = force_inline || !func.capture_vars.is_empty();
         assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
-        let func = &self.program[fid];
         if will_inline {
             // TODO: check that you're calling from the same place as the definition.
             Ok((self.emit_capturing_call(fid, expr)?, true))

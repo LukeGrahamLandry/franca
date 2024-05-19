@@ -236,9 +236,13 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub(crate) fn do_merges(&mut self, overloads: &mut Vec<OverloadOption>, i: OverloadSetId) -> Res<'p, ()> {
         let mut merged = vec![];
+
         let output = overloads[0].clone();
+        self.ensure_compiled(output.func, ExecTime::Both)?;
+
         // It could be a builtin (like add) that exists for different architectures. Merge them into one.
-        for opt in overloads.drain(0..) {
+        for opt in overloads.drain(1..) {
+            debug_assert!(merged.len() < 10); // wtf
             assert!(opt.arg == output.arg && opt.ret == output.ret, "overload missmatch. unreachable?");
 
             let f = opt.func;
@@ -246,7 +250,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.ensure_compiled(f, ExecTime::Both)?;
 
             match &self.program[f].body {
-                FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => err!("ambigous overload",),
+                FuncImpl::Redirect(_) => {} // TODO: i'd rather not get here a billion times
+                FuncImpl::Empty | FuncImpl::Normal(_) => err!("hmmm {}", self.program[f].body.log(self.pool)),
                 FuncImpl::Merged(parts) => {
                     merged.extend(parts.iter().cloned());
                 }
@@ -257,7 +262,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut new = FuncImpl::Redirect(output.func);
                     mem::swap(&mut self.program[f].body, &mut new);
                     merged.push(new);
-                    // self.program[f].annotations.clear();
+                    self.program[f].annotations.clear();
 
                     // TODO: remove from program as well?
                     // we cloned, so change the original too.
@@ -268,10 +273,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         }
+
+        // i dare you to make this not an ass copy-paste.
+        match &self.program[output.func].body {
+            FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => err!("ambigous overload",),
+            FuncImpl::Merged(parts) => {
+                merged.extend(parts.iter().cloned());
+            }
+            _ => {
+                // let tags = self.program[f].annotations.clone();
+                // target.annotations.extend(tags); // TODO: ?
+                // let mut new = FuncImpl::Empty;
+                let mut new = FuncImpl::Redirect(output.func);
+                mem::swap(&mut self.program[output.func].body, &mut new);
+                merged.push(new);
+            }
+        }
+
         self.program[output.func].annotations.clear(); // TODO: this prevents it from tring to emit_special body multiple times.
         self.program[output.func].body = FuncImpl::Merged(merged);
-        overloads.push(output.clone());
-        self.program[i].ready.push(output);
+        // overloads.push(output.clone());
+        // self.program[i].ready.push(output);
 
         Ok(())
     }

@@ -493,6 +493,7 @@ impl<'p> DebugState<'p> {
             DebugState::RunInstLoop(f, i) => format!("| Loop Insts  | {:?} {}", *f, pool.get(*i)),
             DebugState::ComptimeCall(f, i) => format!("| Comptime Call | {:?} {}", *f, pool.get(*i)),
             DebugState::ResolveFnType(f, i) => format!("| Resolve Type| {:?} {}", *f, pool.get(*i)),
+            DebugState::ResolveConstant(v) => format!("| Find Const | {}", v.log(pool)),
             _ => format!("{self:?}"),
         }
     }
@@ -561,7 +562,7 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
             FuncImpl::JittedAarch64(c) => format!("JittedAarch64({c:?})"),
             &FuncImpl::LlvmIr(ir) => pool.get(ir).to_string(),
             FuncImpl::EmitCranelift(n) => format!("EmitCranelift({n})"),
-            FuncImpl::PendingRedirect { arg, ret, os } => todo!(),
+            FuncImpl::PendingRedirect { .. } => todo!(),
             FuncImpl::Redirect(n) => format!("Redirect({n:?})"),
             FuncImpl::Merged(parts) => parts.iter().map(|p| p.log(pool)).collect(),
             FuncImpl::Empty => String::from("Unknown"),

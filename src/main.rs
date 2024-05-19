@@ -10,7 +10,7 @@ use franca::{
     find_std_lib,
     lex::Lexer,
     log_err, make_toplevel,
-    parse::Parser,
+    parse::{Parser, ANON_BODY_AS_NAME},
     pool::StringPool,
     scope::ResolveScope,
     timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
@@ -86,6 +86,7 @@ fn main() {
             match name {
                 "no-fork" => no_fork = true,
                 "60fps" => do_60fps_ = true,
+                "anon-names" => unsafe { ANON_BODY_AS_NAME = true },
                 #[cfg(feature = "cranelift")]
                 "cranelift" => arch = TargetArch::Cranelift,
                 #[cfg(not(feature = "cranelift"))]
@@ -387,7 +388,6 @@ fn run_one(comp: &mut Compile, f: FuncId) {
         exit(1);
     }
 
-    println!("compiled {f:?}");
     for indirect in mem::take(&mut comp.aarch64.pending_indirect).drain(0..) {
         debug_assert!(comp.aarch64.get_fn(indirect).is_some());
     }

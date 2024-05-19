@@ -375,6 +375,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 } else {
                     assert!(f.as_index() < 4096);
                     let reg = self.get_free_reg();
+                    self.asm.extend_blanks(f);
                     self.asm.pending_indirect.push(f);
                     self.load_imm(reg, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
                     self.asm.push(ldr_uo(X64, reg, reg, f.as_index() as i64));
@@ -1164,6 +1165,10 @@ impl Value {
     }
 }
 
+extern "C-unwind" fn not_compiled() {
+    panic!("Tried to call un-compiled function");
+}
+
 pub mod jit {
     use crate::ast::FuncId;
     use crate::bc_to_asm::brk;
@@ -1171,6 +1176,8 @@ pub mod jit {
     use std::cell::UnsafeCell;
     use std::ptr::null;
     use std::slice;
+
+    use super::not_compiled;
 
     pub struct Jitted {
         map_mut: Option<memmap2::MmapMut>,
@@ -1224,8 +1231,11 @@ pub mod jit {
             &map[0..len]
         }
 
-        // This is a better marker for not compiled yet so you can recognise when you hit it in a debugger.
-        pub const EMPTY: usize = 0x1337;
+        // This is a better marker for not compiled yet.
+        // Depending on your mood this could be 0x1337 or whatever so you can recognise when you hit it in a debugger.
+        pub fn empty() -> usize {
+            not_compiled as usize
+        }
 
         #[track_caller]
         pub fn get_dispatch(&self) -> *const *const u8 {
@@ -1235,7 +1245,7 @@ pub mod jit {
         pub fn get_fn(&self, f: FuncId) -> Option<*const u8> {
             self.dispatch
                 .get(f.as_index())
-                .and_then(|f| if (*f) as usize <= Self::EMPTY { None } else { Some(*f) })
+                .and_then(|f| if (*f) as usize == Self::empty() { None } else { Some(*f) })
         }
 
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -1273,7 +1283,7 @@ pub mod jit {
 
         pub fn extend_blanks(&mut self, f: FuncId) {
             while self.dispatch.len() < f.as_index() + 1 {
-                self.dispatch.push(Self::EMPTY as *const u8);
+                self.dispatch.push(Self::empty() as *const u8);
                 self.ranges.push(&[]);
             }
         }

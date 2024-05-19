@@ -391,7 +391,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else if result_location == ResAddr {
                         todo!("untested. assign to variable a call that returns unit through a function ptr");
                         // pop the dest!
-                        result.push(Bc::Pop { slots: 1 })
+                        // result.push(Bc::Pop { slots: 1 })
                     }
                     return Ok(());
                 }
@@ -752,7 +752,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 todo!()
             }
             &Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
-            _ => ice!("TODO: other `place=e;`"),
+            _ => ice!("TODO: other `place=e;` :("),
         }
     }
 

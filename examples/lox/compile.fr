@@ -1,12 +1,130 @@
+Parser :: @struct(
+    scanner: Scanner, 
+    current: Token, 
+    previous: Token, 
+    had_error: bool, 
+    panic_mode: bool,
+    chunk: *Chunk
+);
 
-Parser :: @struct(scanner: Scanner, current: Token, previous: Token, had_error: bool);
+Prec      :: @enum(None, Assignment, Or, And, Equality, Comparison, Term, Factor, Unary, Call, Primary);
+ParseFn   :: FnPtr(*Parser, Unit);
+ParseRule :: @struct(
+    prefix: ParseFn,
+    infix: ParseFn,
+    prec: Prec,
+);
+
+// TODO: array literal syntax for constants would be nice. 
+// TODO: square bracket index syntax doesn't work??
+// TODO: should be able to assign to a fn ptr with an overload set. 
+// TODO: show find_const on the debug_trace.
+// TODO: better mutual recursion. to construct the table you need the fn ptr values, 
+//       so it thinks you might want to call them in that expression, so it needs to compile them first,
+//       but those functions need to reference the rules array.  
+//       the get_rule indirection is enough to fix it for c but not for me :\
+rules: *Slice(ParseRule) : @as(rawptr) malloc(16);
+null_rule :: {
+    crash :: fn(self: *Parser) Unit = unreachable();
+    crash!fn_ptr
+};
+
+::{ // HACK -- May 19
+    
+    len := @as(i64) TokenType._Count;
+    mem := alloc(ParseRule, len);
+    table: Slice(ParseRule) = (ptr = mem, len = len);
+    range(0, table.len) {(i: i64)|
+        rule: ParseRule = (prefix = null_rule, infix = null_rule, prec = Prec.None);
+        table.set(i, rule);
+    };
+    
+    table.set(@as(i64) TokenType.LeftParen, @as(ParseRule) (prefix = grouping!fn_ptr, infix = null_rule, prec = Prec.None));
+    table.set(@as(i64) TokenType.Plus, @as(ParseRule) (prefix = null_rule, infix = binary!fn_ptr, prec = Prec.Term));
+    table.set(@as(i64) TokenType.Minus, @as(ParseRule) (prefix = unary!fn_ptr, infix = binary!fn_ptr, prec = Prec.Term));
+    table.set(@as(i64) TokenType.Star, @as(ParseRule) (prefix = null_rule, infix = binary!fn_ptr, prec = Prec.Factor));
+    table.set(@as(i64) TokenType.Slash, @as(ParseRule) (prefix = null_rule, infix = binary!fn_ptr, prec = Prec.Factor));
+    table.set(@as(i64) TokenType.Number, @as(ParseRule) (prefix = number!fn_ptr, infix = null_rule, prec = Prec.None));
+    rules[] = table;
+};
 
 fun compile(source: Str, chunk: *Chunk) bool = {
-    self: Parser = (scanner = init(source), current = ()!uninitialized, previous = ()!uninitialized, had_error = false);
+    self: Parser = (
+        scanner = init(source), 
+        current = ()!uninitialized, 
+        previous = ()!uninitialized, 
+        had_error = false, 
+        panic_mode = false,
+        chunk = chunk, // TODO: be like rust where you can leave off the name if it matches the expr var name. 
+    );
     self&.advance();
+    self&.expression();
+    self&.current_chunk().disassemble("just parsed");
+    self&.consume(TokenType.Eof, "Expect end of expression.");
+    self&.emit(OpCode.Return);
+    
     self.had_error = true; // TODO: temp! just need to make it not try to run the chunk before ive put anything in it. 
     self.had_error
 }
+
+fn parse(self: *Parser, prec: Prec) Unit = {
+    self.advance();
+    // TODO: generate fn ordinal for int enums so its more obvious what's going on. 
+    rule := get_rule(self.previous.type);
+    null_rule_addr :: (@as(rawptr) null_rule).ptr_to_int();
+    if((@as(rawptr) rule.prefix).ptr_to_int().eq(null_rule_addr)) {|
+        self.error_at(self.previous, "Expect expression.");
+    };
+    prefix := rule.prefix;
+    prefix(self);
+    
+    r := get_rule(self.current.type);
+    while(=> (@as(i64) prec).le(@as(i64) r.prec)) {|
+        self.advance();
+        infix := r.infix;
+        r = get_rule(self.current.type);
+        infix(self);
+    };
+}
+
+#inline fn expression(self: *Parser) Unit = self.parse(Prec.Assignment);
+
+number :: fn(self: *Parser) Unit = {
+    value := self.previous.lexeme.float();
+    self.emit(value);
+};
+
+unary :: fn(self: *Parser) Unit = {
+    type := self.previous.type;
+    self.parse(Prec.Unary);
+    @switch(@as(i64) type) {
+        @case(@as(i64) TokenType.Minus) => {
+            self.emit(OpCode.Negate);
+        };
+        @default fn(_: i64) => unreachable();
+    }
+};
+
+binary :: fn(self: *Parser) Unit = {
+    type := self.previous.type;
+    rule := get_rule(type);
+    self.parse(@as(Prec) @as(i64) (@as(i64) rule.prec).add(1));
+    op := @switch(@as(i64) type) {
+        @case(@as(i64) TokenType.Plus) => OpCode.Add; 
+        @case(@as(i64) TokenType.Minus) => OpCode.Subtract; 
+        @case(@as(i64) TokenType.Star) => OpCode.Multiply; 
+        @case(@as(i64) TokenType.Slash) => OpCode.Divide; 
+        @default fn(_: i64) => unreachable();
+    };
+    self.emit(op);
+};
+
+grouping :: fn(self: *Parser) Unit = {
+    self.expression();
+    self.consume(TokenType.RightParen, "Expect ')' after expression.");
+};
+
+fn get_rule(type: TokenType) *ParseRule = rules[].index(@as(i64) type);
 
 fn advance(self: *Parser) Unit = {
     self.previous = self.current;
@@ -17,18 +135,49 @@ fn advance(self: *Parser) Unit = {
         break :: __return;
         loop {()Unit|
             self.current = self.scanner&.next();
-            println(self.current.lexeme);
             if(self.current.type.eqq(TokenType.Error).not(), => { break(); });
             self.error_at(self.current, "");
         };
     })();
 }
 
-fn error(self: *Parser, msg: Str) Unit = self.error_at(self.previous, msg);
-fn error_at(self: *Parser, token: Token, msg: Str) Unit = {
-    self.had_error = true;
-    // TODO: render lex err vs eof vs normal token differently
-    @println("[line %] Error: % at %", token.line, msg, token.lexeme);
+fn consume(self: *Parser, type: TokenType, msg: Str) Unit = {
+    if(self.current.type.eqq(type),
+        => self.advance(),
+        =>self.error_at(self.current, msg)
+    )
 }
 
+fn error(self: *Parser, msg: Str) Unit = self.error_at(self.previous, msg);
+fn error_at(self: *Parser, token: Token, msg: Str) Unit = {
+    if(not(self.panic_mode)){|
+        self.panic_mode = true;
+        self.had_error = true;
+        // TODO: render lex err vs eof vs normal token differently
+        @println("[line %] Error: % at %", token.line, msg, token.lexeme);
+    }
+}
+
+#redirect(Ty(*Parser, i64), Unit) fn emit(self: *Parser, b: OpCode) Unit;
+fn emit(self: *Parser, b: i64) Unit = {
+    self.current_chunk().push(b, self.previous.line);
+}
+
+fn emit(self: *Parser, a: i64, b: i64) Unit = {
+    self.emit(a);
+    self.emit(b);
+}
+
+// TODO: EXTRA: OpCode.Constant16
+fn emit(self: *Parser, value: Value) Unit = self.emit(@as(i64) OpCode.Constant, self.make_constant(value));
+
+fn make_constant(self: *Parser, value: Value) i64 = {
+    c := self.current_chunk().push(value);
+    if(c.gt(255), => self.error("Too many constants in one chunk."));
+    c
+}
+
+fn current_chunk(self: *Parser) *Chunk = self.chunk;
+
 fn unreachable() Never = panic("Entered unreachable code.");
+

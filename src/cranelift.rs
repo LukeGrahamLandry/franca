@@ -350,6 +350,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                                 // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
                                 //       its just annoying because then i need to make sure i know if im supposed to be declaring
                                 //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
+                                self.asm.extend_blanks(f);
                                 self.asm.pending_indirect.push(f);
                                 let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
                                 builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
@@ -411,6 +412,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                                 // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
                                 //       its just annoying because then i need to make sure i know if im supposed to be declaring
                                 //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
+                                self.asm.extend_blanks(f);
                                 self.asm.pending_indirect.push(f);
                                 let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
                                 builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
@@ -581,7 +583,7 @@ impl<'z, 'p> Emit<'z, 'p> {
         }
     }
 
-    fn make_sig(&mut self, t: FnType, internal: bool, comp_ctx: bool) -> Signature {
+    fn make_sig(&mut self, t: FnType, _internal: bool, comp_ctx: bool) -> Signature {
         let mut sig = self.cl.module.make_signature();
         // if internal {
         //     sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?

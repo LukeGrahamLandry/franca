@@ -53,7 +53,7 @@ pub struct ParseTasks<'p> {
 unsafe impl<'p> Sync for ParseTasks<'p> {}
 unsafe impl<'p> Send for ParseTasks<'p> {}
 
-pub const ANON_BODY_AS_NAME: bool = true;
+pub static mut ANON_BODY_AS_NAME: bool = false;
 
 impl<'p> ParseTasks<'p> {
     pub fn new(pool: &'p StringPool<'p>) -> Self {
@@ -224,7 +224,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn anon_fn_name(&self, expr: &FatExpr<'p>) -> Ident<'p> {
-        if ANON_BODY_AS_NAME {
+        if unsafe { ANON_BODY_AS_NAME } {
             let mut name = expr.log(self.pool);
             name.truncate(25);
             self.pool.intern(&name)
