@@ -184,6 +184,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         TypeInfo::Type => Value::Type(TypeId::from_raw(n)),
         TypeInfo::OverloadSet => Value::OverloadSet(OverloadSetId::from_raw(n)),
         TypeInfo::FnPtr(_) => {
+            #[cfg(target_arch = "aarch64")]
             debug_assert!(n % 4 == 0);
             Value::I64(n)
         }

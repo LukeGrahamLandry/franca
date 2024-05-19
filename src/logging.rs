@@ -102,7 +102,7 @@ macro_rules! unwrap {
 
 pub use unwrap;
 
-use crate::ast::{FatStmt, FuncImpl, Pattern};
+use crate::ast::{FatStmt, FuncFlags, FuncImpl, Pattern};
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
@@ -354,7 +354,7 @@ impl<'p> Stmt<'p> {
     pub(crate) fn logd(&self, pool: &StringPool<'p>, depth: usize) -> String {
         let s = match self {
             Stmt::DeclNamed { name, ty, value, kind } => format!("{kind:?} {}: {} = {};", pool.get(*name), ty.log(pool), value.logd(pool, depth)),
-            Stmt::DeclVar { name, ty, value, kind, .. } => format!("{:?} {}: {} = {};", kind, name.log(pool), ty.log(pool), value.logd(pool, depth)),
+            Stmt::DeclVar { name, ty, value, .. } => format!("{:?} {}: {} = {};", name.kind, name.log(pool), ty.log(pool), value.logd(pool, depth)),
             Stmt::Eval(e) => e.logd(pool, depth),
             Stmt::DeclFunc(func) => format!("declare(fn {})", pool.get(func.name)),
             Stmt::Noop => "".to_owned(),
@@ -397,7 +397,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        if self.evil_uninit {
+        if !self.get_flag(FuncFlags::NotEvilUninit) {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(

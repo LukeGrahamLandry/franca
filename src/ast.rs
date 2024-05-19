@@ -28,14 +28,12 @@ impl std::fmt::Debug for TypeId {
     }
 }
 
-#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub arg: TypeId,
     pub ret: TypeId,
 }
-#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
@@ -43,7 +41,6 @@ pub enum VarType {
     Const,
 }
 
-#[repr(C)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     #[default]
@@ -101,7 +98,6 @@ impl TypeMeta {
     }
 }
 
-#[repr(C)]
 #[derive(Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 pub struct Field<'p> {
     pub name: Ident<'p>,
@@ -109,7 +105,7 @@ pub struct Field<'p> {
     pub ffi_byte_offset: Option<usize>,
     pub default: Option<Values>,
 }
-#[repr(C)]
+
 #[derive(Clone, Debug, InterpSend)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
@@ -121,7 +117,7 @@ pub struct Var<'p> {
     pub name: Ident<'p>,
     pub id: u32,
     pub scope: ScopeId,
-    pub block: u32,
+    pub block: u16,
     pub kind: VarType,
 }
 
@@ -138,7 +134,6 @@ pub struct Var<'p> {
 // }
 
 // TODO: should really get an arena going because boxes make me sad.
-#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Poison,
@@ -400,7 +395,6 @@ impl<'p> FatExpr<'p> {
 
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
-#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
@@ -417,18 +411,6 @@ impl<'p> FatExpr<'p> {
         self.done = true;
     }
 
-    pub fn as_int(&self) -> Option<i64> {
-        if let Expr::Value {
-            value: Values::One(Value::I64(v)),
-            ..
-        } = self.expr
-        {
-            debug_assert!(self.ty == TypeId::i64());
-            return Some(v);
-        }
-        None
-    }
-
     pub fn value(value: Values, ty: TypeId, loc: Span) -> Self {
         FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
     }
@@ -439,7 +421,7 @@ impl Default for FatExpr<'_> {
         FatExpr::null(garbage_loc())
     }
 }
-#[repr(C)]
+
 #[derive(Clone, Debug, InterpSend)]
 pub struct Pattern<'p> {
     pub bindings: Vec<Binding<'p>>,
@@ -454,7 +436,7 @@ impl<'p> Default for Pattern<'p> {
         }
     }
 }
-#[repr(C)]
+
 #[derive(Copy, Clone, Debug, InterpSend, PartialEq, Eq)]
 pub enum Name<'p> {
     Ident(Ident<'p>),
@@ -463,7 +445,6 @@ pub enum Name<'p> {
 }
 
 // arguments of a function and left of variable declaration.
-#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Binding<'p> {
     pub name: Name<'p>,
@@ -483,13 +464,6 @@ impl<'p> Name<'p> {
 }
 
 impl<'p> Binding<'p> {
-    pub fn type_for_name(&self, name: Var) -> Option<&LazyType> {
-        if self.name == Name::Var(name) {
-            return Some(&self.ty);
-        }
-        None
-    }
-
     pub fn unwrap(&self) -> TypeId {
         self.ty.unwrap()
     }
@@ -518,11 +492,6 @@ impl<'p> Pattern<'p> {
         Self { loc, bindings: vec![] }
     }
 
-    // Useful for function args.
-    pub fn then(&mut self, other: Self) {
-        self.bindings.extend(other.bindings);
-    }
-
     pub fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId, VarType)> {
         self.bindings
             .iter()
@@ -536,47 +505,8 @@ impl<'p> Pattern<'p> {
             .collect()
     }
 
-    pub fn collect_vars(&self) -> Vec<Var<'p>> {
-        self.bindings
-            .iter()
-            .flat_map(|b| match b.name {
-                Name::Var(v) => Some(v),
-                _ => None,
-            })
-            .collect()
-    }
-
     pub fn flatten_names(&self) -> Vec<Ident<'p>> {
         self.bindings.iter().map(|b| b.name().unwrap()).collect()
-    }
-
-    // TODO: remove?
-    pub fn flatten_exprs(&self) -> Option<Vec<FatExpr<'p>>> {
-        self.bindings
-            .iter()
-            .map(|b| b.ty.clone())
-            .map(|t| match t {
-                LazyType::EvilUnit => panic!(),
-                LazyType::Infer => None,
-                LazyType::PendingEval(e) => Some(e),
-                LazyType::Finished(_) => None,
-                LazyType::Different(_) => unreachable!(),
-            })
-            .collect()
-    }
-
-    pub fn flatten_exprs_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
-        self.bindings
-            .iter_mut()
-            .map(|b| &mut b.ty)
-            .map(|t| match t {
-                LazyType::EvilUnit => panic!(),
-                LazyType::Infer => None,
-                LazyType::PendingEval(e) => Some(e),
-                LazyType::Finished(_) => None,
-                LazyType::Different(_) => unreachable!(),
-            })
-            .collect()
     }
 
     pub fn flatten_defaults_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
@@ -587,19 +517,6 @@ impl<'p> Pattern<'p> {
         self.bindings.iter().map(|b| b.default.as_ref()).collect()
     }
 
-    pub fn flatten_exprs_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
-        self.bindings
-            .iter()
-            .map(|b| &b.ty)
-            .map(|t| match t {
-                LazyType::EvilUnit => panic!(),
-                LazyType::Infer => None,
-                LazyType::PendingEval(e) => Some(e),
-                LazyType::Finished(_) => None,
-                LazyType::Different(_) => unreachable!(),
-            })
-            .collect()
-    }
     pub fn remove_named(&mut self, arg_name: Var<'p>) {
         let start = self.bindings.len();
         self.bindings.retain(|b| match b.name {
@@ -615,19 +532,6 @@ impl<'p> Pattern<'p> {
                 kind: VarType::Let,
             })
         }
-    }
-
-    pub fn ty(&self, program: &mut Program<'p>) -> TypeId {
-        let types: Vec<_> = self
-            .bindings
-            .iter()
-            .map(|b| &b.ty)
-            .map(|t| match t {
-                LazyType::Finished(ty) => *ty,
-                LazyType::Infer | LazyType::PendingEval(_) | LazyType::EvilUnit | LazyType::Different(_) => unreachable!(),
-            })
-            .collect();
-        program.tuple_of(types)
     }
 
     // TODO: probably shouldn't do this because ideally someone would take it out later anyway.
@@ -669,19 +573,18 @@ impl<'p> FatExpr<'p> {
         FatExpr::synthetic(Expr::Poison, loc)
     }
 }
-#[repr(C)]
+
 #[derive(Clone, Debug, InterpSend)]
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
-    DeclFunc(Func<'p>),
+    DeclFunc(Box<Func<'p>>),
 
     // Backend Only
     DeclVar {
         name: Var<'p>,
         ty: LazyType<'p>,
         value: FatExpr<'p>,
-        kind: VarType,
     },
     // I have to write the logic for this anyway to deal with function args and I need it for inlining because I don't want the backend to have to deal with it.
     // The main thing this solves is letting you defer figuring out how to unwrap an expression.
@@ -708,7 +611,7 @@ pub enum Stmt<'p> {
     },
     ExpandParsedStmts(usize),
 }
-#[repr(C)]
+
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatStmt<'p> {
     pub stmt: Stmt<'p>,
@@ -717,7 +620,6 @@ pub struct FatStmt<'p> {
 }
 
 // NOTE: you can't store the FuncId in here because I clone it!
-#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
@@ -732,21 +634,35 @@ pub struct Func<'p> {
 
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
     pub scope: Option<ScopeId>,
-    pub args_block: Option<usize>,
-    pub resolved_body: bool,
-    pub resolved_sign: bool,
-    pub evil_uninit: bool,
-    pub allow_rt_capture: bool,
-    pub referencable_name: bool, // Diferentiate closures, etc which can't be refered to by name in the program text but I assign a name for debugging.
-    pub asm_done: bool,
-    pub ensured_compiled: bool,
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
     pub callees: Vec<FuncId>,
     pub body: FuncImpl<'p>,
+    pub flags: u32,
 }
 
-#[repr(C)]
+pub enum FuncFlags {
+    NotEvilUninit,
+    ResolvedBody,
+    ResolvedSign,
+    AllowRtCapture,
+    EnsuredCompiled,
+    AsmDone,
+}
+
+impl<'p> Func<'p> {
+    pub fn get_flag(&self, f: FuncFlags) -> bool {
+        self.flags & (1 << f as u32) != 0
+    }
+    pub fn set_flag(&mut self, f: FuncFlags, v: bool) {
+        if v {
+            self.flags |= 1 << f as u32;
+        } else {
+            self.flags &= !(1 << f as u32);
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq)]
 pub enum CallConv {
     Arg8Ret1, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
@@ -760,7 +676,6 @@ pub enum CallConv {
 }
 
 // TODO: use this instead of having a billion fields.
-#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
@@ -787,26 +702,18 @@ pub enum FuncImpl<'p> {
 }
 
 impl<'p> Func<'p> {
-    pub fn new(
-        name: Ident<'p>,
-        arg: Pattern<'p>,
-        ret: LazyType<'p>,
-        body: Option<FatExpr<'p>>,
-        loc: Span,
-        referencable_name: bool,
-        allow_rt_capture: bool,
-    ) -> Self {
-        Func {
+    pub fn new(name: Ident<'p>, arg: Pattern<'p>, ret: LazyType<'p>, body: Option<FatExpr<'p>>, loc: Span, allow_rt_capture: bool) -> Self {
+        let mut f = Func {
             name,
             arg,
             ret,
             body: body.map(FuncImpl::Normal).unwrap_or(FuncImpl::Empty),
             loc,
-            referencable_name,
-            allow_rt_capture,
-            evil_uninit: false,
             ..Default::default()
-        }
+        };
+        f.set_flag(FuncFlags::NotEvilUninit, true);
+        f.set_flag(FuncFlags::AllowRtCapture, allow_rt_capture);
+        f
     }
 
     /// Find annotation ignoring arguments
@@ -851,11 +758,11 @@ impl<'p> Func<'p> {
     }
 
     #[track_caller]
-    pub fn unwrap_ty(&self) -> FnType {
+    pub(crate) fn unwrap_ty(&self) -> FnType {
         self.finished_ty().expect("fn type")
     }
 
-    pub fn finished_ty(&self) -> Option<FnType> {
+    pub(crate) fn finished_ty(&self) -> Option<FnType> {
         if let Some(arg) = self.finished_arg {
             if let Some(ret) = self.finished_ret {
                 return Some(FnType { arg, ret });
@@ -864,7 +771,7 @@ impl<'p> Func<'p> {
         None
     }
 
-    pub fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {
+    pub(crate) fn known_args(arg: TypeId, ret: TypeId, loc: Span) -> (Pattern<'p>, LazyType<'p>) {
         let arg = Pattern {
             bindings: vec![Binding {
                 ty: LazyType::Finished(arg),
@@ -878,18 +785,17 @@ impl<'p> Func<'p> {
         (arg, ret)
     }
 
-    pub fn any_const_args(&self) -> bool {
+    pub(crate) fn any_const_args(&self) -> bool {
         self.arg.bindings.iter().any(|b| b.kind == VarType::Const)
     }
 
     #[track_caller]
     pub(crate) fn assert_body_not_resolved(&self) -> Res<'p, ()> {
-        assert!(!self.evil_uninit);
-        assert!(!self.resolved_body);
+        assert!(self.get_flag(FuncFlags::NotEvilUninit));
+        assert!(!self.get_flag(FuncFlags::ResolvedBody));
         Ok(())
     }
 }
-#[repr(C)]
 #[derive(Clone, Debug, Default, InterpSend)]
 pub enum LazyType<'p> {
     #[default]
@@ -900,13 +806,6 @@ pub enum LazyType<'p> {
     Different(Vec<Self>),
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, InterpSend)]
-pub struct VarInfo {
-    pub kind: VarType,
-    pub loc: Span,
-}
-
-#[repr(C)]
 pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
@@ -971,13 +870,6 @@ impl<'p> LazyType<'p> {
         }
     }
 
-    pub fn expr(self) -> Option<FatExpr<'p>> {
-        match self {
-            LazyType::PendingEval(e) => Some(e),
-            _ => None,
-        }
-    }
-
     pub fn expr_ref(&self) -> Option<&FatExpr<'p>> {
         match self {
             LazyType::PendingEval(e) => Some(e),
@@ -1003,7 +895,6 @@ macro_rules! safe_rec {
 
 pub(crate) use safe_rec;
 
-#[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
 pub struct IntTypeInfo {
     pub bit_count: i64,
@@ -1051,7 +942,7 @@ impl<'p> Program<'p> {
         program
     }
 
-    pub fn add_ffi_definition<T: InterpSend<'p>>(&mut self) {
+    pub(crate) fn add_ffi_definition<T: InterpSend<'p>>(&mut self) {
         let def = T::definition();
         if !def.is_empty() {
             self.ffi_definitions.push_str(&T::name());
@@ -1062,7 +953,7 @@ impl<'p> Program<'p> {
     }
 
     /// This allows ffi types to be unique.
-    pub fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
+    pub(crate) fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             self.add_ffi_definition::<T>();
             let n = TypeId::unknown;
@@ -1079,7 +970,7 @@ impl<'p> Program<'p> {
         })
     }
 
-    pub fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
+    pub(crate) fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
         use crate::reflect::*;
         // TODO: think more about this but need same int type
         if let RsData::Opaque = type_info.data {
@@ -1130,22 +1021,8 @@ impl<'p> Program<'p> {
         })
     }
 
-    pub fn sig_str(&self, f: FuncId) -> Res<'p, Ident<'p>> {
-        let func = &self.funcs[f.as_index()];
-
-        let args: String = func
-            .arg
-            .flatten()
-            .iter()
-            .map(|(name, ty, _)| format!("{}: {}, ", name.map(|n| self.pool.get(n.name)).unwrap_or("_"), self.log_type(*ty)))
-            .collect();
-        let ret = self.log_type(func.ret.unwrap());
-        let out = format!("fn {}({args}) {ret}", self.pool.get(func.name));
-        Ok(self.pool.intern(&out))
-    }
-
     #[track_caller]
-    pub fn raw_type(&self, mut ty: TypeId) -> TypeId {
+    pub(crate) fn raw_type(&self, mut ty: TypeId) -> TypeId {
         debug_assert!(ty.is_valid(), "invalid type: {}", ty.0);
 
         while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) | &TypeInfo::Enum { raw: inner, .. } = &self[ty] {
@@ -1154,7 +1031,7 @@ impl<'p> Program<'p> {
         ty
     }
 
-    pub fn get_enum(&self, enum_ty: TypeId) -> Option<&[(Ident<'p>, TypeId)]> {
+    pub(crate) fn get_enum(&self, enum_ty: TypeId) -> Option<&[(Ident<'p>, TypeId)]> {
         let enum_ty = self.raw_type(enum_ty);
         if let TypeInfo::Tagged { cases, .. } = &self[enum_ty] {
             Some(cases)
@@ -1163,7 +1040,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
+    pub(crate) fn tuple_of(&mut self, types: Vec<TypeId>) -> TypeId {
         match types.len() {
             0 => TypeId::unit,
             1 => types[0],
@@ -1251,7 +1128,7 @@ impl<'p> Program<'p> {
 
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
-        debug_assert!(!func.evil_uninit);
+        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
         let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id
@@ -1365,7 +1242,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub fn named_tuple(&mut self, name: &str, types: Vec<TypeId>) -> TypeId {
+    pub(crate) fn named_tuple(&mut self, name: &str, types: Vec<TypeId>) -> TypeId {
         let ty = self.tuple_of(types);
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))
@@ -1456,11 +1333,11 @@ impl<'p> Program<'p> {
         info
     }
 
-    pub fn get_infos(&self, ty: FnType) -> (TypeMeta, TypeMeta) {
+    pub(crate) fn get_infos(&self, ty: FnType) -> (TypeMeta, TypeMeta) {
         (self.get_info(ty.arg), self.get_info(ty.ret))
     }
 
-    pub fn slot_count(&self, ty: TypeId) -> u16 {
+    pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {
         self.get_info(ty).size_slots
     }
 }
@@ -1588,11 +1465,10 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
-            ensured_compiled: false,
+            flags: 0,
             callees: vec![],
             return_var: None,
             cc: None,
-            asm_done: false,
             annotations: vec![],
             name: Ident::null(),
             var_name: None,
@@ -1606,13 +1482,7 @@ impl<'p> Default for Func<'p> {
             loc: garbage_loc(),
             finished_arg: None,
             finished_ret: None,
-            referencable_name: false,
-            evil_uninit: true,
-            allow_rt_capture: false,
-            resolved_sign: false,
-            resolved_body: false,
             scope: None,
-            args_block: None,
         }
     }
 }
@@ -1851,19 +1721,15 @@ tagged_index!(LabelId, 27);
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
 pub struct TypeId(pub u32);
 
-#[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(u32);
 
-#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
 pub struct ScopeId(u32);
 
-#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OverloadSetId(u32);
 
-#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend, Debug)]
 pub struct LabelId(u32);
 

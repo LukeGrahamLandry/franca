@@ -15,7 +15,7 @@ use crate::{bc::*, extend_options, Map};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
-pub struct EmitBc<'z, 'p: 'z> {
+struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
@@ -37,6 +37,24 @@ pub enum ResultLoc {
 }
 use ResultLoc::*;
 
+pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId) -> FnBody<'p> {
+    let mut jump_targets = BitSet::empty();
+    jump_targets.set(0); // entry is the first instruction
+    FnBody {
+        var_names: vec![],
+        vars: Default::default(),
+        when: ExecTime::Comptime, // TODO
+        func,
+        blocks: vec![],
+        name: program[func].name,
+        aarch64_stack_bytes: None,
+        current_block: BbId(0),
+        inlined_return_addr: Default::default(),
+        want_log: program[func].has_tag(Flag::Log_Bc),
+        clock: 0,
+    }
+}
+
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn new(program: &'z Program<'p>) -> Self {
         Self {
@@ -48,25 +66,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    #[track_caller]
-    pub fn empty_fn(program: &Program<'p>, func: FuncId) -> FnBody<'p> {
-        let mut jump_targets = BitSet::empty();
-        jump_targets.set(0); // entry is the first instruction
-        FnBody {
-            var_names: vec![],
-            vars: Default::default(),
-            when: ExecTime::Comptime, // TODO
-            func,
-            blocks: vec![],
-            name: program[func].name,
-            aarch64_stack_bytes: None,
-            current_block: BbId(0),
-            inlined_return_addr: Default::default(),
-            want_log: program[func].has_tag(Flag::Log_Bc),
-            clock: 0,
-        }
-    }
-
     fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
         if self.program[f].has_tag(Flag::Log_Ast) {
             println!("{}", self.program[f].log(self.program.pool));
@@ -74,7 +73,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         self.locals.clear();
         self.locals.push(vec![]);
-        let mut result = Self::empty_fn(self.program, f);
+        let mut result = empty_fn_body(self.program, f);
         match self.emit_body(&mut result, f) {
             Ok(_) => Ok(result),
             Err(mut e) => {
@@ -275,8 +274,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 debug_assert!(!expr.ty.is_unknown());
                 self.compile_expr(result, expr, Discard, false)?;
             }
-            Stmt::DeclVar { name, ty, value, kind } => {
-                assert_ne!(VarType::Const, *kind);
+            Stmt::DeclVar { name, ty, value } => {
+                assert_ne!(VarType::Const, name.kind);
                 let ty = ty.unwrap();
 
                 let id = result.add_var(ty);
@@ -806,7 +805,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    pub fn slot_count(&self, ty: TypeId) -> u16 {
+    fn slot_count(&self, ty: TypeId) -> u16 {
         self.program.slot_count(ty)
     }
 

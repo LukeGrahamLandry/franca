@@ -4,7 +4,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused)]
 
-use crate::ast::{CallConv, Flag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
+use crate::ast::{CallConv, Flag, FnType, Func, FuncFlags, FuncId, FuncImpl, TypeId, TypeInfo};
 use crate::bc::{BbId, Bc, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
@@ -66,7 +66,7 @@ const sp: i64 = 31;
 const X64: i64 = 0b1;
 
 pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime, body: &FnBody<'p>) -> Res<'p, ()> {
-    debug_assert!(!compile.program[f].asm_done, "ICE: tried to double compile?");
+    debug_assert!(!compile.program[f].get_flag(FuncFlags::AsmDone), "ICE: tried to double compile?");
     compile.aarch64.extend_blanks(f);
     let mut a = BcToAsm::new(compile, when, body);
     a.compile(f)?;

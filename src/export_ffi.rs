@@ -325,7 +325,6 @@ extern "C-unwind" fn symbol_to_int(_: &mut &mut Program, symbol: u32) -> i64 {
     symbol as i64
 }
 
-#[repr(C)]
 #[derive(Reflect)]
 pub struct RsResolvedSymbol {
     line: i64,
@@ -652,7 +651,6 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let func = &mut compile.program[id];
     let s = func.scope.unwrap();
 
-    // TODO: remove block index
     FatExpr::value(Values::One(Value::I64(s.as_raw())), TypeId::scope, loc)
 }
 

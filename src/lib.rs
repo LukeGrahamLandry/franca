@@ -341,7 +341,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     ));
 
     let (g_arg, g_ret) = Func::known_args(TypeId::unit, TypeId::unit, user_span);
-    Func::new(name, g_arg, g_ret, body, user_span, true, false)
+    Func::new(name, g_arg, g_ret, body, user_span, false)
 }
 
 pub fn timestamp() -> f64 {

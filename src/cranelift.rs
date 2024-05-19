@@ -22,11 +22,11 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, ModuleError};
 
 use crate::{
-    ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
+    ast::{CallConv, Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, Res},
-    emit_bc::EmitBc,
+    emit_bc::empty_fn_body,
     err, extend_options,
     logging::make_err,
     reflect::BitSet,
@@ -79,7 +79,7 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 }
 
 pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, f: FuncId) -> Res<'p, ()> {
-    let mut body = EmitBc::empty_fn(compile.program, f);
+    let mut body = empty_fn_body(compile.program, f);
     body.func = f;
     let arg = compile.program[f].finished_arg.unwrap();
     let arg = compile.program.get_info(arg);
@@ -293,7 +293,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
                     let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
-                    if let FuncImpl::EmitCranelift(emit) = self.program[f].body {
+                    if let Some(&emit) = self.program[f].body.cranelift_emit() {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
                         let v = emit(builder, args);
                         pops(&mut self.stack, arg.size_slots as usize);
@@ -771,5 +771,8 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     }),
     ("fn store(_: *Unit, val: Unit) Unit;", |builder: &mut FunctionBuilder, _: &[Value]| {
         builder.ins().iconst(I64, 0)
+    }),
+    ("fun float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().fcvt_from_sint(F64, v[0])
     }),
 ];

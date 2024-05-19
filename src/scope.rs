@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, FuncFlags, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err, ice,
     logging::PoolLog,
@@ -43,7 +43,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.resolved_body && func.resolved_sign {
+        if func.get_flag(FuncFlags::ResolvedBody) && func.get_flag(FuncFlags::ResolvedSign) {
             return Ok(());
         }
 
@@ -52,7 +52,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.push_scope(Some(func.name));
         func.scope = Some(self.scope);
 
-        if func.allow_rt_capture {
+        if func.get_flag(FuncFlags::AllowRtCapture) {
             self.resolve_func_args(func)?;
             self.resolve_func_body(func)?;
             debug_assert_eq!(s, self.scope);
@@ -82,7 +82,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn resolve_func_args(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.resolved_sign {
+        if func.get_flag(FuncFlags::ResolvedSign) {
             return Ok(());
         }
         self.scope = func.scope.unwrap();
@@ -90,7 +90,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         debug_assert_eq!(self.scope, func.scope.unwrap());
         let generic = func.has_tag(Flag::Generic); // ret is allowed to depend on previous args.
 
-        func.resolved_sign = true;
+        func.set_flag(FuncFlags::ResolvedSign, true);
         for b in &mut func.arg.bindings {
             self.resolve_binding(b)?;
         }
@@ -105,7 +105,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn resolve_func_body(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.resolved_body {
+        if func.get_flag(FuncFlags::ResolvedBody) {
             return Ok(());
         }
         unsafe { STATS.fn_body_resolve += 1 };
@@ -113,10 +113,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
 
         self.push_scope(None);
-        debug_assert!(func.args_block.is_none());
-        func.args_block = Some(self.block);
-
-        self.block = func.args_block.unwrap();
 
         for b in &mut func.arg.bindings {
             self.declare_binding(b, func.loc)?;
@@ -125,14 +121,13 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             self.walk_ty(&mut func.ret);
         }
         self.push_scope(None);
-        func.resolved_body = true;
+        func.set_flag(FuncFlags::ResolvedBody, true);
         if let FuncImpl::Normal(body) = &mut func.body {
             func.return_var = Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
             self.resolve_expr(body)?;
         }
         self.pop_block();
         debug_assert_eq!(self.scope, func.scope.unwrap());
-        debug_assert_eq!(self.block, func.args_block.unwrap());
         self.pop_block();
         self.pop_scope();
         let capures = mem::take(&mut self.captures);
@@ -143,7 +138,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             func.capture_vars.push(c);
         }
 
-        if !func.allow_rt_capture {
+        if !func.get_flag(FuncFlags::AllowRtCapture) {
             // TODO: show the captured var use site and declaration site.
             self.last_loc = func.loc;
             let n = self.compiler.pool.get(func.name);
@@ -170,7 +165,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 // kinda hack. just makes it easier to read logs when you do 'name :: fn() ...'
                 if let Expr::Closure(func) = &mut value.expr {
                     if func.name == Flag::Anon.ident() {
-                        debug_assert!(!func.referencable_name);
                         func.name = *name;
                     }
                 }
@@ -181,14 +175,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                         name: new,
                         ty: mem::replace(ty, LazyType::Infer),
                         value: mem::replace(value, FatExpr::null(loc)),
-                        kind: *kind,
                     };
                     stmt.stmt = decl;
                     // Don't move to local_constants yet because want value to be able to reference later constants
                 }
             }
             Stmt::DeclFunc(func) => {
-                assert!(func.referencable_name);
                 // Functions don't shadow, they just add to an overload group.
                 // TOOD: @pub vs @private
                 if let Some(v) = self.find_var(&func.name) {
@@ -229,7 +221,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                     name: new,
                     ty: mem::replace(ty, LazyType::Infer),
                     value: mem::replace(value, FatExpr::null(loc)),
-                    kind: *kind,
                 };
                 stmt.stmt = decl;
             }
@@ -237,8 +228,8 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 func.annotations.extend(aaa);
                 self.resolve_func(func)?;
             }
-            Stmt::DeclVar { kind, ty, value, .. } => {
-                debug_assert!(*kind == VarType::Const);
+            Stmt::DeclVar { name, ty, value } => {
+                debug_assert!(name.kind == VarType::Const);
                 self.walk_ty(ty);
                 self.resolve_expr(value)?;
             }
@@ -450,7 +441,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             name: *name,
             id: self.compiler.program.next_var,
             scope: s,
-            block: self.block as u32,
+            block: self.block as u16,
             kind,
         };
         if kind == VarType::Const {

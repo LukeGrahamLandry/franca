@@ -16,8 +16,8 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, CallConv, FatStmt, Field, Flag, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
-    ScopeId, TargetArch, Var, VarType, WalkAst,
+    Annotation, Binding, CallConv, FatStmt, Field, Flag, FuncFlags, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern,
+    RenumberVars, ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -296,13 +296,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: this is a little sketchy. can one merged arch cause asm_done to be set and then other arches don't get processed?
         //       i dont think so cause overloading short circuits, and what ever arch did happen will be in the dispatch table.
         //       need to revisit when not jitting tho.   -- May 16
-        if self.program[f].asm_done || self.currently_compiling.contains(&f) {
+        if self.program[f].get_flag(FuncFlags::AsmDone) || self.currently_compiling.contains(&f) {
             return Ok(());
         }
         let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
         let before = self.debug_trace.len();
-        debug_assert!(!self.program[f].evil_uninit);
+        debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
         self.ensure_compiled(f, when)?;
 
         if let FuncImpl::Redirect(target) = self.program[f].body {
@@ -362,8 +362,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert_eq!(before, after);
         self.pop_state(state);
         // self.currently_compiling.retain(|check| *check != f);
-        self.program[f].asm_done = true;
-
+        self.program[f].set_flag(FuncFlags::AsmDone, true);
         self.last_loc = Some(self.program[f].loc);
 
         assert!(!matches!(self.program[f].body, FuncImpl::Empty));
@@ -391,7 +390,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if !self.aarch64.pending_indirect.is_empty() {
             println!("run {f:?} pending:{:?}", self.aarch64.pending_indirect);
             for f in self.aarch64.pending_indirect.clone() {
-                debug_assert!(!self.program[f].asm_done);
+                debug_assert!(!self.program[f].get_flag(FuncFlags::AsmDone));
                 self.compile(f, when)?;
                 println!("{}", self.program[f].body.log(self.pool));
             }
@@ -497,8 +496,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: they should be allowed to refer to functiobns too so need to delay them.
         //       plus the double loop looks really dumb.
         for stmt in body.iter_mut() {
-            if let Stmt::DeclVar { name, ty, value, kind } = &mut stmt.stmt {
-                if *kind == VarType::Const {
+            if let Stmt::DeclVar { name, ty, value } = &mut stmt.stmt {
+                if name.kind == VarType::Const {
                     self[name.scope].constants.insert(*name, (mem::take(value), mem::take(ty)));
                     stmt.stmt = Stmt::Noop;
                 }
@@ -517,10 +516,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
     pub fn ensure_compiled(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        if self.program[f].ensured_compiled {
+        if self.program[f].get_flag(FuncFlags::EnsuredCompiled) {
             return Ok(());
         }
-        self.program[f].ensured_compiled = true;
+        self.program[f].set_flag(FuncFlags::EnsuredCompiled, true);
+
         let func = &self.program[f];
 
         if !add_unique(&mut self.currently_compiling, f) {
@@ -528,7 +528,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(());
         }
         self.wip_stack.push(f);
-        debug_assert!(!func.evil_uninit);
+        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
         self.ensure_resolved_body(f)?;
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
         assert!(!self.program[f].any_const_args());
@@ -551,7 +551,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn emit_special_body(&mut self, f: FuncId, no_redirect: bool) -> Res<'p, bool> {
-        debug_assert!(!self.program[f].evil_uninit);
+        debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
         assert!(!self.program[f].has_tag(Flag::Comptime));
@@ -566,7 +566,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         } else {
             assert!(self.program[f].finished_ty().is_some(), "fn without body needs type annotations.");
-            assert!(self.program[f].referencable_name, "fn no body needs name");
+
             special = true;
         }
 
@@ -593,9 +593,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
-            let addr = unwrap!(unwrap!(tag.args.as_ref(), "").as_int(), "");
+            let addr: usize = self.immediate_eval_expr_known(unwrap!(tag.args.clone(), ""))?;
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
-            self.program[f].body = FuncImpl::ComptimeAddr(addr as usize);
+            self.program[f].body = FuncImpl::ComptimeAddr(addr);
             self.aarch64.extend_blanks(f);
             self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             special = true;
@@ -722,7 +722,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_capturing_call(&mut self, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         self.ensure_resolved_body(f)?; // it might not be a closure. it might be an inlined thing.
         let loc = expr_out.loc;
-        assert!(!self.program[f].evil_uninit);
+        assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
         let state = DebugState::EmitCapturingCall(f, self.program[f].name);
         self.push_state(&state);
         let Expr::Call(_, arg_expr) = expr_out.deref_mut() else { ice!("") };
@@ -806,7 +806,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn bind_const_arg(&mut self, o_f: FuncId, arg_name: Var<'p>, arg_value: Values, arg_ty_found: TypeId, loc: Span) -> Res<'p, ()> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
-        debug_assert!(self.program[o_f].resolved_body && self.program[o_f].resolved_sign);
+        debug_assert!(self.program[o_f].get_flag(FuncFlags::ResolvedBody) && self.program[o_f].get_flag(FuncFlags::ResolvedSign));
 
         let mut arg_x = self.program[o_f].arg.clone();
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
@@ -874,7 +874,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Don't want to renumber, so only resolve on the clone. // TODO: this does redundant work on closed constants.
         self.program[template_f].assert_body_not_resolved()?;
 
-        debug_assert!(self.program[template_f].resolved_sign);
+        debug_assert!(self.program[template_f].get_flag(FuncFlags::ResolvedSign));
 
         let state = DebugState::ComptimeCall(template_f, self.program[template_f].name);
         self.push_state(&state);
@@ -918,8 +918,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
         //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
         //       or when impl new functions so can only happen once so they dont make redundant overloads.  -- Apr 20
-        debug_assert!(!func.evil_uninit);
-        func.referencable_name = false;
+        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
 
         assert!(!arg_expr.ty.is_unknown());
         arg_expr.set(arg_value.clone(), arg_expr.ty);
@@ -998,9 +997,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Stmt::DeclFunc(_) => unreachable!("DeclFunc gets hoisted"),
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
-            Stmt::DeclVar { name, ty, value, kind, .. } => {
-                debug_assert_ne!(*kind, VarType::Const);
-                self.decl_var(*name, ty, value, *kind, &stmt.annotations)?;
+            Stmt::DeclVar { name, ty, value, .. } => {
+                debug_assert_ne!(name.kind, VarType::Const);
+                self.decl_var(*name, ty, value, name.kind, &stmt.annotations)?;
             }
             // TODO: don't make the backend deal with the pattern matching but it does it for args anyway rn.
             //       be able to expand this into multiple statements so backend never even sees a DeclVarPattern (and skip constants when doing so)
@@ -1085,7 +1084,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok((None, None));
         }
 
-        debug_assert!(!func.evil_uninit);
+        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
         let loc = func.loc;
         // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
         if let Some(when) = func.get_tag_mut(Flag::When) {
@@ -1102,8 +1101,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             func.set_cc(CallConv::Flat)?;
         }
 
-        let referencable_name = func.referencable_name;
-
         let public = func.has_tag(Flag::Pub);
         let id = self.add_func(func)?;
 
@@ -1111,41 +1108,39 @@ impl<'a, 'p> Compile<'a, 'p> {
         // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
         // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
         if let Some(var) = var {
-            if referencable_name {
-                // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
-                // TODO: distinguish between overload sets that you add to and those that you re-export
-                debug_assert!(!self.program[id].resolved_sign);
-                debug_assert!(!self.program[id].resolved_body);
-                if let Some(overloads) = self.find_const(var)? {
-                    let i = overloads.0.as_overload_set().unwrap();
-                    let os = &mut self.program[i];
-                    assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
+            // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
+            // TODO: distinguish between overload sets that you add to and those that you re-export
+            debug_assert!(!self.program[id].get_flag(FuncFlags::ResolvedSign));
+            debug_assert!(!self.program[id].get_flag(FuncFlags::ResolvedBody));
+            if let Some(overloads) = self.find_const(var)? {
+                let i = overloads.0.as_overload_set().unwrap();
+                let os = &mut self.program[i];
+                assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
 
-                    os.pending.push(id);
-                    out = (Some(id), Some(i));
-                } else {
-                    let index = OverloadSetId::from_index(self.program.overload_sets.len());
-                    self.program.overload_sets.push(OverloadSet {
-                        ready: vec![],
-                        name: var.name,
-                        pending: vec![id],
-                        public,
-                        just_resolved: vec![],
-                    });
-                    self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set, loc)?;
-                    out = (Some(id), Some(index));
-                }
+                os.pending.push(id);
+                out = (Some(id), Some(i));
+            } else {
+                let index = OverloadSetId::from_index(self.program.overload_sets.len());
+                self.program.overload_sets.push(OverloadSet {
+                    ready: vec![],
+                    name: var.name,
+                    pending: vec![id],
+                    public,
+                    just_resolved: vec![],
+                });
+                self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set, loc)?;
+                out = (Some(id), Some(index));
+            }
 
-                let loc = self.program[id].loc;
-                if self.program[id].has_tag(Flag::Redirect) {
-                    // dman it bnoarow chekcser
-                    let os = self.as_literal(out.1.unwrap(), loc)?;
-                    if let Some(types) = self.program[id].get_tag_mut(Flag::Redirect) {
-                        let Expr::Tuple(parts) = &mut types.args.as_mut().unwrap().expr else {
-                            err!("bad",)
-                        };
-                        parts.push(os);
-                    }
+            let loc = self.program[id].loc;
+            if self.program[id].has_tag(Flag::Redirect) {
+                // dman it bnoarow chekcser
+                let os = self.as_literal(out.1.unwrap(), loc)?;
+                if let Some(types) = self.program[id].get_tag_mut(Flag::Redirect) {
+                    let Expr::Tuple(parts) = &mut types.args.as_mut().unwrap().expr else {
+                        err!("bad",)
+                    };
+                    parts.push(os);
                 }
             }
         }
@@ -1200,10 +1195,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
-        if self.program[f].resolved_sign {
+        if self.program[f].get_flag(FuncFlags::ResolvedSign) {
             return Ok(());
         }
-        debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_sign of evil_uninit {}", self.log_trace());
+        debug_assert!(
+            self.program[f].get_flag(FuncFlags::NotEvilUninit),
+            "ensure_resolved_sign of evil_uninit {}",
+            self.log_trace()
+        );
         mut_replace!(self.program[f], |mut func: Func<'p>| {
             ResolveScope::resolve_sign(&mut func, self)?; // TODO
             Ok((func, ()))
@@ -1213,10 +1212,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
-        if self.program[f].resolved_body {
+        if self.program[f].get_flag(FuncFlags::ResolvedBody) {
             return Ok(());
         }
-        debug_assert!(!self.program[f].evil_uninit, "ensure_resolved_body of evil_uninit {}", self.log_trace());
+        debug_assert!(
+            self.program[f].get_flag(FuncFlags::NotEvilUninit),
+            "ensure_resolved_body of evil_uninit {}",
+            self.log_trace()
+        );
         self.ensure_resolved_sign(f)?;
         mut_replace!(self.program[f], |mut func: Func<'p>| {
             ResolveScope::resolve_body(&mut func, self)?; // TODO
@@ -2143,7 +2146,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: bad things are going on. it changes behavior if this is a debug_assert.
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
         //       so making it work in debug with debug_assert is probably the better outcome.
-        assert!(!f.evil_uninit, "{}", self.pool.get(f.name));
+        assert!(f.get_flag(FuncFlags::NotEvilUninit), "{}", self.pool.get(f.name));
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType { arg, ret }));
         }
@@ -2268,10 +2271,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     };
 
                     if let Some(f) = f_id {
-                        debug_assert!(!self.program[f].evil_uninit);
+                        debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
                         // TODO: try to compile it now.
                         // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
-                        let is_ready = self.program[f].asm_done;
+                        let is_ready = self.program[f].get_flag(FuncFlags::AsmDone);
                         if is_ready && !self.program[f].any_const_args() {
                             // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
                             let arg_ty = self.program[f].finished_arg.unwrap();
@@ -2304,9 +2307,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             Flag::Anon.ident()
         };
         let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
-        let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false, false);
-        fake_func.resolved_body = true;
-        fake_func.resolved_sign = true;
+        let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false);
+        fake_func.set_flag(FuncFlags::ResolvedBody, true);
+        fake_func.set_flag(FuncFlags::ResolvedSign, true);
         fake_func.finished_arg = Some(TypeId::unit);
         fake_func.finished_ret = Some(ret_ty);
         fake_func.scope = Some(ScopeId::from_index(0));
@@ -2376,7 +2379,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
             if let FuncImpl::Normal(body) = &mut self.program[f].body.clone() {
                 // debug_
-                assert!(self.program[f].resolved_body, "ICE: closures aren't lazy currently. missing =>?");
+                assert!(
+                    self.program[f].get_flag(FuncFlags::ResolvedBody),
+                    "ICE: closures aren't lazy currently. missing =>?"
+                );
                 // TODO: this is very suspisious! what if it has captures
                 let res = self.type_of(body);
                 debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
@@ -3135,8 +3141,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(new_f);
         }
 
-        if self.program[original_f].allow_rt_capture {
-            debug_assert!(self.program[original_f].resolved_body);
+        if self.program[original_f].get_flag(FuncFlags::AllowRtCapture) {
+            debug_assert!(self.program[original_f].get_flag(FuncFlags::ResolvedBody));
         } else {
             self.program[original_f].assert_body_not_resolved()?;
         }
@@ -3147,7 +3153,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut new_func = self.program[original_f].clone();
         // Closures always resolve up front, so they need to renumber the clone.
         // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
-        if self.program[original_f].allow_rt_capture {
+        if self.program[original_f].get_flag(FuncFlags::AllowRtCapture) {
             let mut mapping = Default::default();
             let mut renumber = RenumberVars {
                 vars: self.program.next_var,
@@ -3162,7 +3168,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 unreachable!()
             }
         }
-        new_func.referencable_name = false;
         let scope = new_func.scope.unwrap();
         let new_fid = self.program.add_func(new_func);
         self[scope].funcs.push(new_fid);
@@ -3604,8 +3609,15 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             self.placeholders.push(Some(mem::take(arg.deref_mut())));
             *expr = placeholder;
         } else if *name == Flag::Placeholder.ident() {
-            let index = arg.as_int().expect("!placeholder expected int") as usize;
-            let value = self.placeholders[index].take(); // TODO: make it more obvious that its only one use and the slot is empty.
+            let Expr::Value {
+                value: Values::One(Value::I64(index)),
+                ..
+            } = arg.expr
+            else {
+                unreachable!("!placeholder expected int")
+            };
+
+            let value = self.placeholders[index as usize].take(); // TODO: make it more obvious that its only one use and the slot is empty.
             *expr = value.unwrap();
         } else if *name == Flag::Quote.ident() {
             // TODO: add a simpler test case than the derive thing (which is what discovered this problem).

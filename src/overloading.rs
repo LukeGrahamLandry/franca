@@ -1,7 +1,7 @@
 use codemap::Span;
 use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Expr, FatExpr, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, Var, VarType};
+use crate::ast::{Expr, FatExpr, FuncFlags, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, Var, VarType};
 use crate::bc::{Value, Values};
 use crate::compiler::{Compile, DebugState, ExecTime, Res};
 use crate::logging::PoolLog;
@@ -173,7 +173,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         "- pending/failed {:?} {:?} uninit={}",
                         f,
                         self.program[f].arg.log(self.pool),
-                        self.program[f].evil_uninit
+                        !self.program[f].get_flag(FuncFlags::NotEvilUninit)
                     )
                     .unwrap()
                 }
@@ -205,7 +205,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         while let Some(f) = decls.pop() {
             decls.extend(mem::take(&mut self.program[i].pending));
 
-            if self.program[f].evil_uninit {
+            if !self.program[f].get_flag(FuncFlags::NotEvilUninit) {
                 continue;
             }
             if self.ensure_resolved_sign(f).is_err() {

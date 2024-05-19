@@ -255,7 +255,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
                 let name = name.unwrap_or_else(|| self.anon_fn_name(&body));
 
-                let mut func = Func::new(name, arg, ret, Some(body), loc, false, capturing);
+                let mut func = Func::new(name, arg, ret, Some(body), loc, capturing);
                 func.annotations = ann;
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
@@ -266,7 +266,7 @@ impl<'a, 'p> Parser<'a, 'p> {
 
                 let name = self.anon_fn_name(&body);
 
-                let func = Func::new(name, Pattern::empty(loc), LazyType::Infer, Some(body), loc, false, true);
+                let func = Func::new(name, Pattern::empty(loc), LazyType::Infer, Some(body), loc, true);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
             Fun => Err(self.error_next("use 'fn' for lambda expression. 'fun' means public which doesn't make sense for an expression".to_string())),
@@ -442,7 +442,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.eat(RightSquiggle)?;
 
                     let name = name.unwrap_or_else(|| self.anon_fn_name(&callback));
-                    let mut callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), false, true);
+                    let mut callback = Func::new(name, arg, ret, Some(callback), *self.spans.last().unwrap(), true);
                     callback.annotations = ann;
                     let callback = self.expr(Expr::Closure(Box::new(callback)));
 
@@ -634,9 +634,9 @@ impl<'a, 'p> Parser<'a, 'p> {
             _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
         };
 
-        let mut func = Func::new(name.unwrap(), arg, ret, body, loc, true, false);
+        let mut func = Func::new(name.unwrap(), arg, ret, body, loc, false);
         func.annotations = ann;
-        Ok(Stmt::DeclFunc(func))
+        Ok(Stmt::DeclFunc(Box::new(func)))
     }
 
     fn parse_stmt_inner(&mut self) -> Res<'p, FatStmt<'p>> {
@@ -693,7 +693,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         let callback = self.parse_block_until_squiggle()?;
                         // Note: we leave the closing squiggle because the outer code is expecting to be inside a block.
                         let name = self.anon_fn_name(&callback);
-                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), false, true);
+                        let callback = Func::new(name, arg, LazyType::Infer, Some(callback), *self.spans.last().unwrap(), true);
                         let callback = self.expr(Expr::Closure(Box::new(callback)));
 
                         self.push_arg(&mut call, callback)?;
