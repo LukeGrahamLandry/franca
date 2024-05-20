@@ -440,13 +440,11 @@ fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
 }
 
 fn set_colour(r: u8, g: u8, b: u8) {
-    std::io::stdout().write_all(&[27]).unwrap();
-    print!("[38;2;{r};{g};{b}m");
+    print!("\x1B[38;2;{r};{g};{b}m");
 }
 
 fn unset_colour() {
-    std::io::stdout().write_all(&[27]).unwrap();
-    print!("[0m");
+    print!("\x1B[0m");
 }
 
 fn do_60fps(arch: TargetArch) {

@@ -85,15 +85,17 @@ pub struct TypeMeta {
     // TODO: can this be a u16 so this struct + option bit could fit in a word if we really wanted?
     pub float_mask: u32,
     pub has_special_pointer_fns: bool,
+    pub contains_pointers: bool,
 }
 
 impl TypeMeta {
-    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool) -> Self {
+    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool, contains_pointers: bool) -> Self {
         Self {
             size_slots,
             align_bytes,
             float_mask,
             has_special_pointer_fns,
+            contains_pointers,
         }
     }
 }
@@ -655,6 +657,7 @@ pub enum FuncFlags {
     AllowRtCapture,
     EnsuredCompiled,
     AsmDone,
+    TryConstantFold,
 }
 
 impl<'p> Func<'p> {
@@ -1281,11 +1284,12 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
-            TypeInfo::Unknown => TypeMeta::new(1, 1, 0, false),
+            TypeInfo::Unknown => TypeMeta::new(1, 1, 0, false, false),
             TypeInfo::Tuple(args) => {
                 let mut size = 0;
                 let mut align = 0;
                 let mut mask = 0;
+                let mut pointers = false;
 
                 for arg in args {
                     let info = self.get_info(*arg);
@@ -1299,41 +1303,37 @@ impl<'p> Program<'p> {
                         mask <<= info.size_slots;
                         mask |= info.float_mask;
                     }
+                    pointers |= info.contains_pointers;
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false)
+                TypeMeta::new(size, align, mask, false, pointers)
             }
             &TypeInfo::Struct { as_tuple, .. } => self.get_info(as_tuple),
             TypeInfo::Tagged { cases, .. } => {
                 let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
+                let pointers = cases.iter().any(|(_, ty)| self.get_info(*ty).contains_pointers);
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.
-                TypeMeta::new(size, 8, 0, false)
+                TypeMeta::new(size, 8, 0, false, pointers)
             }
-            TypeInfo::Never => TypeMeta::new(0, 1, 0, false),
+            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false),
             TypeInfo::Int(int) => {
                 // TODO: u16, u32
                 // TODO: track sizes in bytes, not slots.
                 if int.bit_count == 8 {
                     // :SmallTypes
-                    TypeMeta::new(1, 1, 0, true)
+                    TypeMeta::new(1, 1, 0, true, false)
                 } else {
-                    TypeMeta::new(1, 8, 0, false)
+                    TypeMeta::new(1, 8, 0, false, false)
                 }
             }
-            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false),
-            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true),
-            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true), // :SmallTypes
+            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false),
+            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false),
+            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false), // :SmallTypes
+            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true),
             // TODO:  indexes should be u32
-            TypeInfo::Scope
-            | TypeInfo::Label(_)
-            | TypeInfo::Fn(_)
-            | TypeInfo::Ptr(_)
-            | TypeInfo::VoidPtr
-            | TypeInfo::FnPtr(_)
-            | TypeInfo::Type
-            | TypeInfo::OverloadSet => TypeMeta::new(1, 8, 0, false),
+            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet => TypeMeta::new(1, 8, 0, false, false),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
@@ -1644,9 +1644,11 @@ pub enum Flag {
     No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
     __Return,
     __Get_Assertions_Passed,
+    __String_Escapes,
     Test_Broken,
     Load,
     Store,
+    Fold,
     _Reserved_Count_,
 }
 

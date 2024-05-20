@@ -25,7 +25,7 @@ use crate::{
     ast::{CallConv, Flag, FnType, FuncId, Program, TypeId, TypeInfo},
     bc::{BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
-    compiler::{CErr, Compile, CompileError, Res},
+    compiler::{CErr, Compile, CompileError, ExecTime, Res},
     emit_bc::empty_fn_body,
     err, extend_options,
     logging::make_err,
@@ -79,7 +79,7 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 }
 
 pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, f: FuncId) -> Res<'p, ()> {
-    let mut body = empty_fn_body(compile.program, f);
+    let mut body = empty_fn_body(compile.program, f, ExecTime::Both);
     body.func = f;
     let arg = compile.program[f].finished_arg.unwrap();
     let arg = compile.program.get_info(arg);
@@ -100,6 +100,7 @@ impl Default for JittedCl {
         let mut flags = settings::builder();
         flags.set("preserve_frame_pointers", "true").unwrap();
         flags.set("unwind_info", "false").unwrap();
+        flags.set("enable_pinned_reg", "true").unwrap();
 
         // TODO: want to let comptime control settings...
         // flags.set("opt_level", "speed").unwrap();
@@ -774,5 +775,11 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     }),
     ("fun float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_from_sint(F64, v[0])
+    }),
+    ("fun bitcast(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().bitcast(F64, MemFlags::new(), v[0])
+    }),
+    ("fun bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().bitcast(I64, MemFlags::new(), v[0])
     }),
 ];

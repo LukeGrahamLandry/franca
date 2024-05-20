@@ -28,7 +28,7 @@ pub enum TokenType<'p> {
     Symbol(Ident<'p>),
     Number(i64),
     Float(f64),
-    Quoted(Ident<'p>),
+    Quoted { s: Ident<'p>, escapes: bool },
     DotLeftSquiggle,
     LeftSquiggle,
     RightSquiggle,
@@ -271,17 +271,25 @@ impl<'a, 'p> Lexer<'a, 'p> {
 
     // TODO: support escape characters
     fn lex_quoted(&mut self) -> Token<'p> {
-        if let Some((start, end)) = self.skip_quoted() {
+        if let Some(((start, end), escapes)) = self.skip_quoted() {
             let text = &self.src.source_slice(self.root)[start..end];
             // TODO: probably dont want to always hash string constants like this.
-            self.token(Quoted(self.pool.intern(text)), self.start, self.current)
+            self.token(
+                Quoted {
+                    s: self.pool.intern(text),
+                    escapes,
+                },
+                self.start,
+                self.current,
+            )
         } else {
             self.err(LexErr::UnterminatedStr)
         }
     }
 
-    fn skip_quoted(&mut self) -> Option<(usize, usize)> {
+    fn skip_quoted(&mut self) -> Option<((usize, usize), bool)> {
         self.pop();
+        let mut contains_escapes = false;
         loop {
             match self.pop() {
                 '"' => {
@@ -295,10 +303,14 @@ impl<'a, 'p> Lexer<'a, 'p> {
                                 _ => count = 0,
                             }
                         }
-                        Some((self.start + 3, self.current - 3))
+                        Some(((self.start + 3, self.current - 3), false))
                     } else {
-                        Some((self.start + 1, self.current - 1))
+                        Some(((self.start + 1, self.current - 1), contains_escapes))
                     };
+                }
+                '\\' => {
+                    self.pop(); // an extra so you can do \".
+                    contains_escapes = true;
                 }
                 // I could let you have multi-line, but I don't like it because you end up with garbage indentation.
                 '\n' | '\0' => return None,

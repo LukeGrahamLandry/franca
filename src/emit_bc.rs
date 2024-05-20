@@ -23,9 +23,9 @@ struct EmitBc<'z, 'p: 'z> {
     is_flat_call: bool,
 }
 
-pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId) -> Res<'p, FnBody<'p>> {
+pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, FnBody<'p>> {
     let mut emit = EmitBc::new(compile.program);
-    let body = emit.compile_inner(f)?;
+    let body = emit.compile_inner(f, when)?;
     Ok(body)
 }
 
@@ -37,13 +37,13 @@ pub enum ResultLoc {
 }
 use ResultLoc::*;
 
-pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId) -> FnBody<'p> {
+pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecTime) -> FnBody<'p> {
     let mut jump_targets = BitSet::empty();
     jump_targets.set(0); // entry is the first instruction
     FnBody {
         var_names: vec![],
         vars: Default::default(),
-        when: ExecTime::Comptime, // TODO
+        when,
         func,
         blocks: vec![],
         name: program[func].name,
@@ -66,14 +66,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    fn compile_inner(&mut self, f: FuncId) -> Res<'p, FnBody<'p>> {
+    fn compile_inner(&mut self, f: FuncId, when: ExecTime) -> Res<'p, FnBody<'p>> {
         if self.program[f].has_tag(Flag::Log_Ast) {
             println!("{}", self.program[f].log(self.program.pool));
         }
 
         self.locals.clear();
         self.locals.push(vec![]);
-        let mut result = empty_fn_body(self.program, f);
+        let mut result = empty_fn_body(self.program, f, when);
         match self.emit_body(&mut result, f) {
             Ok(_) => Ok(result),
             Err(mut e) => {
@@ -496,23 +496,31 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     var.log(self.program.pool)
                 )
             }
-            Expr::Value { value } => match result_location {
-                PushStack => {
-                    for value in value.clone().vec().into_iter() {
-                        result.push(Bc::PushConstant { value });
+            Expr::Value { value } => {
+                // if self.program.get_info(expr.ty).contains_pointers {
+                //     println!("YES: {value:?}")
+                // } else {
+                //     println!("NO: {value:?}")
+                // }
+
+                match result_location {
+                    PushStack => {
+                        for value in value.clone().vec().into_iter() {
+                            result.push(Bc::PushConstant { value });
+                        }
                     }
-                }
-                ResAddr => {
-                    for value in value.clone().vec().into_iter() {
-                        result.push(Bc::Dup);
-                        result.push(Bc::PushConstant { value });
-                        result.push(Bc::StorePre { slots: 1 });
-                        result.push(Bc::IncPtr { offset: 1 });
+                    ResAddr => {
+                        for value in value.clone().vec().into_iter() {
+                            result.push(Bc::Dup);
+                            result.push(Bc::PushConstant { value });
+                            result.push(Bc::StorePre { slots: 1 });
+                            result.push(Bc::IncPtr { offset: 1 });
+                        }
+                        result.push(Bc::Pop { slots: 1 }); // res ptr
                     }
-                    result.push(Bc::Pop { slots: 1 }); // res ptr
+                    Discard => {}
                 }
-                Discard => {}
-            },
+            }
             Expr::SuffixMacro(macro_name, arg) => {
                 let Ok(name) = Flag::try_from(*macro_name) else {
                     // TODO: this will change when you're able to define !bang macros in the language.

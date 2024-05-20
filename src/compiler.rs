@@ -336,7 +336,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
             if let FuncImpl::Normal(_) = self.program[f].body {
-                let body = emit_bc(self, f)?;
+                let body = emit_bc(self, f, when)?;
                 // TODO: they can't try to do tailcalls between eachother because they disagress about what that means.
 
                 #[cfg(feature = "cranelift")]
@@ -388,11 +388,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             .pending_indirect
             .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::empty());
         if !self.aarch64.pending_indirect.is_empty() {
-            println!("run {f:?} pending:{:?}", self.aarch64.pending_indirect);
+            // println!("run {f:?} pending:{:?}", self.aarch64.pending_indirect);
             for f in self.aarch64.pending_indirect.clone() {
                 debug_assert!(!self.program[f].get_flag(FuncFlags::AsmDone));
                 self.compile(f, when)?;
-                println!("{}", self.program[f].body.log(self.pool));
+                // println!("{}", self.program[f].body.log(self.pool));
             }
             #[cfg(feature = "cranelift")]
             {
@@ -1026,10 +1026,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(());
                     } else {
-                        assert!(value.expr.is_raw_unit(), "var no name not unit: {}", value.log(self.pool));
+                        if value.expr.is_raw_unit() {
+                            // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
+                            stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
+                        } else {
+                            self.compile_expr(value, Some(ty))?;
+                        }
 
-                        // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
-                        stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         return Ok(());
                     }
                 }
@@ -1146,9 +1149,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        let func = &self.program[id];
-
         let is_cl = self.program.comptime_arch == TargetArch::Cranelift;
+        let func = &mut self.program[id];
         if func.has_tag(Flag::Test) && (!is_cl || !func.has_tag(Flag::Skip_Cranelift)) {
             // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests.push(id);
@@ -1156,6 +1158,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         if func.has_tag(Flag::Test_Broken) && (!is_cl || !func.has_tag(Flag::Skip_Cranelift)) {
             // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
             self.tests_broken.push(id);
+        }
+        if func.has_tag(Flag::Fold) {
+            func.set_flag(FuncFlags::TryConstantFold, true);
         }
 
         Ok(out)
@@ -2993,9 +2998,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // the bool return is did_inline which will be banned if its a Split FuncRef.
+    // the bool return is did_inline which will be banned if its a Split FuncRef. // TODO: remove that cause i dont do it anymore
     fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId, requested: Option<TypeId>) -> Res<'p, (TypeId, bool)> {
         let loc = expr.loc;
+        let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         let func = &self.program[fid];
         let is_comptime = func.has_tag(Flag::Comptime);
@@ -3040,6 +3046,17 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             // TODO: check that you're calling from the same place as the definition.
             Ok((self.emit_capturing_call(fid, expr)?, true))
+        } else if !done && func.get_flag(FuncFlags::TryConstantFold) && arg_expr.as_const().is_some() {
+            // TODO: this should be smarter. like if fn add is #fold, then (1.add(2.add(3))) doesn't need to do the fold at both levels,
+            // it can just emit one function for doing the top one. idk if thats better. probably depends how complicated the expression is.
+            let ty = self.program.func_type(fid);
+            let ret_ty = self.program[fid].finished_ret.unwrap();
+            f_expr.set(Value::GetFn(fid).into(), ty);
+            expr.done = true; // don't infinitly recurse!
+            expr.ty = ret_ty;
+            let value = self.immediate_eval_expr(expr.clone(), ret_ty)?;
+            expr.set(value, ret_ty);
+            Ok((ret_ty, true))
         } else {
             let res = self.emit_runtime_call(fid, arg_expr)?;
             // Since we've called it, we must know the type by now.

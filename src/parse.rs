@@ -321,11 +321,18 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.pop();
                 Ok(self.expr(Expr::GetNamed(i)))
             }
-            Quoted(i) => {
+            // TODO: maybe its wrong to both putting everything in the pool
+            Quoted { s, escapes } => {
                 self.start_subexpr();
                 self.pop();
-                // TODO: maybe its wrong to both putting everything in the pool
-                Ok(self.expr(Expr::String(i)))
+                let mut e = self.expr(Expr::String(s));
+                if escapes {
+                    self.start_subexpr();
+                    self.start_subexpr();
+                    let f = Box::new(self.expr(Expr::GetNamed(Flag::__String_Escapes.ident())));
+                    e = self.expr(Expr::Call(f, Box::new(e)));
+                }
+                Ok(e)
             }
             // TODO: allow this as a raw statement, currently it will get parsed as an annotation on a noop.
             // TODO: should i allow the payload to be statement too?
@@ -715,9 +722,10 @@ impl<'a, 'p> Parser<'a, 'p> {
 
                 if name == Flag::Include_Std.ident() {
                     self.eat(LeftParen)?;
-                    let TokenType::Quoted(name) = self.peek() else {
+                    let TokenType::Quoted { s: name, escapes } = self.peek() else {
                         return Err(self.expected("quoted path"));
                     };
+                    assert!(!escapes, "TODO: string escapes in include");
                     self.pop();
                     self.eat(RightParen)?;
                     self.eat(Semicolon)?;

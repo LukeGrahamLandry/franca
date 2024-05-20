@@ -165,3 +165,41 @@ fun to_list(self: CStr) List$u8 = {
     };
     out
 }
+
+/// Like rust, not c. hex escapes eat exactly two chars. no octal escapes except \0. 
+// Note: you can't use the string escapes in the body of this function, or any it calls, because there's no bootstrapping step. 
+fn __string_escapes(raw: Str) Str #fold = {
+    backslash       : u8 : 92;
+    doublequote     : u8 : 34;
+    horizontal_tab  : u8 :  9;
+    carriage_return : u8 : 13;
+
+    out : List$u8 = list(raw.len);
+    i := 0;
+    while(=> i.lt(raw.len)){|
+        c := raw[i]; i += 1;
+        if(c.eq(backslash)){|
+            c = raw[i]; i += 1;
+            c = @switch(c) {
+                @case("n".ascii()) => @as(u8) 10;
+                @case(doublequote) => doublequote;
+                @case(backslash)   => backslash;
+                @case("r".ascii()) => carriage_return;
+                @case("t".ascii()) => horizontal_tab;
+                @case("'".ascii()) => "'".ascii();  // rust has this one because of single quoted char literals. 
+                @case("0".ascii()) => 0;
+                @case("x".ascii()) => {
+                    s := raw.subslice(i, 2); i += 2;
+                    @as(u8) @as(i64) hex(s)
+                };
+                @default fn(_: u8) => panic("Unknown escape character"); // TODO: compile_error. better message. show line. 
+            };
+        };
+        out&.push(c);
+    };
+    
+    // TODO: should put in the string pool. 
+    //       maybe this should be a macro that works on idents so compiler knows they're still just a string literal.
+    //       but that kinda feels less elegant. 
+    out.items() // LEAK
+}

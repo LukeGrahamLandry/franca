@@ -167,7 +167,7 @@ impl<'p> Lsp<'p> {
             let kind = match &token.kind {
                 TokenType::Error(_) | TokenType::Eof => break,
                 TokenType::BinaryNum { .. } | TokenType::Number(_) => 0,
-                TokenType::Quoted(_) => 1,
+                TokenType::Quoted { .. } => 1,
                 TokenType::Symbol(i) => {
                     if i.0 < Flag::_Reserved_Count_ as u32 {
                         3

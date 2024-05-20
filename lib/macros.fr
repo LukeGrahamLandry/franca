@@ -69,20 +69,37 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
         <{
             for(stmts) { (stmt: *FatStmt) | 
                 if(eq(stmt[].stmt&!tag[], tag_value(Stmt, @symbol(Eval)))) {|  // (1)
-                    var handler_body = stmt.stmt.Eval;
-                    name: Symbol = handler_body.expr.Closure[].name; // (2)
+                    var handler_body = stmt.stmt.Eval&;
+                    closure := handler_body.expr.Closure&;
+                    name: Symbol = closure.name; // (2)
                     index := tag_value(enum_type, name); // they're always sequential
                     name_ty := varients[].get(index);
                     assert(name_ty.(0).eq(name), "ICE: bad enum index");
                     
-                    
+                    ty := name_ty.(1);
+                    if(is_ptr){|
+                        ty = intern_type(@as(TypeInfo) (Ptr = ty));
+                    };
+            
+                    // If they didn't say the argument type, we can fill it in based on the varient name. 
+                    // If they don't put an argument, just ignore the value. Have to set the type because it defaults to Unit. 
+                    bindings: Slice(Binding) = closure.arg.bindings;
+                    if(bindings.len.eq(1)){|
+                        first := bindings[0]&;
+                        infer := first.ty&!tag[].eq(tag_value(LazyType, @symbol Infer));
+                        Name :: Name!builtin;
+                        no_name := first.name&!tag[].eq(tag_value(Name, @symbol None)); 
+                        if (infer.or(no_name)){|
+                            first.ty = (Finished = ty);
+                        };
+                    };
                     var case_access = 'arg_ptr.___';
                     case_access.expr.FieldAccess.(1) = name;  // (3)
                     let tag = 'tag_value(<@literal(Type) enum_type>, <@literal(name)>)';
                     if(is_ptr){|
                         case_access = '<case_access>&';
                     };
-                    body = '(eq(tag_val, <tag>), => <handler_body>(<case_access>), => <body>)!if';
+                    body = '(eq(tag_val, <tag>), => <handler_body[]>(<case_access>), => <body>)!if';
                 };
             };
             body
@@ -186,7 +203,6 @@ fun bits(var arg: AstExpr) AstExpr = {
     as(i64, expr)
 }
 
-
 /// The parser desugars stuff into calls to these blessed functions. 
 /// But it just refers to them by name. If you cause that to resolve to your own function, you can change the operator's behaviour. 
 #macro #outputs(Unit) fn operator_plus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, add);
@@ -234,7 +250,6 @@ fun enum(var names: FatExpr) FatExpr = {
     kind := names.expr&!tag[];
     assert(eq(kind, tag_value(Expr, @symbol(Tuple))), "expected @enum(name1, name2, etc)"); // TODO: single element should be legal i guess. 
 
-    Binding :: Binding!builtin;
     fn binding(name: Symbol, value: i64) Binding = {
         template := '(a = 0)';
         all : Slice$Binding = template.expr.StructLiteralP.bindings; 

@@ -1,3 +1,12 @@
+## (May 20)
+
+- have @match fill in argument types since it knows from the varient name
+- want to add escape chars in strings by just having the parser emit calls to a comptime function.
+  but to pass that to .char(), which you often want to do, need to save a way of saying that function should be constant folded.
+
+## (May 19)
+
+- use bit set for func flags. make some other structs smaller
 - got rid of ::F64, ::Heap. ::Bool, and ::Symbol Value varients, because the compiler doesn't care about them other than type.
 
 ## (May 18)
