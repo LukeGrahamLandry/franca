@@ -53,6 +53,10 @@ pub enum TypeInfo<'p> {
     FnPtr(FnType),
     Tuple(Vec<TypeId>),
     Ptr(TypeId), // One element
+    Array {
+        inner: TypeId,
+        len: usize,
+    },
     Struct {
         // You probably always have few enough that this is faster than a hash map.
         fields: Vec<Field<'p>>,
@@ -83,7 +87,6 @@ pub struct TypeMeta {
     pub size_slots: u16,
     pub stride_bytes: u16,
     pub align_bytes: u16,
-    // TODO: can this be a u16 so this struct + option bit could fit in a word if we really wanted?
     pub float_mask: u32,
     pub has_special_pointer_fns: bool,
     pub contains_pointers: bool,
@@ -1099,6 +1102,7 @@ impl<'p> Program<'p> {
 
     pub fn for_llvm_ir(&self, ty: TypeId) -> &str {
         match &self[ty] {
+            TypeInfo::Array { .. } => todo!(),
             TypeInfo::F64 => "double",
             TypeInfo::Unknown | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
@@ -1341,6 +1345,17 @@ impl<'p> Program<'p> {
                 TypeMeta::new(1, 8, 0, false, false, 8)
             }
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+            &TypeInfo::Array { inner, len } => {
+                let info = self.get_info(inner);
+                TypeMeta::new(
+                    info.size_slots * len as u16,
+                    info.align_bytes,
+                    0,
+                    false,
+                    info.contains_pointers,
+                    info.stride_bytes * len as u16,
+                )
+            }
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
         info

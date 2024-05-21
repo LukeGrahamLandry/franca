@@ -164,6 +164,7 @@ impl<'p> Program<'p> {
                     TypeInfo::Int(int) => {
                         format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
                     }
+                    TypeInfo::Array { inner, len } => format!("Array({}, {len})", self.log_type(*inner)),
                     TypeInfo::Scope => "ScopeId".to_owned(),
                 }
             } else {
@@ -488,7 +489,7 @@ impl<'p> DebugState<'p> {
             DebugState::EvalConstants(f, i) => format!("| Eval Consts | {:?} {}", *f, pool.get(*i)),
             DebugState::EmitCapturingCall(f, i) => format!("| Captur Call | {:?} {}", *f, pool.get(*i)),
             DebugState::ResolveFnRef(v) => format!("| Find Fn | {}", v.log(pool)),
-            DebugState::RunInstLoop(f, i) => format!("| Loop Insts  | {:?} {}", *f, pool.get(*i)),
+            DebugState::RunInstLoop(f, i) => format!("| Execute  | {:?} {}", *f, pool.get(*i)),
             DebugState::ComptimeCall(f, i) => format!("| Comptime Call | {:?} {}", *f, pool.get(*i)),
             DebugState::ResolveFnType(f, i) => format!("| Resolve Type| {:?} {}", *f, pool.get(*i)),
             DebugState::ResolveConstant(v) => format!("| Find Const | {}", v.log(pool)),

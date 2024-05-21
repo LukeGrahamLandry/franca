@@ -168,6 +168,7 @@ fn main() {
             if let Some(output) = exe_path {
                 let obj = emit_cl_exe(&mut comp, f).unwrap();
                 log_time();
+
                 let bytes = obj.emit().unwrap();
                 fs::write(output, bytes).unwrap();
             } else {

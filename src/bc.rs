@@ -166,8 +166,8 @@ pub fn int_to_value(compile: &mut Compile, ty: TypeId, n: i64) -> Res<'static, V
 
 pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
     Some(match info {
-        // TODO: struct and tuple with one field?
-        &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
+        // TODO: array, struct and tuple with one field?
+        TypeInfo::Array { .. } | &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
         TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
         &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
         TypeInfo::Unit => unreachable!(),

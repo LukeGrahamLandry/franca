@@ -305,7 +305,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             for name in names {
                 let index = unwrap!(
                     pattern.bindings.iter().position(|p| p.name() == Some(name)),
-                    "missing named argument {name:?}"
+                    "missing named argument {}",
+                    self.pool.get(name)
                 );
                 let value = pattern.bindings.remove(index);
                 assert!(matches!(value.ty, LazyType::Infer), "use '=' not ':' for named arg");

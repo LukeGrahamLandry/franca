@@ -498,12 +498,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 )
             }
             Expr::Value { value } => {
-                if result.when != ExecTime::Comptime && self.program.get_info(expr.ty).contains_pointers {
-                    if result_location != Discard {
-                        self.emit_relocatable_constant(expr.ty, value, result, result_location)?;
-                    }
-                    return Ok(());
-                }
+                // TODO
+                // if result.when != ExecTime::Comptime && self.program.get_info(expr.ty).contains_pointers {
+                //     if result_location != Discard {
+                //         self.emit_relocatable_constant(expr.ty, value, result, result_location)?;
+                //     }
+                //     return Ok(());
+                // }
 
                 match result_location {
                     PushStack => {

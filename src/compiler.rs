@@ -331,10 +331,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             cfg!(feature = "cranelift") && (self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift);
 
         #[cfg(feature = "cranelift")]
-        if use_cl {
-            if let Some(&cl) = self.program[f].body.cranelift_emit() {
-                crate::cranelift::emit_cl_intrinsic(self.program, &mut self.cranelift, f)?
-            }
+        if use_cl && self.program[f].body.cranelift_emit().is_some() {
+            crate::cranelift::emit_cl_intrinsic(self.program, &mut self.cranelift, f)?
         }
 
         if self.program[f].cc.unwrap() != CallConv::Inline {
@@ -2828,7 +2826,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: auto deref
                 let i: i64 = self.immediate_eval_expr_known(*index.clone())?;
                 self.set_literal(index, i)?;
-                let field_ptr_ty = self.index_expr(ptr.ty, i as usize)?;
+                let field_ptr_ty = self.get_index_type(ptr.ty, i as usize)?;
                 debug_assert!(!matches!(ptr.expr, Expr::GetVar(_)));
                 place.expr = Expr::PtrOffset {
                     ptr: Box::new(mem::take(ptr)),
@@ -2954,41 +2952,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // :PlaceExpr
-    fn index_expr(&mut self, container_ptr: TypeId, index: usize) -> Res<'p, TypeId> {
-        let container_ptr_ty = self.program.raw_type(container_ptr);
-        let depth = self.program.ptr_depth(container_ptr_ty);
-        assert_eq!(depth, 1, "index expr ptr must be one level of indirection");
-        let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "");
-        let mut raw_container_ty = self.program.raw_type(container_ty);
-
-        if let TypeInfo::Struct { as_tuple, fields, .. } = &self.program[raw_container_ty] {
-            // A struct with one field will have its as_tuple be another struct.
-            if let TypeInfo::Struct { .. } = self.program[*as_tuple] {
-                // There should only be one field
-                assert_eq!(fields.len(), 1);
-                assert_eq!(index, 0);
-                // TODO: this is just a noop type cast, should update the ast.
-                let ty = self.program.ptr_type(fields[0].ty);
-                return Ok(ty);
-            }
-            raw_container_ty = self.program.raw_type(*as_tuple);
-        }
-
-        if let TypeInfo::Tagged { cases } = &self.program[raw_container_ty] {
-            let ty = cases[index].1;
-            let ty = self.program.ptr_type(ty);
-            return Ok(ty);
-        }
-
-        if let TypeInfo::Tuple(types) = &self.program[raw_container_ty] {
-            let f_ty = types[index];
-            let ty = self.program.ptr_type(f_ty);
-            Ok(ty)
-        } else {
-            err!("Only tuples support index expr, not {:?}", self.program[raw_container_ty])
-        }
-    }
-
     fn get_index_type(&mut self, container_ptr_ty: TypeId, index: usize) -> Res<'p, TypeId> {
         let container_ty = unwrap!(
             self.program.unptr_ty(container_ptr_ty),
@@ -3002,6 +2965,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             TypeInfo::Struct { fields, .. } => Ok(self.program.ptr_type(fields[index].ty)),
             TypeInfo::Tagged { cases, .. } => Ok(self.program.ptr_type(cases[index].1)),
             TypeInfo::Unique(_, _) => unreachable!(),
+            &TypeInfo::Array { inner, .. } => Ok(self.program.ptr_type(inner)),
             _ => err!(
                 "only tuple/struct/enum/ support field access but found {}",
                 self.program.log_type(container_ty)
@@ -3458,6 +3422,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         // This makes addr_of const for @enum work
         //
         // TODO: :PushConstFnCtx
+        // let inferred_type = self.type_of(value)?;
+        // println!("{inferred_type:?}");
         let res = self.compile_expr(value, ty.ty())?;
         let mut val = self.immediate_eval_expr(value.clone(), res)?;
         // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.

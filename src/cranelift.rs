@@ -489,8 +489,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         let callee = self
                             .asm
                             .as_mut()
-                            .map(|a| a.get_fn(f))
-                            .flatten()
+                            .and_then(|a| a.get_fn(f))
                             .map(|a| a as u64)
                             .map(|addr| builder.ins().iconst(I64, addr as i64))
                             .unwrap_or_else(|| {
@@ -665,6 +664,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
     fn make_type(&mut self, ty: TypeId) -> Type {
         let ty = self.program.raw_type(ty);
         match &self.program[ty] {
+            TypeInfo::Array { .. } => todo!(),
             TypeInfo::Unknown => todo!(),
             TypeInfo::Never => todo!(),
             TypeInfo::F64 => F64,

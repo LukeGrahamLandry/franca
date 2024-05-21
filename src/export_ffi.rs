@@ -60,8 +60,8 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
     ("fn malloc(size: usize) rawptr", libc::malloc as *const u8),
     ("fn free(ptr: rawptr) Unit", libc::free as *const u8),
-    ("fn system(null_terminated_cmd: Ptr(u8)) i64", libc::system as *const u8),
-    ("fn open(null_terminated_path: Ptr(u8), flags: i64) Fd", libc::open as *const u8),
+    ("fn system(null_terminated_cmd: CStr) i64", libc::system as *const u8),
+    ("fn open(null_terminated_path: CStr, flags: i64) Fd", libc::open as *const u8),
     ("fn close(fd: Fd) i64", libc::close as *const u8),
     ("fn rand() i64", libc::rand as *const u8),
     ("fn get_errno() i64", get_errno as *const u8),
@@ -86,7 +86,16 @@ pub const LIBC: &[(&str, *const u8)] = &[
     ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
     ("fn read(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::read as *const u8),
     ("fn c_memcpy(dest: rawptr, src: rawptr, n: i64) i64", libc::memcpy as *const u8),
+    ("fn tcgetattr(fd: Fd, out: *Terminos) Unit", libc::tcgetattr as *const u8),
+    (
+        "fn tcsetattr(fd: Fd, optional_actions: i64, in: *Terminos) Unit",
+        libc::tcsetattr as *const u8,
+    ),
 ];
+
+// tcgetattr(0, &mut term);
+// term.c_lflag |= ICANON | ECHO;
+// tcsetattr(0, TCSADRAIN, &term);
 
 // thank you rust very cool. TODO: non-macos
 #[cfg(target_os = "macos")]
@@ -178,10 +187,12 @@ pub fn get_include_std(name: &str) -> Option<String> {
             writeln!(out, "{}", msg).unwrap();
             writeln!(
                 out,
-                "const OpenFlag = @enum(i32) (Read = {}, Write = {}, ReadWrite = {});",
+                "const OpenFlag = @enum(i64) (Read = {}, Write = {}, ReadWrite = {}, Create = {}, Truncate = {});",
                 libc::O_RDONLY,
                 libc::O_WRONLY,
-                libc::O_RDWR
+                libc::O_RDWR,
+                libc::O_CREAT,
+                libc::O_TRUNC,
             )
             .unwrap();
             // TODO: this should be a bitflag. presumably PROT_NONE is always 0.

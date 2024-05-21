@@ -32,34 +32,21 @@ fun Slice(const T: Type) Type = {
     fun slice(ptr: *T) Self = (ptr = ptr, len = 1);
     // TODO: fun empty() Self = (ptr = zeroed(), len = 0);
     fun slice(ptr: *T, count: i64) Self = (ptr = ptr, len = count);
-    #inline
-    fun len(var self: Self) i64 = self.len;
     
-    #inline
-    fun get(var self: Self, i: i64) T = {
-        let v: *T = self.index(i);  // TODO: fix so dont need useless binding 
-        v[]
-    }
-    
-    #inline
-    fun index(var self: Self, i: i64) *T = {
-        // TODO: this should work but its kinda a dumb way to do it from before I gave ptr_utils -- May 2
-        //var s = self.subslice(i, 1);
-        //s&.ptr[]
-        
+    fun len(self: *Self) i64 #inline = self.len;
+    fun index(self: *Self, i: i64) *T #inline =  {
         assert(i.lt(self.len), "OOB");  
         self.ptr.offset(i)
     }
     
-    #inline fun index(self: *Self) *T = self[].index();
-    
-    // TODO: this should work without inlining. 
-    #inline
-    fun set(var self: Self, i: i64, v: T) Unit = {
-        // TODO: allowing this is a bit creepy if I don't specify order of evaluation. 
-        //       and having it be placement is scary if you aliased the lhs ptr on the rhs. 
-        self.index(i)[] = v; 
+    fun len(var self: Self) i64 #inline = self.len;
+    fun index(var self: Self, i: i64) *T #inline = {
+        assert(i.lt(self.len), "OOB");  
+        self.ptr.offset(i)
     }
+    
+    ::DeriveIndexable(Self, T);
+    ::DeriveIndexable(*Self, T); 
     
     fun slice(var self: Self, first: i64, past_last: i64) Self = {
         // TODO: first should be lt
@@ -83,10 +70,63 @@ fun Slice(const T: Type) Type = {
         self.slice(first, self.len())
     }
     
+    Self
+}
+
+:: {
+    temp : Fn(Type, Type) : Slice;
+    :: __save_slice_t(temp);
+};
+
+Str :: Slice(u8);
+
+// A value type fixed size array. Like [T; len] in Rust or [len] T in Zig.
+#comptime
+fn Array(const T: Type, const count: i64) Type = {
+    info: TypeInfo : (Array = (inner = T, len = count));
+    Self :: intern_type(info);
+    
+    fun init(elements: Slice(T)) Self #fold #no_tail = {
+        assert(eq(elements.len, count), "arrays have fixed length"); // TODO: better message 
+        self: Self = ()!uninitialized;
+        enumerate(elements){(i: i64, t: *T)|
+            self&.index(i)[] = t[];
+        };
+        self
+    }
+    
+    ::ptr_utils(T);
+    fun index(self: *Self, i: i64) *T = {
+        assert(lt(i, count), "OOB");
+        ptr: *T = @as(rawptr) self;
+        ptr.offset(i)
+    }
+    
+    fun len(self: *Self) i64 #inline = count;
+    
+    ::DeriveIndexable(*Self, T);
+    
+    Self
+}
+
+// Note: Passing *Self and Self mean different things. Containers that are already logically a pointer may want both for convenience. 
+// TODO: trait bounds. fn index(Self) *T; fn len(Self) i64;
+fn DeriveIndexable(const Self: Type, const T: Type) Unit #comptime = {
+    #inline
+    fun set(self: Self, i: i64, v: T) Unit = {
+        self.index(i)[] = v; 
+    }
+    
+    #inline
+    fun get(self: Self, i: i64) T = {
+        let v: *T = self.index(i);  // TODO: fix so dont need useless binding 
+        v[]
+    }
+    
     // TODO: the other fn type syntax so you can name the arguments in the closure as documentation. 
     // TODO: be more consistant about how tuples are expanded into args to fix Fn((a, b), c) === Fn(a, b, c) when you want Fn(Ty(a, b), c)
     //       seems like a massive mistake that I create ambiguity and then just guess something stupid and hope for the best. 
-    fun enumerate(var arr: Self, const f: Fn(Ty(i64, *T), Unit)) Unit = {
+    fun enumerate(arr: Self, const f: Fn(Ty(i64, *T), Unit)) Unit = {
         var i = 0;
         while(=> lt(i, arr.len())) {|
             let e: *T = arr.index(i);
@@ -98,10 +138,10 @@ fun Slice(const T: Type) Type = {
     // TODO: I don't love that I have to write the deref version seperatly
     //       but I dont have let destructuring (only function args) so its a pain to take tuples by pointer. 
     //       I should be able to destructure Ptr(A, B) to (Ptr(A), Ptr(B))
-    fun for(var arr: Self, const f: Fn(T, Unit)) Unit = 
+    fun for(arr: Self, const f: Fn(T, Unit)) Unit = 
         for(arr, fn(v: *T) Unit => f(v[]));
     
-    fun for(var arr: Self, const f: Fn(*T, Unit)) Unit = {
+     fun for(arr: Self, const f: Fn(*T, Unit)) Unit = {
         var i = 0;
         let l = arr.len();
         while(fn() bool => lt(i, l)) {|
@@ -110,7 +150,8 @@ fun Slice(const T: Type) Type = {
         };
     }
     
-    fun memcpy(dest: Self, src: Self) Unit = {
+    // TODO: Something's fucked! doesn't work if not inlined!
+    #inline fun memcpy(dest: Self, src: Self) Unit = {
         assert(eq(len(dest), len(src)), "OOB");  // Note: not using `asser t_eq` because the vm tracks those for my tests
         // TODO: sad that this does the bounds check every iteration but a real optimiser would fix it for me anyway so meh. 
         // TODO: this used to work as binding. new syntax is better but old should still work. broke when scan ahead resolve. -- Apr 22
@@ -121,7 +162,8 @@ fun Slice(const T: Type) Type = {
     }
     
     // TODO: add addr_eq/identical if that's really what you want but like... it never is I feel. 
-    fun eq(lhs: Self, rhs: Self) bool = {
+    // TODO: Something's fucked! doesn't work if not inlined!
+    #inline fun eq(lhs: Self, rhs: Self) bool = {
         eq(lhs.len(), rhs.len()).and { () bool |
             var i = 0;
             while(fn()bool=>i.lt(len(lhs)).and(fn()bool=> lhs.get(i).eq(rhs.get(i)))) {()Unit| 
@@ -132,21 +174,12 @@ fun Slice(const T: Type) Type = {
     }
     
     /// Set all elements of the slice to 't'. 
-    fun fill(self: *Self, t: T) Unit = {
+    fun fill(self: Self, t: T) Unit = {
         for(self) { (ptr: *T) |
             ptr[] = t;
         };
     }
-    
-    Self
 }
-
-:: {
-    temp : Fn(Type, Type) : Slice;
-    :: __save_slice_t(temp);
-};
-
-Str :: Slice(u8);
 
 fun endswith(haystack: Str, needle: Str) bool = {
     // TODO: prefix if syntax forces you to give a return type annotation

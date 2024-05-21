@@ -39,12 +39,22 @@ null_rule :: {
         table.set(i, rule);
     };
     
-    table.set(@as(i64) TokenType.LeftParen, @as(ParseRule) (prefix = grouping!fn_ptr, infix = null_rule, prec = Prec.None));
-    table.set(@as(i64) TokenType.Plus, @as(ParseRule) (prefix = null_rule, infix = binary!fn_ptr, prec = Prec.Term));
-    table.set(@as(i64) TokenType.Minus, @as(ParseRule) (prefix = unary!fn_ptr, infix = binary!fn_ptr, prec = Prec.Term));
-    table.set(@as(i64) TokenType.Star, @as(ParseRule) (prefix = null_rule, infix = binary!fn_ptr, prec = Prec.Factor));
-    table.set(@as(i64) TokenType.Slash, @as(ParseRule) (prefix = null_rule, infix = binary!fn_ptr, prec = Prec.Factor));
-    table.set(@as(i64) TokenType.Number, @as(ParseRule) (prefix = number!fn_ptr, infix = null_rule, prec = Prec.None));
+    table.set(@as(i64) TokenType.LeftParen, @as(ParseRule) (prefix = grouping!fn_ptr, infix = null_rule,        prec = Prec.None));
+    table.set(@as(i64) TokenType.Plus,      @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Term));
+    table.set(@as(i64) TokenType.Minus,     @as(ParseRule) (prefix = unary!fn_ptr,    infix = binary!fn_ptr,    prec = Prec.Term));
+    table.set(@as(i64) TokenType.Star,      @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Factor));
+    table.set(@as(i64) TokenType.Slash,     @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Factor));
+    table.set(@as(i64) TokenType.Number,    @as(ParseRule) (prefix = number!fn_ptr,   infix = null_rule,        prec = Prec.None));
+    table.set(@as(i64) TokenType.True,      @as(ParseRule) (prefix = parse_literal!fn_ptr,  infix = null_rule,  prec = Prec.None));
+    table.set(@as(i64) TokenType.False,     @as(ParseRule) (prefix = parse_literal!fn_ptr,  infix = null_rule,  prec = Prec.None));
+    table.set(@as(i64) TokenType.Nil,       @as(ParseRule) (prefix = parse_literal!fn_ptr,  infix = null_rule,  prec = Prec.None));
+    table.set(@as(i64) TokenType.Bang,      @as(ParseRule) (prefix = unary!fn_ptr,    infix = null_rule,        prec = Prec.None));
+    table.set(@as(i64) TokenType.EqualEqual,@as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Equality));
+    table.set(@as(i64) TokenType.BangEqual, @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Equality));
+    table.set(@as(i64) TokenType.Less,      @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Comparison));
+    table.set(@as(i64) TokenType.Greater,      @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Comparison));
+    table.set(@as(i64) TokenType.LessEqual,    @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Comparison));
+    table.set(@as(i64) TokenType.GreaterEqual, @as(ParseRule) (prefix = null_rule,       infix = binary!fn_ptr,    prec = Prec.Comparison));
     rules[] = table;
 };
 
@@ -102,19 +112,38 @@ unary :: fn(self: *Parser) Unit = {
         @case(@as(i64) TokenType.Minus) => {
             self.emit(OpCode.Negate);
         };
+        @case(@as(i64) TokenType.Bang) => {
+            self.emit(OpCode.Not);
+        };
         @default fn(_: i64) => unreachable();
     }
 };
 
+// TODO: a similar identifiers check so it can give better error message when you typo Opcode vs OpCode. 
 binary :: fn(self: *Parser) Unit = {
     type := self.previous.type;
     rule := get_rule(type);
     self.parse(@as(Prec) @as(i64) (@as(i64) rule.prec).add(1));
     op := @switch(@as(i64) type) {
-        @case(@as(i64) TokenType.Plus) => OpCode.Add; 
+        @case(@as(i64) TokenType.Plus)  => OpCode.Add; 
         @case(@as(i64) TokenType.Minus) => OpCode.Subtract; 
-        @case(@as(i64) TokenType.Star) => OpCode.Multiply; 
+        @case(@as(i64) TokenType.Star)  => OpCode.Multiply; 
         @case(@as(i64) TokenType.Slash) => OpCode.Divide; 
+        @case(@as(i64) TokenType.Less)  => OpCode.Less; 
+        @case(@as(i64) TokenType.Greater) => OpCode.Greater; 
+        @case(@as(i64) TokenType.EqualEqual) => OpCode.Equal; 
+        @case(@as(i64) TokenType.BangEqual) => {
+            self.emit(OpCode.Equal);
+            OpCode.Not
+        };
+        @case(@as(i64) TokenType.LessEqual) => {
+            self.emit(OpCode.Greater);
+            OpCode.Not
+        };
+        @case(@as(i64) TokenType.GreaterEqual) => {
+            self.emit(OpCode.Less);
+            OpCode.Not
+        };
         @default fn(_: i64) => unreachable();
     };
     self.emit(op);
@@ -124,6 +153,19 @@ grouping :: fn(self: *Parser) Unit = {
     self.expression();
     self.consume(TokenType.RightParen, "Expect ')' after expression.");
 };
+
+parse_literal :: fn(self: *Parser) Unit = {
+    type := self.previous.type;
+    rule := get_rule(type);
+    value := @switch(@as(i64) type) {
+        @case(@as(i64) TokenType.True) => OpCode.True; 
+        @case(@as(i64) TokenType.False) => OpCode.False; 
+        @case(@as(i64) TokenType.Nil) => OpCode.Nil; 
+        @default fn(_: i64) OpCode => unreachable();
+    };
+    self.emit(value);
+};
+
 
 fn get_rule(type: TokenType) *ParseRule = rules[].index(@as(i64) type);
 
