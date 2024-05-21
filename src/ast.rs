@@ -81,6 +81,7 @@ pub enum TypeInfo<'p> {
 #[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub struct TypeMeta {
     pub size_slots: u16,
+    pub stride_bytes: u16,
     pub align_bytes: u16,
     // TODO: can this be a u16 so this struct + option bit could fit in a word if we really wanted?
     pub float_mask: u32,
@@ -89,10 +90,11 @@ pub struct TypeMeta {
 }
 
 impl TypeMeta {
-    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool, contains_pointers: bool) -> Self {
+    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool, contains_pointers: bool, stride_bytes: u16) -> Self {
         Self {
             size_slots,
             align_bytes,
+            stride_bytes,
             float_mask,
             has_special_pointer_fns,
             contains_pointers,
@@ -678,7 +680,8 @@ pub enum CallConv {
     Arg8Ret1, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
     Arg8Ret1Ct,
     // #flat_call
-    Flat,
+    Flat,   // first arg is a zero
+    FlatCt, // first arg is compiler context pointer
     // #one_ret_pic.
     OneRetPic,
     /// The front end duplicates the function body ast at each callsite.
@@ -746,6 +749,7 @@ impl<'p> Func<'p> {
         }
     }
 
+    #[track_caller]
     pub fn set_cc(&mut self, cc: CallConv) -> Res<'static, ()> {
         if cc == CallConv::Inline {
             assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
@@ -1284,7 +1288,7 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
-            TypeInfo::Unknown => TypeMeta::new(1, 1, 0, false, false),
+            TypeInfo::Unknown => TypeMeta::new(1, 1, 0, false, false, 1),
             TypeInfo::Tuple(args) => {
                 let mut size = 0;
                 let mut align = 0;
@@ -1307,7 +1311,7 @@ impl<'p> Program<'p> {
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false, pointers)
+                TypeMeta::new(size, align, mask, false, pointers, size * 8)
             }
             &TypeInfo::Struct { as_tuple, .. } => self.get_info(as_tuple),
             TypeInfo::Tagged { cases, .. } => {
@@ -1315,25 +1319,27 @@ impl<'p> Program<'p> {
                 let pointers = cases.iter().any(|(_, ty)| self.get_info(*ty).contains_pointers);
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.
-                TypeMeta::new(size, 8, 0, false, pointers)
+                TypeMeta::new(size, 8, 0, false, pointers, size * 8)
             }
-            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false),
+            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false, 0),
             TypeInfo::Int(int) => {
                 // TODO: u16, u32
                 // TODO: track sizes in bytes, not slots.
                 if int.bit_count == 8 {
                     // :SmallTypes
-                    TypeMeta::new(1, 1, 0, true, false)
+                    TypeMeta::new(1, 1, 0, true, false, 1)
                 } else {
-                    TypeMeta::new(1, 8, 0, false, false)
+                    TypeMeta::new(1, 8, 0, false, false, 8)
                 }
             }
-            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false),
-            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false),
-            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false), // :SmallTypes
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true),
+            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false, 8),
+            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0),
+            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1), // :SmallTypes
+            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true, 8),
             // TODO:  indexes should be u32
-            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet => TypeMeta::new(1, 8, 0, false, false),
+            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet => {
+                TypeMeta::new(1, 8, 0, false, false, 8)
+            }
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         };
         self.types_extra.borrow_mut().deref_mut()[ty.as_index()] = Some(info);
@@ -1649,6 +1655,8 @@ pub enum Flag {
     Load,
     Store,
     Fold,
+    Ptr,
+    Len,
     _Reserved_Count_,
 }
 

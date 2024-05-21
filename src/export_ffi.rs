@@ -108,8 +108,8 @@ extern "C" {
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Ptr(Inner: Type) Type", do_ptr_type as *const u8),
     ("#no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
-    ("fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
-    ("fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
+    ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
+    ("#fold fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
     // TODO: make FuncId a unique type
     ("fn name(func_id: FuncId) Symbol", function_name as *const u8),
@@ -133,8 +133,8 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
-    ("fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
-    ("fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
+    ("#fold fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
+    ("#fold fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
     (
         "fn resolve_backtrace_symbol(addr: *i64, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,
@@ -142,7 +142,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
     ("fn IntType(bits: i64, signed: bool) Type;", make_int_type as *const u8),
     // measured in bytes
-    ("fun size_of(T: Type) i64", get_size_of as *const u8),
+    ("#fold fun size_of(T: Type) i64", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.

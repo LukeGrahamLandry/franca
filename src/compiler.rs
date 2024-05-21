@@ -75,7 +75,7 @@ pub struct Compile<'a, 'p> {
     pub next_label: usize,
     pub wip_stack: Vec<FuncId>,
     #[cfg(feature = "cranelift")]
-    pub cranelift: crate::cranelift::JittedCl,
+    pub cranelift: crate::cranelift::JittedCl<cranelift_jit::JITModule>,
     pub make_slice_t: Option<FuncId>,
     pending_redirects: Vec<(FuncId, FuncId)>,
 }
@@ -261,8 +261,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             if self.program[f].has_tag(Flag::Flat_Call) || is_big {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 // TODO: my c_Call can;t handle agragates
-                self.program[f].set_cc(CallConv::Flat)?;
-                self.program[f].add_tag(Flag::Ct);
+                if comp_ctx {
+                    self.program[f].set_cc(CallConv::FlatCt)?;
+                } else {
+                    self.program[f].set_cc(CallConv::Flat)?;
+                }
             } else if comp_ctx {
                 // currently I redundantly add it to #macro but that's always flat_call anyway
                 // assert!(
@@ -272,7 +275,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[f].set_cc(CallConv::Arg8Ret1Ct)?;
             }
             if self.program[f].has_tag(Flag::C_Call) {
-                if self.program[f].has_tag(Flag::Ct) {
+                if comp_ctx {
                     self.program[f].set_cc(CallConv::Arg8Ret1Ct)?;
                 } else {
                     self.program[f].set_cc(CallConv::Arg8Ret1)?;
@@ -330,7 +333,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         #[cfg(feature = "cranelift")]
         if use_cl {
             if let Some(&cl) = self.program[f].body.cranelift_emit() {
-                crate::cranelift::emit_cl_intrinsic(self, cl, f)?
+                crate::cranelift::emit_cl_intrinsic(self.program, &mut self.cranelift, f)?
             }
         }
 
@@ -436,7 +439,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let cc = self.program[f].cc.unwrap();
         let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
-        let flat_call = cc == CallConv::Flat;
+        let flat_call = matches!(cc, CallConv::Flat | CallConv::FlatCt);
 
         #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
@@ -1102,7 +1105,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let var = func.var_name;
         if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
-            func.set_cc(CallConv::Flat)?;
+            func.add_tag(Flag::Ct);
         }
 
         let public = func.has_tag(Flag::Pub);
@@ -2204,7 +2207,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
         // }
 
-        self.call_jitted(func_id, ExecTime::Comptime, ())
+        let res = self.call_jitted(func_id, ExecTime::Comptime, ());
+        self.discard(func_id);
+        res
+    }
+
+    fn discard(&mut self, f: FuncId) {
+        self.program[f].set_flag(FuncFlags::NotEvilUninit, false);
     }
 
     fn check_quick_eval(&mut self, e: &mut FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Option<Values>> {
@@ -2338,7 +2347,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     return Ok(res);
         // }
 
-        self.run(func_id, Value::Unit.into(), ExecTime::Comptime)
+        let res = self.run(func_id, Value::Unit.into(), ExecTime::Comptime);
+        self.discard(func_id);
+        res
     }
 
     #[track_caller]

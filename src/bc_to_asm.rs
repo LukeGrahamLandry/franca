@@ -216,7 +216,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
         let cc = unwrap!(self.program[func.func].cc, "ICE: missing calling convention");
         match cc {
-            CallConv::Flat => {
+            CallConv::FlatCt | CallConv::Flat => {
                 // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
                 // Runtime check that caller agrees on type sizes.
                 // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
@@ -367,6 +367,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::NoCompile => unreachable!("{}", self.program[self.f].log(self.program.pool)),
 
             Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
+            Bc::PushRelocatablePointer { bytes } => self.state.stack.push(Val::Literal(bytes.as_ptr() as i64)),
             Bc::GetNativeFnPtr(f) => {
                 // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
 
@@ -453,7 +454,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     }
                     // We now require the bytecode to deal with putting values in the result address.
                     // so nothing to do here.
-                    CallConv::Flat => {}
+                    CallConv::FlatCt | CallConv::Flat => {}
                     _ => unreachable!("unsupported cc {cc:?}"),
                 }
                 // debug_assert!(self.state.stack.is_empty()); // todo
@@ -1010,7 +1011,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     // stack must be [<ret_ptr>, <arg_ptr>]. bc needs to deal with loading/storing stuff from memory.
     fn call_direct_flat(&mut self, f: FuncId) -> Res<'p, ()> {
         let target = &self.program[f];
-        debug_assert_eq!(target.cc, Some(CallConv::Flat));
         let f_ty = target.unwrap_ty();
 
         debugln!("flat_call");
@@ -1023,7 +1023,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let arg_count = self.program.slot_count(f_ty.arg);
         let ret_count = self.program.slot_count(f_ty.ret);
 
-        let c = self.compile_ctx_ptr as i64;
+        let c = match target.cc.unwrap() {
+            CallConv::Flat => 0,
+            CallConv::FlatCt => self.compile_ctx_ptr as i64,
+            _ => unreachable!(),
+        };
         self.state.stack.push(Val::Literal(c));
         self.state.stack.push(arg_ptr);
         self.state.stack.push(Val::Literal(arg_count as i64));

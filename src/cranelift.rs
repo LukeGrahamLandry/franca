@@ -19,43 +19,108 @@ use cranelift::{
     prelude::*,
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module, ModuleError};
+use cranelift_module::{DataDescription, Linkage, Module, ModuleError};
+use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 
 use crate::{
-    ast::{CallConv, Flag, FnType, FuncId, Program, TypeId, TypeInfo},
+    ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
     bc::{BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecTime, Res},
-    emit_bc::empty_fn_body,
+    emit_bc::{emit_bc, empty_fn_body},
     err, extend_options,
     logging::make_err,
     reflect::BitSet,
     unwrap,
 };
 
-pub struct JittedCl {
-    pub module: JITModule,
+pub struct JittedCl<M: Module> {
+    pub module: M,
     funcs: Vec<Option<cranelift_module::FuncId>>,
     // can't just use funcs[i].is_some because it might just be a forward declaration.
     funcs_done: BitSet,
     pending: Vec<FuncId>,
 }
 
+pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectProduct> {
+    let isa = cranelift_native::builder().unwrap();
+    let mut flags = settings::builder();
+    flags.set("preserve_frame_pointers", "true").unwrap();
+    flags.set("unwind_info", "false").unwrap();
+    flags.set("enable_pinned_reg", "true").unwrap();
+
+    // TODO: want to let comptime control settings...
+    // flags.set("opt_level", "speed").unwrap();
+    let isa = isa.finish(Flags::new(flags));
+
+    let calls = cranelift_module::default_libcall_names();
+    let builder = ObjectBuilder::new(isa.unwrap(), "program", calls).unwrap();
+
+    let module = ObjectModule::new(builder);
+    let mut m = JittedCl {
+        module,
+        funcs: vec![],
+        funcs_done: BitSet::empty(),
+        pending: vec![],
+    };
+
+    fn emit<'p>(comp: &mut Compile<'_, 'p>, m: &mut JittedCl<ObjectModule>, f: FuncId) -> Res<'p, ()> {
+        for callee in comp.program[f].callees.clone() {
+            emit(comp, m, callee)?;
+        }
+
+        if comp.program[f].has_tag(Flag::Ct) {
+            return Ok(()); // TODO: why am i trying to call Unique?
+        }
+        if m.funcs_done.get(f.as_index()) {
+            return Ok(());
+        }
+
+        println!("do {}", comp.program.pool.get(comp.program[f].name));
+        if comp.program[f].body.cranelift_emit().is_some() {
+            crate::cranelift::emit_cl_intrinsic(comp.program, m, f)?;
+        } else if let FuncImpl::Normal(_) = comp.program[f].body {
+            if comp.program[f].cc.unwrap() != CallConv::Inline {
+                let body = emit_bc(comp, f, ExecTime::Runtime)?;
+                emit_cl_inner(comp.program, m, None, &body, f)?;
+            }
+        } else if comp.program[f].body.comptime_addr().is_some() {
+            let body = emit_bc(comp, f, ExecTime::Runtime)?;
+            emit_cl_inner(comp.program, m, None, &body, f)?;
+        }
+        m.funcs_done.set(f.as_index());
+
+        Ok(())
+    }
+    emit(comp, &mut m, f)?;
+
+    Ok(m.module.finish())
+}
+
 pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) -> Res<'p, ()> {
-    if compile.cranelift.funcs_done.get(f.as_index()) {
+    emit_cl_inner(compile.program, &mut compile.cranelift, Some(&mut compile.aarch64), body, f)
+}
+
+fn emit_cl_inner<'p, M: Module>(
+    program: &mut Program<'p>,
+    cl: &mut JittedCl<M>,
+    asm: Option<&mut Jitted>,
+    body: &FnBody<'p>,
+    f: FuncId,
+) -> Res<'p, ()> {
+    if cl.funcs_done.get(f.as_index()) {
         return Ok(());
     }
-    let ctx = compile.cranelift.module.make_context();
+    let ctx = cl.module.make_context();
 
-    let mut flat_sig = Signature::new(compile.cranelift.module.target_config().default_call_conv);
+    let mut flat_sig = Signature::new(cl.module.target_config().default_call_conv);
     flat_sig.params.push(AbiParam::new(I64));
     flat_sig.params.push(AbiParam::new(I64));
     flat_sig.params.push(AbiParam::new(I64));
     flat_sig.params.push(AbiParam::new(I64));
     flat_sig.params.push(AbiParam::new(I64));
 
-    compile.last_loc = Some(compile.program[f].loc);
-    let is_flat = compile.program[f].cc.unwrap() == CallConv::Flat;
+    let is_flat = matches!(program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
     let mut e = Emit {
         body,
         blocks: vec![],
@@ -66,23 +131,23 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
         block_done: BitSet::empty(),
         flat_arg_addr: None,
         flat_args_already_offset: vec![],
-        compile_ctx_ptr: compile as *mut Compile as usize,
-        program: compile.program,
-        asm: &mut compile.aarch64,
-        cl: &mut compile.cranelift,
+        compile_ctx_ptr: 0,
+        program,
+        asm,
+        cl,
         flat_sig,
         is_flat,
     };
     e.emit_func(f, FunctionBuilderContext::new(), ctx)?;
-    compile.cranelift.funcs_done.insert(f.as_index(), true);
+    cl.funcs_done.insert(f.as_index(), true);
     Ok(())
 }
 
-pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, f: FuncId) -> Res<'p, ()> {
-    let mut body = empty_fn_body(compile.program, f, ExecTime::Both);
+pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &mut JittedCl<M>, f: FuncId) -> Res<'p, ()> {
+    let mut body = empty_fn_body(program, f, ExecTime::Both);
     body.func = f;
-    let arg = compile.program[f].finished_arg.unwrap();
-    let arg = compile.program.get_info(arg);
+    let arg = program[f].finished_arg.unwrap();
+    let arg = program.get_info(arg);
     body.blocks.push(BasicBlock {
         insts: vec![Bc::CallDirect { f, tail: true }],
         arg_slots: arg.size_slots,
@@ -91,10 +156,10 @@ pub(crate) fn emit_cl_intrinsic<'p>(compile: &mut Compile<'_, 'p>, _ptr: usize, 
         clock: 0,
         height: 0,
     });
-    emit_cl(compile, &body, f)
+    emit_cl_inner(program, cl, None, &body, f)
 }
 
-impl Default for JittedCl {
+impl Default for JittedCl<JITModule> {
     fn default() -> Self {
         let isa = cranelift_native::builder().unwrap();
         let mut flags = settings::builder();
@@ -122,7 +187,7 @@ impl Default for JittedCl {
     }
 }
 
-impl JittedCl {
+impl JittedCl<JITModule> {
     pub fn flush_pending_defs(&mut self, aarch64: &mut Jitted) -> Res<'static, ()> {
         if self.pending.is_empty() {
             return Ok(());
@@ -138,11 +203,11 @@ impl JittedCl {
     }
 }
 
-struct Emit<'z, 'p> {
+struct Emit<'z, 'p, M: Module> {
     compile_ctx_ptr: usize, // TODO: HACK. should really pass this through correctly as an argument. seperate which flat calls really need it.
     program: &'z mut Program<'p>,
-    asm: &'z mut Jitted, // TODO: kinda hack. other side should be able to do too
-    cl: &'z mut JittedCl,
+    asm: Option<&'z mut Jitted>, // TODO: kinda hack. other side should be able to do too
+    cl: &'z mut JittedCl<M>,
     body: &'z FnBody<'p>,
     blocks: Vec<Block>,
     block_done: BitSet,
@@ -156,12 +221,11 @@ struct Emit<'z, 'p> {
     is_flat: bool,
 }
 
-impl<'z, 'p> Emit<'z, 'p> {
+impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
     fn emit_func(&mut self, f: FuncId, mut builder_ctx: FunctionBuilderContext, mut ctx: codegen::Context) -> Res<'p, ()> {
         self.f = f;
         let f_ty = self.program[f].unwrap_ty();
 
-        let name = format!("FN{}", f.as_index());
         ctx.func.signature = if self.is_flat {
             self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
         } else {
@@ -169,14 +233,23 @@ impl<'z, 'p> Emit<'z, 'p> {
             self.make_sig(f_ty, true, false)
         };
 
-        let id = self
-            .cl
-            .module
-            .declare_function(&name, Linkage::Export, &ctx.func.signature)
-            .map_err(wrap)?;
+        let is_dynamic = matches!(self.program[f].body, FuncImpl::ComptimeAddr(_));
+        let (name, linkage) = if is_dynamic {
+            // cranelift-object does the underscore for me
+            (self.program.pool.get(self.program[f].name).to_string(), Linkage::Import)
+        } else if self.program[f].name == Flag::Main.ident() {
+            // entry point for exe
+            (String::from("main"), Linkage::Export)
+        } else {
+            (format!("FN{}", f.as_index()), Linkage::Export)
+        };
+        let id = self.cl.module.declare_function(&name, linkage, &ctx.func.signature).map_err(wrap)?;
         extend_options(&mut self.cl.funcs, f.as_index());
         self.cl.funcs[f.as_index()] = Some(id);
 
+        if is_dynamic {
+            return Ok(());
+        }
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
         self.emit_body(&mut builder)?;
         if self.program[f].has_tag(Flag::Log_Ir) {
@@ -344,17 +417,22 @@ impl<'z, 'p> Emit<'z, 'p> {
                     } else {
                         let callee = self
                             .asm
-                            .get_fn(f)
+                            .as_mut()
+                            .and_then(|a| a.get_fn(f))
                             .map(|a| a as u64)
                             .map(|addr| builder.ins().iconst(I64, addr as i64))
                             .unwrap_or_else(|| {
-                                // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
-                                //       its just annoying because then i need to make sure i know if im supposed to be declaring
-                                //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
-                                self.asm.extend_blanks(f);
-                                self.asm.pending_indirect.push(f);
-                                let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
-                                builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                                if let Some(asm) = &mut self.asm {
+                                    // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
+                                    //       its just annoying because then i need to make sure i know if im supposed to be declaring
+                                    //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
+                                    asm.extend_blanks(f);
+                                    asm.pending_indirect.push(f);
+                                    let dispatch = builder.ins().iconst(I64, asm.get_dispatch() as i64);
+                                    builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                                } else {
+                                    todo!()
+                                }
                             });
 
                         let comp_ctx = self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct;
@@ -388,7 +466,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::CallDirectFlat { f } => {
                     let f_ty = &self.program[f].unwrap_ty();
                     // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64)
-                    let c = self.compile_ctx_ptr as i64;
+                    let c = match self.program[f].cc.unwrap() {
+                        CallConv::Flat => 0,
+                        CallConv::FlatCt => self.compile_ctx_ptr as i64,
+                        _ => unreachable!(),
+                    };
                     let c = builder.ins().iconst(I64, c);
                     let arg_ptr = self.stack.pop().unwrap();
                     let arg_count = self.program.slot_count(f_ty.arg);
@@ -406,17 +488,23 @@ impl<'z, 'p> Emit<'z, 'p> {
                     } else {
                         let callee = self
                             .asm
-                            .get_fn(f)
+                            .as_mut()
+                            .map(|a| a.get_fn(f))
+                            .flatten()
                             .map(|a| a as u64)
                             .map(|addr| builder.ins().iconst(I64, addr as i64))
                             .unwrap_or_else(|| {
-                                // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
-                                //       its just annoying because then i need to make sure i know if im supposed to be declaring
-                                //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
-                                self.asm.extend_blanks(f);
-                                self.asm.pending_indirect.push(f);
-                                let dispatch = builder.ins().iconst(I64, self.asm.get_dispatch() as i64);
-                                builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                                if let Some(asm) = &mut self.asm {
+                                    // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
+                                    //       its just annoying because then i need to make sure i know if im supposed to be declaring
+                                    //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
+                                    asm.extend_blanks(f);
+                                    asm.pending_indirect.push(f);
+                                    let dispatch = builder.ins().iconst(I64, asm.get_dispatch() as i64);
+                                    builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
+                                } else {
+                                    todo!()
+                                }
                             });
                         let sig = builder.import_signature(self.flat_sig.clone());
                         builder.ins().call_indirect(sig, callee, args);
@@ -443,6 +531,15 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
+                Bc::PushRelocatablePointer { bytes } => {
+                    // TODO: deduplicate. often it will be string literals with exactly the same data pointer.
+                    let id = self.cl.module.declare_anonymous_data(false, false).map_err(wrap)?;
+                    let mut data = DataDescription::new();
+                    data.define(bytes.to_owned().into_boxed_slice());
+                    self.cl.module.define_data(id, &data).map_err(wrap)?;
+                    let local = self.cl.module.declare_data_in_func(id, builder.func);
+                    self.stack.push(builder.ins().global_value(I64, local));
+                }
                 Bc::JumpIf { true_ip, false_ip, slots } => {
                     let cond = self.stack.pop().unwrap();
                     let t = self.blocks[true_ip.0 as usize];
@@ -482,10 +579,12 @@ impl<'z, 'p> Emit<'z, 'p> {
                     if let Some(&Some(id)) = self.cl.funcs.get(f.as_index()) {
                         let id = self.cl.module.declare_func_in_func(id, builder.func);
                         self.stack.push(builder.ins().func_addr(I64, id));
-                    } else {
-                        let addr = self.asm.get_fn(f).map(|a| a as i64);
+                    } else if let Some(asm) = &mut self.asm {
+                        let addr = asm.get_fn(f).map(|a| a as i64);
                         let addr = unwrap!(addr, "fn not ready");
                         self.stack.push(builder.ins().iconst(I64, addr));
+                    } else {
+                        todo!()
                     }
                 }
                 Bc::Load { slots } => {
@@ -600,7 +699,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         // TODO: this is wrong. you can have nested things. i pass (Str, Str) as (*i,i,*i,i).
         //       but that disagrees with c calling convention so need to have another round of clarifying that.
-        fn push(s: &mut Emit, arg: TypeId, sig: &mut Signature) {
+        fn push<M: Module>(s: &mut Emit<M>, arg: TypeId, sig: &mut Signature) {
             let arg = s.program.raw_type(arg);
             if let TypeInfo::Tagged { .. } = &s.program[arg] {
                 for _ in 0..s.program.slot_count(arg) {

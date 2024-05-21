@@ -6,6 +6,7 @@ use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc::Value,
     compiler::{Compile, ExecTime, Res},
+    cranelift::emit_cl_exe,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib,
     lex::Lexer,
@@ -18,7 +19,7 @@ use franca::{
 use std::{
     env,
     fs::{self, File},
-    io::{Read, Write},
+    io::Read,
     mem,
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
@@ -67,6 +68,7 @@ fn main() {
     let mut do_60fps_ = false;
     let mut path = None;
     let mut args = env::args();
+    let mut exe_path = None;
     args.next().unwrap(); // exe path
 
     #[cfg(target_arch = "aarch64")]
@@ -77,7 +79,7 @@ fn main() {
     #[cfg(all(not(target_arch = "aarch64"), not(feature = "cranelift")))]
     compile_error!("no backend available");
 
-    for name in args {
+    while let Some(name) = args.next() {
         if name == "--" {
             panic!("dont put double dash to seperate args");
         }
@@ -106,6 +108,7 @@ fn main() {
                     println!("{}", program.ffi_definitions);
                 }
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi"),
+                "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
                 _ => panic!("unknown argument --{name}"),
             }
         } else {
@@ -157,10 +160,20 @@ fn main() {
                 log_err(&comp, *e);
                 exit(1);
             }
-            let end = timestamp();
-            let seconds = end - start;
-            println!("Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds; main();",);
-            run_one(&mut comp, f);
+            let log_time = || {
+                let end = timestamp();
+                let seconds = end - start;
+                println!("Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds; main();",);
+            };
+            if let Some(output) = exe_path {
+                let obj = emit_cl_exe(&mut comp, f).unwrap();
+                log_time();
+                let bytes = obj.emit().unwrap();
+                fs::write(output, bytes).unwrap();
+            } else {
+                log_time();
+                run_one(&mut comp, f);
+            }
         }
 
         // println!("{:#?}", unsafe { &STATS });

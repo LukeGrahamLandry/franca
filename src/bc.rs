@@ -17,7 +17,7 @@ use interp_derive::InterpSend;
 #[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 
-#[derive(Clone, InterpSend, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc {
     CallDirect { f: FuncId, tail: bool },                 // <args:m> -> <ret:n>
     CallDirectFlat { f: FuncId },                         // <ret_ptr:1> <arg_ptr:1> -> _
@@ -43,6 +43,7 @@ pub enum Bc {
     GetCompCtx,                                           // _ -> <ptr:1>
     NoCompile,
     Noop,
+    PushRelocatablePointer { bytes: &'static [u8] },
 }
 
 #[derive(Clone)]
