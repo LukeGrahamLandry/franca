@@ -21,7 +21,7 @@
 
 ## Progress
 
-- `crates/compiler` contains the frontend and the jit used for comptime execution.
+- `src` contains the frontend and the jit used for comptime execution.
 - The programs in `tests`, `lib`, and `examples` actually work with the existing jit compiler.
 - The programs in `plan` are just trying out how potential language features feel.
 
@@ -37,6 +37,7 @@
 - parse declarations from other languages and generate ffi bindings.
 - checked mode with less undefined behaviour.
 - llvm backend for optimised release builds
+- i want to produce an executable such that every byte in the file is there because i personally put it there.
 
 ## Tradeoffs
 
@@ -49,5 +50,4 @@ there must be proportional terrible things or I'm probably just lying.
 - (TEMP?) there are no arithmetic operators, if you want to add, just call the function add.
 - (TEMP!) every stack slot and struct field takes 8 bytes.
 - (TEMP) completely incomprehensible error messages.
-- (TEMP) MacOS Aarch64 only.
 - (TEMP) no caching. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).

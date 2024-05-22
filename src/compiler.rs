@@ -25,6 +25,7 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -165,12 +166,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
         // TODO: really check_quick_eval should do this.
-        let value = Values::One(Value::Type(expect));
+        //       but be careful about just deleting this check cause it might make you need to call a jitted function too soon and randonly bus error? -- May 22
+        let value = to_values(self.program, expect)?;
         if let Some(res) = self.program.generics_memo.get(&(self.make_slice_t.unwrap(), value.clone())) {
-            if let Values::One(Value::Type(t)) = res.0 {
-                return Ok(t);
-            }
-            unreachable!()
+            let ty: TypeId = from_values(self.program, res.0.clone())?;
+            return Ok(ty);
         }
 
         let ty = self.program.intern_type(TypeInfo::Fn(FnType {
@@ -187,6 +187,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         let a = FatExpr::synthetic_ty(Expr::Value { value }, loc, TypeId::ty);
         let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);
         self.immediate_eval_expr_known(s_ty)
+    }
+
+    fn as_values<T: InterpSend<'p>>(&mut self, ret: T) -> Res<'p, Values> {
+        to_values(self.program, ret)
     }
 }
 impl<'a, 'p> Compile<'a, 'p> {
@@ -452,7 +456,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
             debugln!("OUT: {r}");
             let mut out = vec![];
-            values_from_ints(self, ty.ret, &mut [r].into_iter(), &mut out)?;
+            values_from_ints(self.program, ty.ret, &mut [r].into_iter(), &mut out)?;
             Ok(out.into())
         } else {
             todo!()
@@ -474,7 +478,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
         let arg = if Arg::SIZE == 1 {
             // TODO: this is dumb. i make the vec here anyway, then throw it away, then remake it on the other side.
-            Values::One(int_to_value(self, arg_ty, arg.serialize_to_ints_one()[0])?)
+            Values::One(int_to_value(self.program, arg_ty, arg.serialize_to_ints_one()[0])?)
         } else {
             Values::Many(arg.serialize_to_ints_one())
         };
@@ -654,14 +658,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let ret = LabelId::from_index(self.next_label);
                     self.next_label += 1;
                     let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
-                    self.save_const(
-                        return_var,
-                        Expr::Value {
-                            value: Values::One(Value::Label(ret)),
-                        },
-                        label_ty,
-                        self.program[f].loc,
-                    )?;
+
+                    let val = self.as_values(ret)?;
+                    self.save_const_values(return_var, val, label_ty, self.program[f].loc)?;
                     *ret_label = Some(ret);
                 }
             }
@@ -786,7 +785,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.save_const(
             new_ret_var,
             Expr::Value {
-                value: Values::One(Value::Label(ret_label)),
+                value: Values::One(Value::I64(ret_label.as_raw())),
             },
             label_ty,
             loc,
@@ -897,7 +896,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // let arg_value = arg_value.normalize(); // TODO: general <-, this is just HACK because i know @comptime is always a type.
         if let Values::Many(ints) = &key.1 {
             if ints.len() == 1 && arg_ty == TypeId::ty {
-                key.1 = Values::One(Value::Type(TypeId::from_raw(ints[0])));
+                key.1 = Values::One(Value::I64(TypeId::from_raw(ints[0]).as_raw()));
             }
         }
 
@@ -1008,8 +1007,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: this is extremly similar to what bind_const_arg has to do. should be able to express args as this thing?
             // TODO: remove useless statements
             Stmt::DeclVarPattern { binding, value } => {
-                if binding.bindings.is_empty() || value.expr.is_raw_unit() {
-                    assert!(value.expr.is_raw_unit());
+                if value.is_raw_unit() {
                     stmt.stmt = Stmt::Noop;
 
                     // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
@@ -1023,11 +1021,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if kind == VarType::Const {
                             debug_assert_eq!(binding.bindings.len(), 1);
                             binding.bindings.clear();
-                            value.set(Value::Unit.into(), TypeId::unit);
+                            value.set(Values::Unit, TypeId::unit);
                         }
                         return Ok(());
                     } else {
-                        if value.expr.is_raw_unit() {
+                        if value.is_raw_unit() {
                             // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                             stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         } else {
@@ -1047,7 +1045,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let Some(name) = name {
                         self.decl_var(*name, &mut LazyType::Finished(*ty), expr, *kind, &stmt.annotations)?;
                     } else {
-                        assert!(expr.expr.is_raw_unit(), "var no name not unit");
+                        assert!(expr.is_raw_unit(), "var no name not unit");
                     }
                 }
 
@@ -1118,7 +1116,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(!self.program[id].get_flag(FuncFlags::ResolvedSign));
             debug_assert!(!self.program[id].get_flag(FuncFlags::ResolvedBody));
             if let Some(overloads) = self.find_const(var)? {
-                let i = overloads.0.as_overload_set().unwrap();
+                assert_eq!(overloads.1, TypeId::overload_set);
+                let i: OverloadSetId = from_values(self.program, overloads.0)?;
                 let os = &mut self.program[i];
                 assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
 
@@ -1133,7 +1132,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     public,
                     just_resolved: vec![],
                 });
-                self.save_const_values(var, Value::OverloadSet(index).into(), TypeId::overload_set, loc)?;
+                self.save_const_values(var, Value::I64(index.as_raw()).into(), TypeId::overload_set, loc)?;
                 out = (Some(id), Some(index));
             }
 
@@ -1618,17 +1617,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let container = self.compile_expr(e, None)?;
 
                 if let Some(val) = e.as_const() {
-                    if let Values::One(Value::Type(ty)) = val {
+                    if container == TypeId::ty {
+                        let ty: TypeId = from_values(self.program, val.clone())?;
+
                         if let TypeInfo::Enum { fields, .. } = &self.program[ty] {
                             let field = fields.iter().find(|f| f.0 == *name);
                             let (_, value) = unwrap!(field, "contextual field not found {} for {ty:?}", self.pool.get(*name));
                             expr.set(value.clone(), ty);
                             return Ok(ty);
-                        };
+                        }
                     }
-
-                    let ty = e.ty;
-                    if ty == TypeId::scope {
+                    if container == TypeId::scope {
                         let Values::One(Value::I64(s)) = val else {
                             err!("expected int for scope id",)
                         };
@@ -1677,14 +1676,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let mut target = mem::take(target.deref_mut());
                 let want = FatExpr::get_type(self.program);
                 let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
-
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
-                // TODO: OverloadSet: InterpSend so I can use known. cant say usize even tho thats kinda what i want cause its unique and anyway would be dumb to give up the typechecking -- Apr 21
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
-                let os = self.immediate_eval_expr(*handler.clone(), TypeId::overload_set)?;
-                let Value::OverloadSet(os) = os.single()? else {
-                    err!("expected overload set. TODO: allow direct function",)
-                };
+                let os: OverloadSetId = self.immediate_eval_expr_known(*handler.clone())?;
                 self.compute_new_overloads(os)?;
 
                 let os = self.program[os].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
@@ -1906,7 +1900,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: hack yuck. now that i rely on expr working so it can be passed into quoted things, this is extra ugly.
                 match self.compile_expr(handler, Some(TypeId::overload_set)) {
                     Ok(_) => {
-                        let os = handler.expect_const()?.as_overload_set()?;
+                        // TODO: allow Fn and FnPtr as well.
+                        let os: OverloadSetId = from_values(self.program, handler.expect_const()?)?;
                         // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
                         if self.program[os].name == Flag::As.ident() && self.compile_expr(arg, Some(TypeId::ty)).is_ok() {
                             // HACK: sad that 'as' is special
@@ -1972,7 +1967,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
                             let mut parts = vec![];
                             let ty = ty.to_vec(); // sad
-                            let values = values_from_ints_one(self, arg.ty, value.clone().vec())?;
+                            let values = values_from_ints_one(self.program, arg.ty, value.clone().vec())?;
                             for (v, ty) in values.into_iter().zip(ty.into_iter()) {
                                 parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg.loc, ty))
                             }
@@ -2020,7 +2015,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = T::get_type(self.program);
         let ints = t.serialize_to_ints_one();
         let mut bytes = vec![];
-        values_from_ints(self, ty, &mut ints.into_iter(), &mut bytes)?;
+        values_from_ints(self.program, ty, &mut ints.into_iter(), &mut bytes)?;
         let value = bytes.into();
         let mut e = FatExpr::synthetic_ty(Expr::Value { value }, loc, ty);
         e.done = true;
@@ -2046,13 +2041,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(ty) = ty {
             let ty = self.program.intern_type(ty);
             let tyty = TypeId::ty;
-            return Some((Value::Type(ty), tyty));
+            return Some((Value::I64(ty.as_raw()), tyty));
         }
 
         macro_rules! ffi_type {
             ($ty:ty) => {{
                 let ty = <$ty>::get_type(self.program);
-                (Value::Type(ty), TypeId::ty)
+                (Value::I64(ty.as_raw()), TypeId::ty)
             }};
         }
 
@@ -2065,11 +2060,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             "FatStmt" => ffi_type!(FatStmt),
             "TypeInfo" => ffi_type!(TypeInfo),
             "IntTypeInfo" => ffi_type!(IntTypeInfo),
-            "RsResolvedSymbol" => (Value::Type(self.program.get_rs_type(RsResolvedSymbol::get_ty())), TypeId::ty),
+            "RsResolvedSymbol" => (Value::I64(self.program.get_rs_type(RsResolvedSymbol::get_ty()).as_raw()), TypeId::ty),
             _ => {
                 let name = self.pool.intern(name);
                 if let Some(ty) = self.program.find_ffi_type(name) {
-                    (Value::Type(ty), TypeId::ty)
+                    (Value::I64(ty.as_raw()), TypeId::ty)
                 } else {
                     return None;
                 }
@@ -2084,7 +2079,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             LazyType::Infer => false,
             LazyType::PendingEval(e) => {
                 let value = self.immediate_eval_expr(e.clone(), TypeId::ty)?;
-                let res = self.to_type(value)?;
+                let res: TypeId = from_values(self.program, value)?;
                 *ty = LazyType::Finished(res);
                 true
             }
@@ -2260,18 +2255,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // !slice and !addr can't be const evaled!
                 if !matches!(arg.expr, Expr::SuffixMacro(_, _)) {
                     let f_id = if let Expr::GetVar(var) = f.expr {
-                        if let Some((val, _)) = self.find_const(var)? {
-                            match val {
-                                Values::One(Value::GetFn(f)) => Some(f),
-                                Values::One(Value::OverloadSet(f)) => {
-                                    let ol = &self.program[f];
-                                    if ol.pending.is_empty() && ol.ready.len() == 1 {
-                                        Some(ol.ready[0].func)
-                                    } else {
-                                        None
-                                    }
+                        if let Some((val, ty)) = self.find_const(var)? {
+                            if ty == TypeId::overload_set {
+                                let ff: OverloadSetId = from_values(self.program, val.clone())?;
+                                let ol = &self.program[ff];
+                                if ol.pending.is_empty() && ol.ready.len() == 1 {
+                                    Some(ol.ready[0].func)
+                                } else {
+                                    None
                                 }
-                                _ => None,
+                            } else if let TypeInfo::Fn(_) = self.program[ty] {
+                                Some(val.unwrap_func_id())
+                            } else {
+                                err!("Expected function for {} but found {:?}", var.log(self.pool), val);
                             }
                         } else {
                             None
@@ -2345,14 +2341,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     return Ok(res);
         // }
 
-        let res = self.run(func_id, Value::Unit.into(), ExecTime::Comptime);
+        let res = self.run(func_id, Values::Unit, ExecTime::Comptime);
         self.discard(func_id);
         res
-    }
-
-    #[track_caller]
-    fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
-        self.program.to_type(value)
     }
 
     pub(crate) fn add_func(&mut self, func: Func<'p>) -> Res<'p, FuncId> {
@@ -2578,7 +2569,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             match (&self.program[found], &self.program[expected]) {
                 // :Coercion // TODO: only one direction makes sense
                 (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
-                (TypeInfo::Int(a), TypeInfo::Int(b)) => {
+                (TypeInfo::Int(_), TypeInfo::Int(_)) => {
                     // :Coercion
                     return Ok(()); // TODO: not this!
                 }
@@ -3067,7 +3058,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     check_len(value.len())?;
                     // TODO: this is super dumb but better than what I did before. -- May 3
                     let ty = ty.to_vec(); // sad
-                    let values = values_from_ints_one(self, arg_expr.ty, value.clone().vec())?;
+                    let values = values_from_ints_one(self.program, arg_expr.ty, value.clone().vec())?;
                     let mut parts = Vec::with_capacity(values.len());
                     for (v, ty) in values.into_iter().zip(ty.into_iter()) {
                         parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg_expr.loc, ty))
@@ -3132,6 +3123,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Ok(())
         }
     }
+
     fn curry_const_args(&mut self, original_f: FuncId, f_expr: &mut FatExpr<'p>, arg_expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
         let key = (original_f, self.const_args_key(original_f, arg_expr)?);
         if let Some(new_f) = self.program.const_bound_memo.get(&key).copied() {
@@ -3271,7 +3263,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                 }
-
+                println!("TODO: this is sketchy with new u32");
                 let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                 ops
             };
@@ -3423,53 +3415,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         // let inferred_type = self.type_of(value)?;
         // println!("{inferred_type:?}");
         let res = self.compile_expr(value, ty.ty())?;
-        let mut val = self.immediate_eval_expr(value.clone(), res)?;
+        let val = self.immediate_eval_expr(value.clone(), res)?;
         // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.
         // TODO: more efficient way of handling overload sets
         // TODO: better syntax for inserting a function into an imported overload set.
-        if let Values::One(Value::OverloadSet(i)) = val {
-            if let Some(ty) = ty.ty() {
-                if ty != TypeId::overload_set {
-                    // TODO: fn name instead of var name in messages?
-                    let f_ty = unwrap!(
-                        self.program.fn_ty(ty),
-                        "const {} OverloadSet must have function type not {:?}",
-                        name.log(self.pool),
-                        ty
-                    );
-
-                    self.compute_new_overloads(i)?;
-                    // TODO: just filter the iterator.
-                    let mut overloads = self.program[i].clone(); // sad
-
-                    overloads
-                        .ready
-                        .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
-                    // TODO: You can't just filter here anymore because what if its a Split FuncRef.
-                    let found = match overloads.ready.len() {
-                        0 => err!("Missing overload",),
-                        1 => overloads.ready[0].func,
-                        _ => err!("Ambigous overload \n{:?}", overloads.ready),
-                    };
-                    val = Values::One(Value::GetFn(found));
-                }
-            } else {
-                // TODO: make sure its not a problem that usage in an expression can end up as different types each time
-                *ty = LazyType::Finished(TypeId::overload_set)
-            }
-        }
 
         let final_ty = if let Some(expected_ty) = ty.ty() {
-            if self.program[expected_ty] == TypeInfo::Type {
-                // HACK. todo: general overloads for cast()
-                val = Value::Type(self.to_type(val)?).into()
-            } else {
-                // TODO: you want the type check but doing it against type_of_raw is kinda worthless
-                // like const a: *i64 = @as(rawptr) malloc(8); should be fine? but i have to serialize that as an int and then type_of_raw is wrong.
-                // but i do need to think about how memory makes its way into your exe.
-                // self.type_check_arg(found_ty, expected_ty, "const decl")?;
-            }
-
             expected_ty
         } else {
             let found = value.ty;

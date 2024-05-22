@@ -3,7 +3,7 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, Program, TypeId, TypeInfo, WalkAst};
+use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{int_to_value, values_from_ints, Value, Values};
 use crate::compiler::{bit_literal, Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
@@ -128,6 +128,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //       (these functions don't use InterpSend, they just rely on C ABI).
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
     ("fn Ty(fst: Type, snd: Type) Type;", pair_type as *const u8),
+    ("fn Ty(fst: Type, snd: Type, trd: Type) Type;", triple_type as *const u8),
     // The type of 'fun(Arg) Ret'. This is a comptime only value.
     // All calls are inlined, as are calls that pass one of these as an argument.
     // Captures of runtime variables are allowed since you just inline everything anyway.
@@ -293,6 +294,14 @@ extern "C-unwind" fn pair_type(program: &mut &mut Program, a: TypeId, b: TypeId)
     })
 }
 
+extern "C-unwind" fn triple_type(program: &mut &mut Program, a: TypeId, b: TypeId, c: TypeId) -> TypeId {
+    hope(|| {
+        assert!(a.as_index() < program.types.len(), "TypeId OOB {:?}", a);
+        assert!(b.as_index() < program.types.len(), "TypeId OOB {:?}", b);
+        assert!(c.as_index() < program.types.len(), "TypeId OOB {:?}", c);
+        Ok(program.intern_type(TypeInfo::Tuple(vec![a, b, c])))
+    })
+}
 extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
         assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
@@ -448,7 +457,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     debugln!("OUT: {ret:?}");
     Ok(if ret_count == 1 {
-        Values::One(int_to_value(compile, ret_type, ret[0])?)
+        Values::One(int_to_value(compile.program, ret_type, ret[0])?)
     } else {
         Values::Many(ret)
     })
@@ -537,6 +546,10 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn __get_comptime_dispatch_ptr() **i64",
         bounce_flat_call!((), *mut i64, get_dispatch_ptr),
     ),
+    (
+        "#macro fn resolve(function_type: FatExpr, overload_set_id: FatExpr) FatExpr;",
+        bounce_flat_call!((FatExpr, FatExpr), FatExpr, resolve_os),
+    ),
 ];
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
@@ -624,7 +637,7 @@ fn literal_ast<'p>(compile: &Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> Fat
     let slots = compile.slot_count(ty) as usize;
     let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
     let mut out = vec![];
-    values_from_ints(compile, ty, &mut value.iter().copied().peekable(), &mut out).unwrap();
+    values_from_ints(compile.program, ty, &mut value.iter().copied().peekable(), &mut out).unwrap();
     let value: Values = out.into();
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
     FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
@@ -796,4 +809,26 @@ extern "C-unwind" fn shift_or_slice(compilerctx: usize, ptr: *const i64, len: us
 
 fn get_dispatch_ptr(comp: &mut Compile, _: ()) -> *mut i64 {
     comp.aarch64.get_dispatch() as usize as *mut i64
+}
+fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    let loc = os.loc;
+    let ty: TypeId = hope(|| comp.immediate_eval_expr_known(f_ty));
+    let os: OverloadSetId = hope(|| comp.immediate_eval_expr_known(os));
+    let f_ty = comp.program.fn_ty(ty).expect("@resolve arg should be function type. TODO: allow FnPtr");
+
+    hope(|| comp.compute_new_overloads(os));
+    // TODO: just filter the iterator.
+    let mut overloads = comp.program[os].clone(); // sad
+
+    overloads
+        .ready
+        .retain(|f| f.arg == f_ty.arg && (f.ret.is_none() || f.ret.unwrap() == f_ty.ret));
+    // TODO: You can't just filter here anymore because what if its a Split FuncRef.
+    let found = match overloads.ready.len() {
+        0 => panic!("Missing overload",),
+        1 => overloads.ready[0].func,
+        _ => panic!("Ambigous overload \n{:?}", overloads.ready),
+    };
+    let val = Values::One(Value::GetFn(found));
+    FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }

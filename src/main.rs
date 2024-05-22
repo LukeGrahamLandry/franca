@@ -6,7 +6,6 @@ use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc::Value,
     compiler::{Compile, ExecTime, Res},
-    cranelift::emit_cl_exe,
     export_ffi::{get_include_std, STDLIB_PATH},
     find_std_lib,
     lex::Lexer,
@@ -165,8 +164,9 @@ fn main() {
                 let seconds = end - start;
                 println!("Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds; main();",);
             };
+            #[cfg(feature = "cranelift")]
             if let Some(output) = exe_path {
-                let obj = emit_cl_exe(&mut comp, f).unwrap();
+                let obj = franca::cranelift::emit_cl_exe(&mut comp, f).unwrap();
                 log_time();
 
                 let bytes = obj.emit().unwrap();
@@ -175,8 +175,13 @@ fn main() {
                 log_time();
                 run_one(&mut comp, f);
             }
-        }
 
+            #[cfg(not(feature = "cranelift"))]
+            {
+                log_time();
+                run_one(&mut comp, f);
+            }
+        }
         // println!("{:#?}", unsafe { &STATS });
     } else {
         if !PathBuf::from("tests").exists() {

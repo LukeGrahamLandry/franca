@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::ptr::slice_from_raw_parts;
 use std::usize;
 
-use crate::ast::{CallConv, Expr, FatExpr, FuncId, FuncImpl, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{CallConv, Expr, FatExpr, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, ExecTime, Res};
 use crate::logging::PoolLog;
@@ -398,12 +398,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
                     let Expr::Value {
-                        value: Values::One(Value::Label(return_from)),
+                        value: Values::One(Value::I64(return_from)),
                         ..
                     } = f.expr
                     else {
-                        todo!()
+                        todo!("{}", f.log(self.program.pool))
                     };
+                    let return_from = LabelId::from_raw(return_from);
                     // result_location is the result of the ret() expression, which is Never and we don't care.
                     let (ip, res_loc) = *unwrap!(
                         result.inlined_return_addr.get(&return_from),
@@ -912,7 +913,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn emit_relocatable_constant(&mut self, ty: TypeId, value: &Values, result: &mut FnBody<'p>, result_location: ResultLoc) -> Res<'p, ()> {
+    fn _emit_relocatable_constant(&mut self, ty: TypeId, value: &Values, result: &mut FnBody<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         let raw = self.program.raw_type(ty);
 
         match &self.program[raw] {
@@ -952,11 +953,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                     result.push(Bc::PushConstant { value: len });
                 } else {
-                    self.emit_relocatable_constant(*as_tuple, value, result, result_location)?;
+                    self._emit_relocatable_constant(*as_tuple, value, result, result_location)?;
                 }
             }
             TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
-            TypeInfo::Enum { raw, .. } => self.emit_relocatable_constant(*raw, value, result, result_location)?,
+            TypeInfo::Enum { raw, .. } => self._emit_relocatable_constant(*raw, value, result, result_location)?,
             TypeInfo::VoidPtr => {
                 err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)
             }

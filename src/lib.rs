@@ -97,7 +97,7 @@ use std::env;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 
-use bc::Value;
+use bc::Values;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::CErr;
@@ -333,7 +333,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     let body = Some(FatExpr::synthetic(
         Expr::Block {
             body: stmts,
-            result: Box::new(FatExpr::synthetic_ty(Expr::Value { value: Value::Unit.into() }, user_span, TypeId::unit)),
+            result: Box::new(FatExpr::synthetic_ty(Expr::Value { value: Values::Unit }, user_span, TypeId::unit)),
             ret_label: None,
             hoisted_constants: false,
         },

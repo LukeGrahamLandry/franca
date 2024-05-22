@@ -1140,22 +1140,18 @@ pub use jit::Jitted;
 pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
     let mut out = vec![];
     for value in values {
-        if *value != Value::Unit {
-            out.push(value.as_raw_int());
-        }
+        // if *value != Value::Unit {
+        out.push(value.as_raw_int());
+        // }
     }
     out
 }
 
 impl Value {
     pub fn as_raw_int(&self) -> i64 {
-        match self {
-            &Value::I64(i) => i,
-            &Value::OverloadSet(i) => i.as_raw(),
-            &Value::GetFn(i) => i.as_raw(),
-            &Value::Type(ty) => ty.as_raw(),
-            &Value::Label(return_from) => return_from.as_raw(),
-            Value::Unit => unreachable!(),
+        match *self {
+            Value::I64(i) => i,
+            Value::GetFn(i) => i.as_raw(),
         }
     }
 }

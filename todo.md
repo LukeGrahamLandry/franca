@@ -15,6 +15,8 @@
 - can't write a macro that expands to statements
 - errors don't show multiple locations (like conflicting overloads should show the problem)
 
+// TODO: fix new constant shadowing old constant of same name. or at least give error -- Apr 22
+
 ## Feature Ideas
 
 // TODO: provide this in export_ffi

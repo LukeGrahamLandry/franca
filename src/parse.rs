@@ -992,7 +992,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn raw_unit(&mut self) -> FatExpr<'p> {
-        let mut e = self.expr(Expr::Value { value: Value::Unit.into() });
+        let mut e = self.expr(Expr::Value { value: Values::Unit });
         e.ty = TypeId::unit;
         e
     }
@@ -1092,10 +1092,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.expr(Expr::Call(Box::new(f), Box::new(arg)))
             }
             // Parser flattened empty tuples.
-            Expr::Value {
-                value: Values::One(Value::Unit),
-                ..
-            } => self.expr(Expr::Call(Box::new(f), first)),
+            Expr::Value { value: Values::Unit, .. } => self.expr(Expr::Call(Box::new(f), first)),
             // Tuple parser eagerly falttened single tuples so we have to undo that here.
             // TODO: have it work woth named arguments. Need to support mixing named and positional.
             _ => {
@@ -1111,10 +1108,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             match &mut old_arg.expr {
                 Expr::Tuple(parts) => parts.push(callback),
                 // Parser flattened empty tuples.
-                Expr::Value {
-                    value: Values::One(Value::Unit),
-                    ..
-                } => old_arg.expr = callback.expr,
+                Expr::Value { value: Values::Unit, .. } => old_arg.expr = callback.expr,
                 _ => {
                     old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
                 }

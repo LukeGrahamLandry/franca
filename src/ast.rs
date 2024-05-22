@@ -183,20 +183,10 @@ pub enum Expr<'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn as_overload_set(&self) -> Option<OverloadSetId> {
-        if let Expr::Value { value } = &self.expr {
-            if self.ty == TypeId::overload_set {
-                if let &Values::One(Value::OverloadSet(i)) = value {
-                    return Some(i);
-                } else {
-                    unreachable!("this would be bad since im trying to replace Value with i64")
-                }
-            }
-        }
-        None
+    pub fn is_raw_unit(&self) -> bool {
+        matches!(self.expr, Expr::Value { .. }) && self.ty == TypeId::unit // TODO: Unique
     }
 }
-
 pub trait WalkAst<'p> {
     // Return false to not go deeper down this branch.
     fn pre_walk_expr(&mut self, _: &mut FatExpr<'p>) -> bool {
@@ -1266,21 +1256,6 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
-    #[track_caller]
-    pub fn to_type(&mut self, value: Values) -> Res<'p, TypeId> {
-        match value {
-            Values::One(Value::Unit) => Ok(TypeId::unit),
-            Values::One(Value::Type(id)) => Ok(id),
-            Values::Many(values) => {
-                let values: Vec<_> = values.into_iter().map(TypeId::from_raw).collect();
-                Ok(self.tuple_of(values))
-            }
-            _ => {
-                err!(CErr::TypeError("Type", value))
-            }
-        }
-    }
-
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
@@ -1447,16 +1422,6 @@ impl<'p> Expr<'p> {
             | &Expr::WipFunc(f) => Some(f),
             _ => None,
         }
-    }
-
-    pub fn is_raw_unit(&self) -> bool {
-        matches!(
-            self,
-            Expr::Value {
-                value: Values::One(Value::Unit),
-                ..
-            }
-        )
     }
 
     // TODO: this needs to be removed becuase it doesn't respect shadowing or arbitrary expressions that evaluate to the expected builtin thing.

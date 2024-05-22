@@ -314,16 +314,11 @@ impl<'p> Expr<'p> {
                 format!("[{}]", args)
             }
             Expr::Value {
-                value: Values::One(Value::Unit),
-                ..
-            } => "unit".to_string(),
-            Expr::Value {
                 value: Values::One(Value::GetFn(f)),
                 ..
             } => format!("Fn{}", f.as_index()),
             Expr::Value { value, .. } => match value {
                 Values::One(Value::I64(i)) => format!("{i}"),
-                Values::One(Value::Type(i)) => format!("{i:?}"),
                 v => format!("{v:?}"),
             },
             Expr::GetVar(v) => v.log(pool),
@@ -523,11 +518,7 @@ impl Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Value::I64(v) => write!(f, "{}", v),
-            Value::Type(v) => write!(f, "{:?}", v),
             Value::GetFn(v) => write!(f, "{:?}", v),
-            Value::Unit => write!(f, "unit"),
-            Value::OverloadSet(v) => write!(f, "os{v:?}"),
-            Value::Label(return_from) => write!(f, "{return_from:?}"),
         }
     }
 }
@@ -535,6 +526,7 @@ impl Debug for Value {
 impl Debug for Values {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Values::Unit => write!(f, "unit"),
             Values::One(v) => write!(f, "{v:?}"),
             Values::Many(v) => write!(f, "{v:?}"),
         }

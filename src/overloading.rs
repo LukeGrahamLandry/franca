@@ -1,8 +1,10 @@
 use codemap::Span;
 use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
-use crate::ast::{Expr, FatExpr, FuncFlags, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, Var, VarType};
-use crate::bc::{Value, Values};
+use crate::ast::{
+    Expr, FatExpr, FuncFlags, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var, VarType,
+};
+use crate::bc::from_values;
 use crate::compiler::{Compile, DebugState, ExecTime, Res};
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap};
@@ -11,6 +13,7 @@ use std::ops::DerefMut;
 
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
+        let f_ty = f.ty;
         // TODO: more general system for checking if its a constant known expr instead of just for functions?
         Ok(match f.deref_mut() {
             &mut Expr::GetVar(i) => {
@@ -21,28 +24,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                     None
                 }
             }
-            &mut Expr::Value {
-                value: Values::One(Value::GetFn(id)),
-                ..
+            Expr::Value { value, .. } => {
+                if f_ty == TypeId::overload_set {
+                    let i: OverloadSetId = from_values(self.program, value.clone())?;
+                    let id = self.resolve_in_overload_set(arg, ret, i)?;
+                    Some(id)
+                } else if let TypeInfo::Fn(_) = self.program[f_ty] {
+                    let id = value.unwrap_func_id();
+                    self.adjust_call(arg, id)?;
+                    Some(id)
+                } else {
+                    err!("not callable",)
+                }
             }
-            | &mut Expr::WipFunc(id) => {
+            &mut Expr::WipFunc(id) => {
                 self.adjust_call(arg, id)?;
                 Some(id)
-            }
-            &mut Expr::Value {
-                value: Values::One(Value::OverloadSet(i)),
-                ..
-            } => {
-                let id = self.resolve_in_overload_set(arg, ret, i)?;
-                Some(id)
-            }
-            // TODO: this shouldn't be nessisary. Values::Many should collapse. You get here when a macro tries to literal_ast(OverloadSet)!unquote?
-            Expr::Value {
-                value: Values::Many(vals), ..
-            } => {
-                // TODO: revisit when SplitFunc can't fit in one slot anymore.
-                debug_assert!(vals.len() != 1);
-                None
             }
             Expr::Closure(_) => {
                 // This doesn't come up super often. It means you called a closure inline where you declared it for some reason.
@@ -69,19 +66,19 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(!ty.is_unknown());
         }
 
-        if let Some((value, _)) = self.find_const(name)? {
-            match value {
-                Values::One(Value::GetFn(f)) => {
-                    self.adjust_call(arg, f)?;
-                    self.pop_state(state);
-                    Ok(f)
-                }
-                Values::One(Value::OverloadSet(i)) => {
-                    let out = self.resolve_in_overload_set(arg, requested_ret, i)?;
-                    self.pop_state(state);
-                    Ok(out)
-                }
-                _ => err!("Expected function for {} but found {:?}", name.log(self.pool), value),
+        if let Some((value, ty)) = self.find_const(name)? {
+            if ty == TypeId::overload_set {
+                let i: OverloadSetId = from_values(self.program, value.clone())?;
+                let id = self.resolve_in_overload_set(arg, requested_ret, i)?;
+                self.pop_state(state);
+                Ok(id)
+            } else if let TypeInfo::Fn(_) = self.program[ty] {
+                let id = value.unwrap_func_id();
+                self.adjust_call(arg, id)?;
+                self.pop_state(state);
+                Ok(id)
+            } else {
+                err!("Expected function for {} but found {:?}", name.log(self.pool), value);
             }
         } else {
             // TODO: use self.program.vars[name.1].loc to show the declaration site.

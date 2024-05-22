@@ -1,8 +1,7 @@
 //! Low level instructions
 
-use crate::ast::{LabelId, OverloadSetId, TypeInfo, Var};
+use crate::ast::{LabelId, OverloadSetId, Program, TypeInfo, Var};
 use crate::bc_to_asm::store_to_ints;
-use crate::compiler::Compile;
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
 use crate::{
@@ -82,28 +81,14 @@ impl<'p> FnBody<'p> {
 pub enum Value {
     I64(i64),
     // Both closures and types don't have values at runtime, all uses must be inlined.
-    Type(TypeId),
     GetFn(FuncId),
-    Label(LabelId),
-    /// The empty tuple.
-    Unit,
-    OverloadSet(OverloadSetId),
 }
 
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
 pub enum Values {
+    Unit,
     One(Value),
     Many(Vec<i64>),
-}
-
-impl Values {
-    pub fn as_overload_set<'p>(&self) -> Res<'p, OverloadSetId> {
-        if let Value::OverloadSet(i) = self.clone().single()? {
-            Ok(i)
-        } else {
-            err!("expected OverloadSet not {self:?}",)
-        }
-    }
 }
 
 impl From<Value> for Values {
@@ -126,6 +111,7 @@ impl Values {
     #[track_caller]
     pub fn single(self) -> Res<'static, Value> {
         match self {
+            Values::Unit => Ok(Value::I64(0)),
             Values::One(v) => Ok(v),
             Values::Many(v) => {
                 if v.len() == 1 {
@@ -139,6 +125,7 @@ impl Values {
 
     pub fn vec(self) -> Vec<i64> {
         match self {
+            Values::Unit => vec![],
             Values::One(i) => store_to_ints(&mut [i].iter()),
             Values::Many(v) => v,
         }
@@ -147,21 +134,44 @@ impl Values {
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         match self {
+            Values::Unit => 0,
             Values::One(_) => 1,
             Values::Many(v) => v.len(),
         }
     }
+
+    pub(crate) fn unwrap_func_id(&self) -> FuncId {
+        match *self {
+            Values::One(Value::GetFn(f)) => f,
+            Values::One(Value::I64(f)) => FuncId::from_raw(f),
+            _ => unreachable!("ICE: expected func id not {self:?}"),
+        }
+    }
 }
 
-pub fn values_from_ints_one(compile: &mut Compile, ty: TypeId, ints: Vec<i64>) -> Res<'static, Vec<Value>> {
+pub fn values_from_ints_one(program: &Program, ty: TypeId, ints: Vec<i64>) -> Res<'static, Vec<Value>> {
     let mut vals = vec![];
-    values_from_ints(compile, ty, &mut ints.into_iter(), &mut vals)?;
+    values_from_ints(program, ty, &mut ints.into_iter(), &mut vals)?;
     Ok(vals)
 }
+pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
+    if T::SIZE == 1 {
+        let ty = T::get_type(program);
+        // TODO: this is dumb. i make the vec here anyway, then throw it away, then remake it on the other side.
+        Ok(Values::One(int_to_value(program, ty, t.serialize_to_ints_one()[0])?))
+    } else {
+        Ok(Values::Many(t.serialize_to_ints_one()))
+    }
+}
 
-pub fn int_to_value(compile: &mut Compile, ty: TypeId, n: i64) -> Res<'static, Value> {
-    let ty = compile.program.raw_type(ty);
-    Ok(unwrap!(int_to_value_inner(&compile.program[ty], n), "too big for an int"))
+pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &mut Program<'p>, t: Values) -> Res<'p, T> {
+    let ints = t.vec();
+    Ok(unwrap!(T::deserialize_from_ints(&mut ints.into_iter()), ""))
+}
+
+pub fn int_to_value(program: &Program, ty: TypeId, n: i64) -> Res<'static, Value> {
+    let ty = program.raw_type(ty);
+    Ok(unwrap!(int_to_value_inner(&program[ty], n), "too big for an int"))
 }
 
 pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
@@ -172,35 +182,40 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
         TypeInfo::Unit => unreachable!(),
         TypeInfo::Fn(_) => Value::GetFn(FuncId::from_raw(n)),
-        TypeInfo::Label(_) => Value::Label(LabelId::from_raw(n)),
-        TypeInfo::Type => Value::Type(TypeId::from_raw(n)),
-        TypeInfo::OverloadSet => Value::OverloadSet(OverloadSetId::from_raw(n)),
         TypeInfo::FnPtr(_) => {
             #[cfg(target_arch = "aarch64")]
             debug_assert!(n % 4 == 0);
             Value::I64(n)
         }
-        TypeInfo::Bool | TypeInfo::Ptr(_) | TypeInfo::F64 | TypeInfo::Scope | TypeInfo::Int(_) | TypeInfo::VoidPtr => Value::I64(n),
+        TypeInfo::OverloadSet
+        | TypeInfo::Label(_)
+        | TypeInfo::Type
+        | TypeInfo::Bool
+        | TypeInfo::Ptr(_)
+        | TypeInfo::F64
+        | TypeInfo::Scope
+        | TypeInfo::Int(_)
+        | TypeInfo::VoidPtr => Value::I64(n),
     })
 }
 
-pub fn values_from_ints(compile: &Compile, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
-    let ty = compile.program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
-    match &compile.program[ty] {
-        &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(compile, ty, ints, out)?,
+pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
+    let ty = program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
+    match &program[ty] {
+        &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(program, ty, ints, out)?,
         TypeInfo::Tuple(types) => {
             for ty in types {
-                values_from_ints(compile, *ty, ints, out)?;
+                values_from_ints(program, *ty, ints, out)?;
             }
         }
         TypeInfo::Tagged { cases } => {
             let start = out.len();
-            let payload_size = compile.slot_count(ty) - 1;
+            let payload_size = program.slot_count(ty) - 1;
             let tag = unwrap!(ints.next(), "");
             out.push(Value::I64(tag));
             let ty = cases[tag as usize].1;
-            let value_size = compile.slot_count(ty);
-            values_from_ints(compile, ty, ints, out)?;
+            let value_size = program.slot_count(ty);
+            values_from_ints(program, ty, ints, out)?;
 
             for _ in 0..payload_size - value_size {
                 // NOTE: the other guy must have already put padding there, so we have to pop that, not just add our own.
@@ -211,7 +226,7 @@ pub fn values_from_ints(compile: &Compile, ty: TypeId, ints: &mut impl Iterator<
             let end = out.len();
             assert_eq!(end - start, payload_size as usize + 1, "{out:?}");
         }
-        TypeInfo::Unit => out.push(Value::Unit),
+        TypeInfo::Unit => {}
         info => {
             let n = unwrap!(ints.next(), "");
             let v = unwrap!(int_to_value_inner(info, n), "");

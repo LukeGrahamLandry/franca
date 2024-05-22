@@ -1,3 +1,12 @@
+## (May 22)
+
+- got rid of Value::(Type, Label, Unit, OverloadSet)
+- got rid of some implicit casts
+  becuase they get in the way of just representing all values as bytes.
+  probably want to bring them back eventually but in a more explicit way where you just declare overloads for implicit_cast maybe.
+  - tuple of types to type so you have to call Ty all the time.
+  - overload set to Fn, now you use @resolve (only needed to change 3 tests + `__save_slice_t`).
+
 ## (May 21)
 
 I want to be able to make terminal ui things but that kinda needs correctly sized array of bytes as a struct fields to call the terminos functions.
