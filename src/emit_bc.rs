@@ -955,7 +955,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     self.emit_relocatable_constant(*as_tuple, value, result, result_location)?;
                 }
             }
-            TypeInfo::Tagged { cases } => err!("TODO: pointers in constant tagged union",),
+            TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
             TypeInfo::Enum { raw, .. } => self.emit_relocatable_constant(*raw, value, result, result_location)?,
             TypeInfo::VoidPtr => {
                 err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)

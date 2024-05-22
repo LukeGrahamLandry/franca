@@ -10,7 +10,7 @@ use cranelift::{
         control::ControlPlane,
         ir::{
             stackslot::StackSize,
-            types::{F64, I64, I8},
+            types::{F64, I32, I64, I8},
             ArgumentExtension, ArgumentPurpose, StackSlot,
         },
         settings::Flags,
@@ -880,5 +880,13 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     }),
     ("fun bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(I64, MemFlags::new(), v[0])
+    }),
+    ("fn load(_: *u32) u32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().uload32(MemFlags::new(), v[0], 0)
+    }),
+    ("fn store(_: *u32, val: u32) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        let val = builder.ins().ireduce(I32, v[1]);
+        builder.ins().store(MemFlags::new(), val, v[0], 0);
+        builder.ins().iconst(I64, 0)
     }),
 ];

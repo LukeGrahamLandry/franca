@@ -1327,13 +1327,12 @@ impl<'p> Program<'p> {
             }
             TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false, 0),
             TypeInfo::Int(int) => {
-                // TODO: u16, u32
-                // TODO: track sizes in bytes, not slots.
-                if int.bit_count == 8 {
-                    // :SmallTypes
-                    TypeMeta::new(1, 1, 0, true, false, 1)
-                } else {
-                    TypeMeta::new(1, 8, 0, false, false, 8)
+                // TODO: u16
+                // :SmallTypes
+                match int.bit_count {
+                    8 => TypeMeta::new(1, 1, 0, true, false, 1),
+                    32 => TypeMeta::new(1, 4, 0, true, false, 4),
+                    _ => TypeMeta::new(1, 8, 0, false, false, 8),
                 }
             }
             TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false, 8),

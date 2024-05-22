@@ -164,17 +164,7 @@ extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
 }
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
-    let raw = compiler.program.raw_type(ty);
-    if let TypeInfo::Int(int) = compiler.program[raw] {
-        // :SmallTypes
-        if int.bit_count == 8 {
-            return 1; // HACK
-        }
-    }
-    if raw == TypeId::bool() {
-        return 1; // HACK
-    }
-    compiler.slot_count(ty) as i64 * 8
+    compiler.program.get_info(ty).stride_bytes as i64
 }
 
 pub static STDLIB_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);

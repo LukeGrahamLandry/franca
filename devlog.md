@@ -13,8 +13,11 @@ Its 20 bytes so i can't even hack it with bitshifting cause i don't have u32 fie
 - have @match fill in argument types since it knows from the varient name
 - want to add escape chars in strings by just having the parser emit calls to a comptime function.
   but to pass that to .char(), which you often want to do, need to save a way of saying that function should be constant folded.
+- started tracking which constants are pointers so the backend can handle relocations when not just jitting.
 - trying to output an executable with cranelift-object.
   the thing it gives you is a .o file and then i run clang on it to link, but i get bus error trying to call a Linkage::Import libc function.
+  i tried having a function called main and i tried having a c program call one of my functions and giving that porgram + my obj to clang.
+  no luck.
 
 ## (May 19)
 
