@@ -2580,9 +2580,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
                 (TypeInfo::Int(a), TypeInfo::Int(b)) => {
                     // :Coercion
-                    if a.bit_count == b.bit_count || a.bit_count == 64 || b.bit_count == 64 {
-                        return Ok(()); // TODO: not this!
-                    }
+                    return Ok(()); // TODO: not this!
                 }
                 (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
                     if f.len() == e.len() {
@@ -3256,8 +3254,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Expr::Tuple(parts) = asm.deref_mut().deref_mut() {
                     let mut ops = Vec::with_capacity(parts.len());
                     for int in parts {
-                        let i: i64 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
-                        ops.push(i as u32);
+                        let i: u32 = self.immediate_eval_expr_known(int.clone())?; // TODO: sad clone
+                        ops.push(i);
                     }
                     break 'o ops;
                 }
