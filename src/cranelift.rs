@@ -82,11 +82,11 @@ pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectP
         } else if let FuncImpl::Normal(_) = comp.program[f].body {
             if comp.program[f].cc.unwrap() != CallConv::Inline {
                 let body = emit_bc(comp, f, ExecTime::Runtime)?;
-                emit_cl_inner(comp.program, m, None, &body, f)?;
+                emit_cl_inner(comp.program, m, None, &body, f, 0)?;
             }
         } else if comp.program[f].body.comptime_addr().is_some() {
             let body = emit_bc(comp, f, ExecTime::Runtime)?;
-            emit_cl_inner(comp.program, m, None, &body, f)?;
+            emit_cl_inner(comp.program, m, None, &body, f, 0)?;
         }
         m.funcs_done.set(f.as_index());
 
@@ -98,7 +98,8 @@ pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectP
 }
 
 pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) -> Res<'p, ()> {
-    emit_cl_inner(compile.program, &mut compile.cranelift, Some(&mut compile.aarch64), body, f)
+    let ctx = compile as *mut Compile as usize;
+    emit_cl_inner(compile.program, &mut compile.cranelift, Some(&mut compile.aarch64), body, f, ctx)
 }
 
 fn emit_cl_inner<'p, M: Module>(
@@ -107,6 +108,7 @@ fn emit_cl_inner<'p, M: Module>(
     asm: Option<&mut Jitted>,
     body: &FnBody<'p>,
     f: FuncId,
+    compile_ctx_ptr: usize,
 ) -> Res<'p, ()> {
     if cl.funcs_done.get(f.as_index()) {
         return Ok(());
@@ -131,7 +133,7 @@ fn emit_cl_inner<'p, M: Module>(
         block_done: BitSet::empty(),
         flat_arg_addr: None,
         flat_args_already_offset: vec![],
-        compile_ctx_ptr: 0,
+        compile_ctx_ptr,
         program,
         asm,
         cl,
@@ -156,7 +158,7 @@ pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &m
         clock: 0,
         height: 0,
     });
-    emit_cl_inner(program, cl, None, &body, f)
+    emit_cl_inner(program, cl, None, &body, f, 0)
 }
 
 impl Default for JittedCl<JITModule> {
@@ -237,7 +239,8 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         let (name, linkage) = if is_dynamic {
             // cranelift-object does the underscore for me
             (self.program.pool.get(self.program[f].name).to_string(), Linkage::Import)
-        } else if self.program[f].name == Flag::Main.ident() {
+        } else if self.program[f].name == Flag::Main.ident() && self.asm.is_none() {
+            // HACK
             // entry point for exe
             (String::from("main"), Linkage::Export)
         } else {
