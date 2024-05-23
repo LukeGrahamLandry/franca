@@ -1141,19 +1141,10 @@ pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
     let mut out = vec![];
     for value in values {
         // if *value != Value::Unit {
-        out.push(value.as_raw_int());
+        out.push(*value);
         // }
     }
     out
-}
-
-impl Value {
-    pub fn as_raw_int(&self) -> i64 {
-        match *self {
-            Value::I64(i) => i,
-            Value::GetFn(i) => i.as_raw(),
-        }
-    }
 }
 
 extern "C-unwind" fn not_compiled() {

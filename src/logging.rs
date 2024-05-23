@@ -313,12 +313,8 @@ impl<'p> Expr<'p> {
                 let args: String = args.join(", ");
                 format!("[{}]", args)
             }
-            Expr::Value {
-                value: Values::One(Value::GetFn(f)),
-                ..
-            } => format!("Fn{}", f.as_index()),
             Expr::Value { value, .. } => match value {
-                Values::One(Value::I64(i)) => format!("{i}"),
+                Values::One(i) => format!("{i}"),
                 v => format!("{v:?}"),
             },
             Expr::GetVar(v) => v.log(pool),
@@ -456,15 +452,6 @@ impl<'p> FnBody<'p> {
     }
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::I64(v) => write!(f, "{v}"),
-            _ => write!(f, "{self:?}"),
-        }
-    }
-}
-
 impl<'p> Debug for CompileError<'p> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "COMPILATION ERROR:")?;
@@ -511,15 +498,6 @@ impl<'p> CErr<'p> {
 impl<'p> FatStmt<'p> {
     pub fn log_annotations(&self, pool: &StringPool<'p>) -> String {
         self.annotations.iter().map(|a| pool.get(a.name)).collect()
-    }
-}
-
-impl Debug for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Value::I64(v) => write!(f, "{}", v),
-            Value::GetFn(v) => write!(f, "{:?}", v),
-        }
     }
 }
 

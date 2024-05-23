@@ -1,6 +1,6 @@
 //! Low level instructions
 
-use crate::ast::{LabelId, OverloadSetId, Program, TypeInfo, Var};
+use crate::ast::{LabelId, Program, TypeInfo, Var};
 use crate::bc_to_asm::store_to_ints;
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
@@ -77,13 +77,7 @@ impl<'p> FnBody<'p> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
-pub enum Value {
-    I64(i64),
-    // Both closures and types don't have values at runtime, all uses must be inlined.
-    GetFn(FuncId),
-}
-
+pub type Value = i64;
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
 pub enum Values {
     Unit,
@@ -111,7 +105,7 @@ impl Values {
     #[track_caller]
     pub fn single(self) -> Res<'static, Value> {
         match self {
-            Values::Unit => Ok(Value::I64(0)),
+            Values::Unit => Ok(0),
             Values::One(v) => Ok(v),
             Values::Many(v) => {
                 if v.len() == 1 {
@@ -142,8 +136,7 @@ impl Values {
 
     pub(crate) fn unwrap_func_id(&self) -> FuncId {
         match *self {
-            Values::One(Value::GetFn(f)) => f,
-            Values::One(Value::I64(f)) => FuncId::from_raw(f),
+            Values::One(f) => FuncId::from_raw(f),
             _ => unreachable!("ICE: expected func id not {self:?}"),
         }
     }
@@ -181,13 +174,13 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
         &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
         TypeInfo::Unit => unreachable!(),
-        TypeInfo::Fn(_) => Value::GetFn(FuncId::from_raw(n)),
         TypeInfo::FnPtr(_) => {
             #[cfg(target_arch = "aarch64")]
             debug_assert!(n % 4 == 0);
-            Value::I64(n)
+            n
         }
-        TypeInfo::OverloadSet
+        TypeInfo::Fn(_)
+        | TypeInfo::OverloadSet
         | TypeInfo::Label(_)
         | TypeInfo::Type
         | TypeInfo::Bool
@@ -195,7 +188,7 @@ pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
         | TypeInfo::F64
         | TypeInfo::Scope
         | TypeInfo::Int(_)
-        | TypeInfo::VoidPtr => Value::I64(n),
+        | TypeInfo::VoidPtr => n,
     })
 }
 
@@ -212,7 +205,7 @@ pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<
             let start = out.len();
             let payload_size = program.slot_count(ty) - 1;
             let tag = unwrap!(ints.next(), "");
-            out.push(Value::I64(tag));
+            out.push(tag);
             let ty = cases[tag as usize].1;
             let value_size = program.slot_count(ty);
             values_from_ints(program, ty, ints, out)?;
@@ -221,7 +214,7 @@ pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<
                 // NOTE: the other guy must have already put padding there, so we have to pop that, not just add our own.
                 // TODO: should preserve the value so you can do weird void cast tricks but meh until i remove the interp since I can't reconstruct the right types anyway.
                 let _padding = unwrap!(ints.next(), "");
-                out.push(Value::I64(99999));
+                out.push(99999);
             }
             let end = out.len();
             assert_eq!(end - start, payload_size as usize + 1, "{out:?}");

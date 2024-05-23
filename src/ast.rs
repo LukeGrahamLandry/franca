@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Value, Values},
+    bc::Values,
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
     ffi::InterpSend,
@@ -139,7 +139,6 @@ pub struct Var<'p> {
 //         state.write_u32(self.id);
 //     }
 // }
-
 // TODO: should really get an arena going because boxes make me sad.
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
@@ -1246,7 +1245,8 @@ impl<'p> Program<'p> {
             };
             self.intern_type(ty)
         } else {
-            panic!()
+            let ty = self.intern_type(ty);
+            panic!("{}", self.log_type(ty));
         }
     }
 
@@ -1409,17 +1409,6 @@ impl<'p> Expr<'p> {
         match self {
             Expr::GetVar(v) => Some(v.name),
             &Expr::GetNamed(i) => Some(i),
-            _ => None,
-        }
-    }
-
-    pub fn as_fn(&self) -> Option<FuncId> {
-        match self {
-            &Expr::Value {
-                value: Values::One(Value::GetFn(f)), // Note: NOT GetNativeFnPtr thats a different type
-                ..
-            }
-            | &Expr::WipFunc(f) => Some(f),
             _ => None,
         }
     }

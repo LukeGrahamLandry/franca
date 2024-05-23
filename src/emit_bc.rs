@@ -369,7 +369,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Call(f, arg) => {
                 assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.program.pool));
                 assert!(!arg.ty.is_unknown(), "Not typechecked: {}", arg.log(self.program.pool));
-                if let Some(f_id) = f.as_fn() {
+                if let TypeInfo::Fn(_) = self.program[f.ty] {
+                    let f_id = unwrap!(f.as_const(), "tried to call non-const fn").unwrap_func_id();
                     let func = &self.program[f_id];
                     assert!(!func.has_tag(Flag::Comptime));
                     return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
@@ -398,7 +399,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
                     let Expr::Value {
-                        value: Values::One(Value::I64(return_from)),
+                        value: Values::One(return_from),
                         ..
                     } = f.expr
                     else {
@@ -584,8 +585,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         self.compile_expr(result, arg, result_location, can_tail)?;
                     }
                     Flag::Fn_Ptr => {
-                        // TODO: say arg is of type fn and dont let as_fn accept addr ptr. -- Apr 30
-                        let f = unwrap!(arg.as_fn(), "expected fn for ptr");
+                        debug_assert!(matches!(self.program[arg.ty], TypeInfo::Fn(_)));
+                        let f = unwrap!(arg.as_const(), "expected fn for ptr").unwrap_func_id();
                         result.push(Bc::GetNativeFnPtr(f));
                         match result_location {
                             PushStack => {}

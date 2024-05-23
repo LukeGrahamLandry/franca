@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{int_to_value, values_from_ints, Value, Values};
+use crate::bc::{int_to_value, values_from_ints, Values};
 use crate::compiler::{bit_literal, Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
@@ -655,17 +655,14 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
         arg: TypeId::unit,
         ret: TypeId::unit,
     }));
-    compile.compile_expr(&mut block, Some(ty)).unwrap();
-
-    let Some(id) = block.as_fn() else {
-        panic!("expected block for @namespace not {}", block.log(compile.pool))
-    };
-
+    let found_ty = compile.compile_expr(&mut block, Some(ty)).unwrap();
+    let id = block.as_const().unwrap().unwrap_func_id();
+    debug_assert_eq!(ty, found_ty);
     compile.compile(id, ExecTime::Comptime).unwrap();
     let func = &mut compile.program[id];
     let s = func.scope.unwrap();
 
-    FatExpr::value(Values::One(Value::I64(s.as_raw())), TypeId::scope, loc)
+    FatExpr::value(Values::One(s.as_raw()), TypeId::scope, loc)
 }
 
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
@@ -829,6 +826,6 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
         1 => overloads.ready[0].func,
         _ => panic!("Ambigous overload \n{:?}", overloads.ready),
     };
-    let val = Values::One(Value::GetFn(found));
+    let val = Values::One(found.as_raw());
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }

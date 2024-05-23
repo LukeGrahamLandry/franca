@@ -12,7 +12,6 @@ use crate::export_ffi::get_include_std;
 use crate::STATS;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
-    bc::Value,
     lex::{Lexer, Token, TokenType},
     logging::PoolLog,
     pool::{Ident, StringPool},
@@ -282,7 +281,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             Number(f) => {
                 self.start_subexpr();
                 self.pop();
-                let mut e = self.expr(Expr::Value { value: Value::I64(f).into() });
+                let mut e = self.expr(Expr::Value { value: Values::One(f) });
                 e.ty = TypeId::i64();
                 Ok(e)
             }
@@ -290,7 +289,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.pop();
                 let mut e = self.expr(Expr::Value {
-                    value: Value::I64(f.to_bits() as i64).into(),
+                    value: (f.to_bits() as i64).into(),
                 });
                 e.ty = TypeId::f64();
                 Ok(e)
@@ -306,10 +305,10 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.pop();
                 let v = i64::from_le_bytes((value).to_le_bytes());
-                let mut v = self.expr(Expr::Value { value: Value::I64(v).into() });
+                let mut v = self.expr(Expr::Value { value: (v).into() });
                 v.ty = TypeId::i64();
                 let mut bits = self.expr(Expr::Value {
-                    value: Value::I64(bit_count as i64).into(),
+                    value: (bit_count as i64).into(),
                 });
                 bits.ty = TypeId::i64();
                 let pair = self.expr(Expr::Tuple(vec![bits, v]));
