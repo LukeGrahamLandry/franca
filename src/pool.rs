@@ -1,6 +1,11 @@
 use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::PhantomData, mem};
 
-use crate::{ast::Flag, ffi::InterpSend, Map, MY_CONST_DATA};
+use crate::{
+    ast::Flag,
+    bc::{ReadBytes, WriteBytes},
+    ffi::InterpSend,
+    Map, MY_CONST_DATA,
+};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Ident<'pool>(pub u32, pub PhantomData<&'pool str>);
@@ -239,7 +244,7 @@ impl<T: ?Sized> Clone for Ptr<T> {
 impl<T: ?Sized> Copy for Ptr<T> {}
 
 impl<'p> InterpSend<'p> for Ident<'p> {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 4;
 
     fn get_type_key() -> u128 {
         // i dare you to change the generic to Self
@@ -250,17 +255,13 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         crate::ast::TypeId::i64() // TODO: have a unique Symbol type
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         self.0.serialize_to_ints(values)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        let i = values.next()?;
-        if i < 0 {
-            return None;
-        }
-
-        Some(Ident(i as u32, PhantomData))
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        let i = values.next_u32()?;
+        Some(Ident(i, PhantomData))
     }
 
     fn name() -> String {

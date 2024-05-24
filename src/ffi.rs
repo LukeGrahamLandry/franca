@@ -4,12 +4,13 @@ use codemap::Span;
 
 use crate::{
     ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
+    bc::{ReadBytes, WriteBytes},
     Map,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
 pub trait InterpSend<'p>: Sized {
-    const SIZE: usize;
+    const SIZE_BYTES: usize;
 
     // TODO: could use ptr&len of a static string of the type name. but thats sad.
     //       cant use std::any because of lifetimes. tho my macro can cheat and refer to the name without lifetimes,
@@ -18,15 +19,15 @@ pub trait InterpSend<'p>: Sized {
     fn get_type(program: &mut Program<'p>) -> TypeId {
         program.get_ffi_type::<Self>(Self::get_type_key())
     }
-    fn create_type(interp: &mut Program<'p>) -> TypeId;
     /// This should only be called once! Use get_type which caches it.
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self>;
-    fn serialize_to_ints(self, values: &mut Vec<i64>);
-    fn serialize_to_ints_one(self) -> Vec<i64> {
-        let mut values = Vec::with_capacity(Self::SIZE);
+    fn create_type(interp: &mut Program<'p>) -> TypeId;
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self>;
+    fn serialize_to_ints(self, values: &mut WriteBytes);
+    fn serialize_to_ints_one(self) -> Vec<u8> {
+        let mut values = WriteBytes::default(); // TODO: with_capacity
         self.serialize_to_ints(&mut values);
         // debug_assert_eq!(values.len(), Self::SIZE); // not true because Unit
-        values
+        values.0
     }
 
     fn definition() -> String {
@@ -40,14 +41,14 @@ pub trait InterpSend<'p>: Sized {
     fn add_child_ffi_definitions(_: Program<'p>) {}
 }
 
-pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut impl Iterator<Item = i64>) -> Option<T> {
+pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(values: &mut ReadBytes) -> Option<T> {
     T::deserialize_from_ints(values)
 }
 
 macro_rules! send_num {
-    ($ty:ty, $bits:expr, $signed:expr) => {
+    ($ty:ty, $bits:expr, $signed:expr, $bytes:expr, $read_fn:ident, $write_fn:ident, $as_int:ty) => {
         impl<'p> InterpSend<'p> for $ty {
-            const SIZE: usize = 1;
+            const SIZE_BYTES: usize = $bytes;
 
             fn get_type_key() -> u128 {
                 unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -68,12 +69,12 @@ macro_rules! send_num {
                 }))
             }
 
-            fn serialize_to_ints(self, values: &mut Vec<i64>) {
-                values.push(self as i64)
+            fn serialize_to_ints(self, values: &mut WriteBytes) {
+                values.$write_fn(self as $as_int)
             }
 
-            fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-                Some(values.next()? as $ty)
+            fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+                Some(values.$read_fn()? as $ty)
             }
 
             fn name() -> String {
@@ -83,19 +84,19 @@ macro_rules! send_num {
     };
 }
 
-send_num!(i64, 64, true);
-send_num!(u64, 64, false);
-send_num!(isize, 64, true);
-send_num!(usize, 64, false);
-send_num!(i32, 32, true);
-send_num!(u32, 32, false);
-send_num!(i16, 16, true);
-send_num!(u16, 16, false);
-send_num!(i8, 8, true);
-send_num!(u8, 8, false);
+send_num!(i64, 64, true, 8, next_i64, push_i64, i64);
+send_num!(u64, 64, false, 8, next_i64, push_i64, i64);
+send_num!(isize, 64, true, 8, next_i64, push_i64, i64);
+send_num!(usize, 64, false, 8, next_i64, push_i64, i64);
+send_num!(i32, 32, true, 4, next_u32, push_u32, u32);
+send_num!(u32, 32, false, 4, next_u32, push_u32, u32);
+send_num!(i16, 16, true, 8, next_i64, push_i64, i64); // TODO
+send_num!(u16, 16, false, 8, next_i64, push_i64, i64); // TODO
+send_num!(i8, 8, true, 1, next_u8, push_u8, u8);
+send_num!(u8, 8, false, 1, next_u8, push_u8, u8);
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 8;
 
     fn get_type_key() -> u128 {
         mix::<T, Box<()>>(1274222)
@@ -111,12 +112,12 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
         p.intern_type(TypeInfo::Ptr(t))
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(self as i64)
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_i64(self as i64)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(values.next()? as *mut T)
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        Some(values.next_i64()? as *mut T)
     }
 
     fn name() -> String {
@@ -125,7 +126,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
 }
 
 impl<'p> InterpSend<'p> for bool {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 1;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -138,12 +139,12 @@ impl<'p> InterpSend<'p> for bool {
         TypeId::bool()
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(if self { 1 } else { 0 })
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_u8(if self { 1 } else { 0 })
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(values.next()? != 0)
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        Some(values.next_u8()? != 0)
     }
 
     fn name() -> String {
@@ -152,7 +153,7 @@ impl<'p> InterpSend<'p> for bool {
 }
 
 impl<'p> InterpSend<'p> for () {
-    const SIZE: usize = 0;
+    const SIZE_BYTES: usize = 0;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -165,9 +166,9 @@ impl<'p> InterpSend<'p> for () {
         TypeId::unit
     }
 
-    fn serialize_to_ints(self, _: &mut Vec<i64>) {}
+    fn serialize_to_ints(self, _: &mut WriteBytes) {}
 
-    fn deserialize_from_ints(_: &mut impl Iterator<Item = i64>) -> Option<Self> {
+    fn deserialize_from_ints(_: &mut ReadBytes) -> Option<Self> {
         Some(())
     }
 
@@ -177,7 +178,7 @@ impl<'p> InterpSend<'p> for () {
 }
 
 impl<'p> InterpSend<'p> for char {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 4;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -186,12 +187,12 @@ impl<'p> InterpSend<'p> for char {
         TypeId::i64()
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(self as i64)
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_u32(self as u32)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        char::from_u32(values.next()? as u32)
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        char::from_u32(values.next_u32()? as u32)
     }
 
     fn name() -> String {
@@ -200,7 +201,7 @@ impl<'p> InterpSend<'p> for char {
 }
 
 impl<'p> InterpSend<'p> for f64 {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 8;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -209,12 +210,12 @@ impl<'p> InterpSend<'p> for f64 {
         TypeId::f64()
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(self.to_bits() as i64)
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_i64(self.to_bits() as i64)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(f64::from_bits(values.next()? as u64))
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        Some(f64::from_bits(values.next_i64()? as u64))
     }
 
     fn name() -> String {
@@ -223,7 +224,7 @@ impl<'p> InterpSend<'p> for f64 {
 }
 
 impl<'p> InterpSend<'p> for TypeId {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 4;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -236,12 +237,12 @@ impl<'p> InterpSend<'p> for TypeId {
         TypeId::ty
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(self.as_raw())
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_u32(self.as_raw())
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(TypeId::from_raw(values.next()?))
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        Some(TypeId::from_raw(values.next_u32()?))
     }
 
     fn name() -> String {
@@ -251,7 +252,7 @@ impl<'p> InterpSend<'p> for TypeId {
 
 // TODO: this is sad.
 impl<'p> InterpSend<'p> for OverloadSetId {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 4;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -264,12 +265,12 @@ impl<'p> InterpSend<'p> for OverloadSetId {
         TypeId::overload_set
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(self.as_raw())
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_u32(self.as_raw())
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(OverloadSetId::from_raw(values.next()?))
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        Some(OverloadSetId::from_raw(values.next_u32()?))
     }
 
     fn name() -> String {
@@ -279,7 +280,7 @@ impl<'p> InterpSend<'p> for OverloadSetId {
 
 // TODO: this is sad.
 impl<'p> InterpSend<'p> for ScopeId {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 4;
 
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -292,12 +293,12 @@ impl<'p> InterpSend<'p> for ScopeId {
         TypeId::scope
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        values.push(self.as_raw())
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        values.push_u32(self.as_raw())
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        Some(ScopeId::from_raw(values.next()?))
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        Some(ScopeId::from_raw(values.next_u32()?))
     }
 
     fn name() -> String {
@@ -306,7 +307,7 @@ impl<'p> InterpSend<'p> for ScopeId {
 }
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
-    const SIZE: usize = A::SIZE + B::SIZE;
+    const SIZE_BYTES: usize = A::SIZE_BYTES + B::SIZE_BYTES; // TODO: alignment
     fn get_type_key() -> u128 {
         mix::<A, B>(6749973390999)
     }
@@ -316,12 +317,12 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
         program.tuple_of(vec![a, b])
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         self.0.serialize_to_ints(values);
         self.1.serialize_to_ints(values);
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
         let a = A::deserialize_from_ints(values)?;
         let b = B::deserialize_from_ints(values)?;
         Some((a, b))
@@ -333,7 +334,7 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
 }
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p> for (A, B, C) {
-    const SIZE: usize = A::SIZE + B::SIZE;
+    const SIZE_BYTES: usize = A::SIZE_BYTES + B::SIZE_BYTES + C::SIZE_BYTES; // TODO: alignment
     fn get_type_key() -> u128 {
         mix::<(A, B), C>(87986)
     }
@@ -344,13 +345,13 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
         program.tuple_of(vec![a, b, c])
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         self.0.serialize_to_ints(values);
         self.1.serialize_to_ints(values);
         self.2.serialize_to_ints(values);
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
         let a = A::deserialize_from_ints(values)?;
         let b = B::deserialize_from_ints(values)?;
         let c = C::deserialize_from_ints(values)?;
@@ -363,7 +364,7 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
-    const SIZE: usize = 2;
+    const SIZE_BYTES: usize = 16;
     fn get_type_key() -> u128 {
         mix::<T, i16>(999998827262625)
     }
@@ -374,30 +375,30 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         program.intern_type(TypeInfo::Tuple(vec![ty, TypeId::i64()]))
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         let len = self.len();
-        let mut parts = Vec::with_capacity(T::SIZE * len);
+        let mut parts = WriteBytes::default(); // TODO: with_capacity
         for e in self {
             e.serialize_to_ints(&mut parts);
         }
-        debug_assert_eq!(parts.len(), T::SIZE * len);
-        let (ptr, _, _) = parts.into_raw_parts();
-        values.push(ptr as i64);
-        values.push(len as i64);
+        debug_assert_eq!(parts.0.len(), T::SIZE_BYTES * len);
+        let (ptr, _, _) = parts.0.into_raw_parts();
+        values.push_i64(ptr as i64);
+        values.push_i64(len as i64);
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        let ptr = values.next()?;
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        let ptr = values.next_i64()?;
         debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let len = usize::deserialize_from_ints(values)?;
 
-        let entries = T::SIZE * len;
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, entries) };
-        let mut values = s.iter().copied();
+        let entries = T::SIZE_BYTES * len;
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, entries) };
 
         let mut res = Vec::with_capacity(len);
+        let mut reader = ReadBytes { bytes: s, i: 0 }; // TODO: alignment
         for _ in 0..len {
-            res.push(T::deserialize_from_ints(&mut values)?);
+            res.push(T::deserialize_from_ints(&mut reader)?);
         }
 
         Some(res)
@@ -409,7 +410,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
-    const SIZE: usize = 1;
+    const SIZE_BYTES: usize = 8;
     fn get_type_key() -> u128 {
         mix::<T, i8>(67445234555533)
     }
@@ -419,21 +420,19 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         program.intern_type(TypeInfo::Ptr(ty))
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
-        let mut parts = vec![];
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
+        let mut parts = WriteBytes::default();
         let inner: T = *self;
         inner.serialize_to_ints(&mut parts);
-        debug_assert_eq!(parts.len(), T::SIZE);
-        let (ptr, _, _) = parts.into_raw_parts();
-        values.push(ptr as i64)
+        debug_assert_eq!(parts.0.len(), T::SIZE_BYTES);
+        let (ptr, _, _) = parts.0.into_raw_parts();
+        values.push_i64(ptr as i64)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        let ptr = values.next()?;
-        debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const i64, T::SIZE) };
-        let mut values = s.iter().copied();
-        let v = T::deserialize_from_ints(&mut values)?;
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        let ptr = values.next_i64()?;
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, T::SIZE_BYTES) };
+        let v = T::deserialize_from_ints(&mut ReadBytes { bytes: s, i: 0 })?;
         Some(Box::new(v))
     }
 
@@ -444,7 +443,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
 
 // TODO: this should be an enum
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
-    const SIZE: usize = 1 + T::SIZE;
+    const SIZE_BYTES: usize = 8 + T::SIZE_BYTES; // TODO
     fn get_type_key() -> u128 {
         mix::<T, bool>(8090890890986)
     }
@@ -454,27 +453,27 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         interp.tuple_of(vec![TypeId::i64(), t])
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         match self {
             Some(v) => {
-                values.push(0);
+                values.push_i64(0);
                 v.serialize_to_ints(values);
             }
             None => {
-                values.push(1);
-                for _ in 0..T::SIZE {
-                    values.push(66666);
+                values.push_i64(1);
+                for _ in 8..T::SIZE_BYTES {
+                    values.push_u8(0);
                 }
             }
         }
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
-        match values.next()? {
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+        match values.next_i64()? {
             0 => Some(T::deserialize_from_ints(values)),
             1 => {
-                for _ in 0..T::SIZE {
-                    let _ = values.next()?;
+                for _ in 0..T::SIZE_BYTES {
+                    let _ = values.next_u8()?;
                 }
                 Some(None)
             }
@@ -488,7 +487,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
 }
 
 impl<'p> InterpSend<'p> for Span {
-    const SIZE: usize = 2;
+    const SIZE_BYTES: usize = <(u32, u32)>::SIZE_BYTES;
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
     }
@@ -499,12 +498,12 @@ impl<'p> InterpSend<'p> for Span {
     }
 
     // This looks wierd because no breaking changes is when private field.
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         let (a, b): (u32, u32) = unsafe { mem::transmute(self) };
         (a, b).serialize_to_ints(values)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
         let (a, b) = <(u32, u32)>::deserialize_from_ints(values)?;
         let res: Span = unsafe { mem::transmute((a, b)) };
         Some(res)
@@ -520,7 +519,7 @@ impl<'p> InterpSend<'p> for Span {
 }
 
 impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for Map<K, V> {
-    const SIZE: usize = 2;
+    const SIZE_BYTES: usize = 16;
     fn get_type_key() -> u128 {
         mix::<K, V>(1234567890)
     }
@@ -529,11 +528,11 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
         Vec::<(K, V)>::get_type(interp)
     }
 
-    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+    fn serialize_to_ints(self, values: &mut WriteBytes) {
         self.into_iter().collect::<Vec<_>>().serialize_to_ints(values)
     }
 
-    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
         Some(Vec::<(K, V)>::deserialize_from_ints(values)?.into_iter().collect::<Self>())
     }
 
@@ -552,11 +551,11 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
 //         Vec::<u8>::get_type(interp)
 //     }
 
-//     fn serialize_to_ints(self, values: &mut Vec<i64>) {
+//     fn serialize_to_ints(self, values: &mut WriteBytes) {
 //         Vec::<u8>::from(self).serialize_to_ints(values)
 //     }
 
-//     fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+//     fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
 //         Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
 //     }
 

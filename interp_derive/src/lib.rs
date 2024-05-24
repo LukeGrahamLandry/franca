@@ -27,7 +27,7 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let expanded = quote! {
         impl #impl_generics crate::ffi::InterpSend<'p> for #name #ty_generics #where_clause {
 
-            const SIZE: usize = #size;
+            const SIZE_BYTES: usize = #size;
             fn get_type_key() -> u128 {
                 // # Safety: trust me bro
                 unsafe { std::mem::transmute(std::any::TypeId::of::<#name>()) }
@@ -37,11 +37,11 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
                 #get_type
             }
 
-            fn serialize_to_ints(self, values: &mut Vec<i64>) {
+            fn serialize_to_ints(self, values: &mut crate::bc::WriteBytes) {
                 #serialize_to_ints
             }
 
-            fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+            fn deserialize_from_ints(values: &mut crate::bc::ReadBytes) -> Option<Self> {
                 #deserialize_from_ints
             }
 
@@ -209,9 +209,9 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                     }
                 };
 
-                let payload_size = Self::SIZE - 1;
+                let payload_size = Self::SIZE_BYTES - 8;
                 for _ in 0..(payload_size-varient_size) {
-                    let _pad = values.next()?;
+                    let _pad = values.next_i64()?;
                 }
 
                 result
@@ -301,12 +301,12 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                     #left => { #extra #fields },
                 }
             });
-            let pad = quote!(values.push(88888););
+            let pad = quote!(values.push_u8(0););
             quote! {
                 #[allow(unused_variables)]
                 let varient_size = match &self {  #(#recurse_tag)* };
                 match self {  #(#recurse_fields)* };
-                let payload_size = Self::SIZE - 1;
+                let payload_size = Self::SIZE_BYTES - 8;
                 for _ in 0..(payload_size-varient_size) {
                     #pad  // TODO: less dumb padding
                 }
@@ -395,7 +395,7 @@ fn size_for(name: &Ident, data: &Data) -> TokenStream {
             });
             quote! {{
                 use crate::ffi::const_max;
-                const_max(&[0, #( #recurse, )* ]) + 1
+                const_max(&[0, #( #recurse, )* ]) + 8
             }}
         }
         syn::Data::Union(_) => todo!(),
@@ -408,7 +408,7 @@ fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
             let recurse = fields.named.iter().map(|f| {
                 let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                    <#ty as InterpSend>::SIZE
+                    <#ty as InterpSend>::SIZE_BYTES
                 }
             });
             quote! {
@@ -419,7 +419,7 @@ fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
             let recurse = fields.unnamed.iter().map(|f| {
                 let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                     <#ty as InterpSend>::SIZE
+                     <#ty as InterpSend>::SIZE_BYTES
                 }
             });
             quote! {

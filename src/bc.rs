@@ -78,23 +78,32 @@ impl<'p> FnBody<'p> {
 
 pub type Value = i64;
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq, Debug)]
-pub struct Values(Vec<i64>);
+pub struct Values(pub Vec<u8>);
+
+impl From<u32> for Values {
+    fn from(value: u32) -> Self {
+        Values::many(value.to_le_bytes().to_vec())
+    }
+}
 
 impl Values {
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
     pub fn unit() -> Self {
         Self(vec![])
     }
 
     pub fn one(v: i64) -> Self {
-        Self(vec![v])
+        Self(v.to_le_bytes().to_vec())
     }
 
-    pub fn many(v: Vec<i64>) -> Self {
+    pub fn many(v: Vec<u8>) -> Self {
         Self(v)
     }
 
     pub fn is_unit(&self) -> bool {
-        self.len() == 0
+        self.0.is_empty()
     }
 }
 
@@ -104,45 +113,35 @@ impl From<Value> for Values {
     }
 }
 
-impl From<Vec<Value>> for Values {
-    fn from(value: Vec<Value>) -> Self {
-        Values::many(value)
-    }
-}
-
 impl Values {
-    pub fn vec(self) -> Vec<i64> {
-        self.0
-    }
-
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
     pub(crate) fn unwrap_func_id(&self) -> FuncId {
-        debug_assert_eq!(self.0.len(), 1);
-        FuncId::from_raw(self.0[0])
+        debug_assert_eq!(self.0.len(), 4);
+        let i = ReadBytes { bytes: &self.0, i: 0 }.next_u32().unwrap();
+        FuncId::from_raw(i)
     }
 }
 
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
-    Ok(Values::many(t.serialize_to_ints_one()))
+    let ints = t.serialize_to_ints_one();
+    // NOT SOUND. lower alignment not good enough. its fine for now since i never free anything i hope?? -- May 24
+    let (ptr, len, cap) = ints.into_raw_parts();
+    let bytes = unsafe { Vec::from_raw_parts(ptr, len * 8, cap * 8) };
+    Ok(Values::many(bytes))
 }
 
 pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &Program<'p>, t: Values) -> Res<'p, T> {
-    let ints = t.vec();
-    Ok(unwrap!(T::deserialize_from_ints(&mut ints.into_iter()), ""))
+    let mut reader = ReadBytes { bytes: &t.0, i: 0 };
+    Ok(unwrap!(T::deserialize_from_ints(&mut reader), ""))
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
 pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: Values) -> Res<'p, (Values, Values)> {
-    let mut ints = t.vec();
-    let slots = program.slot_count(prefix);
-    assert!(ints.len() >= slots as usize);
-    let (_, snd) = ints.split_at(slots as usize);
+    let mut ints = t.0;
+    let bytes = program.slot_count(prefix) * 8;
+    assert!(ints.len() >= bytes as usize);
+    let (_, snd) = ints.split_at(bytes as usize);
     let snd = snd.to_vec();
-    ints.truncate(slots as usize);
+    ints.truncate(bytes as usize);
     Ok((Values::many(ints), Values::many(snd)))
 }
 
@@ -227,8 +226,8 @@ pub fn temp_deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBy
 }
 
 pub struct ReadBytes<'a> {
-    bytes: &'a [u8],
-    i: usize,
+    pub bytes: &'a [u8],
+    pub i: usize,
 }
 
 impl<'a> ReadBytes<'a> {
@@ -272,7 +271,8 @@ impl<'a> ReadBytes<'a> {
     }
 }
 
-pub struct WriteBytes(Vec<u8>);
+#[derive(Default)]
+pub struct WriteBytes(pub Vec<u8>);
 
 impl WriteBytes {
     pub fn push_u8(&mut self, v: u8) {

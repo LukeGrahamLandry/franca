@@ -4,7 +4,6 @@
 
 use codemap::Span;
 use std::ops::Deref;
-use std::ptr::slice_from_raw_parts;
 use std::usize;
 
 use crate::ast::{CallConv, Expr, FatExpr, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
@@ -501,14 +500,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 //     return Ok(());
                 // }
 
+                let mut parts = vec![];
+                deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
                 match result_location {
                     PushStack => {
-                        for value in value.clone().vec().into_iter() {
+                        for value in parts {
                             result.push(Bc::PushConstant { value });
                         }
                     }
                     ResAddr => {
-                        for value in value.clone().vec().into_iter() {
+                        for value in parts {
                             result.push(Bc::Dup);
                             result.push(Bc::PushConstant { value });
                             result.push(Bc::StorePre { slots: 1 });
@@ -903,64 +904,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 //
             }
             _ => err!("struct literal but expected {:?}", requested),
-        }
-        Ok(())
-    }
-
-    fn _emit_relocatable_constant(&mut self, ty: TypeId, value: &Values, result: &mut FnBody<'p>, result_location: ResultLoc) -> Res<'p, ()> {
-        let raw = self.program.raw_type(ty);
-
-        match &self.program[raw] {
-            TypeInfo::FnPtr(_) => err!("TODO: fnptr in constant",),
-            TypeInfo::Tuple(_) => err!("TODO: partial pointers constant tuple",),
-            TypeInfo::Ptr(inner) => {
-                // TODO: CStr is special...
-                if self.program.get_info(*inner).contains_pointers {
-                    err!("TODO: nested constant pointers",)
-                } else {
-                    todo!()
-                }
-            }
-            TypeInfo::Struct { fields, as_tuple } => {
-                if fields.len() == 2 && fields[0].name == Flag::Ptr.ident() && fields[1].name == Flag::Len.ident() {
-                    // TODO: actually construct the slice type from unptr_ty(ptr) and check that its the same.
-                    // TODO: really you want to let types overload a function to do this,
-                    //       because List doesn't really want to keep its uninitialized memory.
-                    let parts = value.clone().vec(); // sad
-                    let ptr = parts[0];
-                    let len = parts[1];
-                    let inner = self.program.unptr_ty(fields[0].ty).unwrap();
-                    let inner_info = self.program.get_info(inner);
-                    if inner_info.contains_pointers {
-                        err!("TODO: nested constant pointers",)
-                    }
-
-                    if len == 0 {
-                        // an empty slice can have a null data ptr i guess.
-                        result.push(Bc::PushConstant { value: 0 });
-                    } else {
-                        assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
-                        let bytes = len as usize * inner_info.stride_bytes as usize;
-                        let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
-                        result.push(Bc::PushRelocatablePointer { bytes: data });
-                    }
-
-                    result.push(Bc::PushConstant { value: len });
-                } else {
-                    self._emit_relocatable_constant(*as_tuple, value, result, result_location)?;
-                }
-            }
-            TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
-            TypeInfo::Enum { raw, .. } => self._emit_relocatable_constant(*raw, value, result, result_location)?,
-            TypeInfo::VoidPtr => {
-                err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)
-            }
-            _ => err!("ICE: bad constant",),
-        }
-
-        if result_location == ResAddr {
-            let slots = self.slot_count(ty);
-            result.push(Bc::StorePre { slots });
         }
         Ok(())
     }

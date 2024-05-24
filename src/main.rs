@@ -4,6 +4,7 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
+    bc::{Value, Values},
     compiler::{Compile, ExecTime, Res},
     export_ffi::{end_raw, get_include_std, start_raw, STDLIB_PATH},
     find_std_lib,
@@ -406,8 +407,8 @@ fn run_one(comp: &mut Compile, f: FuncId) {
         exit(1);
     }
 
-    let arg = 0; // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
-    comp.run(f, (arg).into(), ExecTime::Runtime).unwrap();
+    // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
+    comp.run(f, Values::many(vec![0, 0, 0, 0, 0, 0, 0, 0]), ExecTime::Runtime).unwrap();
 }
 
 fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {

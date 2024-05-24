@@ -833,7 +833,7 @@ pub struct Program<'p> {
     pub inline_llvm_ir: Vec<FuncId>,
     pub ffi_definitions: String,
     // After binding const args to a function, you get a new function with fewer arguments.
-    pub const_bound_memo: Map<(FuncId, Vec<i64>), FuncId>,
+    pub const_bound_memo: Map<(FuncId, Vec<u8>), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
 }
 
@@ -1673,14 +1673,14 @@ macro_rules! tagged_index {
             }
 
             #[track_caller]
-            pub fn as_raw(self) -> i64 {
+            pub fn as_raw(self) -> u32 {
                 debug_assert!(self.is_valid(), "{}", self.0);
-                self.0 as i64
+                self.0 as u32
             }
 
             #[track_caller]
-            pub fn from_raw(value: i64) -> Self {
-                let s = Self(value as u32);
+            pub fn from_raw(value: u32) -> Self {
+                let s = Self(value);
                 debug_assert!(s.is_valid(), "{value}");
                 s
             }

@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{to_values, Values};
+use crate::bc::{to_values, ReadBytes, Values};
 use crate::compiler::{Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
@@ -12,7 +12,7 @@ use crate::pool::Ident;
 use crate::{err, ice};
 use std::fmt::Write;
 use std::hint::black_box;
-use std::mem::{self, transmute};
+use std::mem::{self};
 use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
@@ -29,13 +29,13 @@ macro_rules! bounce_flat_call {
             // TODO: can't do this because of lifetimes. you still get the error message if it doesn't compile so its not a big deal but I find it less clear.
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
-            pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut i64, arg_count: i64, retptr: *mut i64, ret_count: i64) {
-                debug_assert_eq!(arg_count, <$Arg>::SIZE as i64, "bad arg count. expected {}", stringify!($Arg));
-                debug_assert_eq!(ret_count, <$Ret>::SIZE as i64, "bad ret count. expected {}", stringify!($Ret));
+            pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, retptr: *mut u8, ret_count: i64) {
+                debug_assert_eq!(arg_count, <$Arg>::SIZE_BYTES as i64, "bad arg count. expected {}", stringify!($Arg));
+                debug_assert_eq!(ret_count, <$Ret>::SIZE_BYTES as i64, "bad ret count. expected {}", stringify!($Ret));
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     debugln!("bounce ARG: {argslice:?}");
-                    let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(&mut argslice.iter().copied()), "deserialize arg")));
+                    let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(&mut ReadBytes { bytes: argslice, i: 0}), "deserialize arg")));
                     let ret: $Ret = $f(compile, arg);
                     let ret = ret.serialize_to_ints_one();
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
@@ -438,50 +438,59 @@ extern "C-unwind" fn debug_log_int(_: &mut &mut Program<'_>, i: i64) {
     println!("{i}");
 }
 
-extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
-    assert!(arg_count == 3);
-    assert!(ret_count == 1);
+extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
+    assert!(arg_count == 3 * 8);
+    assert!(ret_count == 1 * 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
-        let s = &mut *slice_from_raw_parts_mut(arg, arg_count as usize);
-        *ret = (s[0] * s[1]) + s[2];
+        // let s = &mut *slice_from_raw_parts_mut(arg, arg_count as usize);
+        // *ret = (s[0] * s[1]) + s[2];
+        todo!()
     }
 }
-extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64) {
-    assert!(arg_count == 1);
-    assert!(ret_count == 1);
+extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
+    assert!(arg_count == 8);
+    assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
-        let addr = *arg as usize;
-        // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
-        debug_assert!(
-            addr % 4 == 0 && (addr as u32 & FuncId::MASK == 0 || FuncId::from_raw(addr as i64).as_index() > compile.program.funcs.len()),
-            "thats a weird ptr my dude, did you mean to call {:?}?",
-            FuncId::from_raw(addr as i64)
-        );
-        let f: FlatCallFn = transmute(addr);
-        *ret = do_flat_call(compile, f, ((10, 5), 7));
-        assert_eq!(*ret, 57);
+        // let addr = *arg as usize;
+        // // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
+        // debug_assert!(
+        //     addr % 4 == 0 && (addr as u32 & FuncId::MASK == 0 || FuncId::from_raw(addr as u32).as_index() > compile.program.funcs.len()),
+        //     "thats a weird ptr my dude, did you mean to call {:?}?",
+        //     FuncId::from_raw(addr as u32)
+        // );
+        // let f: FlatCallFn = transmute(addr);
+        // *ret = do_flat_call(compile, f, ((10, 5), 7));
+        // assert_eq!(*ret, 57);
+
+        todo!()
     }
 }
 
-pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *mut i64, arg_count: i64, ret: *mut i64, ret_count: i64);
+pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64);
 
 // This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
     let mut arg = arg.serialize_to_ints_one();
-    let mut ret = vec![0i64; Ret::SIZE];
+    let mut ret = vec![0u8; Ret::SIZE_BYTES];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
-    Ret::deserialize_from_ints(&mut ret.into_iter()).unwrap()
+    Ret::deserialize_from_ints(&mut ReadBytes { bytes: &ret, i: 0 }).unwrap()
 }
 
 // This the interpreter call a flat_call without knowing its types
-pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
-    let ret_count = compile.slot_count(ret_type) as usize;
-    let mut arg = arg.vec();
+pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut arg: Values, ret_type: TypeId) -> Res<'p, Values> {
+    let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
     debugln!("IN: {arg:?}");
-    let mut ret = vec![0i64; ret_count];
-    f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
+    let mut ret = vec![0u8; ret_count];
+    f(
+        compile,
+        // TODO: decide if flat call is allowed to mutate its args.
+        arg.0.as_mut_ptr(),
+        arg.bytes().len() as i64,
+        ret.as_mut_ptr(),
+        ret.len() as i64,
+    );
     debugln!("OUT: {ret:?}");
     Ok(Values::many(ret))
 }
@@ -598,11 +607,10 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
 
     match compile.immediate_eval_expr(expr, ty) {
         Ok(val) => {
-            let slots = compile.slot_count(ty) as usize;
-            let val = val.vec();
-            debug_assert_eq!(val.len(), slots);
-            let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut i64, val.len()) };
-            out.copy_from_slice(&val);
+            let bytes = val.bytes();
+            debug_assert_eq!(bytes.len(), compile.program.get_info(ty).stride_bytes as usize);
+            let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut u8, bytes.len()) };
+            out.copy_from_slice(bytes);
         }
         Err(e) => panic!("{e:?}"),
     }
@@ -657,8 +665,8 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
 }
 
 fn literal_ast<'p>(compile: &Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
-    let slots = compile.slot_count(ty) as usize;
-    let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
+    let bytes = compile.program.get_info(ty).stride_bytes as usize;
+    let value = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
     let value = Values::many(value.to_vec());
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
     FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)

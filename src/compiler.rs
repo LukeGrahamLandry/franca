@@ -447,7 +447,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
         } else if c_call {
             assert!(!flat_call);
-            let ints = arg.vec();
+            let mut ints = vec![];
+            deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints)?;
             debugln!("IN: {ints:?}");
             let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
             debugln!("OUT: {r}");
@@ -789,14 +790,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         self.currently_inlining.retain(|check| *check != f);
 
-        self.save_const(
-            new_ret_var,
-            Expr::Value {
-                value: Values::one(ret_label.as_raw()),
-            },
-            label_ty,
-            loc,
-        )?;
+        let value = to_values(self.program, ret_label)?;
+        self.save_const(new_ret_var, Expr::Value { value }, label_ty, loc)?;
 
         let res = self.compile_expr(expr_out, hint)?;
         if hint.is_none() {
@@ -1954,7 +1949,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
                             assert_eq!(ty[0], TypeId::ty, "@as expected type");
                             let (ty_val, rest) = chop_prefix(self.program, TypeId::ty, value.clone())?;
-                            let rest_ty = if rest.len() == 2 {
+                            let rest_ty = if ty.len() == 2 {
                                 ty[1]
                             } else {
                                 self.program.intern_type(TypeInfo::Tuple(ty[1..].to_vec()))
@@ -2013,8 +2008,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(e)
     }
 
-    // TODO: this kinda sucks. it should go in a builtin generated file like libc and use the normal name resolution rules
-    pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(Value, TypeId)> {
+    // TODO: bool will be the wrong number of bytes!!! -- May 24
+    pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(u32, TypeId)> {
         let name = self.pool.get(name);
         use TypeInfo::*;
         let ty = match name {
@@ -2172,8 +2167,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
-        let ints = values.vec();
-        Ok(unwrap!(Ret::deserialize_from_ints(&mut ints.into_iter()), ""))
+        Ok(unwrap!(Ret::deserialize_from_ints(&mut ReadBytes { bytes: values.bytes(), i: 0 }), ""))
     }
 
     pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
@@ -2236,9 +2230,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     .collect();
                 let mut pls = vec![];
                 for v in values? {
-                    for v in v.vec() {
-                        pls.push(v);
-                    }
+                    pls.extend(v.0); // TODO: alignment
                 }
                 return Ok(Some(Values::many(pls)));
             }
@@ -3018,12 +3010,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Vec<i64>> {
+    fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Vec<u8>> {
         if self.program[original_f].arg.bindings.len() == 1 {
             let Expr::Value { value } = arg_expr.expr.clone() else {
                 err!("expected const arg",)
             };
-            Ok(value.vec())
+            Ok(value.0)
         } else {
             let check_len = |len| {
                 assert_eq!(
@@ -3041,17 +3033,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             check_len(ty.len())?;
             match &arg_expr.expr {
                 Expr::Value { value } => {
-                    check_len(value.len())?;
                     // TODO: this is super dumb but better than what I did before. -- May 3 -- May 24
                     let mut values = value.clone();
-                    let mut parts = Vec::with_capacity(values.len());
+                    let mut parts = Vec::with_capacity(values.bytes().len());
                     for ty in ty {
                         let (taken, rest) = chop_prefix(self.program, *ty, values)?;
                         values = rest;
                         parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken }, arg_expr.loc, *ty))
                     }
                     arg_expr.expr = Expr::Tuple(parts);
-                    debug_assert!(values.is_unit());
+                    assert!(values.is_unit(), "TODO: nontrivial pattern matching");
                 }
                 Expr::Tuple(parts) => {
                     check_len(parts.len())?;
@@ -3072,7 +3063,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let Expr::Value { value } = arg_exprs[i].expr.clone() else {
                     unreachable!()
                 };
-                all_const_args.extend(value.vec());
+                all_const_args.extend(value.bytes());
             }
             Ok(all_const_args)
         }
@@ -3244,8 +3235,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     if let TypeInfo::Tuple(parts) = &self.program[ty] {
                         let is_ints = parts.iter().all(|t| matches!(self.program[*t], TypeInfo::Int(_)));
                         if is_ints {
-                            let ints = self.immediate_eval_expr(asm.clone(), ty)?;
-                            let ints = ints.vec().into_iter().map(|i| i as u32).collect();
+                            let len = parts.len();
+                            let val = self.immediate_eval_expr(asm.clone(), ty)?;
+                            let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
+                            let mut ints = vec![];
+                            for _ in 0..len {
+                                ints.push(unwrap!(reader.next_u32(), ""));
+                            }
+                            assert_eq!(reader.i, val.bytes().len()); // TODO: do this check everywhere.
                             break 'o ints;
                         }
                     }
