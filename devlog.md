@@ -1,3 +1,13 @@
+- ok so now i never match against Values::One, so i can take it away, just do everything with Vec<i64>, then do everything
+  with Vec<u8>, and then add back the by value varient when its small as an optimisation. thats the plan.
+  got to everything being Vec<i64>, its like 15% slower than last i checked, thats fine for now.
+- problem where it didn't compile f in create_slice_type if i set the type to FuncId instead of Fn(Type, Type).
+  fixed by calling compile instead of ensure_compiled in emit_runtime_call and switching some checks from matches TypeInfo::Fn to also allow FuncId::get_type.
+  not sure if thats the best choice. or if i should just have seperate as_literal for functions that checks the type...
+  but you want to allow for ones that haven't typechecked yet.
+
+## (May 23)
+
 - compiling the function before folding a call to it because those didn't go in anyones callee list.
   and to avoid that recursing, it marked the expression as done so it wouldn't get added as a callee of the lit_fn,
   so it would go in pending_indirect list and get compiled at the last minute.

@@ -6,6 +6,7 @@ use crate::ast::{
 };
 use crate::bc::from_values;
 use crate::compiler::{Compile, DebugState, ExecTime, Res};
+use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap};
 use std::mem;
@@ -29,7 +30,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let i: OverloadSetId = from_values(self.program, value.clone())?;
                     let id = self.resolve_in_overload_set(arg, ret, i)?;
                     Some(id)
-                } else if let TypeInfo::Fn(_) = self.program[f_ty] {
+                } else if matches!(self.program[f_ty], TypeInfo::Fn(_)) || f_ty == FuncId::get_type(self.program) {
                     let id = value.unwrap_func_id();
                     self.adjust_call(arg, id)?;
                     Some(id)
@@ -67,12 +68,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some((value, ty)) = self.find_const(name)? {
+            // TODO: copy paste
             if ty == TypeId::overload_set {
                 let i: OverloadSetId = from_values(self.program, value.clone())?;
                 let id = self.resolve_in_overload_set(arg, requested_ret, i)?;
                 self.pop_state(state);
                 Ok(id)
-            } else if let TypeInfo::Fn(_) = self.program[ty] {
+            } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == FuncId::get_type(self.program) {
                 let id = value.unwrap_func_id();
                 self.adjust_call(arg, id)?;
                 self.pop_state(state);

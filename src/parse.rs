@@ -280,7 +280,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             Number(f) => {
                 self.start_subexpr();
                 self.pop();
-                let mut e = self.expr(Expr::Value { value: Values::One(f) });
+                let mut e = self.expr(Expr::Value { value: Values::one(f) });
                 e.ty = TypeId::i64();
                 Ok(e)
             }
@@ -990,7 +990,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn raw_unit(&mut self) -> FatExpr<'p> {
-        let mut e = self.expr(Expr::Value { value: Values::Unit });
+        let mut e = self.expr(Expr::Value { value: Values::unit() });
         e.ty = TypeId::unit;
         e
     }
@@ -1084,21 +1084,25 @@ impl<'a, 'p> Parser<'a, 'p> {
         self.start_subexpr();
         let f = self.expr(Expr::GetNamed(name));
         match arg.expr {
+            // Tuple parser eagerly falttened single tuples so we have to undo that here.
+            // TODO: have it work woth named arguments. Need to support mixing named and positional.
             Expr::Tuple(mut parts) => {
                 parts.insert(0, *first);
                 arg.expr = Expr::Tuple(parts);
-                self.expr(Expr::Call(Box::new(f), Box::new(arg)))
+                return self.expr(Expr::Call(Box::new(f), Box::new(arg)));
             }
             // Parser flattened empty tuples.
-            Expr::Value { value: Values::Unit, .. } => self.expr(Expr::Call(Box::new(f), first)),
-            // Tuple parser eagerly falttened single tuples so we have to undo that here.
-            // TODO: have it work woth named arguments. Need to support mixing named and positional.
-            _ => {
-                self.start_subexpr();
-                let arg = self.expr(Expr::Tuple(vec![*first, arg]));
-                self.expr(Expr::Call(Box::new(f), Box::new(arg)))
+            Expr::Value { ref value } => {
+                if value.is_unit() {
+                    return self.expr(Expr::Call(Box::new(f), first));
+                }
+                // fallthrough
             }
+            _ => {} // fallthrough
         }
+        self.start_subexpr();
+        let arg = self.expr(Expr::Tuple(vec![*first, arg]));
+        self.expr(Expr::Call(Box::new(f), Box::new(arg)))
     }
 
     fn push_arg(&mut self, call: &mut FatExpr<'p>, callback: FatExpr<'p>) -> Res<'p, ()> {
@@ -1106,7 +1110,13 @@ impl<'a, 'p> Parser<'a, 'p> {
             match &mut old_arg.expr {
                 Expr::Tuple(parts) => parts.push(callback),
                 // Parser flattened empty tuples.
-                Expr::Value { value: Values::Unit, .. } => old_arg.expr = callback.expr,
+                Expr::Value { value } => {
+                    if value.is_unit() {
+                        old_arg.expr = callback.expr;
+                    } else {
+                        old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
+                    }
+                }
                 _ => {
                     old_arg.expr = Expr::Tuple(vec![mem::take(old_arg), callback]);
                 }

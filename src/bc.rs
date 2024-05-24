@@ -78,83 +78,63 @@ impl<'p> FnBody<'p> {
 }
 
 pub type Value = i64;
-#[derive(InterpSend, Clone, Hash, PartialEq, Eq)]
-pub enum Values {
-    Unit,
-    One(Value),
-    Many(Vec<i64>),
+#[derive(InterpSend, Clone, Hash, PartialEq, Eq, Debug)]
+pub struct Values(Vec<i64>);
+
+impl Values {
+    pub fn unit() -> Self {
+        Self(vec![])
+    }
+
+    pub fn one(v: i64) -> Self {
+        Self(vec![v])
+    }
+
+    pub fn many(v: Vec<i64>) -> Self {
+        Self(v)
+    }
+
+    pub fn is_unit(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl From<Value> for Values {
     fn from(value: Value) -> Self {
-        Values::One(value)
+        Values::one(value)
     }
 }
 
 impl From<Vec<Value>> for Values {
     fn from(value: Vec<Value>) -> Self {
-        if value.len() == 1 {
-            Values::One(value.into_iter().next().unwrap())
-        } else {
-            Values::Many(store_to_ints(&mut value.iter()))
-        }
+        Values::many(store_to_ints(&mut value.iter()))
     }
 }
 
 impl Values {
     #[track_caller]
     pub fn single(self) -> Res<'static, Value> {
-        match self {
-            Values::Unit => Ok(0),
-            Values::One(v) => Ok(v),
-            Values::Many(v) => {
-                if v.len() == 1 {
-                    todo!()
-                    // return Ok(v.into_iter().next().unwrap());
-                }
-                err!("expected single found {v:?}",)
-            }
-        }
+        assert_eq!(self.0.len(), 1, "expected single found {self:?}",);
+        Ok(self.0[0])
     }
 
     pub fn vec(self) -> Vec<i64> {
-        match self {
-            Values::Unit => vec![],
-            Values::One(i) => store_to_ints(&mut [i].iter()),
-            Values::Many(v) => v,
-        }
+        self.0
     }
 
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        match self {
-            Values::Unit => 0,
-            Values::One(_) => 1,
-            Values::Many(v) => v.len(),
-        }
+        self.0.len()
     }
 
     pub(crate) fn unwrap_func_id(&self) -> FuncId {
-        match *self {
-            Values::One(f) => FuncId::from_raw(f),
-            _ => unreachable!("ICE: expected func id not {self:?}"),
-        }
+        debug_assert_eq!(self.0.len(), 1);
+        FuncId::from_raw(self.0[0])
     }
 }
 
-pub fn values_from_ints_one(program: &Program, ty: TypeId, ints: Vec<i64>) -> Res<'static, Vec<Value>> {
-    let mut vals = vec![];
-    values_from_ints(program, ty, &mut ints.into_iter(), &mut vals)?;
-    Ok(vals)
-}
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
-    if T::SIZE == 1 {
-        let ty = T::get_type(program);
-        // TODO: this is dumb. i make the vec here anyway, then throw it away, then remake it on the other side.
-        Ok(Values::One(int_to_value(program, ty, t.serialize_to_ints_one()[0])?))
-    } else {
-        Ok(Values::Many(t.serialize_to_ints_one()))
-    }
+    Ok(Values::many(t.serialize_to_ints_one()))
 }
 
 pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &mut Program<'p>, t: Values) -> Res<'p, T> {
@@ -162,69 +142,148 @@ pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &mut Program<'p>, t: Values) 
     Ok(unwrap!(T::deserialize_from_ints(&mut ints.into_iter()), ""))
 }
 
-pub fn int_to_value(program: &Program, ty: TypeId, n: i64) -> Res<'static, Value> {
+/// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
+pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, out: &mut Vec<i64>) -> Res<'static, ()> {
     let ty = program.raw_type(ty);
-    Ok(unwrap!(int_to_value_inner(&program[ty], n), "too big for an int"))
-}
-
-pub fn int_to_value_inner(info: &TypeInfo, n: i64) -> Option<Value> {
-    Some(match info {
-        // TODO: array, struct and tuple with one field?
-        TypeInfo::Array { .. } | &TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => return None,
-        TypeInfo::Unknown | TypeInfo::Never => unreachable!("bad type"),
-        &TypeInfo::Enum { .. } | &TypeInfo::Unique(_, _) | &TypeInfo::Named(_, _) => unreachable!("should be raw type but {info:?}"),
-        TypeInfo::Unit => unreachable!(),
-        TypeInfo::FnPtr(_) => {
-            #[cfg(target_arch = "aarch64")]
-            debug_assert!(n % 4 == 0);
-            n
-        }
-        TypeInfo::Fn(_)
-        | TypeInfo::OverloadSet
-        | TypeInfo::Label(_)
-        | TypeInfo::Type
-        | TypeInfo::Bool
-        | TypeInfo::Ptr(_)
-        | TypeInfo::F64
-        | TypeInfo::Scope
-        | TypeInfo::Int(_)
-        | TypeInfo::VoidPtr => n,
-    })
-}
-
-pub fn values_from_ints(program: &Program, ty: TypeId, ints: &mut impl Iterator<Item = i64>, out: &mut Vec<Value>) -> Res<'static, ()> {
-    let ty = program.raw_type(ty); // without this (jsut doing it manually below), big AstExprs use so much recursion that you can only run it in release where it does tail call
     match &program[ty] {
-        &TypeInfo::Struct { as_tuple: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => values_from_ints(program, ty, ints, out)?,
-        TypeInfo::Tuple(types) => {
-            for ty in types {
-                values_from_ints(program, *ty, ints, out)?;
+        TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
+        TypeInfo::F64 | TypeInfo::FnPtr(_) | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => out.push(unwrap!(bytes.next_i64(), "")),
+        TypeInfo::Int(_) => match program.get_info(ty).stride_bytes {
+            8 => out.push(unwrap!(bytes.next_u8(), "") as i64),
+            32 => out.push(unwrap!(bytes.next_u32(), "") as i64),
+            _ => out.push(unwrap!(bytes.next_i64(), "")), // TODO
+        },
+        TypeInfo::Bool => out.push(unwrap!(bytes.next_u8(), "") as i64),
+        TypeInfo::Tuple(parts) => {
+            for t in parts {
+                deconstruct_values(program, *t, bytes, out)?;
             }
         }
-        TypeInfo::Tagged { cases } => {
-            let start = out.len();
-            let payload_size = program.slot_count(ty) - 1;
-            let tag = unwrap!(ints.next(), "");
-            out.push(tag);
-            let ty = cases[tag as usize].1;
-            let value_size = program.slot_count(ty);
-            values_from_ints(program, ty, ints, out)?;
-
-            for _ in 0..payload_size - value_size {
-                // NOTE: the other guy must have already put padding there, so we have to pop that, not just add our own.
-                // TODO: should preserve the value so you can do weird void cast tricks but meh until i remove the interp since I can't reconstruct the right types anyway.
-                let _padding = unwrap!(ints.next(), "");
-                out.push(99999);
+        &TypeInfo::Array { inner, len } => {
+            for _ in 0..len {
+                deconstruct_values(program, inner, bytes, out)?;
             }
-            let end = out.len();
-            assert_eq!(end - start, payload_size as usize + 1, "{out:?}");
         }
+        &TypeInfo::Struct { as_tuple, .. } => deconstruct_values(program, as_tuple, bytes, out)?,
+        TypeInfo::Tagged { .. } => {
+            // TODO
+            let size = program.get_info(ty).stride_bytes;
+            assert_eq!(size % 8, 0);
+            for _ in 0..size % 8 {
+                out.push(unwrap!(bytes.next_i64(), ""))
+            }
+        }
+        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out)?,
+        TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         TypeInfo::Unit => {}
-        info => {
-            let n = unwrap!(ints.next(), "");
-            let v = unwrap!(int_to_value_inner(info, n), "");
-            out.push(v);
+        TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => {
+            out.push(unwrap!(bytes.next_u32(), "") as i64)
         }
-    };
+    }
     Ok(())
+}
+
+pub fn temp_deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, out: &mut Vec<i64>) -> Res<'static, ()> {
+    let ty = program.raw_type(ty);
+    match &program[ty] {
+        TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
+        TypeInfo::F64
+        | TypeInfo::FnPtr(_)
+        | TypeInfo::Ptr(_)
+        | TypeInfo::VoidPtr
+        | TypeInfo::Int(_)
+        | TypeInfo::Bool
+        | TypeInfo::Fn(_)
+        | TypeInfo::Type
+        | TypeInfo::OverloadSet
+        | TypeInfo::Scope
+        | TypeInfo::Label(_) => out.push(unwrap!(bytes.next_i64(), "")),
+        TypeInfo::Tuple(parts) => {
+            for t in parts {
+                deconstruct_values(program, *t, bytes, out)?;
+            }
+        }
+        &TypeInfo::Array { inner, len } => {
+            for _ in 0..len {
+                deconstruct_values(program, inner, bytes, out)?;
+            }
+        }
+        &TypeInfo::Struct { as_tuple, .. } => deconstruct_values(program, as_tuple, bytes, out)?,
+        TypeInfo::Tagged { .. } => {
+            let size = program.get_info(ty).size_slots;
+            for _ in 0..size {
+                out.push(unwrap!(bytes.next_i64(), ""))
+            }
+        }
+        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out)?,
+        TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+        TypeInfo::Unit => {}
+    }
+    Ok(())
+}
+
+pub struct ReadBytes<'a> {
+    bytes: &'a [u8],
+    i: usize,
+}
+
+impl<'a> ReadBytes<'a> {
+    pub fn next_u8(&mut self) -> Option<u8> {
+        if self.i < self.bytes.len() {
+            self.i += 1;
+            Some(self.bytes[self.i - 1])
+        } else {
+            None
+        }
+    }
+    pub fn next_u32(&mut self) -> Option<u32> {
+        if self.i + 3 < self.bytes.len() {
+            self.i += 4;
+            Some(u32::from_ne_bytes([
+                self.bytes[self.i - 4],
+                self.bytes[self.i - 3],
+                self.bytes[self.i - 2],
+                self.bytes[self.i - 1],
+            ]))
+        } else {
+            None
+        }
+    }
+    pub fn next_i64(&mut self) -> Option<i64> {
+        if self.i + 7 < self.bytes.len() {
+            self.i += 8;
+            Some(i64::from_ne_bytes([
+                self.bytes[self.i - 8],
+                self.bytes[self.i - 7],
+                self.bytes[self.i - 6],
+                self.bytes[self.i - 5],
+                self.bytes[self.i - 4],
+                self.bytes[self.i - 3],
+                self.bytes[self.i - 2],
+                self.bytes[self.i - 1],
+            ]))
+        } else {
+            None
+        }
+    }
+}
+
+pub struct WriteBytes(Vec<u8>);
+
+impl WriteBytes {
+    pub fn push_u8(&mut self, v: u8) {
+        self.0.push(v)
+    }
+
+    pub fn push_u32(&mut self, v: u32) {
+        for v in v.to_le_bytes() {
+            self.0.push(v)
+        }
+    }
+
+    pub fn push_i64(&mut self, v: i64) {
+        for v in v.to_le_bytes() {
+            self.0.push(v)
+        }
+    }
 }

@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::{int_to_value, values_from_ints, Values};
+use crate::bc::Values;
 use crate::compiler::{bit_literal, Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
@@ -483,11 +483,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
     let mut ret = vec![0i64; ret_count];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     debugln!("OUT: {ret:?}");
-    Ok(if ret_count == 1 {
-        Values::One(int_to_value(compile.program, ret_type, ret[0])?)
-    } else {
-        Values::Many(ret)
-    })
+    Ok(Values::many(ret))
 }
 
 fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
@@ -663,9 +659,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
 fn literal_ast<'p>(compile: &Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
     let slots = compile.slot_count(ty) as usize;
     let value = unsafe { &*slice_from_raw_parts(ptr as *const i64, slots) };
-    let mut out = vec![];
-    values_from_ints(compile.program, ty, &mut value.iter().copied().peekable(), &mut out).unwrap();
-    let value: Values = out.into();
+    let value = Values::many(value.to_vec());
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
     FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
 }
@@ -688,8 +682,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     compile.compile(id, ExecTime::Comptime).unwrap();
     let func = &mut compile.program[id];
     let s = func.scope.unwrap();
-
-    FatExpr::value(Values::One(s.as_raw()), TypeId::scope, loc)
+    compile.as_literal(s, loc).unwrap()
 }
 
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
@@ -853,6 +846,6 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
         1 => overloads.ready[0].func,
         _ => panic!("Ambigous overload \n{:?}", overloads.ready),
     };
-    let val = Values::One(found.as_raw());
+    let val = Values::one(found.as_raw());
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }

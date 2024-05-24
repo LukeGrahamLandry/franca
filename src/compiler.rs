@@ -177,13 +177,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             arg: TypeId::ty,
             ret: TypeId::ty,
         }));
-        let f = FatExpr::synthetic_ty(
-            Expr::Value {
-                value: Values::One(self.make_slice_t.unwrap().as_raw()),
-            },
-            loc,
-            ty,
-        );
+        let mut f = self.as_literal(self.make_slice_t.unwrap(), loc)?;
+        // f.ty = ty; // TODO: it doesn't compile the function if the type here is FuncId?
         let a = FatExpr::synthetic_ty(Expr::Value { value }, loc, TypeId::ty);
         let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);
         self.immediate_eval_expr_known(s_ty)
@@ -472,9 +467,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debugln!("IN: {ints:?}");
             let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
             debugln!("OUT: {r}");
-            let mut out = vec![];
-            values_from_ints(self.program, ty.ret, &mut [r].into_iter(), &mut out)?;
-            Ok(out.into())
+            Ok(Values::one(r))
         } else {
             todo!()
         };
@@ -493,12 +486,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
         let ret_ty = Ret::get_type(self.program);
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
-        let arg = if Arg::SIZE == 1 {
-            // TODO: this is dumb. i make the vec here anyway, then throw it away, then remake it on the other side.
-            Values::One(int_to_value(self.program, arg_ty, arg.serialize_to_ints_one()[0])?)
-        } else {
-            Values::Many(arg.serialize_to_ints_one())
-        };
+        let arg = Values::many(arg.serialize_to_ints_one());
         let ret = self.run(f, arg, when)?;
         // TODO: this is also dumb, another double vec.
         Ok(unwrap!(Ret::deserialize_from_ints(&mut ret.vec().into_iter()), ""))
@@ -722,7 +710,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!force_inline);
         assert!(!func.any_const_args());
         self.add_callee(f);
-        self.ensure_compiled(f, ExecTime::Both)?; // TODO
+        self.compile(f, ExecTime::Both)?; // TODO
         let ret_ty = unwrap!(self.program[f].finished_ret, "fn ret");
         Ok(ret_ty)
     }
@@ -820,7 +808,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.save_const(
             new_ret_var,
             Expr::Value {
-                value: Values::One(ret_label.as_raw()),
+                value: Values::one(ret_label.as_raw()),
             },
             label_ty,
             loc,
@@ -933,15 +921,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
         let mut key = (template_f, arg_value); // TODO: no clone
 
-        // TODO: wtf.someones calling it on a tuple whish shows up as a diferent type so you get multiple of inner functions because eval twice. but then cant resolve overlaods because they have the same type beause elsewhere handles single tuples correctly.
-        // TODO: figure out what was causing and write a specific test for it. discovered in fmt @join
-        // let arg_value = arg_value.normalize(); // TODO: general <-, this is just HACK because i know @comptime is always a type.
-        if let Values::Many(ints) = &key.1 {
-            if ints.len() == 1 && arg_ty == TypeId::ty {
-                key.1 = Values::One(TypeId::from_raw(ints[0]).as_raw());
-            }
-        }
-
         if !no_memo {
             let found = self.program.generics_memo.get(&key);
             if let Some(found) = found {
@@ -987,7 +966,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             if let Some(var) = name {
                 assert_eq!(kind, VarType::Const, "@comptime arg not const in {}", self.pool.get(self.program[f].name)); // not outside the check because of implicit Unit.
-                self.save_const_values(var, Values::Many(values), ty, arg_expr.loc)?;
+                self.save_const_values(var, Values::many(values), ty, arg_expr.loc)?;
                 // this is fine cause we renumbered at the top.
             }
         }
@@ -1063,7 +1042,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if kind == VarType::Const {
                             debug_assert_eq!(binding.bindings.len(), 1);
                             binding.bindings.clear();
-                            value.set(Values::Unit, TypeId::unit);
+                            value.set(Values::unit(), TypeId::unit);
                         }
                         return Ok(());
                     } else {
@@ -1484,7 +1463,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         let ty = FatExpr::get_type(self.program);
                         let ints = arg.serialize_to_ints_one();
-                        let value = Values::Many(ints);
+                        let value = Values::many(ints);
 
                         expr.set(value.clone(), ty);
                         if placeholders.is_empty() {
@@ -1662,8 +1641,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                     if container == TypeId::scope {
-                        let Values::One(s) = val else { err!("expected int for scope id",) };
-                        let Some(&var) = self[ScopeId::from_raw(s)].constants.keys().find(|v| v.name == *name) else {
+                        let s: ScopeId = from_values(self.program, val.clone())?;
+                        let Some(&var) = self[s].constants.keys().find(|v| v.name == *name) else {
                             err!(CErr::UndeclaredIdent(*name))
                         };
                         debug_assert!(var.kind == VarType::Const);
@@ -1859,7 +1838,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let Ok(fid) = self.resolve_function(*i, arg, None) {
                             if let Ok(Some(f_ty)) = self.infer_types(fid) {
                                 // Need to save this because resolving overloads eats named arguments
-                                f.set(Values::One(fid.as_raw()), self.program.func_type(fid));
+                                f.set(Values::one(fid.as_raw()), self.program.func_type(fid));
                                 return Ok(Some(f_ty.ret));
                             }
                         }
@@ -1994,9 +1973,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
                             let mut parts = vec![];
                             let ty = ty.to_vec(); // sad
-                            let values = values_from_ints_one(self.program, arg.ty, value.clone().vec())?;
+                            let values = value.clone().vec();
                             for (v, ty) in values.into_iter().zip(ty.into_iter()) {
-                                parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg.loc, ty))
+                                parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::one(v) }, arg.loc, ty))
                             }
                             arg.expr = Expr::Tuple(parts);
                         }
@@ -2038,12 +2017,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
+    // TODO: this really shouldn't return an error -- May 24
     pub fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
         let ty = T::get_type(self.program);
         let ints = t.serialize_to_ints_one();
-        let mut bytes = vec![];
-        values_from_ints(self.program, ty, &mut ints.into_iter(), &mut bytes)?;
-        let value = bytes.into();
+        let value = Values::many(ints);
         let mut e = FatExpr::synthetic_ty(Expr::Value { value }, loc, ty);
         e.done = true;
         Ok(e)
@@ -2276,7 +2254,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         pls.push(v);
                     }
                 }
-                return Ok(Some(Values::Many(pls)));
+                return Ok(Some(Values::many(pls)));
             }
             Expr::Call(f, arg) => {
                 // !slice and !addr can't be const evaled!
@@ -2297,7 +2275,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             } else {
                                 None
                             }
-                        } else if let TypeInfo::Fn(_) = self.program[ty] {
+                        } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == FuncId::get_type(self.program) {
                             Some(val.unwrap_func_id())
                         } else {
                             err!("Expected function but found {:?}", val);
@@ -2369,7 +2347,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     return Ok(res);
         // }
 
-        let res = self.run(func_id, Values::Unit, ExecTime::Comptime);
+        let res = self.run(func_id, Values::unit(), ExecTime::Comptime);
         self.discard(func_id);
         res
     }
@@ -3084,10 +3062,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                     check_len(value.len())?;
                     // TODO: this is super dumb but better than what I did before. -- May 3
                     let ty = ty.to_vec(); // sad
-                    let values = values_from_ints_one(self.program, arg_expr.ty, value.clone().vec())?;
+                    let values = value.clone().vec();
                     let mut parts = Vec::with_capacity(values.len());
                     for (v, ty) in values.into_iter().zip(ty.into_iter()) {
-                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::One(v) }, arg_expr.loc, ty))
+                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: Values::one(v) }, arg_expr.loc, ty))
                     }
                     arg_expr.expr = Expr::Tuple(parts);
                 }
@@ -3532,17 +3510,10 @@ pub fn bit_literal<'p>(expr: &FatExpr<'p>, _pool: &StringPool<'p>) -> Option<(In
         return None;
     }
     let Expr::Tuple(parts) = arg.deref().deref() else { return None };
-    let &Expr::Value {
-        value: Values::One(bit_count),
-        ..
-    } = parts[0].deref()
-    else {
-        return None;
-    };
-
-    let &Expr::Value { value: Values::One(val), .. } = parts[1].deref() else {
-        return None;
-    };
+    let bit_count = parts[0].clone().as_const()?;
+    let Ok(bit_count) = bit_count.single() else { return None };
+    let val = parts[1].clone().as_const()?;
+    let Ok(val) = val.single() else { return None };
 
     Some((IntTypeInfo { bit_count, signed: false }, val))
 }
@@ -3579,7 +3550,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO
             let loc = arg.loc;
             let placeholder = Expr::Value {
-                value: Values::One(self.placeholders.len() as i64),
+                value: Values::one(self.placeholders.len() as i64),
             };
             let placeholder = FatExpr::synthetic_ty(placeholder, loc, TypeId::i64());
             let mut placeholder = FatExpr::synthetic(Expr::SuffixMacro(Flag::Placeholder.ident(), Box::new(placeholder)), loc);
@@ -3588,13 +3559,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             self.placeholders.push(Some(mem::take(arg.deref_mut())));
             *expr = placeholder;
         } else if *name == Flag::Placeholder.ident() {
-            let Expr::Value {
-                value: Values::One(index), ..
-            } = arg.expr
-            else {
-                unreachable!("!placeholder expected int")
-            };
-
+            let index = arg.as_const().unwrap().single().unwrap();
             let value = self.placeholders[index as usize].take(); // TODO: make it more obvious that its only one use and the slot is empty.
             *expr = value.unwrap();
         } else if *name == Flag::Quote.ident() {

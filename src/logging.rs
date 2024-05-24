@@ -313,10 +313,7 @@ impl<'p> Expr<'p> {
                 let args: String = args.join(", ");
                 format!("[{}]", args)
             }
-            Expr::Value { value } => match value {
-                Values::One(i) => format!("{i}"),
-                v => format!("{v:?}"),
-            },
+            Expr::Value { value } => format!("{value:?}"),
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", pool.get(f.name)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.logd(pool, depth), pool.get(*i)),
@@ -498,16 +495,6 @@ impl<'p> CErr<'p> {
 impl<'p> FatStmt<'p> {
     pub fn log_annotations(&self, pool: &StringPool<'p>) -> String {
         self.annotations.iter().map(|a| pool.get(a.name)).collect()
-    }
-}
-
-impl Debug for Values {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Values::Unit => write!(f, "unit"),
-            Values::One(v) => write!(f, "{v:?}"),
-            Values::Many(v) => write!(f, "{v:?}"),
-        }
     }
 }
 

@@ -3,7 +3,7 @@ use std::{mem, ptr::slice_from_raw_parts};
 use codemap::Span;
 
 use crate::{
-    ast::{OverloadSetId, Program, TypeId, TypeInfo},
+    ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
     Map,
 };
 
@@ -277,6 +277,34 @@ impl<'p> InterpSend<'p> for OverloadSetId {
     }
 }
 
+// TODO: this is sad.
+impl<'p> InterpSend<'p> for ScopeId {
+    const SIZE: usize = 1;
+
+    fn get_type_key() -> u128 {
+        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+    }
+    fn create_type(_: &mut Program<'p>) -> TypeId {
+        TypeId::scope
+    }
+
+    fn get_type(_: &mut Program<'p>) -> TypeId {
+        TypeId::scope
+    }
+
+    fn serialize_to_ints(self, values: &mut Vec<i64>) {
+        values.push(self.as_raw())
+    }
+
+    fn deserialize_from_ints(values: &mut impl Iterator<Item = i64>) -> Option<Self> {
+        Some(ScopeId::from_raw(values.next()?))
+    }
+
+    fn name() -> String {
+        "ScopeId".to_string()
+    }
+}
+
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     const SIZE: usize = A::SIZE + B::SIZE;
     fn get_type_key() -> u128 {
@@ -542,7 +570,6 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 }
 
 pub mod c {
-    use crate::bc_to_asm::Jitted;
     use crate::compiler::Compile;
     use crate::compiler::Res;
     use crate::err;

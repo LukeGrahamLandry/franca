@@ -1712,7 +1712,7 @@ pub struct TypeId(pub u32);
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, InterpSend)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeId(u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

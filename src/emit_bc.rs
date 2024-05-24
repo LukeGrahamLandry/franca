@@ -398,13 +398,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
-                    let Expr::Value {
-                        value: Values::One(return_from),
-                        ..
-                    } = f.expr
-                    else {
-                        todo!("{}", f.log(self.program.pool))
-                    };
+                    let ints = unwrap!(f.as_const(), "").vec();
+                    debug_assert_eq!(ints.len(), 1);
+                    let return_from = ints[0];
                     let return_from = LabelId::from_raw(return_from);
                     // result_location is the result of the ret() expression, which is Never and we don't care.
                     let (ip, res_loc) = *unwrap!(
