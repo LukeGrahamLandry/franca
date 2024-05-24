@@ -1,7 +1,6 @@
 //! Low level instructions
 
 use crate::ast::{LabelId, Program, TypeInfo, Var};
-use crate::bc_to_asm::store_to_ints;
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
 use crate::{
@@ -107,17 +106,11 @@ impl From<Value> for Values {
 
 impl From<Vec<Value>> for Values {
     fn from(value: Vec<Value>) -> Self {
-        Values::many(store_to_ints(&mut value.iter()))
+        Values::many(value)
     }
 }
 
 impl Values {
-    #[track_caller]
-    pub fn single(self) -> Res<'static, Value> {
-        assert_eq!(self.0.len(), 1, "expected single found {self:?}",);
-        Ok(self.0[0])
-    }
-
     pub fn vec(self) -> Vec<i64> {
         self.0
     }
@@ -137,9 +130,20 @@ pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<
     Ok(Values::many(t.serialize_to_ints_one()))
 }
 
-pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &mut Program<'p>, t: Values) -> Res<'p, T> {
+pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &Program<'p>, t: Values) -> Res<'p, T> {
     let ints = t.vec();
     Ok(unwrap!(T::deserialize_from_ints(&mut ints.into_iter()), ""))
+}
+
+// When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
+pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: Values) -> Res<'p, (Values, Values)> {
+    let mut ints = t.vec();
+    let slots = program.slot_count(prefix);
+    assert!(ints.len() >= slots as usize);
+    let (_, snd) = ints.split_at(slots as usize);
+    let snd = snd.to_vec();
+    ints.truncate(slots as usize);
+    Ok((Values::many(ints), Values::many(snd)))
 }
 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.

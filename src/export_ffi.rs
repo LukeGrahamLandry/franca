@@ -4,8 +4,8 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
-use crate::bc::Values;
-use crate::compiler::{bit_literal, Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
+use crate::bc::{to_values, Values};
+use crate::compiler::{Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
@@ -638,7 +638,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
     hope(|| {
         match &mut arg.expr {
             Expr::Call(_, _) => {
-                if let Some((int, _)) = bit_literal(&arg, compile.pool) {
+                if let Some((int, _)) = compile.bit_literal(&arg) {
                     return Ok(int);
                 }
             }
@@ -790,7 +790,7 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         assert!(!ty.signed);
         shift -= ty.bit_count;
         assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
-        if let Some((_, v)) = bit_literal(&int, compile.pool) {
+        if let Some((_, v)) = compile.bit_literal(&int) {
             int = compile.as_literal(v, loc).unwrap();
         }
         int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
@@ -846,6 +846,6 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
         1 => overloads.ready[0].func,
         _ => panic!("Ambigous overload \n{:?}", overloads.ready),
     };
-    let val = Values::one(found.as_raw());
+    let val = to_values(comp.program, found).unwrap();
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }
