@@ -640,6 +640,7 @@ pub struct Func<'p> {
     pub cc: Option<CallConv>,
     pub return_var: Option<Var<'p>>,
     pub callees: Vec<FuncId>,
+    pub mutual_callees: Vec<FuncId>,
     pub body: FuncImpl<'p>,
     pub flags: u32,
 }
@@ -652,6 +653,7 @@ pub enum FuncFlags {
     EnsuredCompiled,
     AsmDone,
     TryConstantFold,
+    CalleesAsmDone,
 }
 
 impl<'p> Func<'p> {
@@ -1446,6 +1448,7 @@ impl<'p> Expr<'p> {
 impl<'p> Default for Func<'p> {
     fn default() -> Self {
         Self {
+            mutual_callees: vec![],
             flags: 0,
             callees: vec![],
             return_var: None,

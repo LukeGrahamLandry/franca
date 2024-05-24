@@ -144,6 +144,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             cranelift: crate::cranelift::JittedCl::default(),
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
+        // println!("EMPTY fn ptr: {}", Jitted::empty());
         c
     }
 
@@ -302,7 +303,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: this is a little sketchy. can one merged arch cause asm_done to be set and then other arches don't get processed?
         //       i dont think so cause overloading short circuits, and what ever arch did happen will be in the dispatch table.
         //       need to revisit when not jitting tho.   -- May 16
-        if self.program[f].get_flag(FuncFlags::AsmDone) || self.currently_compiling.contains(&f) {
+        if self.currently_compiling.contains(&f) {
+            return Ok(());
+        }
+        if self.program[f].get_flag(FuncFlags::AsmDone) {
             return Ok(());
         }
         let state = DebugState::Compile(f, self.program[f].name);
@@ -325,6 +329,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.tag_err(res)?;
             i += 1;
         }
+        self.compile_asm_no_rec(f, when)?;
+        let after = self.debug_trace.len();
+        debug_assert_eq!(before, after);
+        self.pop_state(state);
+        // self.currently_compiling.retain(|check| *check != f);
+
+        assert!(!matches!(self.program[f].body, FuncImpl::Empty));
+        Ok(())
+    }
+
+    fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         self.last_loc = Some(self.program[f].loc);
 
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
@@ -360,17 +375,26 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         }
-        // TODO: assert that if body is ::merged, none are Redirect/Normal/ComptimeAddr cause that doesn't really make sense.
-
-        let after = self.debug_trace.len();
-        debug_assert_eq!(before, after);
-        self.pop_state(state);
-        // self.currently_compiling.retain(|check| *check != f);
         self.program[f].set_flag(FuncFlags::AsmDone, true);
         self.last_loc = Some(self.program[f].loc);
-
-        assert!(!matches!(self.program[f].body, FuncImpl::Empty));
+        let cd = self.callees_done(f);
+        self.program[f].set_flag(FuncFlags::CalleesAsmDone, cd);
+        // TODO: assert that if body is ::merged, none are Redirect/Normal/ComptimeAddr cause that doesn't really make sense.
         Ok(())
+    }
+
+    fn callees_done(&self, f: FuncId) -> bool {
+        if self.program[f].get_flag(FuncFlags::CalleesAsmDone) {
+            return true;
+        }
+        let mut callees_done = true;
+        for c in &self.program[f].callees {
+            callees_done &= self.program[*c].get_flag(FuncFlags::CalleesAsmDone);
+        }
+        for c in &self.program[f].mutual_callees {
+            callees_done &= self.program[*c].get_flag(FuncFlags::CalleesAsmDone);
+        }
+        callees_done
     }
 
     pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
@@ -383,35 +407,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let ty = self.program[f].unwrap_ty();
 
-        #[cfg(feature = "cranelift")]
-        {
-            self.cranelift.flush_pending_defs(&mut self.aarch64)?;
-        }
-
-        self.aarch64
-            .pending_indirect
-            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::empty());
-        if !self.aarch64.pending_indirect.is_empty() {
-            // println!("run {f:?} pending:{:?}", self.aarch64.pending_indirect);
-            for f in self.aarch64.pending_indirect.clone() {
-                debug_assert!(!self.program[f].get_flag(FuncFlags::AsmDone));
-                self.compile(f, when)?;
-                // println!("{}", self.program[f].body.log(self.pool));
-            }
-            #[cfg(feature = "cranelift")]
-            {
-                self.cranelift.flush_pending_defs(&mut self.aarch64)?;
-            }
-        }
-        self.aarch64
-            .pending_indirect
-            .retain(|f| self.aarch64.dispatch[f.as_index()] as usize == Jitted::empty());
-        // debug_assert!(self.aarch64.pending_indirect.is_empty());
-
         #[cfg(target_arch = "aarch64")]
-        {
-            self.aarch64.make_exec();
-        }
+        self.aarch64.make_exec();
+        #[cfg(feature = "cranelift")]
+        self.cranelift.flush_pending_defs(&mut self.aarch64)?;
 
         for (from, to) in self.pending_redirects.drain(0..) {
             self.last_loc = Some(self.program[to].loc);
@@ -425,11 +424,19 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         self.last_loc = loc;
-        self.flush_cpu_instruction_cache();
         // cranelift puts stuff here too and so does comptime_addr
         let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
-        debug_assert!(addr as usize != Jitted::empty());
 
+        // TODO: need to recurse on the mutual_callees somewhere. this is just a hack.
+        //       need ensure_compiled, compile, and like really_super_compile.
+        for c in self.program[f].mutual_callees.clone() {
+            self.wip_stack.push(c);
+            self.ensure_compiled_force(f, when)?;
+            self.compile_asm_no_rec(c, when)?;
+            let cc = self.wip_stack.pop();
+            debug_assert_eq!(Some(c), cc);
+        }
+        // assert!(self.callees_done(f));
         for c in &self.program[f].callees {
             debug_assert!(
                 self.aarch64.get_fn(*c).is_some(),
@@ -437,7 +444,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.pool.get(self.program[*c].name)
             )
         }
-
+        for c in &self.program[f].mutual_callees {
+            debug_assert!(
+                self.aarch64.get_fn(*c).is_some(),
+                "missing callee {}",
+                self.pool.get(self.program[*c].name)
+            )
+        }
         let cc = self.program[f].cc.unwrap();
         let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
         let flat_call = matches!(cc, CallConv::Flat | CallConv::FlatCt);
@@ -445,7 +458,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
 
-        debugln!("Call {f:?} {} flat:{flat_call}", self.pool.get(self.program[f].name));
+        debugln!(
+            "Call {f:?} {} flat:{flat_call};      callees={:?}",
+            self.pool.get(self.program[f].name),
+            self.program[f].callees
+        );
+        self.flush_cpu_instruction_cache();
         let result = if flat_call {
             do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
         } else if c_call {
@@ -469,7 +487,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, when: ExecTime, arg: Arg) -> Res<'p, Ret> {
-        self.compile(f, when)?;
+        self.ensure_compiled(f, when)?;
         let ty = self.program[f].unwrap_ty();
         let arg_ty = Arg::get_type(self.program);
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
@@ -518,19 +536,23 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    // Don't pass constants in because the function declaration must have closed over anything it needs.
     pub fn ensure_compiled(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        if self.program[f].get_flag(FuncFlags::EnsuredCompiled) {
-            return Ok(());
-        }
-        self.program[f].set_flag(FuncFlags::EnsuredCompiled, true);
-
-        let func = &self.program[f];
-
         if !add_unique(&mut self.currently_compiling, f) {
             // This makes recursion work.
             return Ok(());
         }
+        self.ensure_compiled_force(f, when)?;
+        self.currently_compiling.retain(|check| *check != f);
+        Ok(())
+    }
+
+    // Don't pass constants in because the function declaration must have closed over anything it needs.
+    pub fn ensure_compiled_force(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+        if self.program[f].get_flag(FuncFlags::EnsuredCompiled) {
+            return Ok(());
+        }
+        self.program[f].set_flag(FuncFlags::EnsuredCompiled, true);
+        let func = &self.program[f];
         self.wip_stack.push(f);
         debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
         self.ensure_resolved_body(f)?;
@@ -548,7 +570,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.update_cc(f)?;
 
         // TODO: error safety ^
-        self.currently_compiling.retain(|check| *check != f);
         let end = self.wip_stack.pop();
         assert_eq!(end, Some(f), "ICE: fucked up the stack. {:?}", self.wip_stack);
         Ok(())
@@ -711,10 +732,23 @@ impl<'a, 'p> Compile<'a, 'p> {
         // this fixes mutual recursion
         // TODO: now if other backends try to use callees they might not get everything they need.
         //       not failing tests rn because im egarly compiling on this backend and llvm doesn't support everything yet os not all tests run there anyway.  -- Apr 25
-        if !self.currently_compiling.contains(&f) {
-            let callees = &mut self.program[*self.wip_stack.last().unwrap()].callees;
-            add_unique(callees, f);
-        }
+
+        // println!(
+        //     "{wip:?}={} calls {f:?}={}",
+        //     self.pool.get(self.program[wip].name),
+        //     self.pool.get(self.program[f].name)
+        // )
+        let wip = *self.wip_stack.last().unwrap();
+        let callees = if !self.currently_compiling.contains(&f) {
+            &mut self.program[wip].callees
+        } else {
+            &mut self.program[wip].mutual_callees
+        };
+        add_unique(callees, f);
+        //else {
+        //     add_unique(&mut self.aarch64.pending_indirect, f); // HACK
+        //                                                        // println!("not adding callee currently_compiling {f:?} {}", self.pool.get(self.program[f].name));
+        // }
     }
 
     // Replace a call expr with the body of the target function.
@@ -725,6 +759,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let state = DebugState::EmitCapturingCall(f, self.program[f].name);
         self.push_state(&state);
         let Expr::Call(_, arg_expr) = expr_out.deref_mut() else { ice!("") };
+
+        debug_assert!(!self.program[f].has_tag(Flag::NoInline));
 
         assert!(!self.currently_inlining.contains(&f), "Tried to inline recursive function.");
         self.currently_inlining.push(f);
@@ -815,6 +851,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: not sure if i actually need this but it seems like i should.
         if matches!(self.program[arg_ty], TypeInfo::Fn(_)) {
+            assert!(
+                !self.program[o_f].has_tag(Flag::NoInline),
+                "functions with constant lambda arguments are always inlined"
+            );
             let arg_func = arg_value.unwrap_func_id();
             // TODO: support fns nested in tuples.
             let arg_func_obj = &self.program[arg_func];
@@ -830,7 +870,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             // :ChainedCaptures
             // TODO: HACK: captures aren't tracked properly.
+
             self.program[o_f].set_cc(CallConv::Inline)?; // just this is enough to fix chained_captures
+
             self.program[arg_func].set_cc(CallConv::Inline)?; // but this is needed too for others (perhaps just when there's a longer chain than that simple example).
         }
         self.save_const_values(arg_name, arg_value, arg_ty, loc)?;
@@ -1149,16 +1191,20 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        let is_cl = self.program.comptime_arch == TargetArch::Cranelift;
+        let is_cl = self.program.comptime_arch == TargetArch::Cranelift && cfg!(feature = "cranelift");
         let func = &mut self.program[id];
-        if func.has_tag(Flag::Test) && (!is_cl || !func.has_tag(Flag::Skip_Cranelift)) {
-            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
-            self.tests.push(id);
+        let should_skip = is_cl && func.has_tag(Flag::Skip_Cranelift);
+        if !should_skip {
+            if func.has_tag(Flag::Test) {
+                // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
+                self.tests.push(id);
+            }
+            if func.has_tag(Flag::Test_Broken) {
+                // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
+                self.tests_broken.push(id);
+            }
         }
-        if func.has_tag(Flag::Test_Broken) && (!is_cl || !func.has_tag(Flag::Skip_Cranelift)) {
-            // TODO: probably want referencable_name=false? but then you couldn't call them from cli so meh.
-            self.tests_broken.push(id);
-        }
+
         if func.has_tag(Flag::Fold) {
             func.set_flag(FuncFlags::TryConstantFold, true);
         }
@@ -1536,7 +1582,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // TODO: for now you just need to not make a mistake lol
                             //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
                             self.add_callee(id);
-                            // self.ensure_compiled(id, ExecTime::Both)?; // TODO
+                            self.ensure_compiled(id, ExecTime::Both)?;
                             // The backend still needs to do something with this, so just leave it
                             let fn_ty = self.program.func_type(id);
                             let ty = self.program.fn_ty(fn_ty).unwrap();
@@ -1699,7 +1745,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert!(os2.next().is_none(), "ambigous macro overload");
                 assert!(self.program[f].has_tag(Flag::Macro));
                 self.infer_types(f)?;
-                self.compile(f, ExecTime::Comptime)?;
 
                 self.typecheck_macro_outputs(f, requested)?;
                 let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, (arg, target))?;
@@ -2306,7 +2351,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
         self.update_cc(func_id)?;
-        self.compile(func_id, ExecTime::Comptime)?;
         Ok(func_id)
     }
 
@@ -2998,6 +3042,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             f_expr.set((fid.as_raw()).into(), ty);
             expr.done = true; // don't infinitly recurse!
             expr.ty = ret_ty;
+
+            self.compile(fid, ExecTime::Comptime)?;
             let value = self.immediate_eval_expr(expr.clone(), ret_ty)?;
             expr.set(value, ret_ty);
             Ok((ret_ty, true))
@@ -3211,7 +3257,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     /// - anything else, comptime eval expecting Slice(u32) -> aarch64 asm ops
     pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, FuncImpl<'p>> {
         self.last_loc = Some(self.program[f].loc);
-
         assert!(
             self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
             "inline asm msut specify calling convention. but just: {:?}",

@@ -1,11 +1,53 @@
 
+STD_IN  : Fd : 0;
+STD_OUT : Fd : 1;
 
 fn main() = {
-    println("Hello World");
+    println(start_other_screen);
+    temp_start_raw_terminal(STD_IN);
 
+    text := clone("Hello World\n");
+    render_buffer: List(u8) = list(4096);
+    x := 0;
+    y := 0;
+    width := 50; // TODO: can I ask the terminal for this? 
+    height := 50;
+    (=> {
+        break :: __return;
+        loop {|
+            continue :: __return;
+            c: u8 = 0;
+            len := read(STD_IN, c&, 1);
+            if(len.eq(1)){|
+                @switch(@as(u8) c) {
+                    @case("q".ascii()) => { break(); };
+                    @case("h".ascii()) => { x = x.sub(1).max(0); };
+                    @case("j".ascii()) => { y = y.add(1).min(height); };
+                    @case("k".ascii()) => { y = y.sub(1).max(0); };
+                    @case("l".ascii()) => { x = x.add(1).min(width); };
+                    @default() fn(b:u8) => { @fmt(text&, "%\n", @as(i64) b); };
+                };
+                continue();    
+            };
+            @fmt(render_buffer&, "\x1B[%;%H", 0, 0);
+            render_buffer&.push_all(clear_screen);
+            render_buffer&.push_all(text.items());
+            @fmt(render_buffer&, "\x1B[%;%H", y, x);
+            print(render_buffer.items());
+            
+            render_buffer&.clear();
+            usleep(@as(u32) @as(i64) 1000.mul(12));
+        };
+    })();
+
+    
+    // TODO: panic hooks because this really fucks you up if the program crashes. 
+    temp_end_raw_terminal(STD_IN);
+    println(end_other_screen); 
 }
 
 start_other_screen :: "\x1B[?1049h";
 end_other_screen :: "\x1B[?1049l";
+clear_screen :: "\x1B[2J"; 
 // I need struct termios so i need smaller fields, 
 

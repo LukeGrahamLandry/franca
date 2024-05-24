@@ -91,8 +91,35 @@ pub const LIBC: &[(&str, *const u8)] = &[
         "fn tcsetattr(fd: Fd, optional_actions: i64, in: *Terminos) Unit",
         libc::tcsetattr as *const u8,
     ),
+    ("fn temp_start_raw_terminal(fd: Fd) Unit", start_raw as *const u8),
+    ("fn temp_end_raw_terminal(fd: Fd) Unit", end_raw as *const u8),
+    ("fn usleep(micro_seconds: u32) Unit", libc::usleep as *const u8),
+    ("fn abort() Never", libc::abort as *const u8),
 ];
 
+// Based on man termios and
+// https://stackoverflow.com/questions/421860/capture-characters-from-standard-input-without-waiting-for-enter-to-be-pressed
+pub extern "C" fn start_raw(fd: i32) {
+    use libc::*;
+    unsafe {
+        let mut term: termios = mem::zeroed();
+        tcgetattr(fd, &mut term);
+        term.c_lflag &= !(ICANON | ECHO); // dont read in lines | dont show what you're typing
+        term.c_cc[VMIN] = 0; // its ok for a read to return nothing
+        term.c_cc[VTIME] = 0; // dont wait at all
+        tcsetattr(fd, TCSANOW, &term);
+    }
+}
+
+pub extern "C" fn end_raw(fd: i32) {
+    use libc::*;
+    unsafe {
+        let mut term: termios = mem::zeroed();
+        tcgetattr(fd, &mut term);
+        term.c_lflag |= ICANON | ECHO;
+        tcsetattr(fd, TCSADRAIN, &term);
+    }
+}
 // tcgetattr(0, &mut term);
 // term.c_lflag |= ICANON | ECHO;
 // tcsetattr(0, TCSADRAIN, &term);

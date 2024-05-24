@@ -5,7 +5,7 @@
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     compiler::{Compile, ExecTime, Res},
-    export_ffi::{get_include_std, STDLIB_PATH},
+    export_ffi::{end_raw, get_include_std, start_raw, STDLIB_PATH},
     find_std_lib,
     lex::Lexer,
     log_err, make_toplevel,
@@ -473,7 +473,7 @@ fn do_60fps(arch: TargetArch) {
     let src2 = src_parts.next().unwrap().to_string();
 
     println!("\x1B[?1049h");
-    start_raw();
+    start_raw(0);
     let base = MEM.get();
 
     let start = timestamp();
@@ -550,33 +550,9 @@ fn do_60fps(arch: TargetArch) {
     }
     let end = timestamp();
     let s = end - start;
-    end_raw();
+    end_raw(0);
     println!("\x1B[?1049l");
     println!("{frames} frames in {:.0} ms: {:.0}fps", s * 1000.0, frames as f64 / s);
-
-    // Based on man termios and
-    // https://stackoverflow.com/questions/421860/capture-characters-from-standard-input-without-waiting-for-enter-to-be-pressed
-    fn start_raw() {
-        use libc::*;
-        unsafe {
-            let mut term: termios = mem::zeroed();
-            tcgetattr(0, &mut term);
-            term.c_lflag &= !(ICANON | ECHO); // dont read in lines | dont show what you're typing
-            term.c_cc[VMIN] = 0; // its ok for a read to return nothing
-            term.c_cc[VTIME] = 0; // dont wait at all
-            tcsetattr(0, TCSANOW, &term);
-        }
-    }
-
-    fn end_raw() {
-        use libc::*;
-        unsafe {
-            let mut term: termios = mem::zeroed();
-            tcgetattr(0, &mut term);
-            term.c_lflag |= ICANON | ECHO;
-            tcsetattr(0, TCSADRAIN, &term);
-        }
-    }
 
     fn get_input() -> Option<u8> {
         let mut c = 0;

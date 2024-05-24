@@ -1,3 +1,8 @@
+- compiling the function before folding a call to it because those didn't go in anyones callee list.
+  and to avoid that recursing, it marked the expression as done so it wouldn't get added as a callee of the lit_fn,
+  so it would go in pending_indirect list and get compiled at the last minute.
+  dont have to worry about the arg trying to call something that's not ready because you only fold if its already a const value.
+
 ## (May 22)
 
 - got rid of Value::(Type, Label, Unit, OverloadSet)

@@ -209,10 +209,9 @@ impl<'a, 'p> Parser<'a, 'p> {
         arg.if_empty_add_unit();
 
         let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() && FatRightArrow != self.peek() && Hash != self.peek() {
-            assert!(
-                name.is_some() || !no_paren,
-                "'fn <Expr> =' can't treat Expr as ret type. pls specify name or args."
-            );
+            if name.is_none() && no_paren {
+                return Err(self.error_next(String::from("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args.")));
+            }
             LazyType::PendingEval(self.parse_expr()?)
         } else {
             LazyType::Infer

@@ -32,17 +32,13 @@ fn get_func_index(ip: InstPtr) (@struct(f: i64, rel_ip: i64)) = {
     
     // Check every function id. 
     functions.enumerate(fn(i: i64, func: *InstPtr) Unit => {
-        let func: rawptr = func[];
-        let func = func.ptr_to_int();
-        // Skip missing functions
-        if(func.ne(@as(i64) 0x1337)) {|
-            let ip: rawptr = ip;
-            let dist = ip.ptr_to_int().sub(func);
-            // If distance is negative, 'ip' is before 'func' so can't be inside it (don't care if its closer). 
-            if(dist.lt(best_distance).and(dist.ge(0))) {|
-                best_distance = dist;
-                best_index = i;
-            };
+        let func = (@as(rawptr) func[]).ptr_to_int();
+        let ip: rawptr = ip;
+        let dist = ip.ptr_to_int().sub(func);
+        // If distance is negative, 'ip' is before 'func' so can't be inside it (don't care if its closer). 
+        if(dist.lt(best_distance).and(dist.ge(0))) {|
+            best_distance = dist;
+            best_index = i;
         };
     });
     
@@ -58,34 +54,34 @@ const ResolvedFn = @tagged(Rust: RsResolvedSymbol, Franca: FrResolvedSymbol, Unk
 // TODO: check for panic while panicking. 
 /// TODO: you want to do this on panics should shouldn't be allocating but this is nice for test. 
 /// Note: This relies on the stack frame layout used by bc_to_asm and rustc matching. 
-#aarch64 fun collect_backtrace() List$ResolvedFn = {
-    var found: List$ResolvedFn = list(10);
+#aarch64 fun walk_backtrace(const yield: Fn(ResolvedFn, Unit)) Unit = {
     var addr = get_fp();
     var i = 0;
     var info: RsResolvedSymbol = ()!uninitialized;
     // TODO: nullable pointer should be spelled ?*T
     while(=> addr[].fp.ptr_to_int().ne(0)) {|
-        if(resolve_backtrace_symbol(addr[].lr, info&), => {
-            let r: ResolvedFn = (Rust = info); // TODO: should be able to do this inline
-            found&.push(r);
-        }, => {
+        ::if(ResolvedFn);
+        found: ResolvedFn = if(resolve_backtrace_symbol(addr[].lr, info&),fn() ResolvedFn => {
+            (Rust = info) // TODO: should be able to do this inline
+            
+        }, fn() ResolvedFn => {
             // TODO: check that its not some other ffi thing that rust couldn't find a name for. 
             var func = addr[].lr.get_func_index();
             let fid = func.f;
-            if(number_of_functions().gt(fid), => {
+            if(number_of_functions().gt(fid), fn() ResolvedFn=> {
                 let fid = fid.index_to_func_id();
                 let name = fid.name();
-                let r: ResolvedFn = (Franca = (name = name, fid = fid));
-                found&.push(r);
-            }, => {
-                let r: ResolvedFn = (Unknown = addr[].lr);
-                found&.push(r);
-            });
+                (Franca = (name = name, fid = fid))
+                
+            }, fn() ResolvedFn => {
+                (Unknown = addr[].lr)
+                
+            })
         });
+        yield(found);
         
         let fp: *Frame = addr[].fp;
         addr = fp;
         i = i.add(1);
     };
-    found
 }

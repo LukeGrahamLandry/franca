@@ -549,7 +549,6 @@ pub mod c {
     use std::arch::global_asm;
 
     pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
-        debug_assert_ne!(ptr, Jitted::empty());
         let (arg, ret) = program.program.get_infos(f_ty);
         let bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1

@@ -313,7 +313,7 @@ impl<'p> Expr<'p> {
                 let args: String = args.join(", ");
                 format!("[{}]", args)
             }
-            Expr::Value { value, .. } => match value {
+            Expr::Value { value } => match value {
                 Values::One(i) => format!("{i}"),
                 v => format!("{v:?}"),
             },

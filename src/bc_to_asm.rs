@@ -1215,7 +1215,7 @@ pub mod jit {
 
         // This is a better marker for not compiled yet.
         // Depending on your mood this could be 0x1337 or whatever so you can recognise when you hit it in a debugger.
-        pub fn empty() -> usize {
+        fn empty() -> usize {
             not_compiled as usize
         }
 

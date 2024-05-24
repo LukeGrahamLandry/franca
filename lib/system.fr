@@ -1,8 +1,52 @@
 
+PANIC_HOOK : *FnPtr(Str, Never) : @as(rawptr) malloc(8);
+IS_PANICKING : *bool : @as(rawptr) malloc(1);
+::{ IS_PANICKING[] = false; };
+
 fun panic(msg: Str) Never = {
-    println(msg);
-    exit(1)
+    is_panicking := IS_PANICKING;
+    if(is_panicking[], => { abort(); });
+    is_panicking[] = true;
+    
+    hook := PANIC_HOOK;
+    hook[](msg);
+    unreachable()  // TODO: bc_to_asm handle fnptr returning never correctly -- May 23
 }
+
+fn unreachable() Never = panic("Entered unreachable code.");
+
+fun print_and_abort(msg: Str) Never = {
+    println(msg);
+    abort()
+}
+
+fun print_trace_and_abort(msg: Str) Never = {
+    @println("Panicked: %", msg);
+    walk_backtrace{(f: ResolvedFn)|
+        print("- ");
+        @match(f) {
+            (fn Rust(rs) => { 
+                name: Str = (ptr = rs.owned_name, len = rs.name_len);
+                if(rs.line.ne(1.neg())){|
+                    @println("[line %] %", rs.line, name); 
+                }{|
+                    @println("[] %", name); 
+                };
+            });
+            (fn Franca(f) => { @println("%", f.name); });
+            (fn Unknown(ip) => { @println("[ip=%] ???", (@as(rawptr) ip).ptr_to_int()); });
+        };
+    };
+    abort()
+}
+
+fun print_stacktrace_on_panic() Unit = {
+    PANIC_HOOK[] = (@resolve(Fn(Str, Never)) print_trace_and_abort)!fn_ptr;
+}
+
+:: {
+    PANIC_HOOK[] = (@resolve(Fn(Str, Never)) print_and_abort)!fn_ptr;
+};
 
 fun println(var msg: Str) Unit = {
     print(msg);
