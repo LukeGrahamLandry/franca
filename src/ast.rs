@@ -14,7 +14,7 @@ use interp_derive::InterpSend;
 use std::{
     cell::RefCell,
     hash::Hash,
-    mem::{self, size_of, transmute},
+    mem::{self, transmute},
     ops::{Deref, DerefMut},
 };
 
@@ -54,16 +54,14 @@ pub enum TypeInfo<'p> {
     Bool,
     Fn(FnType),
     FnPtr(FnType),
-    Tuple(Vec<TypeId>),
     Ptr(TypeId), // One element
     Array {
         inner: TypeId,
         len: usize,
     },
     Struct {
-        // You probably always have few enough that this is faster than a hash map.
+        // You probably always have few enough that this is faster than a hash map. // TODO: check that
         fields: Vec<Field<'p>>,
-        as_tuple: TypeId,
     },
     // What rust calls an enum
     Tagged {
@@ -112,8 +110,8 @@ impl TypeMeta {
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
-    pub ffi_byte_offset: Option<usize>,
     pub default: Option<Values>,
+    pub byte_offset: usize,
 }
 
 #[derive(Clone, Debug, InterpSend)]
@@ -175,11 +173,7 @@ pub enum Expr<'p> {
     // This is what TupleAccess and FieldAccess both desugar to. Even for tagged unions!
     PtrOffset {
         ptr: Box<FatExpr<'p>>,
-        index: usize,
-    },
-    TupleAccess {
-        ptr: Box<FatExpr<'p>>,
-        index: Box<FatExpr<'p>>,
+        bytes: usize,
     },
     GetParsed(usize),
     Cast(Box<FatExpr<'p>>),
@@ -209,7 +203,7 @@ pub trait WalkAst<'p> {
         match &mut expr.expr {
             Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
             Expr::Poison => unreachable!("ICE: POISON"),
-            Expr::Call(fst, snd) | Expr::TupleAccess { ptr: fst, index: snd } => {
+            Expr::Call(fst, snd) => {
                 self.expr(fst);
                 self.expr(snd);
             }
@@ -972,13 +966,12 @@ impl<'p> Program<'p> {
     pub(crate) fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             self.add_ffi_definition::<T>();
-            let n = TypeId::unknown;
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::simple_struct(vec![], n));
+            self.types.push(TypeInfo::Unknown);
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] = TypeInfo::Unique(ty, (id & usize::MAX as u128) as usize);
@@ -1003,7 +996,7 @@ impl<'p> Program<'p> {
             let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Struct { fields: vec![], as_tuple: n });
+            self.types.push(TypeInfo::Struct { fields: vec![] });
             self.ffi_types.insert(id, ty_final);
 
             let ty = match type_info.data {
@@ -1016,12 +1009,12 @@ impl<'p> Program<'p> {
                         fields.push(Field {
                             ty,
                             name: self.pool.intern(f.name),
-                            ffi_byte_offset: Some(f.offset),
+                            byte_offset: f.offset,
                             default: None,
                         })
                     }
                     let as_tuple = self.tuple_of(types);
-                    self.intern_type(TypeInfo::Struct { fields, as_tuple })
+                    self.intern_type(TypeInfo::Struct { fields })
                 }
                 RsData::Enum { .. } => todo!(),
                 RsData::Ptr { inner, .. } => {
@@ -1060,8 +1053,42 @@ impl<'p> Program<'p> {
         match types.len() {
             0 => TypeId::unit,
             1 => types[0],
-            _ => self.intern_type(TypeInfo::Tuple(types)),
+            _ => {
+                // TODO: dont allocate the string a billion times
+                let info = self
+                    .make_struct(
+                        types
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ty)| Ok((*ty, self.pool.intern(&format!("_{i}")), None))),
+                    )
+                    .unwrap();
+                self.intern_type(info)
+            }
         }
+    }
+
+    pub(crate) fn make_struct(&self, parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>)>>) -> Res<'p, TypeInfo<'p>> {
+        let mut fields = vec![];
+        let mut bytes = 0;
+        for p in parts {
+            let (ty, name, default) = p?;
+            let info = self.get_info(ty);
+            let inv_pad = bytes % info.align_bytes as usize;
+            if inv_pad != 0 {
+                bytes += info.align_bytes as usize - inv_pad;
+            }
+            fields.push(Field {
+                name,
+                ty,
+                default,
+                byte_offset: bytes,
+            });
+            // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.
+            //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
+            bytes += info.stride_bytes as usize;
+        }
+        Ok(TypeInfo::Struct { fields })
     }
 
     pub extern "C" fn unique_ty(&mut self, ty: TypeId) -> TypeId {
@@ -1109,7 +1136,7 @@ impl<'p> Program<'p> {
             TypeInfo::OverloadSet | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
-            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tuple(_) | TypeInfo::Tagged { .. } => {
+            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => {
                 todo!()
             }
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
@@ -1174,11 +1201,6 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }
 
-    pub fn slice_type(&mut self, value_ty: TypeId) -> TypeId {
-        let ptr = self.ptr_type(value_ty);
-        self.intern_type(TypeInfo::Tuple(vec![ptr, TypeId::i64()]))
-    }
-
     pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
         let ptr_ty = self.raw_type(ptr_ty);
         let ptr_ty = &self[ptr_ty];
@@ -1189,10 +1211,10 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub fn tuple_types(&self, ty: TypeId) -> Option<&[TypeId]> {
+    // TODO: get rid of this. its dumb now that it needs to reallocate the vec everytime -- May 25
+    pub fn tuple_types(&self, ty: TypeId) -> Option<Vec<TypeId>> {
         match &self[ty] {
-            TypeInfo::Tuple(types) => Some(types),
-            &TypeInfo::Struct { as_tuple, .. } => self.tuple_types(as_tuple),
+            TypeInfo::Struct { fields } => Some(fields.iter().map(|f| f.ty).collect()),
             &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
             _ => None,
         }
@@ -1211,20 +1233,11 @@ impl<'p> Program<'p> {
 
     pub fn struct_type(&mut self, name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
         let name = self.pool.intern(name);
-        let mut types = vec![];
-        let mut fields = vec![];
-        for (name, ty) in fields_in {
-            fields.push(Field {
-                name: self.pool.intern(name),
-                ty: *ty,
-                ffi_byte_offset: None,
-                default: None,
-            });
-            types.push(*ty);
-        }
-        let as_tuple = self.tuple_of(types);
-        let ty = TypeInfo::simple_struct(fields, as_tuple);
-        let ty = self.intern_type(ty);
+        let pool = self.pool;
+        let info = self
+            .make_struct(fields_in.iter().map(|(name, ty)| Ok((*ty, pool.intern(name), None))))
+            .unwrap();
+        let ty = self.intern_type(info);
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
@@ -1247,11 +1260,6 @@ impl<'p> Program<'p> {
         if let TypeInfo::Struct { fields, .. } = ty {
             let ty = TypeInfo::Tagged {
                 cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
-            };
-            self.intern_type(ty)
-        } else if let TypeInfo::Tuple(fields) = ty {
-            let ty = TypeInfo::Tagged {
-                cases: fields.into_iter().map(|ty| (self.synth_name(ty), ty)).collect(),
             };
             self.intern_type(ty)
         } else {
@@ -1278,16 +1286,17 @@ impl<'p> Program<'p> {
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
             TypeInfo::Unknown => todo!(),
-            TypeInfo::Tuple(args) => {
+            TypeInfo::Struct { fields } => {
                 let mut size = 0;
                 let mut align = 0;
                 let mut mask = 0;
                 let mut pointers = false;
                 let mut bytes = 0;
 
-                for arg in args {
-                    let info = self.get_info(*arg);
-                    bytes += info.stride_bytes;
+                for arg in fields {
+                    let info = self.get_info(arg.ty);
+                    debug_assert!(arg.byte_offset >= bytes);
+                    bytes = arg.byte_offset + info.stride_bytes.max(info.align_bytes) as usize;
                     size += info.size_slots;
                     align = align.max(info.align_bytes);
                     if size > 16 {
@@ -1302,9 +1311,8 @@ impl<'p> Program<'p> {
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false, pointers, bytes)
+                TypeMeta::new(size, align, mask, false, pointers, bytes as u16)
             }
-            &TypeInfo::Struct { as_tuple, .. } => self.get_info(as_tuple),
             TypeInfo::Tagged { cases, .. } => {
                 let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
                 let bytes = 8 + cases.iter().map(|(_, ty)| self.get_info(*ty).stride_bytes).max().expect("no empty enum");
@@ -1496,12 +1504,6 @@ impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
     }
 }
 
-impl<'p> TypeInfo<'p> {
-    pub fn simple_struct(fields: Vec<Field<'p>>, as_tuple: TypeId) -> Self {
-        TypeInfo::Struct { fields, as_tuple }
-    }
-}
-
 #[allow(non_upper_case_globals)]
 impl TypeId {
     pub fn is_unit(&self) -> bool {
@@ -1639,6 +1641,7 @@ pub enum Flag {
     Fold,
     Ptr,
     Len,
+    __Tag_Check,
     _Reserved_Count_,
 }
 

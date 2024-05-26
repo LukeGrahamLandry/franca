@@ -353,8 +353,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
-            Expr::TupleAccess { .. }
-            | Expr::String(_)
+            Expr::String(_)
             | Expr::GetParsed(_)
             | Expr::AddToOverloadSet(_)
             | Expr::GetNamed(_)
@@ -470,13 +469,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
-                let mut offset = 0;
-                for value in values {
-                    let slots = self.slot_count(value.ty);
+                let mut bytes = 0;
+                let TypeInfo::Struct { fields } = &self.program[self.program.raw_type(expr.ty)] else {
+                    err!("Expr::Tuple should have struct type",)
+                };
+                for (value, f) in values.iter().zip(fields.iter()) {
                     if result_location == ResAddr {
                         result.push(Bc::Dup);
-                        result.push(Bc::IncPtr { offset });
-                        offset += slots;
+                        result.push(Bc::IncPtrBytes { bytes: f.byte_offset as u16 });
                     }
                     self.compile_expr(result, value, result_location, false)?;
                 }
@@ -626,9 +626,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
-            Expr::PtrOffset { ptr, index } => {
+            Expr::PtrOffset { ptr, bytes } => {
+                // TODO: compiler has to emit tagchecks for enums now!!
                 self.compile_expr(result, ptr, PushStack, false)?;
-                self.index_expr(result, ptr.ty, *index)?;
+
+                result.push(Bc::IncPtrBytes { bytes: *bytes as u16 });
                 match result_location {
                     PushStack => {}
                     ResAddr => result.push(Bc::StorePre { slots: 1 }),
@@ -776,56 +778,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             &Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
             _ => ice!("TODO: other `place=e;` :("),
         }
-    }
-
-    // This is just doing a GEP
-    fn index_expr(&mut self, result: &mut FnBody<'p>, container_ptr_ty: TypeId, index: usize) -> Res<'p, ()> {
-        let depth = self.program.ptr_depth(container_ptr_ty);
-        assert_eq!(depth, 1);
-        let container_ty = unwrap!(
-            self.program.unptr_ty(container_ptr_ty),
-            "unreachable unptr_ty {:?}",
-            self.program.log_type(container_ptr_ty)
-        );
-
-        let raw_container_ty = self.program.raw_type(container_ty);
-        match &self.program[raw_container_ty] {
-            TypeInfo::Struct { fields, .. } => {
-                let mut offset = 0;
-                for f in fields.iter().take(index) {
-                    offset += self.slot_count(f.ty);
-                }
-                let f = &fields[index];
-                let offset = if let Some(bytes) = f.ffi_byte_offset {
-                    assert_eq!(bytes % 8, 0);
-                    (bytes / 8) as u16
-                } else {
-                    offset
-                };
-                if offset > 0 {
-                    result.push(Bc::IncPtr { offset });
-                }
-            }
-            TypeInfo::Tagged { .. } => {
-                result.push(Bc::TagCheck { expected: index as u16 });
-                result.push(Bc::IncPtr { offset: 1 });
-            }
-            TypeInfo::Tuple(types) => {
-                let mut offset = 0;
-                for f_ty in types.iter().take(index) {
-                    offset += self.slot_count(*f_ty);
-                }
-                if offset > 0 {
-                    result.push(Bc::IncPtr { offset });
-                }
-            }
-            _ => err!(
-                "only structs/enums support field access but found {} = {}",
-                self.program.log_type(container_ty),
-                self.program.log_type(raw_container_ty)
-            ),
-        }
-        Ok(())
     }
 
     fn slot_count(&self, ty: TypeId) -> u16 {

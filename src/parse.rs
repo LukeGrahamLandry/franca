@@ -470,16 +470,9 @@ impl<'a, 'p> Parser<'a, 'p> {
                             self.expr(Expr::FieldAccess(Box::new(prefix), name))
                         }
                         LeftParen => {
-                            self.eat(LeftParen)?;
-                            let index = Box::new(self.parse_expr()?);
-                            self.eat(RightParen)?;
-                            self.expr(Expr::TupleAccess {
-                                ptr: Box::new(prefix),
-                                index,
-                            })
+                            return Err(self.expected("field name: .(index) tuple syntax has been removed. use ._index instead."));
                         }
-
-                        _ => return Err(self.expected(".name or .(index)")),
+                        _ => return Err(self.expected(".name")),
                     }
                 }
                 DoubleSquare => {

@@ -630,6 +630,15 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let res = builder.ins().bitcast(I64, MemFlags::new(), res);
                     self.stack.push(res);
                 }
+                // TODO: copy-paste
+                Bc::IncPtrBytes { bytes } => {
+                    let ptr = self.stack.pop().unwrap();
+                    let offset = builder.ins().iconst(I64, bytes as i64);
+                    let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
+                    let res = builder.ins().iadd(ptr, offset);
+                    let res = builder.ins().bitcast(I64, MemFlags::new(), res);
+                    self.stack.push(res);
+                }
                 Bc::Pop { slots } => {
                     pops(&mut self.stack, slots as usize);
                 }
@@ -687,7 +696,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             | TypeInfo::Fn(_)
             | TypeInfo::Scope
             | TypeInfo::Bool => I64,
-            TypeInfo::Tuple(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => I64,
+            TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => I64,
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr => I64,
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         }

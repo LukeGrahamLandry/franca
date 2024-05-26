@@ -30,6 +30,7 @@ pub enum Bc {
     StorePre { slots: u16 },                              // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
     IncPtr { offset: u16 },                               // <ptr:1> -> <ptr:1>
+    IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
     Pop { slots: u16 },                                   // <?:n> -> _
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     AddrFnResult,                                         // _ -> <ptr:1>
@@ -155,17 +156,21 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
             _ => out.push(unwrap!(bytes.next_i64(), "")), // TODO
         },
         TypeInfo::Bool => out.push(unwrap!(bytes.next_u8(), "") as i64),
-        TypeInfo::Tuple(parts) => {
-            for t in parts {
-                deconstruct_values(program, *t, bytes, out)?;
-            }
-        }
         &TypeInfo::Array { inner, len } => {
             for _ in 0..len {
                 deconstruct_values(program, inner, bytes, out)?;
             }
         }
-        &TypeInfo::Struct { as_tuple, .. } => deconstruct_values(program, as_tuple, bytes, out)?,
+        TypeInfo::Struct { fields } => {
+            let mut prev = 0;
+            for t in fields {
+                assert!(prev <= t.byte_offset);
+                bytes.i = t.byte_offset;
+                deconstruct_values(program, t.ty, bytes, out)?;
+                prev = t.byte_offset;
+            }
+            // TODO: eat trailing stride padding?
+        }
         TypeInfo::Tagged { .. } => {
             // TODO
             let size = program.get_info(ty).stride_bytes;

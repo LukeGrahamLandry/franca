@@ -265,7 +265,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
             Expr::AddToOverloadSet(_) | Expr::WipFunc(_) => unreachable!(),
             Expr::Poison => ice!("POISON",),
-            Expr::Call(fst, snd) | Expr::TupleAccess { ptr: fst, index: snd } => {
+            Expr::Call(fst, snd) => {
                 self.resolve_expr(fst)?;
                 self.resolve_expr(snd)?;
             }

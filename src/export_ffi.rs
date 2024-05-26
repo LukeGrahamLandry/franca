@@ -317,7 +317,7 @@ extern "C-unwind" fn pair_type(program: &mut &mut Program, a: TypeId, b: TypeId)
     hope(|| {
         assert!(a.as_index() < program.types.len(), "TypeId OOB {:?}", a);
         assert!(b.as_index() < program.types.len(), "TypeId OOB {:?}", b);
-        Ok(program.intern_type(TypeInfo::Tuple(vec![a, b])))
+        Ok(program.tuple_of(vec![a, b]))
     })
 }
 
@@ -326,7 +326,7 @@ extern "C-unwind" fn triple_type(program: &mut &mut Program, a: TypeId, b: TypeI
         assert!(a.as_index() < program.types.len(), "TypeId OOB {:?}", a);
         assert!(b.as_index() < program.types.len(), "TypeId OOB {:?}", b);
         assert!(c.as_index() < program.types.len(), "TypeId OOB {:?}", c);
-        Ok(program.intern_type(TypeInfo::Tuple(vec![a, b, c])))
+        Ok(program.tuple_of(vec![a, b, c]))
     })
 }
 extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {

@@ -509,6 +509,24 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 Val::FloatReg(_) => err!("don't try to gep a float",),
             },
+            // TODO: copy-paste
+            Bc::IncPtrBytes { bytes } => match self.state.stack.last_mut().unwrap() {
+                Val::Increment { reg, offset_bytes: prev } => {
+                    *prev += bytes;
+                }
+                Val::Literal(v) => {
+                    *v += bytes as i64;
+                }
+                Val::Spill(_) => {
+                    // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
+                    let (reg, offset_bytes) = self.pop_to_reg_with_offset();
+                    self.state.stack.push(Val::Increment {
+                        reg,
+                        offset_bytes: offset_bytes + bytes,
+                    })
+                }
+                Val::FloatReg(_) => err!("don't try to gep a float",),
+            },
             Bc::Load { slots } => self.emit_load(slots),
             Bc::StorePost { slots } => self.emit_store(slots),
             Bc::StorePre { slots } => {

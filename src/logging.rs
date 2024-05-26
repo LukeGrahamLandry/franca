@@ -155,10 +155,7 @@ impl<'p> Program<'p> {
                         format!("&(fn({}) {})", self.log_type(f.arg), self.log_type(f.ret))
                     }
                     TypeInfo::Label(e) => format!("Label({})", self.log_type(*e)),
-                    TypeInfo::Tuple(v) => {
-                        let v: Vec<_> = v.iter().map(|v| self.log_type(*v)).collect();
-                        format!("({})", v.join(", "))
-                    }
+
                     TypeInfo::Type => "Type".to_owned(),
                     TypeInfo::Unit => "Unit".to_owned(),
                     TypeInfo::VoidPtr => "rawptr".to_owned(),
@@ -333,8 +330,8 @@ impl<'p> Expr<'p> {
             Expr::PrefixMacro { handler, arg, target } => {
                 format!("[@{}({}) {}]", handler.logd(pool, depth), arg.logd(pool, depth), target.logd(pool, depth))
             }
-            Expr::TupleAccess { ptr, index } => format!("{}.({})", ptr.logd(pool, depth), index.logd(pool, depth)),
-            Expr::PtrOffset { ptr, index } => format!("{}.(~{index})", ptr.logd(pool, depth)),
+
+            Expr::PtrOffset { ptr, bytes } => format!("{}.(~{bytes})", ptr.logd(pool, depth)),
             _ => format!("{:?}", self),
         }
     }

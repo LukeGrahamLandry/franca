@@ -16,8 +16,8 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, CallConv, FatStmt, Field, Flag, FuncFlags, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern,
-    RenumberVars, ScopeId, TargetArch, Var, VarType, WalkAst,
+    Annotation, Binding, CallConv, FatStmt, Flag, FuncFlags, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
+    ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -1480,7 +1480,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let expect = if let Some(types) = ty {
                             let expect = *unwrap!(types.iter().find(|t| !t.is_unknown()), "all unknown");
                             for t in types {
-                                self.type_check_arg(*t, expect, "match slice types")?;
+                                self.type_check_arg(t, expect, "match slice types")?;
                             }
                             expect
                         } else {
@@ -1650,11 +1650,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Otherwise its a normal struct/tagged field.
                 self.compile_place_expr(expr, requested, true)?;
                 self.compile_expr(expr, requested)?; // TODO: this is dumb. its just to get the load/store applied/
-                expr.ty
-            }
-            // :PlaceExpr
-            Expr::TupleAccess { .. } => {
-                self.compile_place_expr(expr, requested, true)?;
                 expr.ty
             }
             // TODO: replace these with a more explicit node type?
@@ -1867,19 +1862,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(None);
                 }
             }
-            Expr::TupleAccess { ptr, .. } => {
-                if (self.type_of(ptr)?).is_some() {
-                    self.compile_expr(expr, None)?
-                } else {
-                    return Ok(None);
-                }
-            }
-            Expr::PtrOffset { ptr, index } => {
-                if let Ok(Some(container_ptr_ty)) = self.type_of(ptr) {
-                    self.get_index_type(container_ptr_ty, *index)?
-                } else {
-                    return Ok(None);
-                }
+            Expr::PtrOffset { .. } => {
+                unreachable!()
             }
             Expr::Closure(_) => {
                 if let Ok(id) = self.promote_closure(expr, None, None) {
@@ -1965,11 +1949,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
                             assert_eq!(ty[0], TypeId::ty, "@as expected type");
                             let (ty_val, rest) = chop_prefix(self.program, TypeId::ty, value.clone())?;
-                            let rest_ty = if ty.len() == 2 {
-                                ty[1]
-                            } else {
-                                self.program.intern_type(TypeInfo::Tuple(ty[1..].to_vec()))
-                            };
+                            assert!(ty.len() == 2);
+                            let rest_ty = ty[1];
                             let parts = vec![
                                 FatExpr::synthetic_ty(Expr::Value { value: ty_val }, arg.loc, TypeId::ty),
                                 FatExpr::synthetic_ty(Expr::Value { value: rest }, arg.loc, rest_ty),
@@ -2566,20 +2547,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // :Coercion
                     return Ok(()); // TODO: not this!
                 }
-                (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
+                // TODO: not this!!!
+                (TypeInfo::Struct { fields: f }, TypeInfo::Struct { fields: e }) => {
                     if f.len() == e.len() {
-                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.coerce_type_check_arg(*f, *e, msg).is_ok());
+                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok());
                         if ok {
                             return Ok(());
                         }
                     }
-                }
-                // TODO: only allow destructuring in some contexts.
-                (&TypeInfo::Struct { as_tuple, .. }, TypeInfo::Tuple(_)) => {
-                    return self.coerce_type_check_arg(as_tuple, expected, msg);
-                }
-                (TypeInfo::Tuple(_), &TypeInfo::Struct { as_tuple, .. }) => {
-                    return self.coerce_type_check_arg(found, as_tuple, msg);
                 }
                 (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
                     if self.coerce_type_check_arg(f, e, msg).is_ok() {
@@ -2588,16 +2563,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
                 (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
-                (TypeInfo::Tuple(found_elements), TypeInfo::Type) => {
-                    // :Coercion
-                    if found_elements.iter().all(|e| self.coerce_type_check_arg(*e, TypeId::ty, msg).is_ok()) {
-                        return Ok(());
-                    }
-                }
-
-                (TypeInfo::Type, TypeInfo::Tuple(_expected_elements)) => {
-                    err!("TODO: expand out a tuple type?",)
-                }
 
                 (TypeInfo::Unit, TypeInfo::Type) => {
                     // :Coercion
@@ -2644,18 +2609,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(()); // TODO: not this!
                     }
                 }
-                (TypeInfo::Tuple(f), TypeInfo::Tuple(e)) => {
-                    // println!("{} vs {}", self.program.log_type(found), self.program.log_type(expected));
-                    // where_the_fuck_am_i(self, self.last_loc.unwrap());
+
+                // TODO: not this!!! at the very least only do it in the coerceon verion!
+                (TypeInfo::Struct { fields: f }, TypeInfo::Struct { fields: e }) => {
                     if f.len() == e.len() {
-                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.type_check_arg(*f, *e, msg).is_ok());
+                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok());
                         if ok {
                             return Ok(());
                         }
                     }
-                }
-                (TypeInfo::Tuple(_), &TypeInfo::Struct { as_tuple, .. }) => {
-                    return self.type_check_arg(found, as_tuple, msg);
                 }
                 (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
                     if self.type_check_arg(f, e, msg).is_ok() {
@@ -2664,12 +2626,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
                 (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
-                (TypeInfo::Tuple(found_elements), TypeInfo::Type) => {
-                    // :Coercion
-                    if found_elements.iter().all(|e| self.type_check_arg(*e, TypeId::ty, msg).is_ok()) {
-                        return Ok(());
-                    }
-                }
 
                 // TODO: correct varience
                 // TODO: calling convention for FnPtr
@@ -2687,25 +2643,22 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
         // TODO: maybe const keyword before name in func/struct lets you be generic.
         let types = self.infer_pattern(&mut pattern.bindings)?;
-        let as_tuple = self.program.tuple_of(types);
-        let mut fields = vec![];
-        for binding in &pattern.bindings {
-            assert_ne!(binding.kind, VarType::Const, "todo");
-            let ty = unwrap!(binding.ty.ty(), "field type not inferred");
-            let default = if let Some(expr) = binding.default.clone() {
-                // TODO: no clone
-                Some(self.immediate_eval_expr(expr, ty)?)
-            } else {
-                None
-            };
-            fields.push(Field {
-                name: unwrap!(binding.name.ident(), "field name"),
-                ty,
-                ffi_byte_offset: None,
-                default,
-            });
-        }
-        Ok(TypeInfo::simple_struct(fields, as_tuple))
+        let parts: Vec<_> = pattern
+            .bindings
+            .iter()
+            .map(|binding| {
+                assert_ne!(binding.kind, VarType::Const, "todo");
+                let ty = unwrap!(binding.ty.ty(), "field type not inferred");
+                let default = if let Some(expr) = binding.default.clone() {
+                    // TODO: no clone
+                    Some(self.immediate_eval_expr(expr, ty)?)
+                } else {
+                    None
+                };
+                Ok((ty, unwrap!(binding.name.ident(), "field name"), default))
+            })
+            .collect();
+        self.program.make_struct(parts.into_iter())
     }
 
     fn set_deref(&mut self, full_stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
@@ -2713,7 +2666,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             unreachable!()
         };
         match place.deref_mut().deref_mut() {
-            Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) | Expr::TupleAccess { .. } => {
+            Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
                 self.compile_place_expr(place, None, true)?;
                 let oldty = place.ty;
                 let value_ty = self.compile_expr(value, Some(oldty))?;
@@ -2784,12 +2737,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                         inner = self.program.raw_type(next_inner);
                     }
                 }
-                let (i, field_val_ty) = self.field_access_expr(container, *name)?;
+                let (bytes, field_val_ty) = self.field_access_expr(container, *name)?;
                 let field_ptr_ty = self.program.ptr_type(field_val_ty);
                 debug_assert!(!matches!(container.expr, Expr::GetVar(_)));
                 place.expr = Expr::PtrOffset {
                     ptr: Box::new(mem::take(container)),
-                    index: i,
+                    bytes,
                 };
                 place.done = true;
                 if want_deref {
@@ -2801,27 +2754,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     // place.done = true;
                     place.ty = field_ptr_ty;
-                }
-            }
-            Expr::TupleAccess { ptr, index } => {
-                self.compile_place_expr(ptr, None, false)?;
-                // TODO: auto deref
-                let i: i64 = self.immediate_eval_expr_known(*index.clone())?;
-                self.set_literal(index, i)?;
-                let field_ptr_ty = self.get_index_type(ptr.ty, i as usize)?;
-                debug_assert!(!matches!(ptr.expr, Expr::GetVar(_)));
-                place.expr = Expr::PtrOffset {
-                    ptr: Box::new(mem::take(ptr)),
-                    index: i as usize,
-                };
-                place.ty = field_ptr_ty;
-                place.done = true;
-
-                if want_deref {
-                    // Now we have the offset-ed ptr, add back the deref
-                    self.deref_one(place)?;
-                    // Don't set again done because you want to go around the main compile_expr another time so special load/store overloads get processed.
-                    // place.done = true;
                 }
             }
             Expr::SuffixMacro(macro_name, arg) => {
@@ -2909,18 +2841,20 @@ impl<'a, 'p> Compile<'a, 'p> {
         let raw_container_ty = self.program.raw_type(container_ty);
         match &self.program[raw_container_ty] {
             TypeInfo::Struct { fields, .. } => {
+                let mut bytes = 0;
                 for (i, f) in fields.iter().enumerate() {
                     if f.name == name {
                         container_ptr.done = true;
-                        return Ok((i, f.ty));
+                        return Ok((bytes, f.ty));
                     }
+                    bytes += self.program.get_info(f.ty).stride_bytes as usize; // TODO: align
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
             }
             TypeInfo::Tagged { cases, .. } => {
                 for (i, (f_name, f_ty)) in cases.iter().enumerate() {
                     if *f_name == name {
-                        return Ok((i, *f_ty));
+                        return Ok((8, *f_ty));
                     }
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
@@ -2929,28 +2863,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 "only structs/enums support field access but found {} = {}",
                 self.program.log_type(container_ty),
                 self.program.log_type(raw_container_ty)
-            ),
-        }
-    }
-
-    // :PlaceExpr
-    fn get_index_type(&mut self, container_ptr_ty: TypeId, index: usize) -> Res<'p, TypeId> {
-        let container_ty = unwrap!(
-            self.program.unptr_ty(container_ptr_ty),
-            "unreachable unptr_ty {:?}",
-            self.program.log_type(container_ptr_ty)
-        );
-
-        let raw_container_ty = self.program.raw_type(container_ty);
-        match &self.program[raw_container_ty] {
-            TypeInfo::Tuple(types) => Ok(self.program.ptr_type(types[index])),
-            TypeInfo::Struct { fields, .. } => Ok(self.program.ptr_type(fields[index].ty)),
-            TypeInfo::Tagged { cases, .. } => Ok(self.program.ptr_type(cases[index].1)),
-            TypeInfo::Unique(_, _) => unreachable!(),
-            &TypeInfo::Array { inner, .. } => Ok(self.program.ptr_type(inner)),
-            _ => err!(
-                "only tuple/struct/enum/ support field access but found {}",
-                self.program.log_type(container_ty)
             ),
         }
     }
@@ -3054,9 +2966,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut values = value.clone();
                     let mut parts = Vec::with_capacity(values.bytes().len());
                     for ty in ty {
-                        let (taken, rest) = chop_prefix(self.program, *ty, values)?;
+                        let (taken, rest) = chop_prefix(self.program, ty, values)?;
                         values = rest;
-                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken }, arg_expr.loc, *ty))
+                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken }, arg_expr.loc, ty))
                     }
                     arg_expr.expr = Expr::Tuple(parts);
                     assert!(values.is_unit(), "TODO: nontrivial pattern matching");
@@ -3249,10 +3161,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let ty = self.type_of(asm)?;
                 if let Some(ty) = ty {
-                    if let TypeInfo::Tuple(parts) = &self.program[ty] {
-                        let is_ints = parts.iter().all(|t| matches!(self.program[*t], TypeInfo::Int(_)));
+                    if let TypeInfo::Struct { fields } = &self.program[ty] {
+                        let is_ints = fields.iter().all(|t| matches!(self.program[t.ty], TypeInfo::Int(_)));
                         if is_ints {
-                            let len = parts.len();
+                            let len = fields.len();
                             let val = self.immediate_eval_expr(asm.clone(), ty)?;
                             let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
                             let mut ints = vec![];

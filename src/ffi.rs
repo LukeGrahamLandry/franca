@@ -223,88 +223,40 @@ impl<'p> InterpSend<'p> for f64 {
     }
 }
 
-impl<'p> InterpSend<'p> for TypeId {
-    const SIZE_BYTES: usize = 4;
+macro_rules! ffi_index {
+    ($ty:ty, $typeid:expr, $name:expr) => {
+        impl<'p> InterpSend<'p> for $ty {
+            const SIZE_BYTES: usize = 4;
 
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::ty
-    }
+            fn get_type_key() -> u128 {
+                unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+            }
+            fn create_type(_: &mut Program<'p>) -> TypeId {
+                $typeid
+            }
 
-    fn get_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::ty
-    }
+            fn get_type(_: &mut Program<'p>) -> TypeId {
+                $typeid
+            }
 
-    fn serialize_to_ints(self, values: &mut WriteBytes) {
-        values.push_u32(self.as_raw())
-    }
+            fn serialize_to_ints(self, values: &mut WriteBytes) {
+                values.push_u32(self.as_raw())
+            }
 
-    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
-        Some(TypeId::from_raw(values.next_u32()?))
-    }
+            fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+                Some(<$ty>::from_raw(values.next_u32()?))
+            }
 
-    fn name() -> String {
-        "Type".to_string()
-    }
+            fn name() -> String {
+                $name.to_string()
+            }
+        }
+    };
 }
 
-// TODO: this is sad.
-impl<'p> InterpSend<'p> for OverloadSetId {
-    const SIZE_BYTES: usize = 4;
-
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::overload_set
-    }
-
-    fn get_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::overload_set
-    }
-
-    fn serialize_to_ints(self, values: &mut WriteBytes) {
-        values.push_u32(self.as_raw())
-    }
-
-    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
-        Some(OverloadSetId::from_raw(values.next_u32()?))
-    }
-
-    fn name() -> String {
-        "OverloadSet".to_string()
-    }
-}
-
-// TODO: this is sad.
-impl<'p> InterpSend<'p> for ScopeId {
-    const SIZE_BYTES: usize = 4;
-
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::scope
-    }
-
-    fn get_type(_: &mut Program<'p>) -> TypeId {
-        TypeId::scope
-    }
-
-    fn serialize_to_ints(self, values: &mut WriteBytes) {
-        values.push_u32(self.as_raw())
-    }
-
-    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
-        Some(ScopeId::from_raw(values.next_u32()?))
-    }
-
-    fn name() -> String {
-        "ScopeId".to_string()
-    }
-}
+ffi_index!(TypeId, TypeId::ty, "Type");
+ffi_index!(OverloadSetId, TypeId::overload_set, "OverloadSet");
+ffi_index!(ScopeId, TypeId::scope, "Scope");
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     const SIZE_BYTES: usize = A::SIZE_BYTES + B::SIZE_BYTES; // TODO: alignment
@@ -372,7 +324,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn create_type(program: &mut Program<'p>) -> TypeId {
         let ty = T::get_type(program);
         let ty = program.intern_type(TypeInfo::Ptr(ty));
-        program.intern_type(TypeInfo::Tuple(vec![ty, TypeId::i64()]))
+        program.tuple_of(vec![ty, TypeId::i64()]) // TODO: not this
     }
 
     fn serialize_to_ints(self, values: &mut WriteBytes) {

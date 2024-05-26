@@ -1,3 +1,7 @@
+## regressions
+
+- @tagged tag check on field access
+
 ## Deeply annoying
 
 - no u32/u16/u8
