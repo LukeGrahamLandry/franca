@@ -319,7 +319,14 @@ impl<'p> Expr<'p> {
                 let body: String = pattern
                     .bindings
                     .iter()
-                    .map(|b| format!("{}: ({}), ", b.name().map_or("_", |n| pool.get(n)), b.lazy().log(pool)))
+                    .map(|b| {
+                        format!(
+                            "{}: ({}) = {}, ",
+                            b.name().map_or("_", |n| pool.get(n)),
+                            b.lazy().log(pool),
+                            b.default.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| String::from("---"))
+                        )
+                    })
                     .collect();
 
                 format!(".{{ {body} }}")

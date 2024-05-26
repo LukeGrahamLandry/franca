@@ -1333,7 +1333,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     //       and just use the slow linear types for debugging.
     fn compile_expr_inner(&mut self, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
         self.last_loc = Some(expr.loc);
-
+        let prev_ty = expr.ty;
         Ok(match expr.deref_mut() {
             Expr::Cast(inner) => {
                 // TODO: you probably never get here cause .done should be set?
@@ -1665,6 +1665,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             // TODO: replace these with a more explicit node type?
             Expr::StructLiteralP(pattern) => {
+                let requested = requested.or(Some(prev_ty)); // TODO: idk why switching to bytes made me need this. thats disturbing. -- May 26
                 let res = self.construct_struct(requested, pattern)?;
                 expr.ty = res;
                 res

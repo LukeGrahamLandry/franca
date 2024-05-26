@@ -159,7 +159,9 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
         },
         TypeInfo::Bool => out.push(unwrap!(bytes.next_u8(), "") as i64),
         &TypeInfo::Array { inner, len } => {
+            let inner_align = program.get_info(inner).align_bytes;
             for _ in 0..len {
+                bytes.align_to(inner_align as usize);
                 deconstruct_values(program, inner, bytes, out)?;
             }
         }
@@ -172,22 +174,14 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
                 deconstruct_values(program, t.ty, bytes, out)?;
                 prev = t.byte_offset;
             }
-            // TODO: eat trailing stride padding?
+            bytes.align_to(program.get_info(ty).align_bytes as usize); // eat trailing stride padding
         }
-        TypeInfo::Tagged { .. } => {
-            // TODO
-            let size = program.get_info(ty).stride_bytes;
-            assert_eq!(size % 8, 0, "{}", program.log_type(ty));
-            for _ in 0..size % 8 {
-                out.push(unwrap!(bytes.next_i64(), ""))
-            }
-        }
+        TypeInfo::Tagged { .. } => todo!(),
         &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out)?,
         TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         TypeInfo::Unit => {}
-        TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => {
-            out.push(unwrap!(bytes.next_u32(), "") as i64)
-        }
+        TypeInfo::Type => out.push(unwrap!(bytes.next_i64(), "")),
+        TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => out.push(unwrap!(bytes.next_u32(), "") as i64),
     }
     Ok(())
 }
@@ -271,6 +265,7 @@ impl WriteBytes {
     }
 }
 
+#[must_use]
 pub fn align_to(offset: usize, align: usize) -> usize {
     if offset % align == 0 {
         offset

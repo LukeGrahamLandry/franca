@@ -19,6 +19,8 @@ which is dumb and slower but the eventual goal is to use same layout as the rust
 - when emit_bc for ::Values, values.len != ty.stride. I think because of @as for ints doesn't actually do anything.
   for now just copy the right number of bytes but should really handle it in ::Cast somehow.
   now i fail 11, cl fails 3.
+- @enum(a, b, c) has indexes (0, 4294967296, 8589934592). off by 4 bytes.
+  im stupid and did align_to(offset, info.align_bytes as usize); without asigning it back to offset.
 
 ## (May 24)
 

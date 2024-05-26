@@ -93,7 +93,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let id = result.add_var(ty);
                 let info = self.program.get_info(ty);
-                align_to(offset, info.align_bytes as usize);
+                offset = align_to(offset, info.align_bytes as usize);
                 result.push(Bc::NameFlatCallArg {
                     id,
                     offset_bytes: offset as u16,
@@ -541,7 +541,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
                     ResAddr => {
-                        if value.0.len() > 8 || value.0.len() % 8 != 0 {
+                        if value.0.len() > 64 || value.0.len() % 8 != 0 {
                             // TODO: HACK
                             //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
                             //       this solution is extra bad becuase it relies on the value vec not being free-ed
