@@ -26,15 +26,16 @@ fun fmt(arg: AstExpr) AstExpr = {
     arg.ty = UnknownType;  // need to compile so @println can use a macro that expands to a tuple but dont want to remember the type since it will change when our macro gets expanded. -- Apr 25
     let args: Slice(AstExpr) = arg.expr.Tuple;
     // TODO: assert no side effects or use variable so it doesn't run many times. 
+  
     var writer = compile_ast(args[0]);
-    
+
     let params = args.rest(2);  // TODO: fix bounds check when this is one long?
     
     let fmt_string = const_eval_string(args[1]);
     var parts: List(Str) = fmt_string.split("%");  // TODO: dont leak
     var parts: Slice(Str) = parts&.items();
     parts.len().eq(params.len().add(1)).assert("Fmt specifier count mismatch");
-    
+
     let count = parts.len().add(params.len());
     var actions: List(AstExpr) = list(count);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
     
@@ -43,7 +44,6 @@ fun fmt(arg: AstExpr) AstExpr = {
         var action: FatExpr = 'display(<msg>, <writer>)';
         actions&.push(action);
     };
-    
     emit(@literal(Str) parts[0]);
     
     // TODO: zip iterators 
@@ -125,7 +125,12 @@ fun display(self: CStr, writer: *List$u8) Unit = {
 fun display(self: Unit, writer: *List$u8) Unit = display("()", writer);
 
 fun display(self: f64, writer: *List$u8) Unit = {
-    @fmt(writer, "%", self.int()); // TODO: higher precision rendering
+    // TODO: if you try to inline this into the macro call, it crashes trying to compile in fn fmt. 
+    //       bus error. works on cranelift tho which is fun. 
+    //       works if you call self.int here and then also inline it so its a problem with adding it as a callee?
+    //       -- May 26
+    value := self.int();
+    @fmt(writer, "%", value); // TODO: higher precision rendering
 }
 
 fun println(self: CStr) Unit = @println("%", self);

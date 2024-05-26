@@ -2,7 +2,8 @@ use codemap::Span;
 use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{
-    Expr, FatExpr, FuncFlags, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var, VarType,
+    garbage_loc, Expr, FatExpr, FuncFlags, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var,
+    VarType,
 };
 use crate::bc::from_values;
 use crate::compiler::{Compile, DebugState, ExecTime, Res};
@@ -347,6 +348,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 }
 
 pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
+    if loc == garbage_loc() {
+        println!("called where_the_fuck_am_i on garbage_loc");
+        return;
+    }
     let diagnostic = Diagnostic {
         level: Level::Error,
         message: String::from("???"),

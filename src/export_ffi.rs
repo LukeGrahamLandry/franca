@@ -845,7 +845,7 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
 }
 
 extern "C-unwind" fn shift_or_slice(compilerctx: usize, ptr: *const i64, len: usize) -> i64 {
-    assert!(len < 64, "{} {} {}", compilerctx, ptr as usize, len);
+    assert!(len < 32, "{} {} {}", compilerctx, ptr as usize, len);
     let ints = unsafe { &*slice_from_raw_parts(ptr, len) };
     let mut acc = 0;
     for i in 0..ints.len() / 2 {

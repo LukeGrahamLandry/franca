@@ -25,6 +25,7 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -420,6 +421,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             let cc = self.wip_stack.pop();
             debug_assert_eq!(Some(c), cc);
         }
+
+        #[cfg(feature = "cranelift")]
+        self.cranelift.flush_pending_defs(&mut self.aarch64)?;
         // assert!(self.callees_done(f));
         for c in &self.program[f].callees {
             debug_assert!(
@@ -475,6 +479,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert_eq!(result.0.len(), expected_ret_bytes as usize, "{}", self.program.log_type(ty.ret));
             self.pop_state(state2);
         }
+        // println!("Done {f:?} {}", self.pool.get(self.program[f].name),);
         result
     }
 
@@ -3206,8 +3211,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
                             let mut ints = vec![];
                             for _ in 0..len {
-                                ints.push(unwrap!(reader.next_u32(), ""));
-                                // TODO: change this when i do tuple layout correctly -- May 25
+                                let op = unwrap!(reader.next_u32(), "");
+                                ints.push(op);
                             }
                             assert_eq!(reader.i, val.bytes().len()); // TODO: do this check everywhere.
                             break 'o ints;
