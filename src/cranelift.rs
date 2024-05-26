@@ -353,10 +353,10 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = builder.ins().iconst(I64, self.compile_ctx_ptr as i64);
                     self.stack.push(v);
                 }
-                Bc::NameFlatCallArg { id, offset } => {
+                Bc::NameFlatCallArg { id, offset_bytes } => {
                     let Some(ptr) = self.flat_arg_addr else { err!("not flat call",) };
                     debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
-                    let offset = builder.ins().iconst(I64, offset as i64 * 8);
+                    let offset = builder.ins().iconst(I64, offset_bytes as i64);
                     let ptr = builder.ins().iadd(ptr, offset);
                     self.flat_args_already_offset.push(ptr);
                 }

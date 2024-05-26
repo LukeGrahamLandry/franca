@@ -92,10 +92,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
 
                 let id = result.add_var(ty);
-                let slots = self.slot_count(ty);
-
-                result.push(Bc::NameFlatCallArg { id, offset });
-                offset += slots;
+                let info = self.program.get_info(ty);
+                align_to(offset, info.align_bytes as usize);
+                result.push(Bc::NameFlatCallArg {
+                    id,
+                    offset_bytes: offset as u16,
+                });
+                offset += info.stride_bytes as usize;
 
                 self.locals.last_mut().unwrap().push(id);
                 if let Some(name) = name {
@@ -226,6 +229,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::CallDirectFlat { f });
                     let slots = self.slot_count(f_ty.ret);
                     result.push(Bc::AddrVar { id: ret_id });
+                    debug_assert!(self.program.get_info(f_ty.ret).stride_bytes % 8 == 0);
                     result.push(Bc::Load { slots });
                     result.push(Bc::LastUse { id: ret_id });
                 }
@@ -253,7 +257,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             if slots > 0 {
                 match result_location {
                     PushStack => {}
-                    ResAddr => result.push(Bc::StorePre { slots }),
+                    ResAddr => {
+                        // TODO
+                        // debug_assert!(
+                        //     self.program.get_info(f_ty.ret).stride_bytes % 8 == 0,
+                        //     "{}",
+                        //     self.program.log_type(f_ty.ret)
+                        // );
+                        result.push(Bc::StorePre { slots });
+                    }
                     Discard => result.push(Bc::Pop { slots }),
                 }
             } else if result_location == ResAddr {
@@ -355,6 +367,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             "{}",
             expr.log(self.program.pool)
         );
+
+        // let info = self.program.get_info(expr.ty);
+        // debug_assert!(
+        //     result_location != ResAddr || info.stride_bytes % 8 == 0 || info.has_special_pointer_fns,
+        //     "{} should have special fns",
+        //     self.program.log_type(expr.ty)
+        // );
         self.last_loc = Some(expr.loc);
 
         match expr.deref() {
@@ -515,16 +534,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
                     ResAddr => {
-                        if value.0.len() > 8 && value.0.len() % 8 != 0 {
+                        if value.0.len() > 8 || value.0.len() % 8 != 0 {
                             // TODO: HACK
                             //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
                             //       this solution is extra bad becuase it relies on the value vec not being free-ed
-                            // wait no this doesn't work at all because struct field offsets aren't done in bytes
                             let ptr = value.0.clone().leak().as_ptr();
                             result.push(Bc::PushConstant { value: ptr as i64 });
 
                             result.push(Bc::CopyBytesToFrom { bytes: value.0.len() as u16 });
                         } else {
+                            debug_assert!(self.program.get_info(expr.ty).stride_bytes % 8 == 0);
                             let mut parts = vec![];
                             deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
                             for value in parts {
@@ -573,6 +592,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::Deref => {
                         self.compile_expr(result, arg, PushStack, false)?; // get the pointer
+                        debug_assert!(self.program.get_info(expr.ty).stride_bytes % 8 == 0);
                         let slots = self.slot_count(expr.ty);
                         // we care about the type of the pointer, not the value because there might be a cast.
                         assert!(
@@ -588,7 +608,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         } else {
                             match result_location {
                                 PushStack => result.push(Bc::Load { slots }),
-                                ResAddr => result.push(Bc::CopyToFrom { slots }),
+                                ResAddr => {
+                                    let bytes = self.program.get_info(expr.ty).stride_bytes;
+                                    result.push(Bc::CopyBytesToFrom { bytes });
+                                }
                                 Discard => result.push(Bc::Pop { slots: 1 }),
                             };
                         }
@@ -776,6 +799,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
                 if let Ok(Flag::Deref) = Flag::try_from(*macro_name) {
                     self.compile_expr(result, arg, PushStack, false)?;
+                    debug_assert!(self.program.get_info(value.ty).stride_bytes % 8 == 0);
                     self.compile_expr(result, value, ResAddr, false)?;
                     return Ok(());
                 }
@@ -809,22 +833,20 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     self.program.log_type(requested)
                 );
                 let all = names.into_iter().zip(values).zip(fields);
-                let mut offset = 0;
                 for ((name, value), field) in all {
                     assert_eq!(name, field.name);
-                    let size = self.slot_count(field.ty);
                     if result_location == ResAddr {
                         result.push(Bc::Dup);
-                        result.push(Bc::IncPtr { offset });
+                        result.push(Bc::IncPtrBytes {
+                            bytes: field.byte_offset as u16,
+                        });
                     }
                     self.compile_expr(result, value, result_location, false)?;
-                    offset += size;
                 }
 
                 if result_location == ResAddr {
                     result.push(Bc::Pop { slots: 1 }); // res ptr
                 }
-                assert_eq!(offset, slots, "Didn't fill whole struct");
             }
             // TODO: make this constexpr in compiler
             TypeInfo::Tagged { cases } => {
@@ -855,7 +877,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::Dup);
                         result.push(Bc::PushConstant { value: i as i64 });
                         result.push(Bc::StorePre { slots: 1 });
-                        result.push(Bc::IncPtr { offset: 1 });
+                        result.push(Bc::IncPtrBytes { bytes: 8 }); // TODO: differetn sizes of tag
                         self.compile_expr(result, values[0], result_location, false)?;
                     }
                     Discard => {

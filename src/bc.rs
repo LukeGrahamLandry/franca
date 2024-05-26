@@ -37,7 +37,7 @@ pub enum Bc {
     Dup,                                                  // <x:1> -> <x:1> <x:1>
     CopyToFrom { slots: u16 },                            // <to_ptr:1> <from_ptr:1> -> _
     CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
-    NameFlatCallArg { id: u16, offset: u16 },             // _ -> _
+    NameFlatCallArg { id: u16, offset_bytes: u16 },       // _ -> _
     LastUse { id: u16 },                                  // _ -> _
     Unreachable,                                          // _ -> !
     GetCompCtx,                                           // _ -> <ptr:1>
@@ -270,5 +270,13 @@ impl WriteBytes {
         while self.0.len() % v != 0 {
             self.push_u8(0);
         }
+    }
+}
+
+pub fn align_to(offset: usize, align: usize) -> usize {
+    if offset % align == 0 {
+        offset
+    } else {
+        offset + align - offset % align
     }
 }

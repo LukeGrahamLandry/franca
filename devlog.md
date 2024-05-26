@@ -3,6 +3,14 @@
 now that im doing alignment shit, i dont really want to duplicate it for InterpSend::SIZE_BYTES so it just reads it from the program,
 which is dumb and slower but the eventual goal is to use same layout as the rust structs so the whole thing goes away.
 
+- was off by 8 redundantly skipping tag for de/ser Option.
+- operator_index got garbage value for expr tag. needed to do correct alignment offsetting for NameFlatCallArg because (FatExpr, FatExpr) has padding.
+- ok cranelift now works for 80/128 tests (with verbose_assert=false).
+  but my asm says 0 for `debug_log_int(if(0.lt(4), => 1, => 0))`.
+  problem was cmp_with_cond being read as (i64, i64, i64) when asm was trying to return (u32, u32, u32).
+  struct coerceion now checks that byte offsets match. really the whole thing needs to go away eventually. TODO: at least make sure to finish_layout
+  now my asm is same as cl.
+
 ## (May 24)
 
 - ok so now i never match against Values::One, so i can take it away, just do everything with Vec<i64>, then do everything

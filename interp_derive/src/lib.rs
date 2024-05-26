@@ -198,8 +198,8 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
 
             let t = quote!(usize::deserialize_from_ints(program, values)?);
             quote! {
-                let tag = #t;
                 let start = values.i;
+                let tag = #t;
                 let result: Option<Self> = match tag {
                     #(#recurse)*
                     t => {
@@ -207,10 +207,8 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                         return None
                     }
                 };
-                let varient_size = values.i - start;
-                let payload_size = Self::size_bytes(program) - 8;
-                debug_assert!(payload_size >= varient_size, "wft? {payload_size} vs {varient_size}");
-                for _ in 0..(payload_size-varient_size) {
+                let read = values.i - start;
+                for _ in read..Self::size_bytes(program) {
                     let _pad = values.next_u8()?;
                 }
                 values.align_to(Self::align_bytes(program));
@@ -310,14 +308,12 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
             });
             let pad = quote!(values.push_u8(0););
             quote! {
+                let start = values.0.len();
                 #[allow(unused_variables)]
                 match &self {  #(#recurse_tag)* };
-                let start = values.0.len();
                 match self {  #(#recurse_fields)* };
                 let written = values.0.len() - start;
-                let payload_size = Self::size_bytes(program) - 8;
-                debug_assert!(payload_size >= written, "wtf");
-                for _ in 0..(payload_size-written) {
+                for _ in written..Self::size_bytes(program) {
                     #pad  // TODO: less dumb padding
                 }
 

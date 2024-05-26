@@ -373,7 +373,7 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
     }
 
     fn name() -> String {
-        format!("Ty(Ty({}, {}), {})", A::name(), B::name(), C::name()) // TODO: unnest
+        format!("Ty({}, {}, {})", A::name(), B::name(), C::name()) // TODO: unnest
     }
 }
 
@@ -392,10 +392,16 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         let len = self.len();
         let mut parts = WriteBytes::default(); // TODO: with_capacity
         for e in self {
+            debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
             e.serialize_to_ints(program, &mut parts);
         }
-        // TODO
-        //debug_assert_eq!(parts.0.len(), T::size_bytes(program) * len, "vec[{}; {len}]", T::name());
+        debug_assert_eq!(
+            parts.0.len(),
+            T::size_bytes(program) * len,
+            "vec![{}; {len}] one size = {}",
+            T::name(),
+            T::size_bytes(program)
+        );
         let (ptr, _, _) = parts.0.into_raw_parts();
         values.push_i64(ptr as i64);
         values.push_i64(len as i64);
@@ -410,8 +416,9 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, entries) };
 
         let mut res = Vec::with_capacity(len);
-        let mut reader = ReadBytes { bytes: s, i: 0 }; // TODO: alignment
+        let mut reader = ReadBytes { bytes: s, i: 0 };
         for _ in 0..len {
+            debug_assert_eq!(reader.i % T::align_bytes(program), 0);
             res.push(T::deserialize_from_ints(program, &mut reader)?);
         }
 
@@ -473,18 +480,19 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
             }
             None => {
                 values.push_i64(1);
-                for _ in 8..T::size_bytes(program) {
+                for _ in 0..T::size_bytes(program) {
                     values.push_u8(0);
                 }
             }
         }
+        values.align_to(Self::align_bytes(program));
     }
 
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        match values.next_i64()? {
+        let res = match values.next_i64()? {
             0 => Some(T::deserialize_from_ints(program, values)),
             1 => {
-                for _ in 8..T::size_bytes(program) {
+                for _ in 0..T::size_bytes(program) {
                     let _ = values.next_u8()?;
                 }
                 Some(None)
@@ -493,7 +501,9 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
                 println!("bad option tag {n}");
                 None
             }
-        }
+        };
+        values.align_to(Self::align_bytes(program));
+        res
     }
 
     fn name() -> String {

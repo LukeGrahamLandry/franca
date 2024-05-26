@@ -181,6 +181,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // measured in bytes
     ("#fold fun size_of(T: Type) i64", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
+    // useful when everything's broken so can't even compile the one defined in the language.
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
@@ -482,7 +483,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut arg: Values, ret_type: TypeId) -> Res<'p, Values> {
     let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
-    println!("IN: {arg:?}");
+    debugln!("IN: {arg:?}");
     let mut ret = vec![0u8; ret_count];
     f(
         compile,
@@ -492,7 +493,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut
         ret.as_mut_ptr(),
         ret.len() as i64,
     );
-    println!("OUT: {ret:?}");
+    debugln!("OUT: {ret:?}");
     Ok(Values::many(ret))
 }
 

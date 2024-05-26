@@ -93,7 +93,7 @@ struct BcToAsm<'z, 'p> {
     markers: Vec<(String, usize)>,
     log_asm_bc: bool,
     body: &'z FnBody<'p>,
-    // rn these are offsets from the saved arg ptr but later they will be SpOffset for c abi struct args.
+    // rn these are (byte) offsets from the saved arg ptr but later they will be SpOffset for c abi struct args.
     flat_arg_offsets: Vec<u16>,
     flat_arg: Option<SpOffset>,
 }
@@ -335,10 +335,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
         match inst {
             Bc::GetCompCtx => self.state.stack.push(Val::Literal(self.compile_ctx_ptr as i64)),
-            Bc::NameFlatCallArg { id, offset } => {
+            Bc::NameFlatCallArg { id, offset_bytes } => {
                 if let Some(slot) = self.flat_arg {
                     assert_eq!(id, self.flat_arg_offsets.len() as u16);
-                    self.flat_arg_offsets.push(offset);
+                    self.flat_arg_offsets.push(offset_bytes);
                 } else {
                     err!("only flat_call supports arg ptr currently.",)
                 }
@@ -467,10 +467,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 if id < self.flat_arg_offsets.len() as u16 {
                     if let Some(arg) = self.flat_arg {
                         // if its an arg to a flat call, reconstruct that address
-                        let slot = self.flat_arg_offsets[id as usize];
+                        let offset_bytes = self.flat_arg_offsets[id as usize];
                         let reg = self.get_free_reg();
                         self.load_u64(reg, sp, arg.0);
-                        self.state.stack.push(Val::Increment { reg, offset_bytes: slot * 8 });
+                        self.state.stack.push(Val::Increment { reg, offset_bytes });
                         return Ok(false);
                     } else {
                         unreachable!()

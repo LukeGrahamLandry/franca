@@ -1007,7 +1007,6 @@ impl<'p> Program<'p> {
                 layout_done: false,
             });
             self.ffi_types.insert(id, ty_final);
-            println!("from RsType {}", type_info.name);
             let ty = match type_info.data {
                 RsData::Struct(data) => {
                     let mut fields = vec![];
@@ -1063,7 +1062,6 @@ impl<'p> Program<'p> {
             1 => types[0],
             _ => {
                 // TODO: dont allocate the string a billion times
-                println!("tuple struct of {}", types.iter().map(|t| self.log_type(*t)).collect::<String>());
                 let info = self
                     .make_struct(
                         types
@@ -1309,12 +1307,10 @@ impl<'p> Program<'p> {
     }
 
     pub fn struct_type(&mut self, name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
-        println!("start struct {name}");
         let pool = self.pool;
         let info = self
             .make_struct(fields_in.iter().map(|(name, ty)| Ok((*ty, pool.intern(name), None))))
             .unwrap();
-        println!("end struct {name}");
         let name = pool.intern(name);
         let ty = self.intern_type(info);
         self.intern_type(TypeInfo::Named(ty, name))
@@ -1322,28 +1318,17 @@ impl<'p> Program<'p> {
 
     pub fn enum_type(&mut self, name: &str, varients: &[TypeId]) -> TypeId {
         let ty = self.intern_type(TypeInfo::Tagged {
-            cases: varients
-                .iter()
-                .enumerate()
-                .map(|(i, ty)| {
-                    let name = if let TypeInfo::Named(_, name) = self[*ty] {
-                        name
-                    } else {
-                        self.pool.intern(&format!("_{i}"))
-                    };
-                    (name, *ty)
-                })
-                .collect(),
+            cases: varients.iter().enumerate().map(|(i, ty)| (self.synth_name(*ty, i), *ty)).collect(),
         });
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
-    pub fn synth_name(&mut self, ty: TypeId) -> Ident<'p> {
+    pub fn synth_name(&self, ty: TypeId, hint: usize) -> Ident<'p> {
         match self[ty] {
             TypeInfo::Named(_, name) => name,
-            TypeInfo::Unique(ty, _) => self.synth_name(ty),
-            _ => self.pool.intern(&format!("__anon_ty{}", ty.0)),
+            TypeInfo::Unique(ty, _) => self.synth_name(ty, hint),
+            _ => self.pool.intern(&format!("_{hint}")),
         }
     }
 
@@ -1360,7 +1345,6 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn named_tuple(&mut self, name: &str, types: Vec<TypeId>) -> TypeId {
-        println!("named {name}");
         let ty = self.tuple_of(types);
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))

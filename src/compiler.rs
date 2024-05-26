@@ -442,7 +442,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
 
-        println!(
+        debugln!(
             "Call {f:?} {} flat:{flat_call};      callees={:?}",
             self.pool.get(self.program[f].name),
             self.program[f].callees
@@ -455,9 +455,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(!flat_call);
             let mut ints = vec![];
             deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints)?;
-            println!("IN: {ints:?}");
+            debugln!("IN: {ints:?}");
             let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
-            println!("OUT: {r}");
+            debugln!("OUT: {r}");
 
             match expected_ret_bytes {
                 0 => to_values(self.program, ()),
@@ -2577,7 +2577,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: not this!!!
                 (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
                     if f.len() == e.len() {
-                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok());
+                        let ok = f
+                            .iter()
+                            .zip(e.iter())
+                            .all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset);
                         if ok {
                             return Ok(());
                         }
@@ -2685,7 +2688,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Ok((ty, unwrap!(binding.name.ident(), "field name"), default))
             })
             .collect();
-        println!("struct of {types:?}");
         self.program.make_struct(parts.into_iter())
     }
 
@@ -3202,7 +3204,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
                             let mut ints = vec![];
                             for _ in 0..len {
-                                ints.push(unwrap!(reader.next_i64(), "") as u32);
+                                ints.push(unwrap!(reader.next_u32(), ""));
                                 // TODO: change this when i do tuple layout correctly -- May 25
                             }
                             assert_eq!(reader.i, val.bytes().len()); // TODO: do this check everywhere.
@@ -3210,7 +3212,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                 }
-                println!("TODO: this is sketchy with new u32");
+                todo!("this is sketchy with new u32");
                 let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                 ops
             };
