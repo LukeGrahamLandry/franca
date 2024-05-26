@@ -35,6 +35,7 @@ pub enum Bc {
     AddrFnResult,                                         // _ -> <ptr:1>
     Dup,                                                  // <x:1> -> <x:1> <x:1>
     CopyToFrom { slots: u16 },                            // <to_ptr:1> <from_ptr:1> -> _
+    CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
     NameFlatCallArg { id: u16, offset: u16 },             // _ -> _
     LastUse { id: u16 },                                  // _ -> _
     Unreachable,                                          // _ -> !
@@ -122,10 +123,7 @@ impl Values {
 }
 
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
-    let ints = t.serialize_to_ints_one();
-    // NOT SOUND. lower alignment not good enough. its fine for now since i never free anything i hope?? -- May 24
-    let (ptr, len, cap) = ints.into_raw_parts();
-    let bytes = unsafe { Vec::from_raw_parts(ptr, len * 8, cap * 8) };
+    let bytes = t.serialize_to_ints_one();
     Ok(Values::many(bytes))
 }
 
@@ -137,7 +135,7 @@ pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &Program<'p>, t: Values) -> R
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
 pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: Values) -> Res<'p, (Values, Values)> {
     let mut ints = t.0;
-    let bytes = program.slot_count(prefix) * 8;
+    let bytes = program.get_info(prefix).stride_bytes;
     assert!(ints.len() >= bytes as usize);
     let (_, snd) = ints.split_at(bytes as usize);
     let snd = snd.to_vec();
@@ -171,7 +169,7 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
         TypeInfo::Tagged { .. } => {
             // TODO
             let size = program.get_info(ty).stride_bytes;
-            assert_eq!(size % 8, 0);
+            assert_eq!(size % 8, 0, "{}", program.log_type(ty));
             for _ in 0..size % 8 {
                 out.push(unwrap!(bytes.next_i64(), ""))
             }
@@ -182,45 +180,6 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
         TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => {
             out.push(unwrap!(bytes.next_u32(), "") as i64)
         }
-    }
-    Ok(())
-}
-
-pub fn temp_deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, out: &mut Vec<i64>) -> Res<'static, ()> {
-    let ty = program.raw_type(ty);
-    match &program[ty] {
-        TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
-        TypeInfo::F64
-        | TypeInfo::FnPtr(_)
-        | TypeInfo::Ptr(_)
-        | TypeInfo::VoidPtr
-        | TypeInfo::Int(_)
-        | TypeInfo::Bool
-        | TypeInfo::Fn(_)
-        | TypeInfo::Type
-        | TypeInfo::OverloadSet
-        | TypeInfo::Scope
-        | TypeInfo::Label(_) => out.push(unwrap!(bytes.next_i64(), "")),
-        TypeInfo::Tuple(parts) => {
-            for t in parts {
-                deconstruct_values(program, *t, bytes, out)?;
-            }
-        }
-        &TypeInfo::Array { inner, len } => {
-            for _ in 0..len {
-                deconstruct_values(program, inner, bytes, out)?;
-            }
-        }
-        &TypeInfo::Struct { as_tuple, .. } => deconstruct_values(program, as_tuple, bytes, out)?,
-        TypeInfo::Tagged { .. } => {
-            let size = program.get_info(ty).size_slots;
-            for _ in 0..size {
-                out.push(unwrap!(bytes.next_i64(), ""))
-            }
-        }
-        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out)?,
-        TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-        TypeInfo::Unit => {}
     }
     Ok(())
 }

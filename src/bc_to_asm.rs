@@ -220,12 +220,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
                 // Runtime check that caller agrees on type sizes.
                 // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
-                assert!(arg.size_slots < (1 << 12));
-                assert!(ret.size_slots < (1 << 12));
-                self.asm.push(cmp_im(X64, x2, arg.size_slots as i64, 0));
+                assert!(arg.stride_bytes < (1 << 12));
+                assert!(ret.stride_bytes < (1 << 12));
+                self.asm.push(cmp_im(X64, x2, arg.stride_bytes as i64, 0));
                 self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
-                self.asm.push(cmp_im(X64, x4, ret.size_slots as i64, 0));
+                self.asm.push(cmp_im(X64, x4, ret.stride_bytes as i64, 0));
                 self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
 
@@ -595,6 +595,19 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     for i in 0..8 {
                         add_unique(&mut self.state.free_reg, i as i64);
                     }
+                }
+            }
+            // TODO: copy-paste
+            Bc::CopyBytesToFrom { bytes } => {
+                self.state.stack.push(Val::Literal(bytes as i64));
+                self.stack_to_ccall_reg(3, 0);
+                self.spill_abi_stompable();
+                let addr = libc::memcpy as *const u8;
+                // let offset = self.asm.offset_words(self.asm.next, addr);
+                self.load_imm(x17, addr as u64);
+                self.asm.push(br(x17, 1));
+                for i in 0..8 {
+                    add_unique(&mut self.state.free_reg, i as i64);
                 }
             }
         }
@@ -1020,8 +1033,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         let arg_ptr = self.state.stack.pop().unwrap();
         let ret_ptr = self.state.stack.pop().unwrap();
-        let arg_count = self.program.slot_count(f_ty.arg);
-        let ret_count = self.program.slot_count(f_ty.ret);
+        let (arg, ret) = self.program.get_infos(f_ty);
 
         let c = match target.cc.unwrap() {
             CallConv::Flat => 0,
@@ -1030,9 +1042,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         };
         self.state.stack.push(Val::Literal(c));
         self.state.stack.push(arg_ptr);
-        self.state.stack.push(Val::Literal(arg_count as i64));
+        self.state.stack.push(Val::Literal(arg.stride_bytes as i64));
         self.state.stack.push(ret_ptr);
-        self.state.stack.push(Val::Literal(ret_count as i64));
+        self.state.stack.push(Val::Literal(ret.stride_bytes as i64));
 
         self.stack_to_ccall_reg(5, 0);
         self.spill_abi_stompable();

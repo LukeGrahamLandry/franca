@@ -481,7 +481,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut arg: Values, ret_type: TypeId) -> Res<'p, Values> {
     let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
-    debugln!("IN: {arg:?}");
+    println!("IN: {arg:?}");
     let mut ret = vec![0u8; ret_count];
     f(
         compile,
@@ -491,7 +491,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut
         ret.as_mut_ptr(),
         ret.len() as i64,
     );
-    debugln!("OUT: {ret:?}");
+    println!("OUT: {ret:?}");
     Ok(Values::many(ret))
 }
 
@@ -582,7 +582,16 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "#macro fn resolve(function_type: FatExpr, overload_set_id: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, resolve_os),
     ),
+    (
+        "#macro fun as(T: FatExpr, e: FatExpr) FatExpr;",
+        bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
+    ),
 ];
+
+fn as_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    let res = compile.as_cast_macro(arg, target);
+    res.unwrap()
+}
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
     let res = compile.enum_constant_macro(arg, target);

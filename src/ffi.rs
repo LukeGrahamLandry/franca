@@ -26,7 +26,7 @@ pub trait InterpSend<'p>: Sized {
     fn serialize_to_ints_one(self) -> Vec<u8> {
         let mut values = WriteBytes::default(); // TODO: with_capacity
         self.serialize_to_ints(&mut values);
-        // debug_assert_eq!(values.len(), Self::SIZE); // not true because Unit
+        debug_assert_eq!(values.0.len(), Self::SIZE_BYTES, "{} bad ser size\n{:?}", Self::name(), values.0);
         values.0
     }
 
@@ -192,7 +192,7 @@ impl<'p> InterpSend<'p> for char {
     }
 
     fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
-        char::from_u32(values.next_u32()? as u32)
+        char::from_u32(values.next_u32()?)
     }
 
     fn name() -> String {
@@ -364,7 +364,7 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
 }
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
-    const SIZE_BYTES: usize = 16;
+    const SIZE_BYTES: usize = 16; // TODO: track capacity and dont reallocate on every ffi call
     fn get_type_key() -> u128 {
         mix::<T, i16>(999998827262625)
     }
@@ -381,7 +381,8 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         for e in self {
             e.serialize_to_ints(&mut parts);
         }
-        debug_assert_eq!(parts.0.len(), T::SIZE_BYTES * len);
+        // TODO
+        // debug_assert_eq!(parts.0.len(), T::SIZE_BYTES * len, "vec[{}; {len}]", T::name());
         let (ptr, _, _) = parts.0.into_raw_parts();
         values.push_i64(ptr as i64);
         values.push_i64(len as i64);
@@ -389,7 +390,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
 
     fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
         let ptr = values.next_i64()?;
-        debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
+        //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let len = usize::deserialize_from_ints(values)?;
 
         let entries = T::SIZE_BYTES * len;
@@ -405,7 +406,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     }
 
     fn name() -> String {
-        format!("List({})", T::name())
+        format!("Slice({})", T::name())
     }
 }
 
@@ -424,7 +425,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         let mut parts = WriteBytes::default();
         let inner: T = *self;
         inner.serialize_to_ints(&mut parts);
-        debug_assert_eq!(parts.0.len(), T::SIZE_BYTES);
+        debug_assert_eq!(parts.0.len(), T::SIZE_BYTES, "Box<{}> payload size", T::name());
         let (ptr, _, _) = parts.0.into_raw_parts();
         values.push_i64(ptr as i64)
     }
@@ -472,12 +473,15 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
         match values.next_i64()? {
             0 => Some(T::deserialize_from_ints(values)),
             1 => {
-                for _ in 0..T::SIZE_BYTES {
+                for _ in 8..T::SIZE_BYTES {
                     let _ = values.next_u8()?;
                 }
                 Some(None)
             }
-            _ => None,
+            n => {
+                println!("bad option tag {n}");
+                None
+            }
         }
     }
 
@@ -519,7 +523,7 @@ impl<'p> InterpSend<'p> for Span {
 }
 
 impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for Map<K, V> {
-    const SIZE_BYTES: usize = 16;
+    const SIZE_BYTES: usize = Vec::<(K, V)>::SIZE_BYTES;
     fn get_type_key() -> u128 {
         mix::<K, V>(1234567890)
     }

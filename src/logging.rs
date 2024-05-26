@@ -3,12 +3,13 @@
 use core::fmt;
 use std::fmt::{Debug, Formatter, Write};
 
+#[track_caller]
 #[inline(never)]
 pub fn break_here(e: &CErr) {
     let depth = unsafe { EXPECT_ERR_DEPTH.load(std::sync::atomic::Ordering::SeqCst) };
     if depth == 0 {
         // TODO: make this never happen so dont have to worry about short circuiting -- Apr 25
-        println!("err: {e:?}");
+        println!("err: {e:?} at {}", std::panic::Location::caller());
     }
 }
 

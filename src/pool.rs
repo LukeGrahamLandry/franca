@@ -1,7 +1,7 @@
 use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::PhantomData, mem};
 
 use crate::{
-    ast::Flag,
+    ast::{Flag, IntTypeInfo, TypeInfo},
     bc::{ReadBytes, WriteBytes},
     ffi::InterpSend,
     Map, MY_CONST_DATA,
@@ -251,8 +251,11 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
     }
 
-    fn create_type(_: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
-        crate::ast::TypeId::i64() // TODO: have a unique Symbol type
+    fn create_type(program: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
+        program.intern_type(TypeInfo::Int(IntTypeInfo {
+            bit_count: 32,
+            signed: false,
+        }))
     }
 
     fn serialize_to_ints(self, values: &mut WriteBytes) {

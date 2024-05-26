@@ -14,7 +14,7 @@ use interp_derive::InterpSend;
 use std::{
     cell::RefCell,
     hash::Hash,
-    mem::{self, transmute},
+    mem::{self, size_of, transmute},
     ops::{Deref, DerefMut},
 };
 
@@ -34,6 +34,8 @@ pub struct FnType {
     pub arg: TypeId,
     pub ret: TypeId,
 }
+
+#[repr(i64)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
@@ -41,6 +43,7 @@ pub enum VarType {
     Const,
 }
 
+#[repr(C, i64)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     #[default]
@@ -140,6 +143,7 @@ pub struct Var<'p> {
 //     }
 // }
 // TODO: should really get an arena going because boxes make me sad.
+#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Poison,
@@ -623,6 +627,7 @@ pub struct FatStmt<'p> {
 }
 
 // NOTE: you can't store the FuncId in here because I clone it!
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
@@ -645,6 +650,7 @@ pub struct Func<'p> {
     pub flags: u32,
 }
 
+#[repr(i64)]
 pub enum FuncFlags {
     NotEvilUninit,
     ResolvedBody,
@@ -669,6 +675,7 @@ impl<'p> Func<'p> {
     }
 }
 
+#[repr(i64)]
 #[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq)]
 pub enum CallConv {
     Arg8Ret1, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
@@ -683,6 +690,7 @@ pub enum CallConv {
 }
 
 // TODO: use this instead of having a billion fields.
+#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
@@ -1269,15 +1277,17 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
-            TypeInfo::Unknown => TypeMeta::new(1, 1, 0, false, false, 1),
+            TypeInfo::Unknown => todo!(),
             TypeInfo::Tuple(args) => {
                 let mut size = 0;
                 let mut align = 0;
                 let mut mask = 0;
                 let mut pointers = false;
+                let mut bytes = 0;
 
                 for arg in args {
                     let info = self.get_info(*arg);
+                    bytes += info.stride_bytes;
                     size += info.size_slots;
                     align = align.max(info.align_bytes);
                     if size > 16 {
@@ -1292,15 +1302,16 @@ impl<'p> Program<'p> {
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false, pointers, size * 8)
+                TypeMeta::new(size, align, mask, false, pointers, bytes)
             }
             &TypeInfo::Struct { as_tuple, .. } => self.get_info(as_tuple),
             TypeInfo::Tagged { cases, .. } => {
                 let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
+                let bytes = 8 + cases.iter().map(|(_, ty)| self.get_info(*ty).stride_bytes).max().expect("no empty enum");
                 let pointers = cases.iter().any(|(_, ty)| self.get_info(*ty).contains_pointers);
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.
-                TypeMeta::new(size, 8, 0, false, pointers, size * 8)
+                TypeMeta::new(size, 8, 0, false, pointers, bytes)
             }
             TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false, 0),
             TypeInfo::Int(int) => {
@@ -1318,7 +1329,7 @@ impl<'p> Program<'p> {
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true, 8),
             // TODO:  indexes should be u32
             TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet => {
-                TypeMeta::new(1, 8, 0, false, false, 8)
+                TypeMeta::new(1, 8, 0, false, false, 4)
             }
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {

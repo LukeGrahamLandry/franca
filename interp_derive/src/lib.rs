@@ -211,7 +211,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
 
                 let payload_size = Self::SIZE_BYTES - 8;
                 for _ in 0..(payload_size-varient_size) {
-                    let _pad = values.next_i64()?;
+                    let _pad = values.next_u8()?;
                 }
 
                 result

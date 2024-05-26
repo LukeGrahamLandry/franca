@@ -500,22 +500,35 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 //     return Ok(());
                 // }
 
-                let mut parts = vec![];
-                deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
                 match result_location {
                     PushStack => {
+                        let mut parts = vec![];
+                        deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
                         for value in parts {
                             result.push(Bc::PushConstant { value });
                         }
                     }
                     ResAddr => {
-                        for value in parts {
-                            result.push(Bc::Dup);
-                            result.push(Bc::PushConstant { value });
-                            result.push(Bc::StorePre { slots: 1 });
-                            result.push(Bc::IncPtr { offset: 1 });
+                        if value.0.len() > 8 && value.0.len() % 8 != 0 {
+                            // TODO: HACK
+                            //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
+                            //       this solution is extra bad becuase it relies on the value vec not being free-ed
+                            // wait no this doesn't work at all because struct field offsets aren't done in bytes
+                            let ptr = value.0.clone().leak().as_ptr();
+                            result.push(Bc::PushConstant { value: ptr as i64 });
+
+                            result.push(Bc::CopyBytesToFrom { bytes: value.0.len() as u16 });
+                        } else {
+                            let mut parts = vec![];
+                            deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
+                            for value in parts {
+                                result.push(Bc::Dup);
+                                result.push(Bc::PushConstant { value });
+                                result.push(Bc::StorePre { slots: 1 });
+                                result.push(Bc::IncPtr { offset: 1 });
+                            }
+                            result.push(Bc::Pop { slots: 1 }); // res ptr
                         }
-                        result.push(Bc::Pop { slots: 1 }); // res ptr
                     }
                     Discard => {}
                 }

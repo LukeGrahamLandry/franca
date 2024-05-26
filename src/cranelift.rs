@@ -467,20 +467,19 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
                 Bc::CallDirectFlat { f } => {
-                    let f_ty = &self.program[f].unwrap_ty();
+                    let f_ty = self.program[f].unwrap_ty();
                     // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64)
                     let c = match self.program[f].cc.unwrap() {
                         CallConv::Flat => 0,
                         CallConv::FlatCt => self.compile_ctx_ptr as i64,
                         _ => unreachable!(),
                     };
+                    let (arg, ret) = self.program.get_infos(f_ty);
                     let c = builder.ins().iconst(I64, c);
                     let arg_ptr = self.stack.pop().unwrap();
-                    let arg_count = self.program.slot_count(f_ty.arg);
-                    let arg_count = builder.ins().iconst(I64, arg_count as i64);
+                    let arg_count = builder.ins().iconst(I64, arg.stride_bytes as i64);
                     let ret_ptr = self.stack.pop().unwrap();
-                    let ret_count = self.program.slot_count(f_ty.ret);
-                    let ret_count = builder.ins().iconst(I64, ret_count as i64);
+                    let ret_count = builder.ins().iconst(I64, ret.stride_bytes as i64);
 
                     let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
                     // flat_call result goes into a variable somewhere, already setup by bc. so don't worry about return value here.
@@ -658,6 +657,14 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         let config = self.cl.module.target_config();
                         builder.call_memcpy(config, to, from, size)
                     }
+                }
+                // TODO: copy-paste
+                Bc::CopyBytesToFrom { bytes } => {
+                    let from = self.stack.pop().unwrap();
+                    let to = self.stack.pop().unwrap();
+                    let size = builder.ins().iconst(I64, bytes as i64);
+                    let config = self.cl.module.target_config();
+                    builder.call_memcpy(config, to, from, size)
                 }
             }
         }

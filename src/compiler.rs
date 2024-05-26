@@ -437,29 +437,37 @@ impl<'a, 'p> Compile<'a, 'p> {
         #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
 
-        debugln!(
+        println!(
             "Call {f:?} {} flat:{flat_call};      callees={:?}",
             self.pool.get(self.program[f].name),
             self.program[f].callees
         );
         self.flush_cpu_instruction_cache();
+        let expected_ret_bytes = self.program.get_info(ty.ret).stride_bytes;
         let result = if flat_call {
             do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
         } else if c_call {
             assert!(!flat_call);
             let mut ints = vec![];
             deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints)?;
-            debugln!("IN: {ints:?}");
+            println!("IN: {ints:?}");
             let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
-            debugln!("OUT: {r}");
-            // TODO: cope with different byte sizes.
-            Ok(Values::one(r))
+            println!("OUT: {r}");
+
+            match expected_ret_bytes {
+                0 => to_values(self.program, ()),
+                1 => to_values(self.program, r as u8),
+                4 => to_values(self.program, r as u32),
+                8 => to_values(self.program, r as u64),
+                n => todo!("c call ret {n} bytes"),
+            }
         } else {
             todo!()
         };
 
         let result = self.tag_err(result);
-        if result.is_ok() {
+        if let Ok(result) = &result {
+            assert_eq!(result.0.len(), expected_ret_bytes as usize, "{}", self.program.log_type(ty.ret));
             self.pop_state(state2);
         }
         result
@@ -472,7 +480,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
         let ret_ty = Ret::get_type(self.program);
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
-        let arg = Values::many(arg.serialize_to_ints_one());
+        let bytes = arg.serialize_to_ints_one();
+        let again = Arg::deserialize_from_ints(&mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
+        debug_assert!(again.is_some());
+        let arg = Values::many(bytes);
         let ret = self.run(f, arg, when)?;
         from_values(self.program, ret)
     }
@@ -946,7 +957,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // this is fine cause we renumbered at the top.
             }
         }
-        assert!(arg_value.is_unit(), "ICE: unused arguments");
+        assert!(
+            arg_value.is_unit(),
+            "ICE: unused arguments. {}. {:?} -> {arg_value:?}",
+            self.program.log_type(arg_ty),
+            key.1
+        );
 
         // Now the args are stored in the new function's constants, so the normal infer thing should work on the return type.
         // Note: we haven't done local constants yet, so ret can't yse them.
@@ -2194,6 +2210,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program[f].set_flag(FuncFlags::NotEvilUninit, false);
     }
 
+    // TODO: look through Expr::Cast
     fn check_quick_eval(&mut self, e: &mut FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Option<Values>> {
         match e.deref_mut() {
             Expr::Block { body, result, .. } => {
@@ -3240,7 +3257,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let mut reader = ReadBytes { bytes: val.bytes(), i: 0 };
                             let mut ints = vec![];
                             for _ in 0..len {
-                                ints.push(unwrap!(reader.next_u32(), ""));
+                                ints.push(unwrap!(reader.next_i64(), "") as u32);
+                                // TODO: change this when i do tuple layout correctly -- May 25
                             }
                             assert_eq!(reader.i, val.bytes().len()); // TODO: do this check everywhere.
                             break 'o ints;
