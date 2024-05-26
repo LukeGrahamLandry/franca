@@ -1,7 +1,7 @@
 use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::PhantomData, mem};
 
 use crate::{
-    ast::{Flag, IntTypeInfo, TypeInfo},
+    ast::{Flag, IntTypeInfo, Program, TypeInfo},
     bc::{ReadBytes, WriteBytes},
     ffi::InterpSend,
     Map, MY_CONST_DATA,
@@ -244,25 +244,23 @@ impl<T: ?Sized> Clone for Ptr<T> {
 impl<T: ?Sized> Copy for Ptr<T> {}
 
 impl<'p> InterpSend<'p> for Ident<'p> {
-    const SIZE_BYTES: usize = 4;
-
     fn get_type_key() -> u128 {
         // i dare you to change the generic to Self
         unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
     }
 
-    fn create_type(program: &mut crate::ast::Program<'p>) -> crate::ast::TypeId {
+    fn create_type(program: &mut crate::ast::Program) -> crate::ast::TypeId {
         program.intern_type(TypeInfo::Int(IntTypeInfo {
             bit_count: 32,
             signed: false,
         }))
     }
 
-    fn serialize_to_ints(self, values: &mut WriteBytes) {
-        self.0.serialize_to_ints(values)
+    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
+        self.0.serialize_to_ints(program, values)
     }
 
-    fn deserialize_from_ints(values: &mut ReadBytes) -> Option<Self> {
+    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
         let i = values.next_u32()?;
         Some(Ident(i, PhantomData))
     }

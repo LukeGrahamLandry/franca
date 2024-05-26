@@ -30,14 +30,14 @@ macro_rules! bounce_flat_call {
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
             pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, retptr: *mut u8, ret_count: i64) {
-                debug_assert_eq!(arg_count, <$Arg>::SIZE_BYTES as i64, "bad arg count. expected {}", stringify!($Arg));
-                debug_assert_eq!(ret_count, <$Ret>::SIZE_BYTES as i64, "bad ret count. expected {}", stringify!($Ret));
+                debug_assert_eq!(arg_count, <$Arg>::size_bytes(compile.program) as i64, "bad arg count. expected {}", stringify!($Arg));
+                debug_assert_eq!(ret_count, <$Ret>::size_bytes(compile.program) as i64, "bad ret count. expected {}", stringify!($Ret));
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     debugln!("bounce ARG: {argslice:?}");
-                    let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(&mut ReadBytes { bytes: argslice, i: 0}), "deserialize arg")));
+                    let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: argslice, i: 0}), "deserialize arg")));
                     let ret: $Ret = $f(compile, arg);
-                    let ret = ret.serialize_to_ints_one();
+                    let ret = ret.serialize_to_ints_one(compile.program);
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
                     out.fill(0); // TODO: remove
                     out.copy_from_slice(&ret);
@@ -472,10 +472,11 @@ pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *
 
 // This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
-    let mut arg = arg.serialize_to_ints_one();
-    let mut ret = vec![0u8; Ret::SIZE_BYTES];
+    let mut arg = arg.serialize_to_ints_one(compile.program);
+    Ret::get_or_create_type(compile.program); // sigh
+    let mut ret = vec![0u8; Ret::size_bytes(compile.program)];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
-    Ret::deserialize_from_ints(&mut ReadBytes { bytes: &ret, i: 0 }).unwrap()
+    Ret::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: &ret, i: 0 }).unwrap()
 }
 
 // This the interpreter call a flat_call without knowing its types

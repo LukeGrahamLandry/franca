@@ -123,14 +123,18 @@ impl Values {
     }
 }
 
+#[track_caller]
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
-    let bytes = t.serialize_to_ints_one();
+    T::get_or_create_type(program); // sigh
+    let bytes = t.serialize_to_ints_one(program);
     Ok(Values::many(bytes))
 }
 
-pub fn from_values<'p, T: InterpSend<'p>>(_rogram: &Program<'p>, t: Values) -> Res<'p, T> {
+pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, t: Values) -> Res<'p, T> {
     let mut reader = ReadBytes { bytes: &t.0, i: 0 };
-    Ok(unwrap!(T::deserialize_from_ints(&mut reader), ""))
+    let res = Ok(unwrap!(T::deserialize_from_ints(program, &mut reader), "{} from {reader:?}", T::name()));
+    assert_eq!(reader.i, reader.bytes.len());
+    res
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
@@ -189,6 +193,7 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct ReadBytes<'a> {
     pub bytes: &'a [u8],
     pub i: usize,
@@ -233,6 +238,11 @@ impl<'a> ReadBytes<'a> {
             None
         }
     }
+    pub fn align_to(&mut self, v: usize) {
+        while self.i % v != 0 {
+            self.i += 1; // TODO: math
+        }
+    }
 }
 
 #[derive(Default)]
@@ -252,6 +262,12 @@ impl WriteBytes {
     pub fn push_i64(&mut self, v: i64) {
         for v in v.to_le_bytes() {
             self.0.push(v)
+        }
+    }
+
+    pub fn align_to(&mut self, v: usize) {
+        while self.0.len() % v != 0 {
+            self.push_u8(0);
         }
     }
 }

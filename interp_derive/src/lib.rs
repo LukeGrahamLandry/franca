@@ -20,28 +20,26 @@ pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let get_type = get_type(&input.ident, &input.data);
     let deserialize_from_ints = deserialize(&input.ident, &input.data);
     let serialize_to_ints = serialize(&input.ident, &input.data);
-    let size = size_for(&input.ident, &input.data);
 
     let definition = get_definition(&input.data);
 
     let expanded = quote! {
         impl #impl_generics crate::ffi::InterpSend<'p> for #name #ty_generics #where_clause {
 
-            const SIZE_BYTES: usize = #size;
             fn get_type_key() -> u128 {
                 // # Safety: trust me bro
                 unsafe { std::mem::transmute(std::any::TypeId::of::<#name>()) }
             }
 
-            fn create_type(program: &mut crate::ast::Program<'p>) -> TypeId {
+            fn create_type(program: &mut crate::ast::Program) -> TypeId {
                 #get_type
             }
 
-            fn serialize_to_ints(self, values: &mut crate::bc::WriteBytes) {
+            fn serialize_to_ints(self, program: &crate::ast::Program, values: &mut crate::bc::WriteBytes) {
                 #serialize_to_ints
             }
 
-            fn deserialize_from_ints(values: &mut crate::bc::ReadBytes) -> Option<Self> {
+            fn deserialize_from_ints(program: &crate::ast::Program, values: &mut crate::bc::ReadBytes) -> Option<Self> {
                 #deserialize_from_ints
             }
 
@@ -141,7 +139,7 @@ fn get_type_fields(name: &Ident, fields: &syn::Fields) -> TokenStream {
                 let name_str = f.ident.as_ref().unwrap().to_string();
                 // <this thing> because generics and i cant put ::<this_around_them>::
                 quote_spanned! {f.span()=>
-                    (#name_str, <#ty as crate::ffi::InterpSend>::get_type(program))
+                    (#name_str, <#ty as crate::ffi::InterpSend>::get_or_create_type(program))
                 }
             });
             let name_str = name.to_string();
@@ -155,7 +153,7 @@ fn get_type_fields(name: &Ident, fields: &syn::Fields) -> TokenStream {
             let recurse = fields.unnamed.iter().map(|f| {
                 let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                    <#ty as crate::ffi::InterpSend>::get_type(program)
+                    <#ty as crate::ffi::InterpSend>::get_or_create_type(program)
                 }
             });
             let name_str = name.to_string();
@@ -178,41 +176,44 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
     match data {
         syn::Data::Struct(data) => {
             let rest = deserialize_fields(quote!(#name), &data.fields);
-            quote!(
-                #rest
-            )
+            quote! {
+                let out = #rest;
+                values.align_to(Self::align_bytes(program));
+                out
+            }
         }
         syn::Data::Enum(data) => {
             let recurse = data.variants.iter().enumerate().map(|(i, f)| {
                 let varient = &f.ident;
                 let fields = deserialize_fields(quote!(#name :: #varient), &f.fields);
-                let size = size_for_fields(&f.ident, &f.fields);
                 quote_spanned! {f.span()=>
                     #i => {
                         let result: Option<Self> = #fields;
-                        let size: usize = #size;
-                        (result, size)
+                        result
                     },
                 }
             });
 
             let varient_count = data.variants.len();
 
-            let t = quote!(usize::deserialize_from_ints(values)?);
+            let t = quote!(usize::deserialize_from_ints(program, values)?);
             quote! {
                 let tag = #t;
-                let (result, varient_size): (Option<Self>, usize) = match tag {
+                let start = values.i;
+                let result: Option<Self> = match tag {
                     #(#recurse)*
                     t => {
                         println!("err: bad enum tag {} for {} expected 0..={}", t, stringify!(#name), #varient_count);
                         return None
                     }
                 };
-
-                let payload_size = Self::SIZE_BYTES - 8;
+                let varient_size = values.i - start;
+                let payload_size = Self::size_bytes(program) - 8;
+                debug_assert!(payload_size >= varient_size, "wft? {payload_size} vs {varient_size}");
                 for _ in 0..(payload_size-varient_size) {
                     let _pad = values.next_u8()?;
                 }
+                values.align_to(Self::align_bytes(program));
 
                 result
             }
@@ -222,13 +223,17 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
 }
 
 fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream {
-    let t = quote!(crate::ffi::deserialize_from_ints(values)?);
+    let t = quote!(crate::ffi::deserialize_from_ints(program, values)?);
     match fields {
         syn::Fields::Named(FieldsNamed { named: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {
                 let name = &f.ident;
+                let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                    #name: #t,
+                    #name: {
+                        values.align_to(<#ty>::align_bytes(program));
+                        #t
+                    },
                 }
             });
             quote! {
@@ -239,8 +244,12 @@ fn deserialize_fields(prefix: TokenStream, fields: &syn::Fields) -> TokenStream 
         }
         syn::Fields::Unnamed(FieldsUnnamed { unnamed: ref fields, .. }) => {
             let recurse = fields.iter().map(|f| {
+                let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                    #t,
+                    {
+                        values.align_to(<#ty>::align_bytes(program));
+                        #t
+                    },
                 }
             });
             quote! {
@@ -269,12 +278,10 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
         syn::Data::Enum(data) => {
             let recurse_tag = data.variants.iter().enumerate().map(|(i, f)| {
                 let left = enum_match_left(&f.ident, &f.fields);
-                let size = size_for_fields(&f.ident, &f.fields);
-                let t = quote!(usize::serialize_to_ints(#i, values););
+                let t = quote!(usize::serialize_to_ints(#i, program, values););
                 quote_spanned! {f.span()=>
                     #left => {
                         #t
-                        #size
                     },
                 }
             });
@@ -304,12 +311,17 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
             let pad = quote!(values.push_u8(0););
             quote! {
                 #[allow(unused_variables)]
-                let varient_size = match &self {  #(#recurse_tag)* };
+                match &self {  #(#recurse_tag)* };
+                let start = values.0.len();
                 match self {  #(#recurse_fields)* };
-                let payload_size = Self::SIZE_BYTES - 8;
-                for _ in 0..(payload_size-varient_size) {
+                let written = values.0.len() - start;
+                let payload_size = Self::size_bytes(program) - 8;
+                debug_assert!(payload_size >= written, "wtf");
+                for _ in 0..(payload_size-written) {
                     #pad  // TODO: less dumb padding
                 }
+
+                values.align_to(Self::align_bytes(program));
 
             }
         }
@@ -352,81 +364,38 @@ fn serialize_fields(_name: &Ident, fields: &syn::Fields, prefix: TokenStream) ->
         syn::Fields::Named(ref fields) => {
             let recurse = fields.named.iter().map(|f| {
                 let name = &f.ident;
-
+                let ty = &f.ty;
                 quote_spanned! {f.span()=>
-                    #t(#prefix #name, values)
+                    {
+                        values.align_to(<#ty>::align_bytes(program));
+                    #t(#prefix #name, program, values)
+                    }
                 }
             });
             quote! {
-                #(#recurse;)*
+                let out = #(#recurse;)*;
+                values.align_to(Self::align_bytes(program));
+                out
             }
         }
         syn::Fields::Unnamed(ref fields) => {
             let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let i = syn::Index::from(i);
-                quote_spanned! {f.span()=>
-                    #t(#prefix #i, values)
+                let ty = &f.ty;
+                quote_spanned! {f.span()=>{
+                    values.align_to(<#ty>::align_bytes(program));
+                    #t(#prefix #i, program, values)}
                 }
             });
             quote! {
-                #(#recurse;)*
+                let out = #(#recurse;)*;
+                values.align_to(Self::align_bytes(program));
+                out
             }
         }
         syn::Fields::Unit => {
             quote! {}
         }
-    }
-}
-
-fn size_for(name: &Ident, data: &Data) -> TokenStream {
-    match data {
-        syn::Data::Struct(data) => {
-            let rest = size_for_fields(name, &data.fields);
-            quote! {
-                #rest
-            }
-        }
-        syn::Data::Enum(data) => {
-            let recurse = data.variants.iter().map(|f| {
-                let fields = size_for_fields(name, &f.fields);
-                quote_spanned! {f.span()=>
-                    ( #fields )
-                }
-            });
-            quote! {{
-                use crate::ffi::const_max;
-                const_max(&[0, #( #recurse, )* ]) + 8
-            }}
-        }
-        syn::Data::Union(_) => todo!(),
-    }
-}
-
-fn size_for_fields(_name: &Ident, fields: &syn::Fields) -> TokenStream {
-    match fields {
-        syn::Fields::Named(ref fields) => {
-            let recurse = fields.named.iter().map(|f| {
-                let ty = &f.ty;
-                quote_spanned! {f.span()=>
-                    <#ty as InterpSend>::SIZE_BYTES
-                }
-            });
-            quote! {
-                0 #(+ #recurse)*
-            }
-        }
-        syn::Fields::Unnamed(ref fields) => {
-            let recurse = fields.unnamed.iter().map(|f| {
-                let ty = &f.ty;
-                quote_spanned! {f.span()=>
-                     <#ty as InterpSend>::SIZE_BYTES
-                }
-            });
-            quote! {
-                0 #(+ #recurse)*
-            }
-        }
-        syn::Fields::Unit => quote! { 0 },
     }
 }
 

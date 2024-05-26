@@ -94,7 +94,9 @@ pub struct TypeMeta {
 }
 
 impl TypeMeta {
+    #[track_caller]
     fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool, contains_pointers: bool, stride_bytes: u16) -> Self {
+        debug_assert_eq!(stride_bytes % align_bytes, 0);
         Self {
             size_slots,
             align_bytes,
@@ -952,7 +954,7 @@ impl<'p> Program<'p> {
         program
     }
 
-    pub(crate) fn add_ffi_definition<T: InterpSend<'p>>(&mut self) {
+    pub(crate) fn add_ffi_definition<'a, T: InterpSend<'a>>(&mut self) {
         let def = T::definition();
         if !def.is_empty() {
             self.ffi_definitions.push_str(&T::name());
@@ -963,7 +965,7 @@ impl<'p> Program<'p> {
     }
 
     /// This allows ffi types to be unique.
-    pub(crate) fn get_ffi_type<T: InterpSend<'p>>(&mut self, id: u128) -> TypeId {
+    pub(crate) fn get_ffi_type<'a, T: InterpSend<'a>>(&mut self, id: u128) -> TypeId {
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
             self.add_ffi_definition::<T>();
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
@@ -975,6 +977,7 @@ impl<'p> Program<'p> {
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
             self.types[placeholder] = TypeInfo::Unique(ty, (id & usize::MAX as u128) as usize);
+            self.types_extra.borrow_mut().truncate(placeholder);
             ty_final
         })
     }
@@ -998,7 +1001,7 @@ impl<'p> Program<'p> {
             // The problem manifested as wierd bugs in array stride for a few types.
             self.types.push(TypeInfo::Struct { fields: vec![] });
             self.ffi_types.insert(id, ty_final);
-
+            println!("from RsType {}", type_info.name);
             let ty = match type_info.data {
                 RsData::Struct(data) => {
                     let mut fields = vec![];
@@ -1013,7 +1016,6 @@ impl<'p> Program<'p> {
                             default: None,
                         })
                     }
-                    let as_tuple = self.tuple_of(types);
                     self.intern_type(TypeInfo::Struct { fields })
                 }
                 RsData::Enum { .. } => todo!(),
@@ -1088,6 +1090,8 @@ impl<'p> Program<'p> {
             //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
             bytes += info.stride_bytes as usize;
         }
+
+        println!("{}", self.log_struct_layout(&fields));
         Ok(TypeInfo::Struct { fields })
     }
 
@@ -1274,6 +1278,22 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
+    pub fn log_struct_layout(&self, fields: &[Field]) -> String {
+        fields
+            .iter()
+            .map(|f| {
+                format!(
+                    "{}: {}; // align={} size={} offset={}\n",
+                    self.pool.get(f.name),
+                    self.log_type(f.ty),
+                    self.get_info(f.ty).align_bytes,
+                    self.get_info(f.ty).stride_bytes,
+                    f.byte_offset
+                )
+            })
+            .collect::<String>()
+    }
+
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
@@ -1285,20 +1305,21 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
-            TypeInfo::Unknown => todo!(),
+            TypeInfo::Unknown => TypeMeta::new(0, 1, 0, false, false, 0),
             TypeInfo::Struct { fields } => {
                 let mut size = 0;
-                let mut align = 0;
+                debug_assert_eq!(fields[0].byte_offset, 0);
+                let align = self.get_info(fields[0].ty).align_bytes;
                 let mut mask = 0;
                 let mut pointers = false;
                 let mut bytes = 0;
 
                 for arg in fields {
                     let info = self.get_info(arg.ty);
-                    debug_assert!(arg.byte_offset >= bytes);
-                    bytes = arg.byte_offset + info.stride_bytes.max(info.align_bytes) as usize;
+                    debug_assert!(arg.byte_offset as u16 >= bytes, "{}", self.log_struct_layout(fields));
+                    let end = arg.byte_offset as u16 + info.stride_bytes;
+                    bytes = bytes.max(end);
                     size += info.size_slots;
-                    align = align.max(info.align_bytes);
                     if size > 16 {
                         // you only actually care about floats for passing in registers so if its bigger than 16, wont matter anyway?
                         // until i do struct c abi properly and tuples mean args in a different way.
@@ -1310,13 +1331,22 @@ impl<'p> Program<'p> {
                     pointers |= info.contains_pointers;
                 }
 
+                if bytes % align != 0 {
+                    bytes += align - bytes % align;
+                }
+
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false, pointers, bytes as u16)
+                TypeMeta::new(size, align, mask, false, pointers, bytes)
             }
             TypeInfo::Tagged { cases, .. } => {
                 let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
-                let bytes = 8 + cases.iter().map(|(_, ty)| self.get_info(*ty).stride_bytes).max().expect("no empty enum");
+                let mut bytes = 8 + cases.iter().map(|(_, ty)| self.get_info(*ty).stride_bytes).max().expect("no empty enum");
                 let pointers = cases.iter().any(|(_, ty)| self.get_info(*ty).contains_pointers);
+
+                let align = 8;
+                if bytes % align != 0 {
+                    bytes += align - bytes % align;
+                }
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.
                 TypeMeta::new(size, 8, 0, false, pointers, bytes)
@@ -1335,10 +1365,9 @@ impl<'p> Program<'p> {
             TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0),
             TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1), // :SmallTypes
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true, 8),
-            // TODO:  indexes should be u32
-            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::Type | TypeInfo::OverloadSet => {
-                TypeMeta::new(1, 8, 0, false, false, 4)
-            }
+            // this has to be 8 bytes because it can't have a special load function
+            TypeInfo::Type => TypeMeta::new(1, 8, 0, false, false, 8),
+            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);
@@ -1362,6 +1391,10 @@ impl<'p> Program<'p> {
 
     pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {
         self.get_info(ty).size_slots
+    }
+
+    pub fn size_bytes(&self, ty: TypeId) -> usize {
+        self.get_info(ty).stride_bytes as usize
     }
 }
 

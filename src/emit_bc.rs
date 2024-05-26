@@ -343,7 +343,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     // if result_location==true, the top of the stack on entry to this function has the pointer where the result should be stored.
     // otherwise, just push it to the stack.
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
-        assert!(!expr.ty.is_unknown(), "Not typechecked: {}", expr.log(self.program.pool));
+        assert!(
+            !expr.ty.is_unknown(),
+            "Not typechecked: {}. done:{}",
+            expr.log(self.program.pool),
+            expr.done
+        );
 
         debug_assert!(
             self.slot_count(expr.ty) <= 8 || result_location != PushStack,

@@ -30,7 +30,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let i: OverloadSetId = from_values(self.program, value.clone())?;
                     let id = self.resolve_in_overload_set(arg, ret, i)?;
                     Some(id)
-                } else if matches!(self.program[f_ty], TypeInfo::Fn(_)) || f_ty == FuncId::get_type(self.program) {
+                } else if matches!(self.program[f_ty], TypeInfo::Fn(_)) || f_ty == FuncId::get_or_create_type(self.program) {
                     let id = value.unwrap_func_id();
                     self.adjust_call(arg, id)?;
                     Some(id)
@@ -74,7 +74,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let id = self.resolve_in_overload_set(arg, requested_ret, i)?;
                 self.pop_state(state);
                 Ok(id)
-            } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == FuncId::get_type(self.program) {
+            } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == FuncId::get_or_create_type(self.program) {
                 let id = value.unwrap_func_id();
                 self.adjust_call(arg, id)?;
                 self.pop_state(state);

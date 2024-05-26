@@ -168,6 +168,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.immediate_eval_expr_known(s_ty)
     }
 
+    #[track_caller]
     fn as_values<T: InterpSend<'p>>(&mut self, ret: T) -> Res<'p, Values> {
         to_values(self.program, ret)
     }
@@ -476,13 +477,13 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, when: ExecTime, arg: Arg) -> Res<'p, Ret> {
         self.ensure_compiled(f, when)?;
         let ty = self.program[f].unwrap_ty();
-        let arg_ty = Arg::get_type(self.program);
+        let arg_ty = Arg::get_or_create_type(self.program);
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
-        let ret_ty = Ret::get_type(self.program);
+        let ret_ty = Ret::get_or_create_type(self.program);
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
-        let bytes = arg.serialize_to_ints_one();
-        let again = Arg::deserialize_from_ints(&mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
-        debug_assert!(again.is_some());
+        let bytes = arg.serialize_to_ints_one(self.program);
+        // let again = Arg::deserialize_from_ints(self.program, &mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
+        // debug_assert!(again.is_some());
         let arg = Values::many(bytes);
         let ret = self.run(f, arg, when)?;
         from_values(self.program, ret)
@@ -1256,7 +1257,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if self.program[id].finished_ret.is_some() {
             (Expr::Value { value: (id.as_raw()).into() }, self.program.func_type(id))
         } else {
-            (Expr::WipFunc(id), FuncId::get_type(self.program))
+            (Expr::WipFunc(id), FuncId::get_or_create_type(self.program))
         }
     }
 
@@ -1335,14 +1336,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Closure(_) => {
                 let (arg, ret) = self.break_fn_type(requested);
                 let id = self.promote_closure(expr, arg, ret)?;
-                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_type(self.program));
+                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_or_create_type(self.program));
                 expr.set((id.as_raw()).into(), ty);
                 ty
             }
             &mut Expr::WipFunc(id) => {
                 self.infer_types(id)?;
                 // When Expr::Call compiles its 'f', the closure might not know its types yet, so just say its some const known Fn and figure it out later.
-                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_type(self.program));
+                let ty = self.program.fn_type(id).unwrap_or_else(|| FuncId::get_or_create_type(self.program));
                 expr.set((id.as_raw()).into(), ty);
                 ty
             }
@@ -1453,8 +1454,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         walk.expr(&mut arg);
                         let mut placeholders = walk.placeholders; // drop walk.
 
-                        let ty = FatExpr::get_type(self.program);
-                        let ints = arg.serialize_to_ints_one();
+                        let ty = FatExpr::get_or_create_type(self.program);
+                        let ints = arg.serialize_to_ints_one(self.program);
                         let value = Values::many(ints);
 
                         expr.set(value.clone(), ty);
@@ -1664,15 +1665,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.done = true;
                 let bytes = self.pool.get(i);
                 self.set_literal(expr, (bytes.as_ptr() as *mut i64, bytes.len() as i64))?;
-                let byte = u8::get_type(self.program);
+                let byte = u8::get_or_create_type(self.program);
                 expr.ty = self.create_slice_type(byte, expr.loc)?;
                 expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
-                let expr_ty = FatExpr::get_type(self.program);
+                let expr_ty = FatExpr::get_or_create_type(self.program);
                 let mut arg = mem::take(arg.deref_mut());
                 let mut target = mem::take(target.deref_mut());
-                let want = FatExpr::get_type(self.program);
+                let want = FatExpr::get_or_create_type(self.program);
                 let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
@@ -1704,6 +1705,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.typecheck_macro_outputs(f, requested)?;
                     let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, arg)?;
                     *expr = new_expr;
+                    if expr.done {
+                        assert!(!expr.ty.is_unknown());
+                    }
                     return self.compile_expr(expr, requested);
                 }
 
@@ -1715,6 +1719,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.typecheck_macro_outputs(f, requested)?;
                 let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, (arg, target))?;
                 *expr = new_expr;
+                if expr.done {
+                    assert!(!expr.ty.is_unknown());
+                }
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(expr, requested);
             }
@@ -1939,7 +1946,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                         return Ok(None);
                     }
-                    Flag::Quote => FatExpr::get_type(self.program),
+                    Flag::Quote => FatExpr::get_or_create_type(self.program),
                     Flag::While => TypeId::unit,
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
                     Flag::If => return Ok(None),
@@ -1984,7 +1991,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 //TODO: else return Ok(None)?
             }
             Expr::String(_) => {
-                let byte = u8::get_type(self.program);
+                let byte = u8::get_or_create_type(self.program);
                 self.create_slice_type(byte, expr.loc)?
             }
         }))
@@ -1997,17 +2004,25 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // TODO: this really shouldn't return an error -- May 24
     pub fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
-        let ty = T::get_type(self.program);
-        let ints = t.serialize_to_ints_one();
+        let ty = T::get_or_create_type(self.program);
+        let ints = t.serialize_to_ints_one(self.program);
         let value = Values::many(ints);
         let mut e = FatExpr::synthetic_ty(Expr::Value { value }, loc, ty);
         e.done = true;
         Ok(e)
     }
 
-    // TODO: bool will be the wrong number of bytes!!! -- May 24
-    pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(u32, TypeId)> {
+    pub fn builtin_constant(&mut self, name: Ident<'p>) -> Option<(Values, TypeId)> {
         let name = self.pool.get(name);
+
+        match name {
+            "true" => Some((Values::many(vec![1]), TypeId::bool())),
+            "false" => Some((Values::many(vec![0]), TypeId::bool())),
+            n => self.builtin_type(n).map(|ty| (to_values(self.program, ty).unwrap(), TypeId::ty)),
+        }
+    }
+
+    pub fn builtin_type(&mut self, name: &str) -> Option<TypeId> {
         use TypeInfo::*;
         let ty = match name {
             "i64" => Some(TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true })),
@@ -2023,31 +2038,28 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         if let Some(ty) = ty {
             let ty = self.program.intern_type(ty);
-            let tyty = TypeId::ty;
-            return Some(((ty.as_raw()), tyty));
+            return Some(ty);
         }
 
         macro_rules! ffi_type {
             ($ty:ty) => {{
-                let ty = <$ty>::get_type(self.program);
-                ((ty.as_raw()), TypeId::ty)
+                let ty = <$ty>::get_or_create_type(self.program);
+                ty
             }};
         }
 
         Some(match name {
-            "true" => ((1), TypeId::bool()),
-            "false" => ((0), TypeId::bool()),
             "Symbol" => ffi_type!(Ident),
             "FatExpr" => ffi_type!(FatExpr),
             "Var" => ffi_type!(Var),
             "FatStmt" => ffi_type!(FatStmt),
             "TypeInfo" => ffi_type!(TypeInfo),
             "IntTypeInfo" => ffi_type!(IntTypeInfo),
-            "RsResolvedSymbol" => ((self.program.get_rs_type(RsResolvedSymbol::get_ty()).as_raw()), TypeId::ty),
+            "RsResolvedSymbol" => self.program.get_rs_type(RsResolvedSymbol::get_ty()),
             _ => {
                 let name = self.pool.intern(name);
                 if let Some(ty) = self.program.find_ffi_type(name) {
-                    ((ty.as_raw()), TypeId::ty)
+                    TypeId::ty
                 } else {
                     return None;
                 }
@@ -2164,12 +2176,15 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
-        Ok(unwrap!(Ret::deserialize_from_ints(&mut ReadBytes { bytes: values.bytes(), i: 0 }), ""))
+        Ok(unwrap!(
+            Ret::deserialize_from_ints(self.program, &mut ReadBytes { bytes: values.bytes(), i: 0 }),
+            ""
+        ))
     }
 
     pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
         unsafe { STATS.const_eval_node += 1 };
-        let ret_ty = Ret::get_type(self.program);
+        let ret_ty = Ret::get_or_create_type(self.program);
         if let Some(val) = self.check_quick_eval(&mut e, ret_ty)? {
             return self.deserialize_values(val);
         }
@@ -2251,7 +2266,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             } else {
                                 None
                             }
-                        } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == FuncId::get_type(self.program) {
+                        } else if matches!(self.program[ty], TypeInfo::Fn(_)) || ty == FuncId::get_or_create_type(self.program) {
                             Some(val.unwrap_func_id())
                         } else {
                             err!("Expected function but found {:?}", val);
@@ -3188,7 +3203,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: check if they tried to give you something from the stack
 
             // this is really annoying cause i can only refer to the (_, _) version of Str but it already has a cast to Str
-            let ty = <(*mut u8, i64) as InterpSend>::get_type(self.program);
+            let ty = <(*mut u8, i64) as InterpSend>::get_or_create_type(self.program);
             let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(asm.clone())), asm.loc, ty);
 
             let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
@@ -3459,7 +3474,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             return true;
         };
         if *name == Flag::Unquote.ident() {
-            let expr_ty = FatExpr::get_type(self.compiler.program);
+            let expr_ty = FatExpr::get_or_create_type(self.compiler.program);
             // self.compiler
             //     .compile_expr(self.arg, Some(expr_ty))
             //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO

@@ -1,3 +1,10 @@
+## (May 25)
+
+now that im doing alignment shit, i dont really want to duplicate it for InterpSend::SIZE_BYTES so it just reads it from the program,
+which is dumb and slower but the eventual goal is to use same layout as the rust structs so the whole thing goes away.
+
+## (May 24)
+
 - ok so now i never match against Values::One, so i can take it away, just do everything with Vec<i64>, then do everything
   with Vec<u8>, and then add back the by value varient when its small as an optimisation. thats the plan.
   got to everything being Vec<i64>, its like 15% slower than last i checked, thats fine for now.
