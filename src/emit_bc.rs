@@ -493,7 +493,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
-                let mut bytes = 0;
                 let TypeInfo::Struct { fields, layout_done } = &self.program[self.program.raw_type(expr.ty)] else {
                     err!("Expr::Tuple should have struct type",)
                 };
@@ -525,6 +524,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 //     return Ok(());
                 // }
 
+                // TODO
+                // debug_assert_eq!(
+                //     self.program.get_info(expr.ty).stride_bytes as usize,
+                //     value.0.len(),
+                //     "{:?} is {}",
+                //     value.0,
+                //     self.program.log_type(expr.ty)
+                // );
                 match result_location {
                     PushStack => {
                         let mut parts = vec![];
@@ -541,7 +548,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             let ptr = value.0.clone().leak().as_ptr();
                             result.push(Bc::PushConstant { value: ptr as i64 });
 
-                            result.push(Bc::CopyBytesToFrom { bytes: value.0.len() as u16 });
+                            result.push(Bc::CopyBytesToFrom {
+                                bytes: self.program.get_info(expr.ty).stride_bytes, // Note: not the same as value.len!!!!!
+                            });
                         } else {
                             debug_assert!(self.program.get_info(expr.ty).stride_bytes % 8 == 0);
                             let mut parts = vec![];
@@ -550,7 +559,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                 result.push(Bc::Dup);
                                 result.push(Bc::PushConstant { value });
                                 result.push(Bc::StorePre { slots: 1 });
-                                result.push(Bc::IncPtr { offset: 1 });
+                                result.push(Bc::IncPtrBytes { bytes: 8 });
                             }
                             result.push(Bc::Pop { slots: 1 }); // res ptr
                         }

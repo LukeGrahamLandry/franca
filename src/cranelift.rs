@@ -622,15 +622,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         self.stack.push(builder.ins().stack_addr(I64, slot, 0));
                     }
                 }
-                Bc::IncPtr { offset } => {
-                    let ptr = self.stack.pop().unwrap();
-                    let offset = builder.ins().iconst(I64, offset as i64 * 8);
-                    let ptr = builder.ins().bitcast(I64, MemFlags::new(), ptr);
-                    let res = builder.ins().iadd(ptr, offset);
-                    let res = builder.ins().bitcast(I64, MemFlags::new(), res);
-                    self.stack.push(res);
-                }
-                // TODO: copy-paste
                 Bc::IncPtrBytes { bytes } => {
                     let ptr = self.stack.pop().unwrap();
                     let offset = builder.ins().iconst(I64, bytes as i64);
@@ -653,21 +644,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 Bc::Dup => {
                     self.stack.push(*self.stack.last().unwrap());
                 }
-                Bc::CopyToFrom { slots } => {
-                    let from = self.stack.pop().unwrap();
-                    let to = self.stack.pop().unwrap();
-                    if slots < 4 {
-                        for s in 0..slots {
-                            let v = builder.ins().load(I64, MemFlags::new(), from, s as i32 * 8);
-                            builder.ins().store(MemFlags::new(), v, to, s as i32 * 8);
-                        }
-                    } else {
-                        let size = builder.ins().iconst(I64, slots as i64 * 8);
-                        let config = self.cl.module.target_config();
-                        builder.call_memcpy(config, to, from, size)
-                    }
-                }
-                // TODO: copy-paste
                 Bc::CopyBytesToFrom { bytes } => {
                     let from = self.stack.pop().unwrap();
                     let to = self.stack.pop().unwrap();

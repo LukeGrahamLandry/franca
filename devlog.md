@@ -1,4 +1,4 @@
-## (May 25)
+## (May 25/26)
 
 now that im doing alignment shit, i dont really want to duplicate it for InterpSend::SIZE_BYTES so it just reads it from the program,
 which is dumb and slower but the eventual goal is to use same layout as the rust structs so the whole thing goes away.
@@ -10,6 +10,15 @@ which is dumb and slower but the eventual goal is to use same layout as the rust
   problem was cmp_with_cond being read as (i64, i64, i64) when asm was trying to return (u32, u32, u32).
   struct coerceion now checks that byte offsets match. really the whole thing needs to go away eventually. TODO: at least make sure to finish_layout
   now my asm is same as cl.
+- in deconstruct_values i wrote bit sizes instead of byte sizes :(
+- `name: Symbol = part.expr.GetNamed;` doesn't work because it needs the special u32 load fn.
+  but I can't easily refer to the type GetNamed.
+- `missing value program.get_enum(enum_ty).\nType is not enum. (tried tag_value of GetVar)`.
+  because i typo-ed when i redid builtin_const
+- had to fix load_u64/store_u64 for my asm backend with non multiple of 8 offset.
+- when emit_bc for ::Values, values.len != ty.stride. I think because of @as for ints doesn't actually do anything.
+  for now just copy the right number of bytes but should really handle it in ::Cast somehow.
+  now i fail 11, cl fails 3.
 
 ## (May 24)
 

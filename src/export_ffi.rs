@@ -12,7 +12,7 @@ use crate::pool::Ident;
 use crate::{err, ice};
 use std::fmt::Write;
 use std::hint::black_box;
-use std::mem::{self};
+use std::mem::{self, transmute};
 use std::path::PathBuf;
 use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
@@ -30,8 +30,15 @@ macro_rules! bounce_flat_call {
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
             pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, retptr: *mut u8, ret_count: i64) {
+                let ty = <$Arg>::get_or_create_type(compile.program);
+                compile.program.finish_layout_deep(ty).unwrap();
+                let ty = <$Ret>::get_or_create_type(compile.program);
+                compile.program.finish_layout_deep(ty).unwrap();
                 debug_assert_eq!(arg_count, <$Arg>::size_bytes(compile.program) as i64, "bad arg count. expected {}", stringify!($Arg));
                 debug_assert_eq!(ret_count, <$Ret>::size_bytes(compile.program) as i64, "bad ret count. expected {}", stringify!($Ret));
+
+                // debug_assert_eq!(argptr as usize % <$Arg>::align_bytes(compile.program) as usize, 0, "bad arg align for {}", stringify!($Arg));
+                // debug_assert_eq!(retptr as usize % <$Ret>::align_bytes(compile.program) as usize, 0, "bad ret align for {}", stringify!($Ret));
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     debugln!("bounce ARG: {argslice:?}");
@@ -193,6 +200,7 @@ extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
 }
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
+    hope(|| compiler.program.finish_layout(ty));
     compiler.program.get_info(ty).stride_bytes as i64
 }
 
@@ -302,7 +310,14 @@ fn hopec<'p, T>(comp: &Compile<'_, 'p>, res: impl FnOnce() -> Res<'p, T>) -> T {
 }
 
 extern "C-unwind" fn tag_value<'p>(program: &&Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
-    let cases = hope(|| Ok(unwrap!(program.get_enum(enum_ty), "{} is not enum.", program.log_type(enum_ty))));
+    let cases = hope(|| {
+        Ok(unwrap!(
+            program.get_enum(enum_ty),
+            "{} is not enum. (tried tag_value of {})",
+            program.log_type(enum_ty),
+            program.pool.get(name)
+        ))
+    });
     let index = cases.iter().position(|f| f.0 == name);
     let index = hope(|| Ok(unwrap!(index, "bad case name")));
     index as i64
@@ -444,9 +459,8 @@ extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_cou
     assert!(ret_count == 1 * 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
-        // let s = &mut *slice_from_raw_parts_mut(arg, arg_count as usize);
-        // *ret = (s[0] * s[1]) + s[2];
-        todo!()
+        let s = &mut *slice_from_raw_parts_mut(arg as *mut i64, 3);
+        *(ret as *mut i64) = (s[0] * s[1]) + s[2];
     }
 }
 extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
@@ -454,18 +468,17 @@ extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg:
     assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
-        // let addr = *arg as usize;
-        // // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
-        // debug_assert!(
-        //     addr % 4 == 0 && (addr as u32 & FuncId::MASK == 0 || FuncId::from_raw(addr as u32).as_index() > compile.program.funcs.len()),
-        //     "thats a weird ptr my dude, did you mean to call {:?}?",
-        //     FuncId::from_raw(addr as u32)
-        // );
-        // let f: FlatCallFn = transmute(addr);
-        // *ret = do_flat_call(compile, f, ((10, 5), 7));
-        // assert_eq!(*ret, 57);
-
-        todo!()
+        let addr = *(arg as *mut usize);
+        // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
+        debug_assert!(
+            addr % 4 == 0 && (addr as u32 & FuncId::MASK == 0 || FuncId::from_raw(addr as u32).as_index() > compile.program.funcs.len()),
+            "thats a weird ptr my dude, did you mean to call {:?}?",
+            FuncId::from_raw(addr as u32)
+        );
+        let f: FlatCallFn = transmute(addr);
+        let ret = ret as *mut i64;
+        *ret = do_flat_call(compile, f, ((10i64, 5i64), 7i64));
+        assert_eq!(*ret, 57);
     }
 }
 
@@ -473,8 +486,9 @@ pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *
 
 // This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
-    let mut arg = arg.serialize_to_ints_one(compile.program);
+    Arg::get_or_create_type(compile.program); // sigh
     Ret::get_or_create_type(compile.program); // sigh
+    let mut arg = arg.serialize_to_ints_one(compile.program);
     let mut ret = vec![0u8; Ret::size_bytes(compile.program)];
     f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
     Ret::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: &ret, i: 0 }).unwrap()

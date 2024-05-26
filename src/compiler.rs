@@ -1296,8 +1296,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             self.coerce_type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
         }
+        // TODO: its kinda sad to do this every time. better to keep track of pending ones and somehow have safe points you know you're probably not in the middle of mutual recursion.
+        self.program.finish_layout_deep(res)?;
         if let Some(requested) = requested {
             debug_assert!(requested.is_valid());
+            self.program.finish_layout_deep(requested)?;
             // TODO: its possible to write code that gets here without being caught first.
             //       should fix so everywhere that relies on 'requested' does thier own typecheck because they can give a more contextual error message.
             //       but its annoying becuase this happens first so you cant just sanity check here and i dont want to trust that everyone remembered.
@@ -1305,8 +1308,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
 
-            // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
-            self.coerce_type_check_arg(res, requested, "sanity ICE req_expr")?;
+            let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
+            self.coerce_type_check_arg(res, requested, msg)?; // "sanity ICE req_expr"
         }
 
         expr.ty = res;
@@ -1314,8 +1317,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: cant just assert_eq because it does change for rawptr.
             self.coerce_type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
         }
-        // TODO: its kinda sad to do this every time. better to keep track of pending ones and somehow have safe points you know you're probably not in the middle of mutual recursion.
-        self.program.finish_layout_deep(expr.ty)?;
+
         Ok(res)
     }
 
@@ -2067,11 +2069,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             "RsResolvedSymbol" => self.program.get_rs_type(RsResolvedSymbol::get_ty()),
             _ => {
                 let name = self.pool.intern(name);
-                if let Some(ty) = self.program.find_ffi_type(name) {
-                    TypeId::ty
-                } else {
-                    return None;
-                }
+                self.program.find_ffi_type(name)?
             }
         })
     }
@@ -2643,7 +2641,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: not this!!! at the very least only do it in the coerceon verion!
                 (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
                     if f.len() == e.len() {
-                        let ok = f.iter().zip(e.iter()).all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok());
+                        let ok = f
+                            .iter()
+                            .zip(e.iter())
+                            .all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset);
                         if ok {
                             return Ok(());
                         }
@@ -3334,8 +3335,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     *ty = LazyType::Finished(value);
                     value
                 } else {
-                    self.type_check_arg(value, ty.unwrap(), "var decl")?;
-                    ty.unwrap()
+                    let ty = ty.unwrap();
+                    self.program.finish_layout_deep(value)?;
+                    self.program.finish_layout_deep(ty)?;
+                    self.type_check_arg(value, ty, "var decl")?;
+                    ty
                 };
 
                 // TODO: this is so emit_ir which can't mutate program can find it.
@@ -3376,6 +3380,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             *ty = LazyType::Finished(found);
             found
         };
+        self.program.finish_layout_deep(final_ty)?;
 
         self.save_const_values(name, val, final_ty, value.loc)?;
         Ok(())

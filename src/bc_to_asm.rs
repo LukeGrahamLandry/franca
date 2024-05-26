@@ -492,24 +492,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
             }
             // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
-            Bc::IncPtr { offset } => match self.state.stack.last_mut().unwrap() {
-                Val::Increment { reg, offset_bytes: prev } => {
-                    *prev += offset * 8;
-                }
-                Val::Literal(v) => {
-                    *v += offset as i64 * 8;
-                }
-                Val::Spill(_) => {
-                    // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
-                    let (reg, offset_bytes) = self.pop_to_reg_with_offset();
-                    self.state.stack.push(Val::Increment {
-                        reg,
-                        offset_bytes: offset_bytes + (offset * 8),
-                    })
-                }
-                Val::FloatReg(_) => err!("don't try to gep a float",),
-            },
-            // TODO: copy-paste
             Bc::IncPtrBytes { bytes } => match self.state.stack.last_mut().unwrap() {
                 Val::Increment { reg, offset_bytes: prev } => {
                     *prev += bytes;
@@ -590,32 +572,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     Val::FloatReg(_) => todo!(),
                 }
             }
-            Bc::CopyToFrom { slots } => {
-                if slots <= 4 {
-                    let (from, from_offset) = self.pop_to_reg_with_offset();
-                    let (to, to_offset) = self.pop_to_reg_with_offset();
-                    let temp = self.get_free_reg();
-                    for i in 0..slots {
-                        self.load_u64(temp, from, from_offset + i * 8);
-                        self.store_u64(temp, to, to_offset + i * 8);
-                    }
-                    self.drop_reg(from);
-                    self.drop_reg(to);
-                    self.drop_reg(temp);
-                } else {
-                    self.state.stack.push(Val::Literal(slots as i64 * 8));
-                    self.stack_to_ccall_reg(3, 0);
-                    self.spill_abi_stompable();
-                    let addr = libc::memcpy as *const u8;
-                    // let offset = self.asm.offset_words(self.asm.next, addr);
-                    self.load_imm(x17, addr as u64);
-                    self.asm.push(br(x17, 1));
-                    for i in 0..8 {
-                        add_unique(&mut self.state.free_reg, i as i64);
-                    }
-                }
-            }
-            // TODO: copy-paste
             Bc::CopyBytesToFrom { bytes } => {
                 self.state.stack.push(Val::Literal(bytes as i64));
                 self.stack_to_ccall_reg(3, 0);
@@ -841,8 +797,15 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     fn load_u64(&mut self, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
         debug_assert_ne!(dest_reg, sp);
-        self.asm.push(ldr_uo(X64, dest_reg, src_addr_reg, (offset_bytes / 8) as i64));
-        debug_assert!(offset_bytes / 8 < (1 << 12));
+        if offset_bytes % 8 == 0 {
+            self.asm.push(ldr_uo(X64, dest_reg, src_addr_reg, (offset_bytes / 8) as i64));
+            debug_assert!(offset_bytes / 8 < (1 << 12));
+        } else {
+            let reg = self.get_free_reg();
+            self.asm.push(add_im(X64, reg, src_addr_reg, offset_bytes as i64, 0));
+            self.asm.push(ldr_uo(X64, dest_reg, reg, 0));
+            self.drop_reg(reg);
+        }
     }
 
     fn store_u64(&mut self, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) {
@@ -854,8 +817,15 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.drop_reg(reg);
             return;
         }
-        self.asm.push(str_uo(X64, src_reg, dest_addr_reg, (offset_bytes / 8) as i64));
-        debug_assert!(offset_bytes / 8 < (1 << 12));
+        if offset_bytes % 8 == 0 {
+            self.asm.push(str_uo(X64, src_reg, dest_addr_reg, (offset_bytes / 8) as i64));
+            debug_assert!(offset_bytes / 8 < (1 << 12));
+        } else {
+            let reg = self.get_free_reg();
+            self.asm.push(add_im(X64, reg, dest_addr_reg, offset_bytes as i64, 0));
+            self.asm.push(str_uo(X64, src_reg, reg, 0));
+            self.drop_reg(reg);
+        }
     }
 
     fn reset_free_reg(&mut self) {

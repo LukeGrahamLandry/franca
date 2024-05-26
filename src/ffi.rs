@@ -18,7 +18,6 @@ pub trait InterpSend<'p>: Sized {
         program.get_ffi_type::<Self>(Self::get_type_key())
     }
 
-    #[track_caller]
     fn get_type(program: &Program) -> TypeId {
         // cant unwrap_or_else cause #[track_caller] on a lambda
         let Some(&ty) = program.ffi_types.get(&Self::get_type_key()) else {
@@ -53,7 +52,6 @@ pub trait InterpSend<'p>: Sized {
         program.size_bytes(Self::get_type(program))
     }
 
-    #[track_caller]
     fn align_bytes(program: &Program) -> usize {
         program.get_info(Self::get_type(program)).align_bytes as usize
     }
@@ -91,7 +89,7 @@ macro_rules! send_num {
                         bit_count: $bits,
                         signed: $signed,
                     }))
-                    .unwrap()
+                    .expect("number type should be pre-interned")
             }
 
             fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {

@@ -29,13 +29,11 @@ pub enum Bc {
     StorePost { slots: u16 },                             // <?:n> <ptr:1> -> _
     StorePre { slots: u16 },                              // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
-    IncPtr { offset: u16 },                               // <ptr:1> -> <ptr:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
     Pop { slots: u16 },                                   // <?:n> -> _
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     AddrFnResult,                                         // _ -> <ptr:1>
     Dup,                                                  // <x:1> -> <x:1> <x:1>
-    CopyToFrom { slots: u16 },                            // <to_ptr:1> <from_ptr:1> -> _
     CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
     NameFlatCallArg { id: u16, offset_bytes: u16 },       // _ -> _
     LastUse { id: u16 },                                  // _ -> _
@@ -155,8 +153,8 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
         TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
         TypeInfo::F64 | TypeInfo::FnPtr(_) | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => out.push(unwrap!(bytes.next_i64(), "")),
         TypeInfo::Int(_) => match program.get_info(ty).stride_bytes {
-            8 => out.push(unwrap!(bytes.next_u8(), "") as i64),
-            32 => out.push(unwrap!(bytes.next_u32(), "") as i64),
+            1 => out.push(unwrap!(bytes.next_u8(), "") as i64),
+            4 => out.push(unwrap!(bytes.next_u32(), "") as i64),
             _ => out.push(unwrap!(bytes.next_i64(), "")), // TODO
         },
         TypeInfo::Bool => out.push(unwrap!(bytes.next_u8(), "") as i64),
