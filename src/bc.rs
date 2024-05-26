@@ -165,7 +165,8 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
                 deconstruct_values(program, inner, bytes, out)?;
             }
         }
-        TypeInfo::Struct { fields } => {
+        TypeInfo::Struct { fields, layout_done } => {
+            assert!(*layout_done);
             let mut prev = 0;
             for t in fields {
                 assert!(prev <= t.byte_offset);

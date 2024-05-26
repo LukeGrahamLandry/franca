@@ -475,9 +475,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
                 let mut bytes = 0;
-                let TypeInfo::Struct { fields } = &self.program[self.program.raw_type(expr.ty)] else {
+                let TypeInfo::Struct { fields, layout_done } = &self.program[self.program.raw_type(expr.ty)] else {
                     err!("Expr::Tuple should have struct type",)
                 };
+                assert!(*layout_done);
                 for (value, f) in values.iter().zip(fields.iter()) {
                     if result_location == ResAddr {
                         result.push(Bc::Dup);

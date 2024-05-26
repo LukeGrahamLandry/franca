@@ -6,7 +6,7 @@ use crate::{
     ffi::InterpSend,
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
-    reflect::RsType,
+    reflect::{BitSet, RsType},
     unwrap, Map, STATS,
 };
 use codemap::Span;
@@ -62,6 +62,7 @@ pub enum TypeInfo<'p> {
     Struct {
         // You probably always have few enough that this is faster than a hash map. // TODO: check that
         fields: Vec<Field<'p>>,
+        layout_done: bool,
     },
     // What rust calls an enum
     Tagged {
@@ -839,6 +840,7 @@ pub struct Program<'p> {
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Vec<u8>), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
+    finished_layout_deep: BitSet,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -916,6 +918,7 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
+            finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             types: vec![
                 TypeInfo::Unknown,
@@ -999,7 +1002,10 @@ impl<'p> Program<'p> {
             let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Struct { fields: vec![] });
+            self.types.push(TypeInfo::Struct {
+                fields: vec![],
+                layout_done: false,
+            });
             self.ffi_types.insert(id, ty_final);
             println!("from RsType {}", type_info.name);
             let ty = match type_info.data {
@@ -1016,7 +1022,7 @@ impl<'p> Program<'p> {
                             default: None,
                         })
                     }
-                    self.intern_type(TypeInfo::Struct { fields })
+                    self.intern_type(TypeInfo::Struct { fields, layout_done: true })
                 }
                 RsData::Enum { .. } => todo!(),
                 RsData::Ptr { inner, .. } => {
@@ -1057,6 +1063,7 @@ impl<'p> Program<'p> {
             1 => types[0],
             _ => {
                 // TODO: dont allocate the string a billion times
+                println!("tuple struct of {}", types.iter().map(|t| self.log_type(*t)).collect::<String>());
                 let info = self
                     .make_struct(
                         types
@@ -1072,27 +1079,93 @@ impl<'p> Program<'p> {
 
     pub(crate) fn make_struct(&self, parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>)>>) -> Res<'p, TypeInfo<'p>> {
         let mut fields = vec![];
-        let mut bytes = 0;
         for p in parts {
             let (ty, name, default) = p?;
-            let info = self.get_info(ty);
-            let inv_pad = bytes % info.align_bytes as usize;
-            if inv_pad != 0 {
-                bytes += info.align_bytes as usize - inv_pad;
-            }
             fields.push(Field {
                 name,
                 ty,
                 default,
-                byte_offset: bytes,
+                byte_offset: 99999999999,
             });
+        }
+
+        Ok(TypeInfo::Struct { fields, layout_done: false })
+    }
+
+    pub(crate) fn finish_layout_deep(&mut self, ty: TypeId) -> Res<'p, ()> {
+        if self.finished_layout_deep.get(ty.as_index()) {
+            return Ok(());
+        }
+        self.finished_layout_deep.insert(ty.as_index(), true); // do this at the beginning to stop recursion.
+        self.finish_layout(ty)?;
+        let ty = self.raw_type(ty);
+        match &self[ty] {
+            &TypeInfo::Fn(f) | &TypeInfo::FnPtr(f) => {
+                self.finish_layout_deep(f.arg)?;
+                self.finish_layout_deep(f.ret)?;
+            }
+            TypeInfo::Ptr(inner) | TypeInfo::Label(inner) | TypeInfo::Array { inner, .. } => self.finish_layout_deep(*inner)?,
+            TypeInfo::Struct { fields, .. } => {
+                // TODO: no clone
+                for f in fields.clone() {
+                    self.finish_layout_deep(f.ty)?
+                }
+            }
+            TypeInfo::Tagged { cases } => {
+                // TODO: no clone
+                for f in cases.clone() {
+                    self.finish_layout_deep(f.1)?
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    pub(crate) fn finish_layout(&mut self, ty: TypeId) -> Res<'p, ()> {
+        let ty = self.raw_type(ty);
+        if let TypeInfo::Array { inner, .. } = self[ty] {
+            return self.finish_layout(inner);
+        }
+
+        if let TypeInfo::Tagged { cases } = self[ty].clone() {
+            // sad!
+            for c in cases {
+                self.finish_layout(c.1)?;
+            }
+            return Ok(());
+        }
+
+        let TypeInfo::Struct { fields, layout_done } = &self[ty] else {
+            return Ok(());
+        };
+        if *layout_done {
+            return Ok(());
+        }
+
+        let mut fields = fields.clone();
+        for f in &fields {
+            self.finish_layout(f.ty)?;
+        }
+
+        let mut bytes = 0;
+        for p in &mut fields {
+            let info = self.get_info(p.ty);
+            let inv_pad = bytes % info.align_bytes as usize;
+            if inv_pad != 0 {
+                bytes += info.align_bytes as usize - inv_pad;
+            }
+            p.byte_offset = bytes;
+
             // TODO: this must be wrong? surely you dont want to have the array padding out to alignment if its just a nested struct.
             //       tho its what c does. so i guess i need different reprs. and then size_of vs stride_of become different things.
             bytes += info.stride_bytes as usize;
         }
 
-        println!("{}", self.log_struct_layout(&fields));
-        Ok(TypeInfo::Struct { fields })
+        let info = TypeInfo::Struct { fields, layout_done: true };
+        self.types[ty.as_index()] = info.clone();
+        self.type_lookup.insert(info, ty);
+
+        Ok(())
     }
 
     pub extern "C" fn unique_ty(&mut self, ty: TypeId) -> TypeId {
@@ -1218,7 +1291,7 @@ impl<'p> Program<'p> {
     // TODO: get rid of this. its dumb now that it needs to reallocate the vec everytime -- May 25
     pub fn tuple_types(&self, ty: TypeId) -> Option<Vec<TypeId>> {
         match &self[ty] {
-            TypeInfo::Struct { fields } => Some(fields.iter().map(|f| f.ty).collect()),
+            TypeInfo::Struct { fields, .. } => Some(fields.iter().map(|f| f.ty).collect()),
             &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
             _ => None,
         }
@@ -1236,18 +1309,32 @@ impl<'p> Program<'p> {
     }
 
     pub fn struct_type(&mut self, name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
-        let name = self.pool.intern(name);
+        println!("start struct {name}");
         let pool = self.pool;
         let info = self
             .make_struct(fields_in.iter().map(|(name, ty)| Ok((*ty, pool.intern(name), None))))
             .unwrap();
+        println!("end struct {name}");
+        let name = pool.intern(name);
         let ty = self.intern_type(info);
         self.intern_type(TypeInfo::Named(ty, name))
     }
 
     pub fn enum_type(&mut self, name: &str, varients: &[TypeId]) -> TypeId {
-        let as_tuple = self.tuple_of(varients.to_vec());
-        let ty = self.to_enum(self[as_tuple].clone());
+        let ty = self.intern_type(TypeInfo::Tagged {
+            cases: varients
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| {
+                    let name = if let TypeInfo::Named(_, name) = self[*ty] {
+                        name
+                    } else {
+                        self.pool.intern(&format!("_{i}"))
+                    };
+                    (name, *ty)
+                })
+                .collect(),
+        });
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))
     }
@@ -1273,6 +1360,7 @@ impl<'p> Program<'p> {
     }
 
     pub(crate) fn named_tuple(&mut self, name: &str, types: Vec<TypeId>) -> TypeId {
+        println!("named {name}");
         let ty = self.tuple_of(types);
         let name = self.pool.intern(name);
         self.intern_type(TypeInfo::Named(ty, name))
@@ -1294,6 +1382,12 @@ impl<'p> Program<'p> {
             .collect::<String>()
     }
 
+    pub fn get_or_create_info(&mut self, ty: TypeId) -> Res<'p, TypeMeta> {
+        let ty = self.raw_type(ty);
+        self.finish_layout(ty)?;
+        Ok(self.get_info(ty))
+    }
+
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
@@ -1305,8 +1399,9 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
-            TypeInfo::Unknown => TypeMeta::new(0, 1, 0, false, false, 0),
-            TypeInfo::Struct { fields } => {
+            TypeInfo::Unknown => todo!(), //TypeMeta::new(0, 1, 0, false, false, 0),
+            TypeInfo::Struct { fields, layout_done } => {
+                debug_assert!(*layout_done);
                 let mut size = 0;
                 debug_assert_eq!(fields[0].byte_offset, 0);
                 let align = self.get_info(fields[0].ty).align_bytes;
@@ -1332,7 +1427,7 @@ impl<'p> Program<'p> {
                 }
 
                 if bytes % align != 0 {
-                    bytes += align - bytes % align;
+                    bytes += align - (bytes % align);
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
@@ -1345,7 +1440,7 @@ impl<'p> Program<'p> {
 
                 let align = 8;
                 if bytes % align != 0 {
-                    bytes += align - bytes % align;
+                    bytes += align - (bytes % align);
                 }
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.

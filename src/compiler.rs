@@ -240,6 +240,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if let Some(ty) = self.program[f].finished_ty() {
             let comp_ctx = self.program[f].has_tag(Flag::Ct);
+            self.program.finish_layout(ty.arg)?;
+            self.program.finish_layout(ty.ret)?;
             let args = self.slot_count(ty.arg);
             let is_big = (args > 8) || (args == 8 && comp_ctx) || self.slot_count(ty.ret) > 1;
             if self.program[f].has_tag(Flag::Flat_Call) || is_big {
@@ -386,6 +388,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!matches!(self.program[f].body, FuncImpl::Empty));
 
         let ty = self.program[f].unwrap_ty();
+        self.program.finish_layout_deep(ty.arg)?;
+        self.program.finish_layout_deep(ty.ret)?;
 
         #[cfg(target_arch = "aarch64")]
         self.aarch64.make_exec();
@@ -444,7 +448,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].callees
         );
         self.flush_cpu_instruction_cache();
-        let expected_ret_bytes = self.program.get_info(ty.ret).stride_bytes;
+        let expected_ret_bytes = self.program.get_or_create_info(ty.ret)?.stride_bytes;
         let result = if flat_call {
             do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
         } else if c_call {
@@ -481,6 +485,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
         let ret_ty = Ret::get_or_create_type(self.program);
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
+        self.program.finish_layout_deep(arg_ty)?;
+        self.program.finish_layout_deep(ret_ty)?;
         let bytes = arg.serialize_to_ints_one(self.program);
         // let again = Arg::deserialize_from_ints(self.program, &mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
         // debug_assert!(again.is_some());
@@ -1308,6 +1314,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: cant just assert_eq because it does change for rawptr.
             self.coerce_type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
         }
+        // TODO: its kinda sad to do this every time. better to keep track of pending ones and somehow have safe points you know you're probably not in the middle of mutual recursion.
+        self.program.finish_layout_deep(expr.ty)?;
         Ok(res)
     }
 
@@ -1496,7 +1504,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
-                        if self.program.get_info(ty).has_special_pointer_fns {
+                        if self.program.get_or_create_info(ty)?.has_special_pointer_fns {
                             // :SmallTypes
                             // Replace with a call to fn load to handle types smaller than a word.
                             // TODO: this is really stupid
@@ -2005,6 +2013,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     // TODO: this really shouldn't return an error -- May 24
     pub fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
         let ty = T::get_or_create_type(self.program);
+        self.program.finish_layout_deep(ty)?;
         let ints = t.serialize_to_ints_one(self.program);
         let value = Values::many(ints);
         let mut e = FatExpr::synthetic_ty(Expr::Value { value }, loc, ty);
@@ -2159,7 +2168,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut ret = self.program[func].ret.clone();
             if !self.program[func].has_tag(Flag::Generic) && self.infer_types_progress(&mut ret)? {
                 self.program[func].ret = ret;
-                self.program[func].finished_ret = Some(self.program[func].ret.unwrap());
+                let ret = self.program[func].ret.unwrap();
+                self.program[func].finished_ret = Some(ret);
 
                 Some(self.program[func].unwrap_ty())
             } else {
@@ -2185,6 +2195,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
         unsafe { STATS.const_eval_node += 1 };
         let ret_ty = Ret::get_or_create_type(self.program);
+        self.program.finish_layout(ret_ty)?;
         if let Some(val) = self.check_quick_eval(&mut e, ret_ty)? {
             return self.deserialize_values(val);
         }
@@ -2325,6 +2336,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
     pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+        self.program.finish_layout(ret_ty)?;
         unsafe { STATS.const_eval_node += 1 };
         if let Some(values) = self.check_quick_eval(&mut e, ret_ty)? {
             return Ok(values);
@@ -2563,7 +2575,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(()); // TODO: not this!
                 }
                 // TODO: not this!!!
-                (TypeInfo::Struct { fields: f }, TypeInfo::Struct { fields: e }) => {
+                (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
                     if f.len() == e.len() {
                         let ok = f.iter().zip(e.iter()).all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok());
                         if ok {
@@ -2626,7 +2638,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
 
                 // TODO: not this!!! at the very least only do it in the coerceon verion!
-                (TypeInfo::Struct { fields: f }, TypeInfo::Struct { fields: e }) => {
+                (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
                     if f.len() == e.len() {
                         let ok = f.iter().zip(e.iter()).all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok());
                         if ok {
@@ -2673,6 +2685,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Ok((ty, unwrap!(binding.name.ident(), "field name"), default))
             })
             .collect();
+        println!("struct of {types:?}");
         self.program.make_struct(parts.into_iter())
     }
 
@@ -2686,7 +2699,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let oldty = place.ty;
                 let value_ty = self.compile_expr(value, Some(oldty))?;
                 self.type_check_arg(value_ty, oldty, "reassign var")?;
-                if self.program.get_info(oldty).has_special_pointer_fns {
+                if self.program.get_or_create_info(oldty)?.has_special_pointer_fns {
                     // :SmallTypes
                     // Replace with a call to fn store to handle types smaller than a word.
                     self.underef_one(place)?;
@@ -2854,15 +2867,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         let container_ty = unwrap!(self.program.unptr_ty(container_ptr_ty), "",);
 
         let raw_container_ty = self.program.raw_type(container_ty);
+        self.program.finish_layout(raw_container_ty)?;
         match &self.program[raw_container_ty] {
-            TypeInfo::Struct { fields, .. } => {
-                let mut bytes = 0;
-                for (i, f) in fields.iter().enumerate() {
+            TypeInfo::Struct { fields, layout_done } => {
+                debug_assert!(*layout_done);
+                for f in fields {
                     if f.name == name {
                         container_ptr.done = true;
-                        return Ok((bytes, f.ty));
+                        return Ok((f.byte_offset, f.ty));
                     }
-                    bytes += self.program.get_info(f.ty).stride_bytes as usize; // TODO: align
                 }
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
             }
@@ -2872,7 +2885,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok((8, *f_ty));
                     }
                 }
-                err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
+                err!(
+                    "unknown name {} on {:?}. \n{cases:?}",
+                    self.pool.get(name),
+                    self.program.log_type(container_ty)
+                );
             }
             _ => err!(
                 "only structs/enums support field access but found {} = {}",
@@ -3176,7 +3193,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 let ty = self.type_of(asm)?;
                 if let Some(ty) = ty {
-                    if let TypeInfo::Struct { fields } = &self.program[ty] {
+                    self.program.finish_layout_deep(ty)?;
+                    if let TypeInfo::Struct { fields, .. } = &self.program[ty] {
                         let is_ints = fields.iter().all(|t| matches!(self.program[t.ty], TypeInfo::Int(_)));
                         if is_ints {
                             let len = fields.len();
