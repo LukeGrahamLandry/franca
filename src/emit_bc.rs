@@ -541,7 +541,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
                     ResAddr => {
-                        if value.0.len() > 64 || value.0.len() % 8 != 0 {
+                        if self.program.get_info(expr.ty).stride_bytes % 8 != 0 || value.0.len() > 64 || value.0.len() % 8 != 0 {
                             // TODO: HACK
                             //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
                             //       this solution is extra bad becuase it relies on the value vec not being free-ed
@@ -552,7 +552,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                 bytes: self.program.get_info(expr.ty).stride_bytes, // Note: not the same as value.len!!!!!
                             });
                         } else {
-                            debug_assert!(self.program.get_info(expr.ty).stride_bytes % 8 == 0);
                             let mut parts = vec![];
                             deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
                             for value in parts {

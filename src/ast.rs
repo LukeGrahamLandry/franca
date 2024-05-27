@@ -1375,11 +1375,11 @@ impl<'p> Program<'p> {
     //       With raw Any version, you couldn't always change types without reallocating the space and couldn't pass it by value.
     //       AnyScalar=(TypeId, one value), AnyPtr=(TypeId, one value=stack/heap ptr), AnyUnsized=(TypeId, some number of stack slots...)
     pub fn get_info(&self, ty: TypeId) -> TypeMeta {
+        let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         if let Some(info) = self.types_extra.borrow_mut().deref_mut()[ty.as_index()] {
             return info;
         }
-        let ty = self.raw_type(ty);
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
             TypeInfo::Unknown => todo!(), //TypeMeta::new(0, 1, 0, false, false, 0),

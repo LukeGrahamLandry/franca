@@ -673,7 +673,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             | TypeInfo::Fn(_)
             | TypeInfo::Scope
             | TypeInfo::Bool => I64,
-            TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => I64,
+            TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => todo!(),
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr => I64,
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         }

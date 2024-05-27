@@ -1,4 +1,4 @@
-## (May 25/26)
+## (May 25/26/27)
 
 now that im doing alignment shit, i dont really want to duplicate it for InterpSend::SIZE_BYTES so it just reads it from the program,
 which is dumb and slower but the eventual goal is to use same layout as the rust structs so the whole thing goes away.
@@ -48,6 +48,11 @@ which is dumb and slower but the eventual goal is to use same layout as the rust
     it can call debug_log_str.
     but it can also call `fn pls(s: Str) Unit = debug_log_str(s);`
     can also call a copy pasted version of print... so this is all just useless and its some crazy layout thing??
+  - something to do with string escapes maybe?
+    but those work everywhere else.
+  - like i dont have high faith that its not a cranelift bug.
+    maybe we're back to just doing everything myself because its harder to debug other people's stuff.
+- most of the slowdown in calling get_info a lot was because i was checking cache on ty but saving on raw_ty
 
 ## (May 24)
 

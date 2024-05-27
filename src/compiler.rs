@@ -1312,8 +1312,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
 
-            let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
-            self.coerce_type_check_arg(res, requested, msg)?; // "sanity ICE req_expr"
+            // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
+            self.coerce_type_check_arg(res, requested, "sanity ICE req_expr")?;
         }
 
         expr.ty = res;
