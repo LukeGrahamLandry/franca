@@ -55,7 +55,7 @@ unsafe impl GlobalAlloc for MyAllocator {
         if cfg!(not(feature = "be_thread_safe")) && ptr.is_null() {
             ptr = alloc_arena();
         }
-        let ptr = ptr.add(ptr.align_offset(layout.align()));
+        let ptr = ptr.add(ptr.align_offset(layout.align().max(8)));
         MEM.set(ptr.add(layout.size()));
         ptr
     }

@@ -113,8 +113,8 @@ send_num!(isize, 64, true, 8, next_i64, push_i64, i64);
 send_num!(usize, 64, false, 8, next_i64, push_i64, i64);
 send_num!(i32, 32, true, 4, next_u32, push_u32, u32);
 send_num!(u32, 32, false, 4, next_u32, push_u32, u32);
-send_num!(i16, 16, true, 8, next_i64, push_i64, i64); // TODO
-send_num!(u16, 16, false, 8, next_i64, push_i64, i64); // TODO
+send_num!(i16, 16, true, 2, next_u16, push_u16, u16);
+send_num!(u16, 16, false, 2, next_u16, push_u16, u16);
 send_num!(i8, 8, true, 1, next_u8, push_u8, u8);
 send_num!(u8, 8, false, 1, next_u8, push_u8, u8);
 

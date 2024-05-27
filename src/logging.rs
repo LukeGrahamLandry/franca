@@ -339,6 +339,7 @@ impl<'p> Expr<'p> {
             }
 
             Expr::PtrOffset { ptr, bytes } => format!("{}.(~{bytes})", ptr.logd(pool, depth)),
+            Expr::Cast(inner) => format!("@@cast({})", inner.logd(pool, depth)),
             _ => format!("{:?}", self),
         }
     }

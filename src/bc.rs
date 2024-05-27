@@ -61,7 +61,6 @@ pub struct FnBody<'p> {
     pub var_names: Vec<Option<Var<'p>>>,
     pub when: ExecTime,
     pub func: FuncId,
-    pub aarch64_stack_bytes: Option<u16>,
     pub current_block: BbId,
     pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,
     pub clock: u16,
@@ -148,14 +147,22 @@ pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: Values) -> Res<
 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
 pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, out: &mut Vec<i64>) -> Res<'static, ()> {
+    let size = program.get_info(ty).stride_bytes as usize;
+    debug_assert!(
+        size <= bytes.bytes.len() - bytes.i,
+        "deconstruct_values of {} wants {size} bytes but found {bytes:?}",
+        program.log_type(ty)
+    );
     let ty = program.raw_type(ty);
     match &program[ty] {
         TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
         TypeInfo::F64 | TypeInfo::FnPtr(_) | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => out.push(unwrap!(bytes.next_i64(), "")),
         TypeInfo::Int(_) => match program.get_info(ty).stride_bytes {
             1 => out.push(unwrap!(bytes.next_u8(), "") as i64),
+            2 => out.push(unwrap!(bytes.next_u16(), "") as i64),
             4 => out.push(unwrap!(bytes.next_u32(), "") as i64),
-            _ => out.push(unwrap!(bytes.next_i64(), "")), // TODO
+            8 => out.push(unwrap!(bytes.next_i64(), "")),
+            n => todo!("bad int stride {n}"),
         },
         TypeInfo::Bool => out.push(unwrap!(bytes.next_u8(), "") as i64),
         &TypeInfo::Array { inner, len } => {
@@ -197,6 +204,14 @@ impl<'a> ReadBytes<'a> {
         if self.i < self.bytes.len() {
             self.i += 1;
             Some(self.bytes[self.i - 1])
+        } else {
+            None
+        }
+    }
+    pub fn next_u16(&mut self) -> Option<u16> {
+        if self.i + 1 < self.bytes.len() {
+            self.i += 2;
+            Some(u16::from_ne_bytes([self.bytes[self.i - 2], self.bytes[self.i - 1]]))
         } else {
             None
         }
@@ -244,6 +259,12 @@ pub struct WriteBytes(pub Vec<u8>);
 impl WriteBytes {
     pub fn push_u8(&mut self, v: u8) {
         self.0.push(v)
+    }
+
+    pub fn push_u16(&mut self, v: u16) {
+        for v in v.to_le_bytes() {
+            self.0.push(v)
+        }
     }
 
     pub fn push_u32(&mut self, v: u32) {

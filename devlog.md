@@ -53,6 +53,9 @@ which is dumb and slower but the eventual goal is to use same layout as the rust
   - like i dont have high faith that its not a cranelift bug.
     maybe we're back to just doing everything myself because its harder to debug other people's stuff.
 - most of the slowdown in calling get_info a lot was because i was checking cache on ty but saving on raw_ty
+- adding real u16. trying to deconstruct_values a @struct(\_0: u1, \_1: u5, \_2: u16, \_3: u2) from 26 bytes instead of 32.
+  something's not emitting padding for the u16.
+  ah, its `for v in values? { pls.extend(v.0); // TODO: alignment }` in quick_eval ::Tuple.
 
 ## (May 24)
 

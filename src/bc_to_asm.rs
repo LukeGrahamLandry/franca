@@ -8,9 +8,9 @@ use crate::ast::{CallConv, Flag, FnType, Func, FuncFlags, FuncId, FuncImpl, Type
 use crate::bc::{BbId, Bc, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecTime, Res};
 use crate::reflect::BitSet;
-use crate::unwrap;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
+use crate::{unwrap, where_am_i};
 use std::arch::asm;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
@@ -748,7 +748,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // TODO: really you want to suspend this too because the common case is probably that the next thing is a store but thats harder to think about so just gonna start with the dumb thing i was doing before -- May 1
         let (reg, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
 
-        debug_assert_eq!(offset_bytes % 8, 0);
         for _ in 0..slots {
             let working = self.get_free_reg();
             self.load_u64(working, reg, offset_bytes);
@@ -784,6 +783,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             debug!("| [x{reg} + {o}] <- ({:?}) |", v);
             if let &Val::FloatReg(r) = v {
                 self.state.stack.pop().unwrap();
+                assert_eq!(offset_bytes % 8, 0, "TODO: align");
                 self.asm.push(f_str_uo(X64, r, reg, o as i64 / 8))
             } else {
                 let val = self.pop_to_reg();
@@ -801,7 +801,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.asm.push(ldr_uo(X64, dest_reg, src_addr_reg, (offset_bytes / 8) as i64));
             debug_assert!(offset_bytes / 8 < (1 << 12));
         } else {
+            // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
             let reg = self.get_free_reg();
+            debug_assert!(offset_bytes < 1 << 12);
             self.asm.push(add_im(X64, reg, src_addr_reg, offset_bytes as i64, 0));
             self.asm.push(ldr_uo(X64, dest_reg, reg, 0));
             self.drop_reg(reg);
@@ -1147,8 +1149,9 @@ pub fn store_to_ints<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<i64> {
     out
 }
 
-extern "C-unwind" fn not_compiled() {
-    panic!("Tried to call un-compiled function");
+extern "C-unwind" fn not_compiled(a: i64, b: i64, c: i64) {
+    where_am_i();
+    panic!("Tried to call un-compiled function. (x0={a}, x1={b}, x2={c})");
 }
 
 pub mod jit {

@@ -47,7 +47,6 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecTime) ->
         func,
         blocks: vec![],
         name: program[func].name,
-        aarch64_stack_bytes: None,
         current_block: BbId(0),
         inlined_return_addr: Default::default(),
         want_log: program[func].has_tag(Flag::Log_Bc),

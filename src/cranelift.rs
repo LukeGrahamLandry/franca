@@ -21,6 +21,7 @@ use cranelift::{
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
+use types::I16;
 
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
@@ -882,6 +883,14 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     }),
     ("fn store(_: *u32, val: u32) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
         let val = builder.ins().ireduce(I32, v[1]);
+        builder.ins().store(MemFlags::new(), val, v[0], 0);
+        builder.ins().iconst(I64, 0)
+    }),
+    ("fn load(_: *u16) u16;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().uload16(I64, MemFlags::new(), v[0], 0)
+    }),
+    ("fn store(_: *u16, val: u16) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        let val = builder.ins().ireduce(I16, v[1]);
         builder.ins().store(MemFlags::new(), val, v[0], 0);
         builder.ins().iconst(I64, 0)
     }),

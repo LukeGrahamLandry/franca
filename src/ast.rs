@@ -1394,6 +1394,7 @@ impl<'p> Program<'p> {
 
                 for arg in fields {
                     let info = self.get_info(arg.ty);
+                    debug_assert_eq!(arg.byte_offset % info.align_bytes as usize, 0, "{}", self.log_struct_layout(fields));
                     debug_assert!(arg.byte_offset as u16 >= bytes, "{}", self.log_struct_layout(fields));
                     let end = arg.byte_offset as u16 + info.stride_bytes;
                     bytes = bytes.max(end);
@@ -1435,6 +1436,7 @@ impl<'p> Program<'p> {
                 // :SmallTypes
                 match int.bit_count {
                     8 => TypeMeta::new(1, 1, 0, true, false, 1),
+                    16 => TypeMeta::new(1, 2, 0, true, false, 2),
                     32 => TypeMeta::new(1, 4, 0, true, false, 4),
                     _ => TypeMeta::new(1, 8, 0, false, false, 8),
                 }

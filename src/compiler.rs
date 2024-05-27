@@ -465,6 +465,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             match expected_ret_bytes {
                 0 => to_values(self.program, ()),
                 1 => to_values(self.program, r as u8),
+                2 => to_values(self.program, r as u16),
                 4 => to_values(self.program, r as u32),
                 8 => to_values(self.program, r as u64),
                 n => todo!("c call ret {n} bytes"),
@@ -2250,16 +2251,45 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: this only helps if some can be quick-evaled by special cases above, otherwise makes it worse.
                 // TODO:  however.... it debug_asserts it you comment this case out!! -- Apr 30
                 //      because of the special casing on types? (Type, Type) === Type
+                //      I think actually its because you get here when compiling inline asm at the very beginning.
+                //      so you need to be able to do it without all basic ops being ready yet. -- May 27
                 let values: Res<'p, Vec<Values>> = elements
                     .iter()
                     .zip(types)
                     .map(|(e, ty)| self.immediate_eval_expr(e.clone(), ty))
                     .collect();
-                let mut pls = vec![];
-                for v in values? {
-                    pls.extend(v.0); // TODO: alignment
+                let values = values?;
+                if values.len() == 1 {
+                    return Ok(Some(values.into_iter().next().unwrap()));
                 }
-                return Ok(Some(Values::many(pls)));
+
+                self.program.finish_layout(ret_ty)?;
+                let ty = self.program.raw_type(ret_ty);
+                let mut pls = vec![];
+                if let TypeInfo::Struct { fields, .. } = &self.program[ty] {
+                    if fields.len() == values.len() {
+                        for (v, f) in values.into_iter().zip(fields.iter()) {
+                            while pls.len() < f.byte_offset {
+                                pls.push(0);
+                            }
+                            pls.extend(v.0);
+                        }
+                        while pls.len() < self.program.get_info(ty).stride_bytes as usize {
+                            pls.push(0);
+                        }
+                        return Ok(Some(Values::many(pls)));
+                    }
+                    // fallthrough
+                }
+
+                // println!("TODO: untested. quick eval to {}", self.program.log_type(ret_ty));
+                // TODO: handle alignment
+                // for v in values {
+                //     pls.extend(v.0);
+                // }
+                // return Ok(Some(Values::many(pls)));
+                // for now just...
+                // fallthrough
             }
             Expr::Call(f, arg) => {
                 // !slice and !addr can't be const evaled!
