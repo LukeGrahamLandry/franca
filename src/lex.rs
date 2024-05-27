@@ -5,7 +5,6 @@
 use crate::ast::Flag;
 use crate::ast::TypeId;
 use crate::ast::VarType;
-use crate::ffi::InterpSend;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
 use codemap::{File, Span};

@@ -21,6 +21,33 @@ which is dumb and slower but the eventual goal is to use same layout as the rust
   now i fail 11, cl fails 3.
 - @enum(a, b, c) has indexes (0, 4294967296, 8589934592). off by 4 bytes.
   im stupid and did align_to(offset, info.align_bytes as usize); without asigning it back to offset.
+- all the rest of my asm failures are happening in @fmt for floats.
+  problem with adding fn int as callee when you call it inside the macro?
+  cause it works if you call it first and then also in the macro. but idk why it would work on cranelift then.
+  for now just do the easy hack and TODO: actually fix the problem.
+- i just want to get everything kinda working so i can make it less painfully slow!
+  the new InterpFfi has to call get_info like a billion times and its ~47x slower than before i started using bytes.
+  tho get_info is only 64% of samples, im hoping it just gets inlined sometimes.
+- last problem is cranelift jumping into a bunch of zeros for bf_interp.
+  - it happens during compilation, before running main.
+    i can #log_ir of run tho, so it gets that far, it can't compile main.
+  - it seems it can't compile the assert_eq on bools (if i ::println on either side of it, the second doesn't go off).
+    but it can do it in other tests... so what gives??
+  - and deleting random cases from the @switch also makes it compile....? this is kinda scary.
+    like it works if i remove Bf.Open or Bf.Close...
+    but it always compiles fn run anyway, thats somehow affecting its ability to compile the assert_eq in fn main!!!
+  - it works on x86 so i guess its either an alignment thing or a instruction caching thing.
+    i tried always aligning to 8 in my GlobalAlloc since i do flat_call arg/ret with Vec<u8>
+    which might not be correctly aligned but that didn't help.
+  - maybe its like about stack alignment? cause deleting an unused local variable makes it compile.
+    tho asking for opt_level=speed doesn't fix it and i'd hope that would remove the unused things.
+  - its getting to call main but it fails before doing the print.
+    !! but not if i call debug_log_int. now it actively can't call println?
+    can't call print either so its not the stack address thing for the new line.
+    but it does work if i inline print. so its a problem with passing a string as an argument??
+    it can call debug_log_str.
+    but it can also call `fn pls(s: Str) Unit = debug_log_str(s);`
+    can also call a copy pasted version of print... so this is all just useless and its some crazy layout thing??
 
 ## (May 24)
 
@@ -283,26 +310,6 @@ with calls to the inline asm functions that use the short instructions.
   however, they still take 8 bytes as struct fields/stack slots.
   does that mean size_of is wrong for structs containing 8 bytes? yikes.
   oh, no it doesnt... becuase size_of specially lies for u8 and uniques of it, otherwise it still does slot count times 8, so thats ok for now.
-- all the rest of my asm failures are happening in @fmt for floats.
-  problem with adding fn int as callee when you call it inside the macro?
-  cause it works if you call it first and then also in the macro. but idk why it would work on cranelift then.
-  for now just do the easy hack and TODO: actually fix the problem.
-- i just want to get everything kinda working so i can make it less painfully slow!
-  the new InterpFfi has to call get_info like a billion times and its ~47x slower than before i started using bytes.
-  tho get_info is only 64% of samples, im hoping it just gets inlined sometimes.
-- last problem is cranelift jumping into a bunch of zeros for bf_interp.
-  - it happens during compilation, before running main.
-    i can #log_ir of run tho, so it gets that far, it can't compile main.
-  - it seems it can't compile the assert_eq on bools (if i ::println on either side of it, the second doesn't go off).
-    but it can do it in other tests... so what gives??
-  - and deleting random cases from the @switch also makes it compile....? this is kinda scary.
-    like it works if i remove Bf.Open or Bf.Close...
-    but it always compiles fn run anyway, thats somehow affecting its ability to compile the assert_eq in fn main!!!
-  - it works on x86 so i guess its either an alignment thing or a instruction caching thing.
-    i tried always aligning to 8 in my GlobalAlloc since i do flat_call arg/ret with Vec<u8>
-    which might not be correctly aligned but that didn't help.
-  - maybe its like about stack alignment? cause deleting an unused local variable makes it compile.
-    tho asking for opt_level=speed doesn't fix it and i'd hope that would remove the unused things.
 
 ## more place exprs (May 13)
 

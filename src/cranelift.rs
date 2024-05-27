@@ -47,10 +47,10 @@ pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectP
     let mut flags = settings::builder();
     flags.set("preserve_frame_pointers", "true").unwrap();
     flags.set("unwind_info", "false").unwrap();
-    flags.set("enable_pinned_reg", "true").unwrap();
+    // flags.set("enable_pinned_reg", "true").unwrap();
 
     // TODO: want to let comptime control settings...
-    // flags.set("opt_level", "speed").unwrap();
+    flags.set("opt_level", "speed").unwrap();
     let isa = isa.finish(Flags::new(flags));
 
     let calls = cranelift_module::default_libcall_names();
@@ -266,6 +266,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         if self.program[f].has_tag(Flag::Log_Asm) {
             ctx.want_disasm = true;
             let code = ctx.compile_stencil(self.cl.module.isa(), &mut ControlPlane::default()).map_err(wrapg)?;
+            println!("=== asm for {f:?} {} ===", self.program.pool.get(self.program[f].name));
             println!("{}", code.vcode.unwrap());
         }
 

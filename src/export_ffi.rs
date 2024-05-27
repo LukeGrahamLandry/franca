@@ -190,6 +190,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // useful when everything's broken so can't even compile the one defined in the language.
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
+    ("fn debug_log_str(s: Str) Unit", debug_log_str as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
     ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
@@ -454,9 +455,13 @@ extern "C-unwind" fn debug_log_int(_: &mut &mut Program<'_>, i: i64) {
     println!("{i}");
 }
 
+extern "C-unwind" fn debug_log_str(_: &mut &mut Program<'_>, s: &str) {
+    println!("{s}");
+}
+
 extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
     assert!(arg_count == 3 * 8);
-    assert!(ret_count == 1 * 8);
+    assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
         let s = &mut *slice_from_raw_parts_mut(arg as *mut i64, 3);

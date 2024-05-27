@@ -996,7 +996,6 @@ impl<'p> Program<'p> {
         }
         let id = type_info as *const RsType as usize as u128;
         self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            let n = TypeId::unknown;
             // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
             let placeholder = self.types.len();
             let ty_final = TypeId::from_index(placeholder);

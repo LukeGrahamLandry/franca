@@ -25,7 +25,6 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -325,12 +324,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
         self.last_loc = Some(self.program[f].loc);
 
-        if let Some(code) = &self.program[f].body.jitted_aarch64() {
-            self.aarch64.copy_inline_asm(f, code);
-        }
         let use_cl =
             cfg!(feature = "cranelift") && (self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift);
 
+        if let Some(code) = &self.program[f].body.jitted_aarch64() {
+            self.aarch64.copy_inline_asm(f, code);
+        }
         #[cfg(feature = "cranelift")]
         if use_cl && self.program[f].body.cranelift_emit().is_some() {
             crate::cranelift::emit_cl_intrinsic(self.program, &mut self.cranelift, f)?
@@ -1599,7 +1598,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("@builtin requires argument",);
                         };
                         let (value, ty) = unwrap!(self.builtin_constant(name), "unknown @builtin: {:?}", self.pool.get(name));
-                        expr.set(value.into(), ty);
+                        expr.set(value, ty);
                         return Ok(ty);
                     }
                     Flag::Contextual_Field => {
@@ -2679,7 +2678,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn struct_type(&mut self, pattern: &mut Pattern<'p>) -> Res<'p, TypeInfo<'p>> {
         // TODO: maybe const keyword before name in func/struct lets you be generic.
-        let types = self.infer_pattern(&mut pattern.bindings)?;
+        let _ = self.infer_pattern(&mut pattern.bindings)?;
         let parts: Vec<_> = pattern
             .bindings
             .iter()
@@ -2889,7 +2888,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 err!("unknown name {} on {:?}", self.pool.get(name), self.program.log_type(container_ty));
             }
             TypeInfo::Tagged { cases, .. } => {
-                for (i, (f_name, f_ty)) in cases.iter().enumerate() {
+                for (f_name, f_ty) in cases.iter() {
                     if *f_name == name {
                         return Ok((8, *f_ty));
                     }
