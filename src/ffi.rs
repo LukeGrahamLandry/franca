@@ -298,11 +298,11 @@ impl<'p> InterpSend<'p> for TypeId {
         TypeId::ty
     }
     fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        values.push_i64(self.as_raw() as i64)
+        values.push_u32(self.as_raw())
     }
 
     fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(TypeId::from_raw(values.next_i64()? as u32))
+        Some(TypeId::from_raw(values.next_u32()? as u32))
     }
 
     fn name() -> String {

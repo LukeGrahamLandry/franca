@@ -43,6 +43,7 @@ pub enum VarType {
     Const,
 }
 
+// TODO: HACK the layout of this is fragile becuase i pass it by reference without going through InterpSend -- May 27
 #[repr(C, i64)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
@@ -57,7 +58,7 @@ pub enum TypeInfo<'p> {
     Ptr(TypeId), // One element
     Array {
         inner: TypeId,
-        len: usize,
+        len: u32, // note: not usize!! that confusing the padding cause i pass by reference now without going through InterpSend -- May 27
     },
     Struct {
         // You probably always have few enough that this is faster than a hash map. // TODO: check that
@@ -1446,11 +1447,12 @@ impl<'p> Program<'p> {
             TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1), // :SmallTypes
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true, 8),
             // this has to be 8 bytes because it can't have a special load function
-            TypeInfo::Type => TypeMeta::new(1, 8, 0, false, false, 8),
+            TypeInfo::Type => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);
+                println!("{} {}", info.stride_bytes, len as u16,);
                 TypeMeta::new(
                     info.size_slots * len as u16,
                     info.align_bytes,
@@ -1789,9 +1791,9 @@ flag_subset!(Flag, Flag::_Reserved_Null_, Flag::_Reserved_Count_);
 /// This tag is never used for correctness in compiling the program, we track the types of each expression statically and don't need them at runtime.
 /// The tag is not added by release builds of the compiler. In that case, the index types are jsut raw indexes into thier containers.
 macro_rules! tagged_index {
-    ($name:ty, $magic_offset:expr) => {
+    ($name:ty, $magic_offset:expr, $backing:ty) => {
         impl $name {
-            pub const MASK: u32 = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
+            pub const MASK: $backing = if cfg!(debug_assertions) { (1 << $magic_offset) } else { 0 };
 
             #[track_caller]
             pub fn as_index(self) -> usize {
@@ -1807,15 +1809,15 @@ macro_rules! tagged_index {
 
             #[track_caller]
             pub fn from_raw(value: u32) -> Self {
-                let s = Self(value);
+                let s = Self(value as $backing);
                 debug_assert!(s.is_valid(), "{value}");
                 s
             }
 
             #[track_caller]
             pub const fn from_index(value: usize) -> Self {
-                debug_assert!((value as u32) < Self::MASK);
-                Self(value as u32 | Self::MASK)
+                debug_assert!((value as $backing) < Self::MASK);
+                Self(value as $backing | Self::MASK)
             }
 
             pub fn is_valid(self) -> bool {
@@ -1826,15 +1828,15 @@ macro_rules! tagged_index {
 }
 
 // Make sure these tag numbers are all different!
-tagged_index!(TypeId, 31);
-tagged_index!(FuncId, 30);
-tagged_index!(ScopeId, 29);
-tagged_index!(OverloadSetId, 28);
-tagged_index!(LabelId, 27);
+tagged_index!(TypeId, 31, u32);
+tagged_index!(FuncId, 30, u32);
+tagged_index!(ScopeId, 29, u32);
+tagged_index!(OverloadSetId, 28, u32);
+tagged_index!(LabelId, 27, u32);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
-pub struct TypeId(pub u32);
+pub struct TypeId(u32);
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(u32);

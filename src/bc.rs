@@ -135,14 +135,12 @@ pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, t: Values) -> R
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
-pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: Values) -> Res<'p, (Values, Values)> {
-    let mut ints = t.0;
-    let bytes = program.get_info(prefix).stride_bytes;
-    assert!(ints.len() >= bytes as usize);
-    let (_, snd) = ints.split_at(bytes as usize);
-    let snd = snd.to_vec();
-    ints.truncate(bytes as usize);
-    Ok((Values::many(ints), Values::many(snd)))
+pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut ReadBytes) -> Res<'p, Values> {
+    let info = program.get_info(prefix);
+    t.align_to(info.align_bytes as usize);
+    let bytes = info.stride_bytes;
+    let taken = unwrap!(t.take(bytes as usize), "");
+    Ok(Values::many(taken.to_vec()))
 }
 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
@@ -183,11 +181,11 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
             }
             bytes.align_to(program.get_info(ty).align_bytes as usize); // eat trailing stride padding
         }
-        TypeInfo::Tagged { .. } => todo!(),
+        TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
         &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out)?,
         TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         TypeInfo::Unit => {}
-        TypeInfo::Type => out.push(unwrap!(bytes.next_i64(), "")),
+        TypeInfo::Type => out.push(unwrap!(bytes.next_u32(), "") as i64),
         TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => out.push(unwrap!(bytes.next_u32(), "") as i64),
     }
     Ok(())
@@ -246,6 +244,17 @@ impl<'a> ReadBytes<'a> {
             None
         }
     }
+
+    pub fn take(&mut self, len: usize) -> Option<&[u8]> {
+        if self.bytes.len() - self.i >= len {
+            let res = Some(&self.bytes[self.i..self.i + len]);
+            self.i += len;
+            res
+        } else {
+            None
+        }
+    }
+
     pub fn align_to(&mut self, v: usize) {
         while self.i % v != 0 {
             self.i += 1; // TODO: math

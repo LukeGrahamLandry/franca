@@ -150,6 +150,7 @@ extern "C" {
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Ptr(Inner: Type) Type", do_ptr_type as *const u8),
+    ("fn operator_star_prefix(Inner: Type) Type", do_ptr_type as *const u8),
     ("#no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
     ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("#fold fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
@@ -194,6 +195,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
     ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
+    ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
 ];
 
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
@@ -531,7 +533,6 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
         bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
     ),
-    ("fn intern_type(ty: TypeInfo) Type;", bounce_flat_call!(TypeInfo, TypeId, intern_type)),
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
     (
@@ -620,8 +621,8 @@ fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, Fa
     res.unwrap()
 }
 
-fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: TypeInfo<'p>) -> TypeId {
-    compile.program.intern_type(ty)
+extern "C-unwind" fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: &TypeInfo<'p>) -> TypeId {
+    compile.program.intern_type(ty.clone())
 }
 
 fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {

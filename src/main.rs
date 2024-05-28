@@ -19,7 +19,7 @@ use std::{
     env,
     fs::{self, File},
     io::Read,
-    mem,
+    mem::{self},
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,

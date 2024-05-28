@@ -959,9 +959,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program[f];
         let args = func.arg.flatten().into_iter();
         key.1 = arg_value.clone();
+        let mut reader = ReadBytes {
+            bytes: arg_value.bytes(),
+            i: 0,
+        };
         for (name, ty, kind) in args {
-            let (taken, rest) = chop_prefix(self.program, ty, arg_value)?;
-            arg_value = rest;
+            let taken = chop_prefix(self.program, ty, &mut reader)?;
 
             if let Some(var) = name {
                 assert_eq!(kind, VarType::Const, "@comptime arg not const in {}", self.pool.get(self.program[f].name)); // not outside the check because of implicit Unit.
@@ -969,8 +972,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // this is fine cause we renumbered at the top.
             }
         }
-        assert!(
-            arg_value.is_unit(),
+        assert_eq!(
+            reader.bytes.len(),
+            reader.i,
             "ICE: unused arguments. {}. {:?} -> {arg_value:?}",
             self.program.log_type(arg_ty),
             key.1
@@ -1971,12 +1975,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let Expr::Value { value } = &mut arg.expr {
                             let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
                             assert_eq!(ty[0], TypeId::ty, "@as expected type");
-                            let (ty_val, rest) = chop_prefix(self.program, TypeId::ty, value.clone())?;
+                            let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
+                            let ty_val = chop_prefix(self.program, TypeId::ty, &mut reader)?;
                             assert!(ty.len() == 2);
                             let rest_ty = ty[1];
                             let parts = vec![
                                 FatExpr::synthetic_ty(Expr::Value { value: ty_val }, arg.loc, TypeId::ty),
-                                FatExpr::synthetic_ty(Expr::Value { value: rest }, arg.loc, rest_ty),
+                                FatExpr::synthetic_ty(
+                                    Expr::Value {
+                                        value: Values::many(reader.bytes[reader.i..].to_vec()),
+                                    },
+                                    arg.loc,
+                                    rest_ty,
+                                ),
                             ];
                             arg.expr = Expr::Tuple(parts);
                         }
@@ -2591,9 +2602,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn coerce_type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
-        assert!(found.is_valid(), "invalid type: {} {msg}", found.0);
-        assert!(expected.is_valid(), "invalid type: {} {msg}", expected.0);
-
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
@@ -2653,9 +2661,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
-        assert!(found.is_valid(), "invalid type: {} {msg}", found.0);
-        assert!(expected.is_valid(), "invalid type: {} {msg}", expected.0);
-
         // TODO: dont do this. fix ffi types.
         let found = self.program.raw_type(found);
         let expected = self.program.raw_type(expected);
@@ -3033,15 +3038,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             match &arg_expr.expr {
                 Expr::Value { value } => {
                     // TODO: this is super dumb but better than what I did before. -- May 3 -- May 24
-                    let mut values = value.clone();
+                    let values = value;
                     let mut parts = Vec::with_capacity(values.bytes().len());
+
+                    let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
                     for ty in ty {
-                        let (taken, rest) = chop_prefix(self.program, ty, values)?;
-                        values = rest;
+                        let taken = chop_prefix(self.program, ty, &mut reader)?;
                         parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken }, arg_expr.loc, ty))
                     }
+                    assert_eq!(reader.bytes.len(), reader.i, "TODO: nontrivial pattern matching");
                     arg_expr.expr = Expr::Tuple(parts);
-                    assert!(values.is_unit(), "TODO: nontrivial pattern matching");
                 }
                 Expr::Tuple(parts) => {
                     check_len(parts.len())?;

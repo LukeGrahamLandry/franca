@@ -228,7 +228,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::CallDirectFlat { f });
                     let slots = self.slot_count(f_ty.ret);
                     result.push(Bc::AddrVar { id: ret_id });
-                    debug_assert!(self.program.get_info(f_ty.ret).stride_bytes % 8 == 0);
+                    debug_assert!(
+                        self.program.get_info(f_ty.ret).stride_bytes % 8 == 0,
+                        "flat call to stack {} -> {}",
+                        self.program.pool.get(self.program[f].name),
+                        self.program.log_type(f_ty.ret)
+                    );
                     result.push(Bc::Load { slots });
                     result.push(Bc::LastUse { id: ret_id });
                 }
