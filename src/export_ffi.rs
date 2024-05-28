@@ -162,20 +162,20 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //       but to do that here instead of current macro message, I'd need to do ffi of enums in a less insane way.
     //       (these functions don't use InterpSend, they just rely on C ABI).
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
-    ("fn Ty(fst: Type, snd: Type) Type;", pair_type as *const u8),
-    ("fn Ty(fst: Type, snd: Type, trd: Type) Type;", triple_type as *const u8),
+    ("fn Ty(fst: Type, snd: Type) Type #fold;", pair_type as *const u8),
+    ("fn Ty(fst: Type, snd: Type, trd: Type) Type #fold;", triple_type as *const u8),
     // The type of 'fun(Arg) Ret'. This is a comptime only value.
     // All calls are inlined, as are calls that pass one of these as an argument.
     // Captures of runtime variables are allowed since you just inline everything anyway.
     // Const captures behave as you'd expect from first class closures.
-    ("fn Fn(Arg: Type, Ret: Type) Type;", fn_type as *const u8),
+    ("fn Fn(Arg: Type, Ret: Type) Type #fold;", fn_type as *const u8),
     // TODO: include calling convention.
     // Like fun(Arg, Ret) but as a runtime value. Same as a function pointer in c but with less insane syntax :).
     // Use '!addr' on a normal fun value to get create a value of this type.
     // - The function cannot have any runtime variable captures,
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
-    ("fn FnPtr(Arg: Type, Ret: Type) Type;", fn_ptr_type as *const u8),
+    ("fn FnPtr(Arg: Type, Ret: Type) Type #fold;", fn_ptr_type as *const u8),
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("#fold fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
@@ -185,9 +185,9 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         resolve_backtrace_symbol as *const u8,
     ),
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
-    ("fn IntType(bits: i64, signed: bool) Type;", make_int_type as *const u8),
+    ("fn IntType(bits: i64, signed: bool) Type #fold;", make_int_type as *const u8),
     // measured in bytes
-    ("#fold fun size_of(T: Type) i64", get_size_of as *const u8),
+    ("#fold fun size_of(T: Type) i64 #fold", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // useful when everything's broken so can't even compile the one defined in the language.
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),

@@ -1,3 +1,18 @@
+## May 28
+
+another attempt at removing #comptime because const args should do the same thing.
+const_bound_memo ends up being the same as generics_memo, if all args are const
+so it maps to a function with no args that just returns a value.
+tho be be exactly the same you probably need to :: at the call site.
+but its mainly being used for functions that add to overload sets and return types so they're called in a const context anyway.
+I'm hoping this lets me get rid of the hundred line emit_comptime_call function.
+tho it might not because #generic needs to delay knowing its return type.
+
+made const_args_key imm_eval the expression if there's only one and its not already values.
+that was enough to make fn List work without #comptime. and the rest with only one argument.
+same thing for macro eval. same for multi-arg case in const_args_key.
+so now its only needed with #generic.
+
 ## (May 25/26/27)
 
 now that im doing alignment shit, i dont really want to duplicate it for InterpSend::SIZE_BYTES so it just reads it from the program,

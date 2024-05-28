@@ -1912,7 +1912,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match self.compile_expr(handler, Some(TypeId::overload_set)) {
                     Ok(_) => {
                         // TODO: allow Fn and FnPtr as well.
-                        let os: OverloadSetId = from_values(self.program, handler.expect_const()?)?;
+                        let os: OverloadSetId = if let Expr::Value { value } = &handler.expr {
+                            from_values(self.program, value.clone())?
+                        } else {
+                            self.immediate_eval_expr_known(*handler.clone())?
+                        };
                         // Note: need to compile first so if something's not ready yet, you dont error in the asm where you just crash.
                         if self.program[os].name == Flag::As.ident() && self.compile_expr(arg, Some(TypeId::ty)).is_ok() {
                             // HACK: sad that 'as' is special
@@ -3019,9 +3023,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Vec<u8>> {
         if self.program[original_f].arg.bindings.len() == 1 {
-            let Expr::Value { value } = arg_expr.expr.clone() else {
-                err!("expected const arg",)
-            };
+            let arg_ty = self.compile_expr(arg_expr, self.program[original_f].finished_arg)?;
+            let value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
+            if !matches!(arg_expr.expr, Expr::Value { .. }) {
+                arg_expr.set(value.clone(), arg_ty);
+            }
             Ok(value.0)
         } else {
             let check_len = |len| {
@@ -3064,15 +3070,20 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert_eq!(arg_exprs.len(), self.program[original_f].arg.bindings.len(), "TODO: non-tuple baked args");
 
             let mut all_const_args = vec![];
-            for (i, binding) in self.program[original_f].arg.bindings.iter().enumerate() {
+            let mut i = 0;
+            while let Some(binding) = self.program[original_f].arg.bindings.get(i) {
                 if binding.kind != VarType::Const {
+                    i += 1;
                     continue;
                 }
-                let Expr::Value { value } = arg_exprs[i].expr.clone() else {
-                    where_the_fuck_am_i(self, arg_exprs[i].loc);
-                    unreachable!("{}", arg_exprs[i].expr.log(self.pool))
-                };
+                let arg_ty = binding.unwrap();
+                let value = self.immediate_eval_expr(arg_exprs[i].clone(), arg_ty)?;
+                if !matches!(arg_exprs[i].expr, Expr::Value { .. }) {
+                    arg_exprs[i].set(value.clone(), arg_ty);
+                }
+
                 all_const_args.extend(value.bytes());
+                i += 1;
             }
             Ok(all_const_args)
         }
