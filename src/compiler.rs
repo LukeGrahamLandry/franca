@@ -25,6 +25,7 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -932,7 +933,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 return Ok(found);
             }
         }
-        let mut arg_value = key.1;
+        let arg_value = key.1;
 
         // This one does need the be a clone because we're about to bake constant arguments into it.
         // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
@@ -972,6 +973,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // this is fine cause we renumbered at the top.
             }
         }
+        reader.align_to(self.program.get_info(arg_ty).align_bytes as usize);
         assert_eq!(
             reader.bytes.len(),
             reader.i,
@@ -2814,6 +2816,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 place.expr = Expr::PtrOffset {
                     ptr: Box::new(mem::take(container)),
                     bytes,
+                    name: *name,
                 };
                 place.done = true;
                 if want_deref {
@@ -3066,7 +3069,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     continue;
                 }
                 let Expr::Value { value } = arg_exprs[i].expr.clone() else {
-                    unreachable!()
+                    where_the_fuck_am_i(self, arg_exprs[i].loc);
+                    unreachable!("{}", arg_exprs[i].expr.log(self.pool))
                 };
                 all_const_args.extend(value.bytes());
             }

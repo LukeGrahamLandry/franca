@@ -45,9 +45,6 @@
     assert_eq(v[1], 8);
     assert_eq(v[2], 9);
     drop(v&);
-    
-    let s: Slice$Str = ("1", "2", "3")!slice;
-    // multi_println(s);  // This is annoying cause it prints
 }
 
 #test fn comparing_strings_eq() = {
@@ -60,11 +57,16 @@
 
 // note: this is a good one to fix first when verbose_assert is broken.
 #test fn stringify_int() = {
-    assert_eq(true, eq(str(5), "5"));
-    assert_eq(true, eq(str(12), "12"));
-    assert_eq(true, eq(str(345), "345"));
+    output: List(u8) = list();
+    5.display(output&);
+    assert_eq(true, eq(output.items(), "5"));
+    output&.clear();
+    12.display(output&);
+    assert_eq(true, eq(output.items(), "12"));
+    output&.clear();
+    345.display(output&);
+    assert_eq(true, eq(output.items(), "345"));
 }
-
 
 #test fn cmp_prefix_suffix() = {
     assert_eq(true, startswith("abcd", "ab"));
@@ -84,7 +86,7 @@
 }
 
 #test fn splitting_strings() = {
-    var parts: List$Str = split("Hello world. This is words.", " ");
+    var parts: List(Str) = split("Hello world. This is words.", " ");
     assert_eq(5, parts.len);
     assert_eq(true, eq(parts[0], "Hello"));
     assert_eq(true, eq(parts[1], "world."));
@@ -94,7 +96,7 @@
     assert_eq(false, eq(parts[1], "Hello"));  // i live in fear
     
     // Count start and end as empty strings
-    var parts: List$Str = split("%a%b%", "%");
+    var parts: List(Str) = split("%a%b%", "%");
     assert_eq(4, parts.len);
     assert_eq(true, eq(parts[0], ""));
     assert_eq(true, eq(parts[1], "a"));
@@ -125,4 +127,38 @@ world""";
     assert_eq("""\""", "\\");
     assert_eq(10, "\n".char());  // Note: .char is const so this relies on #fold. 
     assert_eq(@as(i64) 0xAB, "\xAB".char());
+}
+
+#test fn buckets() = {
+    arr: BucketArray(i64) = init(128);
+    pointers: List(*i64) = list(1000);
+    total := 0;
+    range(0, 1000) {(i: i64)|
+        ptr := arr&.push(i);
+        pointers&.push(ptr);
+        total += i;
+    };
+    pointers.enumerate {(i: i64, p: **i64) Unit|
+        assert(eq(i, p[][]), "fail");
+    };
+    
+    arr2: BucketArray(*i64) = init(128);
+    chunks: List(Slice(*i64)) = list(20);
+    i := 0;
+    chunk_size :: 50;  // not a factor of the bucket size!
+    while(=> i.lt(1000)) {|
+        chunk := pointers&.items().subslice(i, chunk_size); 
+        ref := arr2&.push_all(chunk);
+        chunks&.push(ref);
+        i += chunk_size;
+    };
+    
+    sum := 0;
+    for(chunks){(chunk: Slice(*i64))|
+        for(chunk){(i: *i64)|
+            sum += i[];
+        };
+    };
+    
+    assert_eq(sum, total);
 }

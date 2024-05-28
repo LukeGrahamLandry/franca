@@ -11,7 +11,10 @@ fun len();
 fun memcpy();
 fun rest();
 fun find();
-
+fun last();
+fun is_empty();
+fun slice_last();
+    
 fun range(start: i64, end: i64, const yield: Fn(i64, Unit)) Unit = {
     var i = start;
     while(=> i.lt(end)) {|
@@ -70,6 +73,13 @@ fun Slice(const T: Type) Type = {
         self.slice(first, self.len())
     }
     
+    fun slice_last(self: Self, count: i64) ?Slice(T) = {
+        ::if(?Slice(T));
+        if(self.len.lt(count), fn()?Slice(T)=> (None = unit)) {()?Slice(T)|
+            (Some = self.slice(self.len.sub(count), self.len))
+        }
+    }
+    
     Self
 }
 
@@ -83,7 +93,6 @@ Str :: Slice(u8);
 // A value type fixed size array. Like [T; len] in Rust or [len] T in Zig.
 #comptime
 fn Array(const T: Type, const count: i64) Type = {
-    
     Self :: {
         // TODO: HACK. I should be able to call intern_type directly but can't call deconstruct_values on a tagged thing. this mostly just works by luck. -- May 27
         info: TypeInfo = (Array = (inner = T, len = count));
@@ -188,6 +197,15 @@ fn DeriveIndexable(const Self: Type, const T: Type) Unit #comptime = {
             ptr[] = t;
         };
     }
+    
+    fun last(self: Self) ?*T = {
+        ::if(?*T);
+        if(self.is_empty(), fn()?*T=> (None = unit)) {()?*T|
+            (Some = self.index(self.len.sub(1)))
+        }
+    }
+    
+    fun is_empty(self: Self) bool = self.len().eq(0);
 }
 
 fun endswith(haystack: Str, needle: Str) bool = {
@@ -209,69 +227,4 @@ fun startswith(haystack: Str, needle: Str) bool = {
             eq(start, needle)
         }
     )
-}
-
-// TODO: this should return an option. 
-// TODO: use @switch once I have ranges. 
-fun hex_digit(cc: u8) i64 = {
-    c: i64 = cc;
-    if(ge(c, 97), 
-        fn() i64 =>  { assert(lt(c, 107), "hex OOB"); add(sub(c, 97), 10) }, 
-        fn() i64 => if(ge(c, 65), 
-            fn() i64 => { assert(lt(c, 75), "hex OOB"); add(sub(c, 65), 10) }, 
-            fn() i64 => { assert(lt(c, 58), "hex OOB"); sub(c, 48)}
-        )
-    )
-}
-
-// TODO: this should return an error. 
-fun hex(s: Str) i64 = {
-    var total = 0;
-    var scale = 1;
-    var i = s.len().sub(1);
-    var first = 0;
-    
-    // This prevents overflow for tracking scale for lots of leading zeros. 
-    // TODO: add a test that requires this. lol its an insane number tho so could just not bother 
-    while(=> first.lt(s.len()).and(=> eq(get(s, first), @as(u8) 48))) {|
-        first = add(first, 1) 
-    };
-    
-    while(=> ge(i, first)) {|
-        total = add(total, mul(scale, hex_digit(get(s, i))));
-        scale = mul(scale, 16);
-        i = sub(i, 1);
-    };
-    total
-}
-
-fun multi_println(s: Slice$Str) Unit = {
-    for(s) {(s: *Str)| println(s[]); };
-}
-
-// TODO: this should return an option instead of asserting. 
-fun dec_digit(cc: u8) i64 = {
-    c: i64 = cc;
-    //assert(c.ge("0".char()).and(c.le("9".char())), "dec OOB");
-    c.sub("0".char())
-}
-    
-// TODO: this should return an error. 
-fun float(s: Str) f64 = {
-    value := 0.0;
-    scale := 0.1;
-    seen_decimal := false;
-    for(s){(c: u8)|
-        if(seen_decimal) {|
-            value += dec_digit(c).float().mul(scale);
-            scale = scale.div(10.0);  // TODO: /= doesn't work??
-        } {|
-            if(c.eq(".".ascii()), => { seen_decimal = true; }) {|
-                value *= 10.0;
-                value += dec_digit(c).float();
-            }
-        };
-    };
-    
-    value
 }

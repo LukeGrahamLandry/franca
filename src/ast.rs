@@ -178,6 +178,7 @@ pub enum Expr<'p> {
     PtrOffset {
         ptr: Box<FatExpr<'p>>,
         bytes: usize,
+        name: Ident<'p>,
     },
     GetParsed(usize),
     Cast(Box<FatExpr<'p>>),
@@ -205,7 +206,7 @@ pub trait WalkAst<'p> {
             return;
         }
         match &mut expr.expr {
-            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!(),
+            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!("ICE: walk. (if def functions not supported yet?)"),
             Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) => {
                 self.expr(fst);

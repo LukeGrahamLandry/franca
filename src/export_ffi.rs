@@ -243,7 +243,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "const DlHandle = rawptr; const CStr = Unique$Ptr(u8);").unwrap();
+            writeln!(out, "const DlHandle = rawptr; const CStr = Unique(Ptr(u8));").unwrap();
             writeln!(out, "TimeSpec :: @struct(seconds: i64, nanoseconds: i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#pub #comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
@@ -536,6 +536,10 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
     (
+        "fn get_type_info_raw(ty: Type) TypeInfo;",
+        bounce_flat_call!(TypeId, TypeInfo, get_type_info_raw),
+    ),
+    (
         "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) Unit;",
         bounce_flat_call!(((FatExpr, TypeId), usize), Unit, const_eval_any),
     ),
@@ -626,6 +630,10 @@ extern "C-unwind" fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: &TypeInf
 }
 
 fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
+    compile.program[ty].clone()
+}
+fn get_type_info_raw<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
+    let ty = compile.program.raw_type(ty);
     compile.program[ty].clone()
 }
 

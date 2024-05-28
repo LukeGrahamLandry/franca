@@ -430,10 +430,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.expr_call(prefix, arg)
                 }
                 Dollar => {
-                    self.start_subexpr();
-                    self.eat(Dollar)?;
-                    let arg = self.parse_expr()?;
-                    self.expr_call(prefix, arg)
+                    return Err(self.error_next(String::from("token '$' is reserved")));
                 }
                 LeftSquiggle => {
                     self.start_subexpr();

@@ -30,17 +30,18 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
     stmts: Slice(FatStmt) = target.expr.Block.body;
     arg = compile_ast(arg);
     enum_type := arg.ty;
-    info := get_type_info(enum_type);
+    info := get_type_info_raw(enum_type);
     
     kind := info&!tag[];
     is_ptr := false;
     if(eq(kind, tag_value(TypeInfo, @symbol(Ptr)))){|
         enum_type = (@as(*Type) info.Ptr&)[];
-        info = get_type_info(enum_type);
+        info = get_type_info_raw(enum_type);
         is_ptr = true;
     };
     ptr_ty := *enum_type;
     
+    assert(eq(info&!tag[], tag_value(TypeInfo, @symbol(Tagged))), "@match expected argument type to be @tagged");
     info : Tagged!builtin = info.Tagged;
     
     // TODO: single element structs suck ass
@@ -67,6 +68,7 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
         var arg_ptr = <if(is_ptr, =>arg, =>'arg_val&')>;
         let tag_val = arg_ptr!tag[];
         <{
+            count := 0;
             for(stmts) { (stmt: *FatStmt) | 
                 if(eq(stmt[].stmt&!tag[], tag_value(Stmt, @symbol(Eval)))) {|  // (1)
                     var handler_body = stmt.stmt.Eval&;
@@ -100,8 +102,16 @@ fun match(var arg: FatExpr, var target: FatExpr) FatExpr = {
                     if(is_ptr){|
                         case_access = '<case_access>&';
                     };
+                    count = count.add(1);
                     body = '(eq(tag_val, <tag>), => <handler_body[]>(<case_access>), => <body>)!if';
                 };
+            };
+            if(count.ne(varients.len)) {|
+                print("warning: wrong number of @match cases (did you forget to wrap them in brackets?). ");
+                print("expected ");
+                print(varients.len);
+                print(" but found ");
+                println(count);
             };
             body
         }>
@@ -172,7 +182,7 @@ fun switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
 #macro #outputs(i64)
 fun bits(var arg: AstExpr) AstExpr = {
     var zero = 0;
-    var parts: Slice$AstExpr = arg.expr.Tuple;
+    var parts: Slice(AstExpr) = arg.expr.Tuple;
     var expr = '@as(u32) 0';
     var shift = 32;
     for(parts, fn(part: *AstExpr) Unit => {
@@ -199,9 +209,10 @@ fun bits(var arg: AstExpr) AstExpr = {
     
     // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
     if(shift.ne(0)){|
-        var msg = concat(str(shift), " != 0; expected 32 bits. TODO: other sizes.");
-        let msg: Str = msg&.items();
-        panic(msg);
+        @println("% != 0; expected 32 bits. TODO: other sizes.", shift);
+        //var msg = concat(str(shift), " != 0; expected 32 bits. TODO: other sizes.");
+        //let msg: Str = msg&.items();
+        //panic(msg);
     };
     
     as(u32, expr)
@@ -226,7 +237,10 @@ fun bits(var arg: AstExpr) AstExpr = {
 fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatExpr = {
     kind := place.expr&!tag[];
     // TODO: generate a typed enum for the tag so this could be kind.eq(.GetVar).or(kind.eq(.GetNamed))
-    is_var_access := eq(kind, tag_value(Expr, @symbol(GetVar))).or(eq(kind, tag_value(Expr, @symbol(GetNamed))));
+    is_var_access := 
+        eq(kind, tag_value(Expr, @symbol(GetVar)))
+        .or(eq(kind, tag_value(Expr, @symbol(GetNamed))))
+        .or(eq(kind, tag_value(Expr, @symbol(FieldAccess)))); // TODO: once field access is allowed on r-values, it can have side effects.  
     
     ::if(FatExpr); // TODO: auto template instantiation. 
     
@@ -256,7 +270,7 @@ fun enum(var names: FatExpr) FatExpr = {
 
     fn binding(name: Symbol, value: i64) Binding = {
         template := '(a = 0)';
-        all : Slice$Binding = template.expr.StructLiteralP.bindings; 
+        all : Slice(Binding) = template.expr.StructLiteralP.bindings; 
         out := all.get(0);
         out.name = (Ident = name);
         out.default._0 = 0; // Some 
@@ -264,8 +278,8 @@ fun enum(var names: FatExpr) FatExpr = {
         out
     }
     
-    cases : List$Binding = list();
-    parts : Slice$FatExpr = names.expr.Tuple;
+    cases : List(Binding) = list();
+    parts : Slice(FatExpr) = names.expr.Tuple;
     enumerate(parts) {(i: i64, part: *FatExpr)|
         // TODO: really need @default on match cause this is annoying. 
         @switch(part[].expr&!tag[]) {

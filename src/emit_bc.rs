@@ -667,7 +667,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     name => err!("{name:?} is known flag but not builtin macro",),
                 }
             }
-            Expr::PtrOffset { ptr, bytes } => {
+            Expr::PtrOffset { ptr, bytes, .. } => {
                 // TODO: compiler has to emit tagchecks for enums now!!
                 self.compile_expr(result, ptr, PushStack, false)?;
 

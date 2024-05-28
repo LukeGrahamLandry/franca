@@ -12,8 +12,8 @@ fun write(fd: *Fd, bytes: Slice(u8)) Unit = {
     assert(written.eq(len), "Failed Write");
 }
 
-fun write(self: *List$u8, bytes: Str) Unit = self.push_all(bytes);
-fun display(self: Str, writer: *List$u8) Unit = writer.write(self);
+fun write(self: *List(u8), bytes: Str) Unit = self.push_all(bytes);
+fun display(self: Str, writer: *List(u8)) Unit = writer.write(self);
 
 /// @fmt(Writer, fmt_spec_str, ...Args)
 /// Currently display is only implemented with 'Writer' being *List$u8 (TODO: need better generics). 
@@ -63,7 +63,7 @@ fun concat(var arg: AstExpr) AstExpr = {
     var actions: List(AstExpr) = list(args.len());
     
     '{
-        var join_list: List$u8 = list();
+        var join_list: List(u8) = list();
         <{
             args.enumerate(fn(i: i64, param: *AstExpr) Unit => {  // TODO: zip iterators 
                 // TODO: having () in the cast instead of lit(Unit) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
@@ -84,8 +84,8 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
     var target = compile_ast(target);
     // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     target.ty = UnknownType;
-    var original: Slice$AstExpr = target.expr.Tuple;
-    var tuple: List$AstExpr = list(original.len.add(1));
+    var original: Slice(AstExpr) = target.expr.Tuple;
+    var tuple: List(AstExpr) = list(original.len.add(1));
     tuple&.push(arg);
     tuple&.push_all(original);
     target.expr.Tuple = (tuple.maybe_uninit.ptr, tuple.len); // TODO
@@ -94,7 +94,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
 
 #macro 
 fun println(arg: AstExpr) AstExpr = '{
-    var out: List$u8 = list(0);
+    var out: List(u8) = list(0);
     @fmt(@prepend_tuple(out&) <arg>);
     println(out&.items());
     out&.drop();
@@ -102,29 +102,43 @@ fun println(arg: AstExpr) AstExpr = '{
 
 
 // TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
-fun display(self: i64, writer: *List$u8) Unit = display(self.str(), writer);
+fun display(i: i64, s: *List(u8)) Unit = {
+    if(i.lt(0)) {|
+        push(s, "-".ascii());
+        i.neg().display(s);
+    } {|
+        is_digit := i.ge(0).and(i.lt(10));
+        if(is_digit, 
+            => s.push(add(48, i)),
+            => {
+                i.div(10).display(s);
+                s.push(i.mod(10).add(48));
+            }
+        );
+    };
+}
 
-fun display(self: bool, writer: *List$u8) Unit = display(self.str(), writer);
+fun display(self: bool, writer: *List(u8)) Unit = display(self.str(), writer);
 
-fun display(self: Type, writer: *List$u8) Unit = {
+fun display(self: Type, writer: *List(u8)) Unit = {
     display("TODO: display type", writer);
 }
 
-fun display(self: Symbol, writer: *List$u8) Unit = {
+fun display(self: Symbol, writer: *List(u8)) Unit = {
     // TODO: !!!! don't use c str! but need to have less sketchy tuple abi. 
     display(self.c_str(), writer);
 }
 
 // You probably don't want to be calling this often, it has to iterate the string to get the length. 
-fun display(self: CStr, writer: *List$u8) Unit = {
+fun display(self: CStr, writer: *List(u8)) Unit = {
     self.for {(c: u8) Unit|
         writer.push(c);
     };
 }
 
-fun display(self: Unit, writer: *List$u8) Unit = display("()", writer);
+fun display(self: Unit, writer: *List(u8)) Unit = display("()", writer);
 
-fun display(self: f64, writer: *List$u8) Unit = {
+fun display(self: f64, writer: *List(u8)) Unit = {
     // TODO: if you try to inline this into the macro call, it crashes trying to compile in fn fmt. 
     //       bus error. works on cranelift tho which is fun. 
     //       works if you call self.int here and then also inline it so its a problem with adding it as a callee?
@@ -164,13 +178,14 @@ fun for(var self: CStr, const f: Fn(u8, Unit)) Unit = {
     }
 }
 
-/// you probably don't want to call this very often. 
-fun to_list(self: CStr) List$u8 = {
-    out : List$u8 = list();
-    self.for {(c: u8) Unit|
-        out&.push(c);
+/// Slowly iterates the string to find the null terminator. 
+/// The returned string is backed by the same memory as the original.
+fun str(self: CStr) Str = {
+    len := 0;
+    self.for {(_: u8) Unit| 
+        len += 1;
     };
-    out
+    (ptr = @as(*u8) self, len = len)
 }
 
 /// Like rust, not c. hex escapes eat exactly two chars. no octal escapes except \0. 
@@ -182,7 +197,7 @@ fn __string_escapes(raw: Str) Str #fold = {
     carriage_return : u8 : 13;
     new_line        : u8 : 0x0A;
 
-    out : List$u8 = list(raw.len);
+    out : List(u8) = list(raw.len);
     i := 0;
     while(=> i.lt(raw.len)){|
         c := raw[i]; i += 1;
@@ -210,4 +225,87 @@ fn __string_escapes(raw: Str) Str #fold = {
     //       maybe this should be a macro that works on idents so compiler knows they're still just a string literal.
     //       but that kinda feels less elegant. 
     out.items() // LEAK
+}
+
+fun println(msg: bool) Unit = {
+    let msg = (msg, =>"true", =>"false")!if;
+    println(msg);
+}
+
+fun println(i: i64) Unit = {
+    mem: List(u8) = list(i.div(10).abs().add(2));
+    i.display(mem&);
+    mem&.push_all("\n");
+    print(mem&.items());
+    mem&.drop();
+}
+fun println(msg: u8) Unit = println(@as(i64) msg);
+
+fn print(i: i64) Unit = {
+    mem: List(u8) = list(i.div(10).abs().add(1));
+    i.display(mem&);
+    print(mem&.items());
+    mem&.drop();
+}
+
+// TODO: this should return an option. 
+// TODO: use @switch once I have ranges. 
+fun hex_digit(cc: u8) i64 = {
+    c: i64 = cc;
+    if(ge(c, 97), 
+        fn() i64 =>  { assert(lt(c, 107), "hex OOB"); add(sub(c, 97), 10) }, 
+        fn() i64 => if(ge(c, 65), 
+            fn() i64 => { assert(lt(c, 75), "hex OOB"); add(sub(c, 65), 10) }, 
+            fn() i64 => { assert(lt(c, 58), "hex OOB"); sub(c, 48)}
+        )
+    )
+}
+
+// TODO: this should return an error. 
+fun hex(s: Str) i64 = {
+    var total = 0;
+    var scale = 1;
+    var i = s.len().sub(1);
+    var first = 0;
+    
+    // This prevents overflow for tracking scale for lots of leading zeros. 
+    // TODO: add a test that requires this. lol its an insane number tho so could just not bother 
+    while(=> first.lt(s.len()).and(=> eq(get(s, first), @as(u8) 48))) {|
+        first = add(first, 1) 
+    };
+    
+    while(=> ge(i, first)) {|
+        total = add(total, mul(scale, hex_digit(get(s, i))));
+        scale = mul(scale, 16);
+        i = sub(i, 1);
+    };
+    total
+}
+
+
+// TODO: this should return an option instead of asserting. 
+fun dec_digit(cc: u8) i64 = {
+    c: i64 = cc;
+    //assert(c.ge("0".char()).and(c.le("9".char())), "dec OOB");
+    c.sub("0".char())
+}
+    
+// TODO: this should return an error. 
+fun float(s: Str) f64 = {
+    value := 0.0;
+    scale := 0.1;
+    seen_decimal := false;
+    for(s){(c: u8)|
+        if(seen_decimal) {|
+            value += dec_digit(c).float().mul(scale);
+            scale = scale.div(10.0);  // TODO: /= doesn't work??
+        } {|
+            if(c.eq(".".ascii()), => { seen_decimal = true; }) {|
+                value *= 10.0;
+                value += dec_digit(c).float();
+            }
+        };
+    };
+    
+    value
 }
