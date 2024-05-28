@@ -398,7 +398,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let TypeInfo::Fn(_) = self.program[f.ty] {
                     let f_id = unwrap!(f.as_const(), "tried to call non-const fn").unwrap_func_id();
                     let func = &self.program[f_id];
-                    assert!(!func.has_tag(Flag::Comptime));
+                    assert!(!func.has_tag(Flag::Generic));
                     return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
                 }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {

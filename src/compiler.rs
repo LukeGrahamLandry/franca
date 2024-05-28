@@ -154,14 +154,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
-        // TODO: really check_quick_eval should do this.
-        //       but be careful about just deleting this check cause it might make you need to call a jitted function too soon and randonly bus error? -- May 22
         let value = to_values(self.program, expect)?;
-        if let Some(res) = self.program.generics_memo.get(&(self.make_slice_t.unwrap(), value.clone())) {
-            let ty: TypeId = from_values(self.program, res.0.clone())?;
-            return Ok(ty);
-        }
-
         let f = self.as_literal(self.make_slice_t.unwrap(), loc)?;
         // f.ty = ty; // TODO: it doesn't compile the function if the type here is FuncId?
         let a = FatExpr::synthetic_ty(Expr::Value { value }, loc, TypeId::ty);
@@ -576,7 +569,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
-        assert!(!self.program[f].has_tag(Flag::Comptime));
+        assert!(!self.program[f].has_tag(Flag::Generic));
         self.last_loc = Some(self.program[f].loc);
 
         let mut special = false;
@@ -649,7 +642,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(self.program[f].finished_ret.unwrap());
         }
 
-        assert!(!self.program[f].has_tag(Flag::Comptime));
+        assert!(!self.program[f].has_tag(Flag::Generic));
         let arguments = self.program[f].arg.flatten();
         for (name, ty, kind) in arguments {
             // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
@@ -895,112 +888,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
         ice!("missing argument {}", arg_name.log(self.pool))
-    }
-
-    // TODO: you only need to call this for generic functions that operate on thier own types.
-    //       If you're just doing comptime manipulations of a TypeInfo to be used elsewhere,
-    //       it can be interpreted as a normal function so you don't have to clone the ast on every call.
-    // TODO: fuse this with bind_const_arg. I have too much of a combinatoric explosion of calling styles going on.
-    // TODO: !!! maybe call this @generic instead of @comptime? cause other things can be comptime
-    // Return type is allowed to use args.
-    fn emit_comptime_call(&mut self, template_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, (Values, TypeId)> {
-        // println!("comptime_call {:?} {}", template_f, arg_expr.log(self.pool));
-        // Don't want to renumber, so only resolve on the clone. // TODO: this does redundant work on closed constants.
-        self.program[template_f].assert_body_not_resolved()?;
-
-        debug_assert!(self.program[template_f].get_flag(FuncFlags::ResolvedSign));
-
-        let state = DebugState::ComptimeCall(template_f, self.program[template_f].name);
-        self.push_state(&state);
-        // We don't care about the constants in `result`, we care about the ones that existed when `f` was declared.
-        // BUT... the *arguments* to the call need to be evaluated in the caller's scope.
-
-        let no_memo = self.program[template_f].has_tag(Flag::No_Memo); // Currently this is only used by 'fn Unique' because that doesn't want to go in the generics_memo cache.
-
-        let arg_ty = self.program[template_f].finished_arg.unwrap();
-        let found_ty = self.compile_expr(arg_expr, Some(arg_ty))?;
-        self.type_check_arg(found_ty, arg_ty, "comptime call")?; // TODO: redundant
-        let arg_value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
-
-        // Note: the key is the original function, not our clone of it. TODO: do this check before making the clone.
-        let mut key = (template_f, arg_value); // TODO: no clone
-
-        if !no_memo {
-            let found = self.program.generics_memo.get(&key);
-            if let Some(found) = found {
-                let found = found.clone();
-                self.pop_state(state);
-                return Ok(found);
-            }
-        }
-        let arg_value = key.1;
-
-        // This one does need the be a clone because we're about to bake constant arguments into it.
-        // If you try to do just the constants or chain them cleverly be careful about the ast rewriting.
-        let mut func = self.program[template_f].clone();
-        ResolveScope::resolve_body(&mut func, self)?;
-        func.annotations.retain(|a| a.name != Flag::Comptime.ident()); // this is our clone, just to be safe, remove the tag.
-
-        // TODO: memo doesn't really work on most things you'd want it to (like pointers) because those functions aren't marked @comptime, so they dont get here, because types are just normal values now
-        //       now only here for generic return type that depends on an arg type (which don't need memo for correctness but no reason why not),
-        //       or when impl new functions so can only happen once so they dont make redundant overloads.  -- Apr 20
-        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
-
-        assert!(!arg_expr.ty.is_unknown());
-        arg_expr.set(arg_value.clone(), arg_expr.ty);
-
-        // Bind the arg into my new constants so the ret calculation can use it.
-        // also the body constants for generics need this. much cleanup pls.
-        // TODO: factor out from normal functions?
-
-        let scope = func.scope.unwrap();
-        let f = self.program.add_func(func);
-        self[scope].funcs.push(f);
-
-        let func = &self.program[f];
-        let args = func.arg.flatten().into_iter();
-        key.1 = arg_value.clone();
-        let mut reader = ReadBytes {
-            bytes: arg_value.bytes(),
-            i: 0,
-        };
-        for (name, ty, kind) in args {
-            let taken = chop_prefix(self.program, ty, &mut reader)?;
-
-            if let Some(var) = name {
-                assert_eq!(kind, VarType::Const, "@comptime arg not const in {}", self.pool.get(self.program[f].name)); // not outside the check because of implicit Unit.
-                self.save_const_values(var, taken, ty, arg_expr.loc)?;
-                // this is fine cause we renumbered at the top.
-            }
-        }
-        reader.align_to(self.program.get_info(arg_ty).align_bytes as usize);
-        assert_eq!(
-            reader.bytes.len(),
-            reader.i,
-            "ICE: unused arguments. {}. {:?} -> {arg_value:?}",
-            self.program.log_type(arg_ty),
-            key.1
-        );
-
-        // Now the args are stored in the new function's constants, so the normal infer thing should work on the return type.
-        // Note: we haven't done local constants yet, so ret can't yse them.
-        self.program[f].annotations.retain(|a| a.name != Flag::Generic.ident()); // HACK
-        let fn_ty = unwrap!(self.infer_types(f)?, "not inferred");
-        let ret = fn_ty.ret;
-
-        // Drop the instantiation of the function specialized to this call's arguments.
-        // We cache the result and will never need to call it again.
-        let func = mem::take(&mut self.program[f]);
-        let FuncImpl::Normal(body) = func.body else { unreachable!() };
-
-        let result = self.immediate_eval_expr(body, ret)?;
-
-        if !no_memo {
-            self.program.generics_memo.insert(key, (result.clone(), ret));
-        }
-
-        self.pop_state(state);
-        Ok((result, ret))
     }
 
     fn compile_stmt(&mut self, stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
@@ -2954,16 +2841,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         let loc = expr.loc;
         let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
-        let func = &self.program[fid];
-        let is_comptime = func.has_tag(Flag::Comptime);
-        if is_comptime {
-            let (ret_val, ret_ty) = self.emit_comptime_call(fid, arg_expr)?;
-            let ty = requested.unwrap_or(ret_ty); // TODO: make sure someone else already did the typecheck.
-            assert!(!ty.is_unknown());
-            expr.set(ret_val.clone(), ty);
-            return Ok(((ty), true));
-        }
-
         self.ensure_resolved_sign(fid)?;
         let arg_ty = self.infer_arg(fid)?;
         self.compile_expr(arg_expr, Some(arg_ty))?;
@@ -3176,6 +3053,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.bind_const_arg(new_fid, name, value, ty, arg_expr.loc)?;
             self.set_literal(arg_expr, ())?;
 
+            if self.program[new_fid].has_tag(Flag::Generic) {
+                self.program[new_fid].annotations.retain(|a| a.name != Flag::Generic.ident());
+                self.infer_types(new_fid)?;
+            }
+
             let ty = self.program.func_type(new_fid);
             f_expr.set(new_fid.as_raw().into(), ty);
             self.program.const_bound_memo.insert(key, new_fid);
@@ -3200,6 +3082,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.bind_const_arg(new_fid, name, value, ty, loc)?;
             }
             debug_assert_ne!(new_fid, original_f);
+
+            if self.program[new_fid].has_tag(Flag::Generic) {
+                self.program[new_fid].annotations.retain(|a| a.name != Flag::Generic.ident());
+                let ty = self.infer_types(new_fid)?;
+                assert!(ty.is_some(), "failed to infer types of #generic function");
+            }
 
             let ty = self.program.func_type(new_fid);
             f_expr.set((new_fid.as_raw()).into(), ty);

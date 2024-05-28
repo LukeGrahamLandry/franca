@@ -829,7 +829,6 @@ pub struct Program<'p> {
     pub funcs: Vec<Func<'p>>,
     /// Comptime function calls that return a type are memoized so identity works out.
     /// Note: if i switch to Values being raw bytes, make sure to define any padding so this works.
-    pub generics_memo: Map<(FuncId, Values), (Values, TypeId)>,
     pub next_var: u32,
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: Map<u128, TypeId>,
@@ -936,7 +935,6 @@ impl<'p> Program<'p> {
                 TypeInfo::Scope,
             ],
             funcs: Default::default(),
-            generics_memo: Default::default(),
             next_var: 0,
             pool,
             overload_sets: Default::default(),

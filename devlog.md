@@ -12,6 +12,8 @@ made const_args_key imm_eval the expression if there's only one and its not alre
 that was enough to make fn List work without #comptime. and the rest with only one argument.
 same thing for macro eval. same for multi-arg case in const_args_key.
 so now its only needed with #generic.
+damn that was actually easy. all it needed was an extra infer_types in curry_const_args.
+well that was good for morale.
 
 ## (May 25/26/27)
 

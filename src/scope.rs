@@ -149,10 +149,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 func.capture_vars.iter().map(|v| v.log(self.compiler.pool)).collect::<Vec<_>>()
             );
         } else {
-            assert!(
-                !func.has_tag(Flag::Comptime) && !func.has_tag(Flag::Generic),
-                "closures cannot be @#comptime/#generic"
-            );
+            assert!(!func.has_tag(Flag::Generic), "closures cannot be #generic");
         }
 
         Ok(())
