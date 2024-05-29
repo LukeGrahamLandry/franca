@@ -97,6 +97,7 @@ use std::env;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 
+use ast::garbage_loc;
 use bc::Values;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
@@ -320,12 +321,16 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
+    let mut nope = false;
     for d in diagnostic {
         println!("{}", d.message);
+        nope |= d.spans.iter().any(|s| s.span == garbage_loc());
     }
 
-    let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(codemap));
-    emitter.emit(diagnostic);
+    if !nope {
+        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(codemap));
+        emitter.emit(diagnostic);
+    }
 }
 
 pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatStmt<'p>>) -> Func<'p> {

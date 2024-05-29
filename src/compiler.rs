@@ -2051,7 +2051,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Resolve the lazy types for Arg and Ret
     // Ok(None) means return type needs to be infered
+    #[track_caller]
     pub(crate) fn infer_types(&mut self, func: FuncId) -> Res<'p, Option<FnType>> {
+        // println!("{} {}", self.pool.get(self.program[func].name), Location::caller());
         self.ensure_resolved_sign(func)?;
         let f = &self.program[func];
         // TODO: bad things are going on. it changes behavior if this is a debug_assert.
@@ -2074,6 +2076,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         let ty = if self.program[func].finished_ret.is_none() {
             let mut ret = self.program[func].ret.clone();
+            // TODO: now this is dumb because a lot of places dont even get here if its #generic because they don't know if its arg or ret.
             if !self.program[func].has_tag(Flag::Generic) && self.infer_types_progress(&mut ret)? {
                 self.program[func].ret = ret;
                 let ret = self.program[func].ret.unwrap();
@@ -2314,29 +2317,31 @@ impl<'a, 'p> Compile<'a, 'p> {
         self[scope].funcs.push(f);
         self.ensure_resolved_sign(f)?;
 
-        // If the closure doesn't have type annotations but our caller asked for something specific,
-        // insert that as a type annotation and don't bother looking at the body to infer.
-        // It will get typechecked later when the callsite actually gets compiled.
-        // TODO: this is wrong because it means overloading can't call this function! -- May 5
-        if matches!(self.program[f].ret, LazyType::Infer) {
-            if let Some(ret) = req_ret {
-                self.program[f].ret = LazyType::Finished(ret);
+        if !self.program[f].has_tag(Flag::Generic) {
+            // If the closure doesn't have type annotations but our caller asked for something specific,
+            // insert that as a type annotation and don't bother looking at the body to infer.
+            // It will get typechecked later when the callsite actually gets compiled.
+            // TODO: this is wrong because it means overloading can't call this function! -- May 5
+            if matches!(self.program[f].ret, LazyType::Infer) {
+                if let Some(ret) = req_ret {
+                    self.program[f].ret = LazyType::Finished(ret);
+                }
             }
-        }
 
-        if self.infer_types(f)?.is_none() {
-            // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
-            if let FuncImpl::Normal(body) = &mut self.program[f].body.clone() {
-                // debug_
-                assert!(
-                    self.program[f].get_flag(FuncFlags::ResolvedBody),
-                    "ICE: closures aren't lazy currently. missing =>?"
-                );
-                // TODO: this is very suspisious! what if it has captures
-                let res = self.type_of(body);
-                debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
-                if let Some(ret_ty) = res? {
-                    self.program[f].finished_ret = Some(ret_ty);
+            if self.infer_types(f)?.is_none() {
+                // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
+                if let FuncImpl::Normal(body) = &mut self.program[f].body.clone() {
+                    // debug_
+                    assert!(
+                        self.program[f].get_flag(FuncFlags::ResolvedBody),
+                        "ICE: closures aren't lazy currently. missing =>?"
+                    );
+                    // TODO: this is very suspisious! what if it has captures
+                    let res = self.type_of(body);
+                    debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
+                    if let Some(ret_ty) = res? {
+                        self.program[f].finished_ret = Some(ret_ty);
+                    }
                 }
             }
         }
@@ -2842,17 +2847,20 @@ impl<'a, 'p> Compile<'a, 'p> {
         let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         self.ensure_resolved_sign(fid)?;
-        let arg_ty = self.infer_arg(fid)?;
-        self.compile_expr(arg_expr, Some(arg_ty))?;
-        self.last_loc = Some(loc);
-        self.type_check_arg(arg_expr.ty, arg_ty, "fn arg")?;
 
         // TODO: you really want to compile as much of the body as possible before you start baking things.
-        let any_const_args = self.program[fid].any_const_args();
-
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
-        if any_const_args {
+        if self.program[fid].has_tag(Flag::Generic) {
+            self.compile_expr(arg_expr, None)?;
+        } else {
+            let arg_ty = self.infer_arg(fid)?;
+            self.compile_expr(arg_expr, Some(arg_ty))?;
+            self.last_loc = Some(loc);
+            self.type_check_arg(arg_expr.ty, arg_ty, "fn arg")?;
+        }
+
+        if self.program[fid].any_const_args() {
             fid = self.curry_const_args(fid, f_expr, arg_expr)?;
         }
 
@@ -2953,7 +2961,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     i += 1;
                     continue;
                 }
-                let arg_ty = binding.unwrap();
+                let arg_ty = binding.ty.ty().unwrap_or_else(|| arg_exprs[i].ty);
                 let value = self.immediate_eval_expr(arg_exprs[i].clone(), arg_ty)?;
                 if !matches!(arg_exprs[i].expr, Expr::Value { .. }) {
                     arg_exprs[i].set(value.clone(), arg_ty);
@@ -2966,27 +2974,26 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn remove_const_args(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, ()> {
+    fn remove_const_args(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>, new_arg_type: TypeId) -> Res<'p, ()> {
+        // println!("new_arg_type = {}", self.program.log_type(new_arg_type));
         if self.program[original_f].arg.bindings.len() == 1 {
+            assert!(new_arg_type == TypeId::unit);
             self.set_literal(arg_expr, ())
         } else {
             let Expr::Tuple(arg_exprs) = arg_expr.deref_mut() else {
                 err!("TODO: pattern match on non-tuple",)
             };
-            let mut skipped_types = vec![];
             let mut removed = 0;
             for (i, binding) in self.program[original_f].arg.bindings.iter().enumerate() {
                 if binding.kind == VarType::Const {
                     // TODO: this would be better if i was iterating backwards
                     arg_exprs.remove(i - removed);
                     removed += 1; // TODO: this sucks
-                } else {
-                    skipped_types.push(binding.ty.unwrap());
                 }
             }
-            let arg_ty = self.program.tuple_of(skipped_types);
             if let Expr::Tuple(v) = arg_expr.deref_mut().deref_mut() {
                 if v.is_empty() {
+                    assert!(new_arg_type == TypeId::unit);
                     // Note: this started being required when I added fn while.
                     self.set_literal(arg_expr, ())?;
                 } else if v.len() == 1 {
@@ -2995,7 +3002,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
             // Symptom of forgetting this was emit_bc passing extra uninit args.
-            arg_expr.ty = arg_ty;
+            arg_expr.ty = new_arg_type;
             Ok(())
         }
     }
@@ -3003,7 +3010,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn curry_const_args(&mut self, original_f: FuncId, f_expr: &mut FatExpr<'p>, arg_expr: &mut FatExpr<'p>) -> Res<'p, FuncId> {
         let key = (original_f, self.const_args_key(original_f, arg_expr)?);
         if let Some(new_f) = self.program.const_bound_memo.get(&key).copied() {
-            self.remove_const_args(original_f, arg_expr)?;
+            let new_arg_type = self.program[new_f].finished_arg.unwrap();
+            self.remove_const_args(original_f, arg_expr, new_arg_type)?;
             return Ok(new_f);
         }
 
@@ -3022,14 +3030,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
         // TODO: the special case for generics is for my new thing where args can reference previous ones
         //       so they have to resolve sign earlier.
-        // self.program[original_f].get_flag(FuncFlags::AllowRtCapture)
-        // || self.program[original_f].has_tag(Flag::Generic)
-        // self.program[original_f].get_flag(FuncFlags::ResolvedBody)
-        //
         assert!(!(self.program[original_f].has_tag(Flag::Generic) && self.program[original_f].get_flag(FuncFlags::AllowRtCapture)));
 
-        let mut needs_renumber = self.program[original_f].get_flag(FuncFlags::AllowRtCapture);
-        needs_renumber |= self.program[original_f].has_tag(Flag::Generic);
+        let needs_renumber = self.program[original_f].get_flag(FuncFlags::AllowRtCapture) || self.program[original_f].has_tag(Flag::Generic);
         if needs_renumber {
             let mut mapping = Default::default();
             let mut renumber = RenumberVars {
@@ -3039,16 +3042,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
             renumber.pattern(&mut new_func.arg);
             renumber.ty(&mut new_func.ret);
-            if let FuncImpl::Normal(body) = &mut new_func.body {
-                renumber.expr(body);
-            } else {
-                unreachable!()
-            }
+            let FuncImpl::Normal(body) = &mut new_func.body else { unreachable!() };
+            renumber.expr(body);
             if self.program[original_f].has_tag(Flag::Generic) {
+                // the sign has already been resolved so we need to renumber before binding arguments.
+                // however, the body hasn't been resolved yet, so we can't just renumber in place.
+                // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
+                // and use that as the starting point when we resolve the body of new new function.
+                // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
+                // this allows #generic argument types that reference the values of other argument.  -- May 29
                 debug_assert!(self.program[original_f].get_flag(FuncFlags::ResolvedSign));
                 self.program[original_f].assert_body_not_resolved()?;
+                debug_assert!(
+                    !matches!(body.expr, Expr::Block { .. }),
+                    "Block should be GetParsed because body is not resolved yet. "
+                );
                 let mut scope = self[new_func.scope.unwrap()].clone();
-                debug_assert!(scope.rt_types.is_empty());
+                // TODO: don't need to copy these. they should be empty the first time,
+                //       but when you call the function multiple times, the results from the old one will be there.
+                scope.rt_types.clear();
                 let old_constants = mem::take(&mut scope.constants); // because need to rehash
                 for (k, v) in old_constants {
                     if let Some(new) = mapping.get(&k) {
@@ -3066,7 +3078,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let id = ScopeId::from_index(self.scopes.len() - 1);
                 new_func.scope = Some(id);
             }
-            // println!("renumber ret {}", new_func.ret.log(self.pool));
         }
         let scope = new_func.scope.unwrap();
         let new_fid = self.program.add_func(new_func);
@@ -3102,22 +3113,38 @@ impl<'a, 'p> Compile<'a, 'p> {
             let Expr::Tuple(arg_exprs) = arg_expr.deref_mut() else {
                 err!("TODO: pattern match on non-tuple",)
             };
-            let pattern = func.arg.flatten();
-            for (i, (name, ty, kind)) in pattern.into_iter().enumerate() {
-                if kind != VarType::Const {
+            let pattern = func.arg.clone();
+            let is_generic = func.has_tag(Flag::Generic);
+            let mut removed_count = 0;
+            for (i, mut b) in pattern.bindings.into_iter().enumerate() {
+                if b.kind != VarType::Const {
+                    if is_generic {
+                        self.infer_types_progress(&mut b.ty)?;
+                        self.program[new_fid].arg.bindings[i - removed_count].ty = b.ty.clone();
+                    }
                     continue;
                 }
-                let name = unwrap!(name, "arg needs name (unreachable?)");
+                let Name::Var(name) = b.name else {
+                    err!("arg needs name (unreachable?)",)
+                };
                 let Expr::Value { value } = arg_exprs[i].clone().expr else {
                     unreachable!()
                 };
+                if !is_generic {
+                    b.ty.unwrap();
+                }
+                self.infer_types_progress(&mut b.ty)?;
+                if is_generic {
+                    self.program[new_fid].arg.bindings[i].ty = b.ty.clone();
+                }
                 // bind_const_arg handles adding closure captures.
                 // since it needs to do a remap, it gives back the new argument names so we can adjust our bindings acordingly. dont have to deal with it above since there's only one.
-                self.bind_const_arg(new_fid, name, value, ty, loc)?;
+                self.bind_const_arg(new_fid, name, value, b.unwrap(), loc)?;
+                removed_count += 1;
             }
             debug_assert_ne!(new_fid, original_f);
 
-            if self.program[new_fid].has_tag(Flag::Generic) {
+            if is_generic {
                 self.program[new_fid].annotations.retain(|a| a.name != Flag::Generic.ident());
                 let ty = self.infer_types(new_fid)?;
                 assert!(ty.is_some(), "failed to infer types of #generic function");
@@ -3127,7 +3154,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             f_expr.set((new_fid.as_raw()).into(), ty);
             let f_ty = self.program.fn_ty(ty).unwrap();
 
-            self.remove_const_args(original_f, arg_expr)?;
+            let new_arg_type = self.program[new_fid].finished_arg.unwrap();
+            self.remove_const_args(original_f, arg_expr, new_arg_type)?;
             self.type_check_arg(arg_expr.ty, f_ty.arg, "sanity: post bake arg")?;
             self.program.const_bound_memo.insert(key, new_fid);
             self.pop_state(state);

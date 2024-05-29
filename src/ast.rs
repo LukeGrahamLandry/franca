@@ -473,6 +473,7 @@ impl<'p> Name<'p> {
 }
 
 impl<'p> Binding<'p> {
+    #[track_caller]
     pub fn unwrap(&self) -> TypeId {
         self.ty.unwrap()
     }
@@ -501,6 +502,7 @@ impl<'p> Pattern<'p> {
         Self { loc, bindings: vec![] }
     }
 
+    #[track_caller]
     pub fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId, VarType)> {
         self.bindings
             .iter()
@@ -1449,13 +1451,11 @@ impl<'p> Program<'p> {
             TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0),
             TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1), // :SmallTypes
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true, 8),
-            // this has to be 8 bytes because it can't have a special load function
             TypeInfo::Type => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);
-                println!("{} {}", info.stride_bytes, len as u16,);
                 TypeMeta::new(
                     info.size_slots * len as u16,
                     info.align_bytes,
