@@ -880,7 +880,7 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
     let os: OverloadSetId = hope(|| comp.immediate_eval_expr_known(os));
     let f_ty = comp.program.fn_ty(ty).expect("@resolve arg should be function type. TODO: allow FnPtr");
 
-    hope(|| comp.compute_new_overloads(os));
+    hope(|| comp.compute_new_overloads(os, None));
     // TODO: just filter the iterator.
     let mut overloads = comp.program[os].clone(); // sad
 

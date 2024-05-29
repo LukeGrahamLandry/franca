@@ -590,7 +590,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let (arg, ret, os): (TypeId, TypeId, OverloadSetId) = self.immediate_eval_expr_known(types.args.unwrap())?;
             // TODO: this wont work cause you can get here while working on the overload set so its order dependednt.
-            self.compute_new_overloads(os)?;
+            self.compute_new_overloads(os, None)?;
             let mut found: Vec<_> = self.program[os]
                 .ready
                 .iter()
@@ -1587,7 +1587,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
                 let os: OverloadSetId = self.immediate_eval_expr_known(*handler.clone())?;
-                self.compute_new_overloads(os)?;
+                self.compute_new_overloads(os, None)?;
 
                 let os = self.program[os].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
                 let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
@@ -3019,6 +3019,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut new_func = self.program[original_f].clone();
         // Closures always resolve up front, so they need to renumber the clone.
         // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
+        // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
+        // TODO: the special case for generics is for my new thing where args can reference previous ones
+        //       so they have to resolve sign earlier.
         if self.program[original_f].get_flag(FuncFlags::AllowRtCapture) {
             let mut mapping = Default::default();
             let mut renumber = RenumberVars {
@@ -3379,6 +3382,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
+    #[track_caller]
     fn save_const_values(&mut self, name: Var<'p>, value: Values, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
         self.save_const(name, Expr::Value { value }, final_ty, loc)
     }
@@ -3399,6 +3403,24 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
 
         Some((IntTypeInfo { bit_count, signed: false }, val))
+    }
+
+    pub fn arity(&mut self, expr: &FatExpr<'p>) -> u16 {
+        if !expr.ty.is_unknown() {
+            let raw = self.program.raw_type(expr.ty);
+            return match &self.program[raw] {
+                TypeInfo::Struct { fields, .. } => fields.len() as u16,
+                TypeInfo::Unit => 1,
+                _ => 1,
+            };
+        }
+
+        match &expr.expr {
+            Expr::Cast(_) | Expr::Value { .. } => unreachable!("ICE: expected known type"),
+            Expr::Tuple(parts) => parts.len() as u16,
+            Expr::StructLiteralP(parts) => parts.bindings.len() as u16,
+            _ => 1,
+        }
     }
 }
 

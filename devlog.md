@@ -1,4 +1,4 @@
-## May 28
+## remove #comptime (May 28)
 
 another attempt at removing #comptime because const args should do the same thing.
 const_bound_memo ends up being the same as generics_memo, if all args are const
@@ -14,6 +14,12 @@ same thing for macro eval. same for multi-arg case in const_args_key.
 so now its only needed with #generic.
 damn that was actually easy. all it needed was an extra infer_types in curry_const_args.
 well that was good for morale.
+
+i wanted to make a quick c backend, so i made a bucket array because it seemed convient to refer to types as a Str,
+but then its a pain to write to because everything is hardcoded List(u8).
+so maybe its time for traits (tho i guess it wouldn't even help this situation cause i need to pointer back but one step at a time).
+I think I'll try to rip off Jai's $T pattern matching polymorphism stuff.
+The current thing where the easy to use functions are the ones inside the generic function that creates the type is really annoying.
 
 ## (May 25/26/27)
 

@@ -206,7 +206,10 @@ pub trait WalkAst<'p> {
             return;
         }
         match &mut expr.expr {
-            Expr::GetParsed(_) | Expr::AddToOverloadSet(_) => unreachable!("ICE: walk. (if def functions not supported yet?)"),
+            Expr::GetParsed(_) => {}
+            Expr::AddToOverloadSet(_) => {
+                unreachable!("ICE: walk. {expr:?}");
+            }
             Expr::Poison => unreachable!("ICE: POISON"),
             Expr::Call(fst, snd) => {
                 self.expr(fst);
@@ -859,9 +862,10 @@ pub struct OverloadSet<'p> {
 
 #[derive(Clone, Debug)]
 pub struct OverloadOption {
-    pub arg: TypeId,
-    pub ret: Option<TypeId>, // For @comptime, we might not know without the args
     pub func: FuncId,
+    pub arg: TypeId,
+    pub ret: Option<TypeId>, // For #generic, we might not know without the args
+    pub arity: u16,
 }
 
 impl<'p> Stmt<'p> {

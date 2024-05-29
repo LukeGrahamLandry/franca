@@ -91,8 +91,12 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     pub fn resolve_in_overload_set(&mut self, arg: &mut FatExpr<'p>, requested_ret: Option<TypeId>, i: OverloadSetId) -> Res<'p, FuncId> {
         let name = self.program[i].name;
-        self.compute_new_overloads(i)?;
+        // This might be a bad idea. its really fucked up if you accidently create an overload with the same types but different arity.
+        // should at least have an optional post-check for that.
+        let arity = self.arity(arg);
+        self.compute_new_overloads(i, Some(arity))?;
         let mut overloads = self.program[i].clone(); // Sad
+        overloads.ready.retain(|o| o.arity == arity);
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             self.prune_overloads_by_named_args(&mut overloads, pattern)?;
 
@@ -108,6 +112,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
         }
 
+        // println!("resolve os. get type of {}", arg.log(self.pool));
         match self.type_of(arg) {
             Ok(Some(arg_ty)) => {
                 // TODO: need to factor this part out so that 'const F: <> = some_overload_set' works properly.
@@ -192,7 +197,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    pub fn compute_new_overloads(&mut self, i: OverloadSetId) -> Res<'p, ()> {
+    // TODO: use required_arity to typecheck less things.
+    pub fn compute_new_overloads(&mut self, i: OverloadSetId, required_arity: Option<u16>) -> Res<'p, ()> {
         let overloads = &mut self.program[i];
         // debug_assert!(overloads.just_resolved.is_empty());
         let mut decls = mem::take(&mut overloads.pending); // Take any new things found since last time we looked at this function that haven't been typechecked yet.
@@ -208,10 +214,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             if self.ensure_resolved_sign(f).is_err() {
                 todo!();
             }
+            let arity = self.program[f].arg.bindings.len() as u16;
+            if let Some(required_arity) = required_arity {
+                if required_arity != arity {
+                    // TODO
+                }
+            }
             match self.infer_types(f) {
                 Ok(Some(f_ty)) => {
                     // TODO: this is probably wrong if you use !assert_compile_error
                     self.program[i].ready.push(OverloadOption {
+                        arity,
                         arg: f_ty.arg,
                         ret: Some(f_ty.ret),
                         func: f,
@@ -219,7 +232,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 Ok(None) => {
                     if let Some(arg) = self.program[f].finished_arg {
-                        self.program[i].ready.push(OverloadOption { arg, ret: None, func: f });
+                        self.program[i].ready.push(OverloadOption {
+                            arg,
+                            ret: None,
+                            func: f,
+                            arity,
+                        });
                     } else {
                         todo!()
                     }
