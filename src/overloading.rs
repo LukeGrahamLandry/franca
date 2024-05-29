@@ -2,7 +2,7 @@ use codemap::Span;
 use codemap_diagnostic::{Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
 use crate::ast::{
-    garbage_loc, Expr, FatExpr, FuncFlags, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var,
+    garbage_loc, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LazyType, OverloadOption, OverloadSet, OverloadSetId, Pattern, TypeId, TypeInfo, Var,
     VarType,
 };
 use crate::bc::from_values;
@@ -106,94 +106,143 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.adjust_call(arg, id)?;
                 return Ok(id);
             }
+            todo!("not tested. below assumes arg is tuple")
+        }
+
+        if overloads.ready.len() == 1 {
+            let id = overloads.ready[0].func;
+            self.adjust_call(arg, id)?;
+            return Ok(id);
         }
 
         if overloads.ready.is_empty() {
             err!("No overload found for {i:?}: {}", self.pool.get(name));
         }
 
-        // println!("resolve os. get type of {}", arg.log(self.pool));
-        match self.type_of(arg) {
-            Ok(Some(arg_ty)) => {
-                // TODO: need to factor this part out so that 'const F: <> = some_overload_set' works properly.
+        let original = overloads.clone();
 
-                // TODO: Never needs to not be a special case. Have like an auto cast graph thingy.
-                let accept = |f_arg: TypeId, f_ret: Option<TypeId>| {
-                    arg_ty == f_arg
-                        && (requested_ret.is_none() || f_ret.is_none() || (requested_ret.unwrap() == f_ret.unwrap() || f_ret.unwrap().is_never()))
-                };
+        if let Some(req) = requested_ret {
+            overloads
+                .ready
+                .retain(|check| check.ret.is_none() || (req == check.ret.unwrap() || check.ret.unwrap().is_never()));
+        }
 
-                let original = overloads.clone();
+        if arity == 1 {
+            match self.type_of(arg) {
+                Ok(Some(arg_ty)) => {
+                    // TODO: need to factor this part out so that 'const F: <> = some_overload_set' works properly.
+                    // TODO: Never needs to not be a special case. Have like an auto cast graph thingy.
+                    let accept = |f_arg: TypeId, f_ret: Option<TypeId>| arg_ty == f_arg;
 
-                // TODO: PROBLEM: this doiesnt do voidptr check. it worked before because i did filter_arch first and there happened to only be one so it didnt even get here and then th e type check passed latter because it knows the rules.
-                overloads.ready.retain(|check| accept(check.arg, check.ret));
+                    // TODO: PROBLEM: this doiesnt do voidptr check. it worked before because i did filter_arch first and there happened to only be one so it didnt even get here and then th e type check passed latter because it knows the rules.
+                    overloads.ready.retain(|check| accept(check.arg, check.ret));
 
-                if overloads.ready.len() > 1 {
-                    self.do_merges(&mut overloads.ready, i)?;
-                }
-                if overloads.ready.len() == 1 {
-                    let id = overloads.ready[0].func;
-                    self.adjust_call(arg, id)?;
-                    return Ok(id);
-                }
-
-                let log_goal = |s: &mut Self| {
-                    format!(
-                        "for fn {}({arg_ty:?}={}) {}={:?};",
-                        s.pool.get(name),
-                        s.program.log_type(arg_ty),
-                        requested_ret.map(|ret| format!("{ret:?}")).unwrap_or_default(),
-                        requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
-                    )
-                };
-
-                // TODO: put the message in the error so !assert_compile_error doesn't print it.
-                let mut msg = String::new();
-                use std::fmt::Write;
-                writeln!(msg, "not found {}", log_goal(self)).unwrap();
-                for f in original.ready {
-                    let yes = accept(f.arg, f.ret);
-                    let prefix = if yes { "[YES]" } else { "[ NO]" };
-                    writeln!(
-                        msg,
-                        "- {prefix} found {:?} fn({:?}={}) {}={}; {:?}",
-                        f.func,
-                        f.arg,
-                        self.program.log_type(f.arg),
-                        f.ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
-                        f.ret.map(|ret| self.program.log_type(ret)).unwrap_or(String::new()),
-                        self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
-                    )
-                    .unwrap();
-                    if yes {
-                        // outln!(ShowErr, "   {}", self.program[f.func].log(self.pool));
+                    if overloads.ready.len() > 1 {
+                        self.do_merges(&mut overloads.ready, i)?;
                     }
-                }
-                for f in original.pending {
-                    writeln!(
-                        msg,
-                        "- pending/failed {:?} {:?} uninit={}",
-                        f,
-                        self.program[f].arg.log(self.pool),
-                        !self.program[f].get_flag(FuncFlags::NotEvilUninit)
-                    )
-                    .unwrap()
-                }
-                writeln!(msg, "Maybe you forgot to instantiate a generic?").unwrap();
+                    if overloads.ready.len() == 1 {
+                        let id = overloads.ready[0].func;
+                        self.adjust_call(arg, id)?;
+                        return Ok(id);
+                    }
 
-                // where_the_fuck_am_i(self, arg.loc);
-                self.last_loc = Some(arg.loc);
-                err!("AmbiguousCall: {}\n{}", log_goal(self), msg)
+                    let log_goal = |s: &mut Self| {
+                        format!(
+                            "for fn {}({arg_ty:?}={}) {}={:?};",
+                            s.pool.get(name),
+                            s.program.log_type(arg_ty),
+                            requested_ret.map(|ret| format!("{ret:?}")).unwrap_or_default(),
+                            requested_ret.map(|t| s.program.log_type(t)).unwrap_or_else(|| "??".to_string())
+                        )
+                    };
+
+                    // TODO: put the message in the error so !assert_compile_error doesn't print it.
+                    let mut msg = String::new();
+                    use std::fmt::Write;
+                    writeln!(msg, "not found {}", log_goal(self)).unwrap();
+                    for f in original.ready {
+                        let yes = accept(f.arg, f.ret);
+                        let prefix = if yes { "[YES]" } else { "[ NO]" };
+                        writeln!(
+                            msg,
+                            "- {prefix} found {:?} fn({:?}={}) {}={}; {:?}",
+                            f.func,
+                            f.arg,
+                            self.program.log_type(f.arg),
+                            f.ret.map(|ret| format!("{ret:?}")).unwrap_or(String::new()),
+                            f.ret.map(|ret| self.program.log_type(ret)).unwrap_or(String::new()),
+                            self.program[f.func].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
+                        )
+                        .unwrap();
+                        if yes {
+                            // outln!(ShowErr, "   {}", self.program[f.func].log(self.pool));
+                        }
+                    }
+                    for f in original.pending {
+                        writeln!(
+                            msg,
+                            "- pending/failed {:?} {:?} uninit={}",
+                            f,
+                            self.program[f].arg.log(self.pool),
+                            !self.program[f].get_flag(FnFlag::NotEvilUninit)
+                        )
+                        .unwrap()
+                    }
+                    writeln!(msg, "Maybe you forgot to instantiate a generic?").unwrap();
+
+                    // where_the_fuck_am_i(self, arg.loc);
+                    self.last_loc = Some(arg.loc);
+                    err!("AmbiguousCall: {}\n{}", log_goal(self), msg)
+                }
+                Ok(None) => {
+                    self.last_loc = Some(arg.loc);
+                    err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool))
+                }
+                Err(e) => err!(
+                    "AmbiguousCall. Unknown type for argument {}. {}",
+                    arg.log(self.pool),
+                    e.reason.log(self.program, self.pool)
+                ),
             }
-            Ok(None) => {
-                self.last_loc = Some(arg.loc);
-                err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool))
+        } else {
+            // TODO: have a version of type_of that can't fail and if that can do it on the arg cause its simple, don't need to ever do multiple iterations here.
+            let Expr::Tuple(parts) = &mut arg.expr else {
+                err!("arg of call with multiple arguments should be tuple",)
+            };
+
+            for (i, part) in parts.iter_mut().enumerate() {
+                match self.type_of(part) {
+                    Ok(Some(part_ty)) => {
+                        overloads.ready.retain(|check| {
+                            let types = self.program.tuple_types(check.arg).expect("arity");
+                            debug_assert_eq!(types.len(), check.arity as usize);
+                            types[i] == part_ty
+                        });
+                        if overloads.ready.len() == 1 {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        self.last_loc = Some(arg.loc);
+                        err!("AmbiguousCall. Unknown type for argument {}", arg.log(self.pool))
+                    }
+                    Err(e) => err!(
+                        "AmbiguousCall. Unknown type for argument {}. {}",
+                        arg.log(self.pool),
+                        e.reason.log(self.program, self.pool)
+                    ),
+                }
             }
-            Err(e) => err!(
-                "AmbiguousCall. Unknown type for argument {}. {}",
-                arg.log(self.pool),
-                e.reason.log(self.program, self.pool)
-            ),
+            if overloads.ready.len() > 1 {
+                self.do_merges(&mut overloads.ready, i)?;
+            }
+            if overloads.ready.len() == 1 {
+                let id = overloads.ready[0].func;
+                self.adjust_call(arg, id)?;
+                return Ok(id);
+            }
+
+            err!("ambigous overload",)
         }
     }
 
@@ -208,7 +257,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         while let Some(f) = decls.pop() {
             decls.extend(mem::take(&mut self.program[i].pending));
 
-            if !self.program[f].get_flag(FuncFlags::NotEvilUninit) {
+            if !self.program[f].get_flag(FnFlag::NotEvilUninit) {
                 continue;
             }
             if self.ensure_resolved_sign(f).is_err() {

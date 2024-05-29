@@ -4,7 +4,7 @@ use codemap::Span;
 
 use crate::{
     assert,
-    ast::{Binding, Expr, FatExpr, FatStmt, Flag, Func, FuncFlags, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
+    ast::{Binding, Expr, FatExpr, FatStmt, Flag, FnFlag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
     err, ice,
     logging::PoolLog,
@@ -43,8 +43,14 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn resolve_func(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.get_flag(FuncFlags::ResolvedBody) && func.get_flag(FuncFlags::ResolvedSign) {
+        if func.get_flag(FnFlag::ResolvedBody) && func.get_flag(FnFlag::ResolvedSign) {
             return Ok(());
+        }
+
+        // TODO: need to remember to update from this if we get one from the user (like they added it in a macro)?
+        if func.has_tag(Flag::Generic) {
+            func.set_flag(FnFlag::Generic, true);
+            func.annotations.retain(|a| a.name != Flag::Generic.ident());
         }
 
         let (s, b) = (self.scope, self.block);
@@ -52,7 +58,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.push_scope(Some(func.name));
         func.scope = Some(self.scope);
 
-        if func.get_flag(FuncFlags::AllowRtCapture) {
+        if func.get_flag(FnFlag::AllowRtCapture) {
             self.resolve_func_args(func)?;
             self.resolve_func_body(func)?;
             debug_assert_eq!(s, self.scope);
@@ -82,15 +88,15 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn resolve_func_args(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.get_flag(FuncFlags::ResolvedSign) {
+        if func.get_flag(FnFlag::ResolvedSign) {
             return Ok(());
         }
         self.scope = func.scope.unwrap();
         self.block = 0;
         debug_assert_eq!(self.scope, func.scope.unwrap());
-        let generic = func.has_tag(Flag::Generic); // ret is allowed to depend on previous args.
+        let generic = func.get_flag(FnFlag::Generic); // ret is allowed to depend on previous args.
 
-        func.set_flag(FuncFlags::ResolvedSign, true);
+        func.set_flag(FnFlag::ResolvedSign, true);
 
         if generic {
             for b in &mut func.arg.bindings {
@@ -114,12 +120,12 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
     }
 
     fn resolve_func_body(&mut self, func: &mut Func<'p>) -> Res<'p, ()> {
-        if func.get_flag(FuncFlags::ResolvedBody) {
+        if func.get_flag(FnFlag::ResolvedBody) {
             return Ok(());
         }
         unsafe { STATS.fn_body_resolve += 1 };
         self.scope = func.scope.unwrap();
-        let generic = func.has_tag(Flag::Generic); // args and ret are allowed to depend on previous args.
+        let generic = func.get_flag(FnFlag::Generic); // args and ret are allowed to depend on previous args.
 
         self.push_scope(None);
 
@@ -130,7 +136,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             }
         }
         self.push_scope(None);
-        func.set_flag(FuncFlags::ResolvedBody, true);
+        func.set_flag(FnFlag::ResolvedBody, true);
         if let FuncImpl::Normal(body) = &mut func.body {
             func.return_var = Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
             self.resolve_expr(body)?;
@@ -147,7 +153,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             func.capture_vars.push(c);
         }
 
-        if !func.get_flag(FuncFlags::AllowRtCapture) {
+        if !func.get_flag(FnFlag::AllowRtCapture) {
             // TODO: show the captured var use site and declaration site.
             self.last_loc = func.loc;
             let n = self.compiler.pool.get(func.name);
@@ -157,8 +163,6 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 n,
                 func.capture_vars.iter().map(|v| v.log(self.compiler.pool)).collect::<Vec<_>>()
             );
-        } else {
-            assert!(!func.has_tag(Flag::Generic), "closures cannot be #generic");
         }
 
         Ok(())

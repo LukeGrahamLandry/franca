@@ -655,7 +655,7 @@ pub struct Func<'p> {
 }
 
 #[repr(i64)]
-pub enum FuncFlags {
+pub enum FnFlag {
     NotEvilUninit,
     ResolvedBody,
     ResolvedSign,
@@ -664,13 +664,14 @@ pub enum FuncFlags {
     AsmDone,
     TryConstantFold,
     CalleesAsmDone,
+    Generic,
 }
 
 impl<'p> Func<'p> {
-    pub fn get_flag(&self, f: FuncFlags) -> bool {
+    pub fn get_flag(&self, f: FnFlag) -> bool {
         self.flags & (1 << f as u32) != 0
     }
-    pub fn set_flag(&mut self, f: FuncFlags, v: bool) {
+    pub fn set_flag(&mut self, f: FnFlag, v: bool) {
         if v {
             self.flags |= 1 << f as u32;
         } else {
@@ -730,8 +731,8 @@ impl<'p> Func<'p> {
             loc,
             ..Default::default()
         };
-        f.set_flag(FuncFlags::NotEvilUninit, true);
-        f.set_flag(FuncFlags::AllowRtCapture, allow_rt_capture);
+        f.set_flag(FnFlag::NotEvilUninit, true);
+        f.set_flag(FnFlag::AllowRtCapture, allow_rt_capture);
         f
     }
 
@@ -811,8 +812,8 @@ impl<'p> Func<'p> {
 
     #[track_caller]
     pub(crate) fn assert_body_not_resolved(&self) -> Res<'p, ()> {
-        assert!(self.get_flag(FuncFlags::NotEvilUninit));
-        assert!(!self.get_flag(FuncFlags::ResolvedBody));
+        assert!(self.get_flag(FnFlag::NotEvilUninit));
+        assert!(!self.get_flag(FnFlag::ResolvedBody));
         Ok(())
     }
 }
@@ -1251,7 +1252,7 @@ impl<'p> Program<'p> {
 
     #[track_caller]
     pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
-        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
+        debug_assert!(func.get_flag(FnFlag::NotEvilUninit));
         let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id

@@ -21,10 +21,12 @@ so maybe its time for traits (tho i guess it wouldn't even help this situation c
 I think I'll try to rip off Jai's $T pattern matching polymorphism stuff.
 The current thing where the easy to use functions are the ones inside the generic function that creates the type is really annoying.
 
-ok so the problem is #generics with const args,
-you can't renumber in the clone, because you haven't resolved the body yet,
+start with having #generic work like zig where tou can have later argument types depend on const args.
+ok so the problem there is you can't renumber in the clone, because you haven't resolved the body yet,
 so it still references the un-renumbred scope.
-so i need to like insert a new scope inbetween where the arguments can go?
+so i need to like insert a new scope in between where the arguments can go?
+
+dumb mistake with checking flags on a mem::take-en func.
 
 ## (May 25/26/27)
 

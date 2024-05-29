@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, CallConv, FatStmt, Flag, FuncFlags, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
+    Annotation, Binding, CallConv, FatStmt, Flag, FnFlag::*, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
     ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
@@ -281,13 +281,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         if self.currently_compiling.contains(&f) {
             return Ok(());
         }
-        if self.program[f].get_flag(FuncFlags::AsmDone) {
+        if self.program[f].get_flag(AsmDone) {
             return Ok(());
         }
         let state = DebugState::Compile(f, self.program[f].name);
         self.push_state(&state);
         let before = self.debug_trace.len();
-        debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
+        debug_assert!(self.program[f].get_flag(NotEvilUninit));
         self.ensure_compiled(f, when)?;
 
         if let FuncImpl::Redirect(target) = self.program[f].body {
@@ -350,24 +350,24 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
         }
-        self.program[f].set_flag(FuncFlags::AsmDone, true);
+        self.program[f].set_flag(AsmDone, true);
         self.last_loc = Some(self.program[f].loc);
         let cd = self.callees_done(f);
-        self.program[f].set_flag(FuncFlags::CalleesAsmDone, cd);
+        self.program[f].set_flag(CalleesAsmDone, cd);
         // TODO: assert that if body is ::merged, none are Redirect/Normal/ComptimeAddr cause that doesn't really make sense.
         Ok(())
     }
 
     fn callees_done(&self, f: FuncId) -> bool {
-        if self.program[f].get_flag(FuncFlags::CalleesAsmDone) {
+        if self.program[f].get_flag(CalleesAsmDone) {
             return true;
         }
         let mut callees_done = true;
         for c in &self.program[f].callees {
-            callees_done &= self.program[*c].get_flag(FuncFlags::CalleesAsmDone);
+            callees_done &= self.program[*c].get_flag(CalleesAsmDone);
         }
         for c in &self.program[f].mutual_callees {
-            callees_done &= self.program[*c].get_flag(FuncFlags::CalleesAsmDone);
+            callees_done &= self.program[*c].get_flag(CalleesAsmDone);
         }
         callees_done
     }
@@ -537,13 +537,13 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
     pub fn ensure_compiled_force(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
-        if self.program[f].get_flag(FuncFlags::EnsuredCompiled) {
+        if self.program[f].get_flag(EnsuredCompiled) {
             return Ok(());
         }
-        self.program[f].set_flag(FuncFlags::EnsuredCompiled, true);
+        self.program[f].set_flag(EnsuredCompiled, true);
         let func = &self.program[f];
         self.wip_stack.push(f);
-        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
+        debug_assert!(func.get_flag(NotEvilUninit));
         self.ensure_resolved_body(f)?;
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
         assert!(!self.program[f].any_const_args());
@@ -565,10 +565,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn emit_special_body(&mut self, f: FuncId, no_redirect: bool) -> Res<'p, bool> {
-        debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
+        debug_assert!(self.program[f].get_flag(NotEvilUninit));
         self.ensure_resolved_sign(f)?;
         self.ensure_resolved_body(f)?;
-        assert!(!self.program[f].has_tag(Flag::Generic));
+        assert!(!self.program[f].get_flag(Generic));
         self.last_loc = Some(self.program[f].loc);
 
         let mut special = false;
@@ -641,7 +641,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(self.program[f].finished_ret.unwrap());
         }
 
-        assert!(!self.program[f].has_tag(Flag::Generic));
+        assert!(!self.program[f].get_flag(Generic));
         let arguments = self.program[f].arg.flatten();
         for (name, ty, kind) in arguments {
             // TODO: probably want to change this so you can do as much compiling as possible before expanding templates.
@@ -744,7 +744,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn emit_capturing_call(&mut self, f: FuncId, expr_out: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         self.ensure_resolved_body(f)?; // it might not be a closure. it might be an inlined thing.
         let loc = expr_out.loc;
-        assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
+        assert!(self.program[f].get_flag(NotEvilUninit));
         let state = DebugState::EmitCapturingCall(f, self.program[f].name);
         self.push_state(&state);
         let Expr::Call(_, arg_expr) = expr_out.deref_mut() else { ice!("") };
@@ -825,7 +825,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn bind_const_arg(&mut self, o_f: FuncId, arg_name: Var<'p>, arg_value: Values, arg_ty_found: TypeId, loc: Span) -> Res<'p, ()> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
-        debug_assert!(self.program[o_f].get_flag(FuncFlags::ResolvedBody) && self.program[o_f].get_flag(FuncFlags::ResolvedSign));
+        debug_assert!(self.program[o_f].get_flag(ResolvedBody) && self.program[o_f].get_flag(ResolvedSign));
         // println!("bind {}", arg_name.log(self.pool));
         let mut arg_x = self.program[o_f].arg.clone();
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
@@ -998,7 +998,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok((None, None));
         }
 
-        debug_assert!(func.get_flag(FuncFlags::NotEvilUninit));
+        debug_assert!(func.get_flag(NotEvilUninit));
         let loc = func.loc;
         // TODO: allow language to declare @macro(.func) and do this there instead. -- Apr 27
         if let Some(when) = func.get_tag_mut(Flag::When) {
@@ -1023,8 +1023,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(var) = var {
             // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
             // TODO: distinguish between overload sets that you add to and those that you re-export
-            debug_assert!(!self.program[id].get_flag(FuncFlags::ResolvedSign));
-            debug_assert!(!self.program[id].get_flag(FuncFlags::ResolvedBody));
+            debug_assert!(!self.program[id].get_flag(ResolvedSign));
+            debug_assert!(!self.program[id].get_flag(ResolvedBody));
             if let Some(overloads) = self.find_const(var)? {
                 assert_eq!(overloads.1, TypeId::overload_set);
                 let i: OverloadSetId = from_values(self.program, overloads.0)?;
@@ -1072,7 +1072,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if func.has_tag(Flag::Fold) {
-            func.set_flag(FuncFlags::TryConstantFold, true);
+            func.set_flag(TryConstantFold, true);
         }
 
         Ok(out)
@@ -1113,11 +1113,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn ensure_resolved_sign(&mut self, f: FuncId) -> Res<'p, ()> {
-        if self.program[f].get_flag(FuncFlags::ResolvedSign) {
+        if self.program[f].get_flag(ResolvedSign) {
             return Ok(());
         }
         debug_assert!(
-            self.program[f].get_flag(FuncFlags::NotEvilUninit),
+            self.program[f].get_flag(NotEvilUninit),
             "ensure_resolved_sign of evil_uninit {}",
             self.log_trace()
         );
@@ -1130,11 +1130,11 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     pub fn ensure_resolved_body(&mut self, f: FuncId) -> Res<'p, ()> {
-        if self.program[f].get_flag(FuncFlags::ResolvedBody) {
+        if self.program[f].get_flag(ResolvedBody) {
             return Ok(());
         }
         debug_assert!(
-            self.program[f].get_flag(FuncFlags::NotEvilUninit),
+            self.program[f].get_flag(NotEvilUninit),
             "ensure_resolved_body of evil_uninit {}",
             self.log_trace()
         );
@@ -1298,7 +1298,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::Tuple(values) => {
                 assert!(values.len() > 1, "ICE: no trivial tuples");
-                let values: Res<'p, Vec<_>> = values.iter_mut().map(|v| self.compile_expr(v, None)).collect();
+                let types = requested
+                    .and_then(|t| self.program.tuple_types(t))
+                    .and_then(|t| if t.len() == values.len() { Some(t) } else { None });
+                let values: Res<'p, Vec<_>> = values
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, v)| self.compile_expr(v, types.as_ref().and_then(|t| t.get(i).copied())))
+                    .collect();
                 let types = values?;
                 let ty = self.program.tuple_of(types);
                 expr.ty = ty;
@@ -2007,6 +2014,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.infer_types_progress(&mut binding.ty)
     }
 
+    #[track_caller]
     fn infer_pattern(&mut self, bindings: &mut [Binding<'p>]) -> Res<'p, Vec<TypeId>> {
         let mut types = vec![];
         for arg in bindings {
@@ -2048,7 +2056,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: bad things are going on. it changes behavior if this is a debug_assert.
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
         //       so making it work in debug with debug_assert is probably the better outcome.
-        assert!(f.get_flag(FuncFlags::NotEvilUninit), "{}", self.pool.get(f.name));
+        assert!(f.get_flag(NotEvilUninit), "{}", self.pool.get(f.name));
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType { arg, ret }));
         }
@@ -2066,7 +2074,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = if self.program[func].finished_ret.is_none() {
             let mut ret = self.program[func].ret.clone();
             // TODO: now this is dumb because a lot of places dont even get here if its #generic because they don't know if its arg or ret.
-            if !self.program[func].has_tag(Flag::Generic) && self.infer_types_progress(&mut ret)? {
+            if !self.program[func].get_flag(Generic) && self.infer_types_progress(&mut ret)? {
                 self.program[func].ret = ret;
                 let ret = self.program[func].ret.unwrap();
                 self.program[func].finished_ret = Some(ret);
@@ -2114,7 +2122,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn discard(&mut self, f: FuncId) {
-        self.program[f].set_flag(FuncFlags::NotEvilUninit, false);
+        self.program[f].set_flag(NotEvilUninit, false);
     }
 
     // TODO: look through Expr::Cast
@@ -2215,10 +2223,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                         None
                     };
                     if let Some(f) = f_id {
-                        debug_assert!(self.program[f].get_flag(FuncFlags::NotEvilUninit));
+                        debug_assert!(self.program[f].get_flag(NotEvilUninit));
                         // TODO: try to compile it now.
                         // TODO: you do want to allow self.program[f].has_tag(Flag::Ct) but dont have the result here and cant tell which ones need it
-                        let is_ready = self.program[f].get_flag(FuncFlags::AsmDone);
+                        let is_ready = self.program[f].get_flag(AsmDone);
                         if is_ready && !self.program[f].any_const_args() {
                             // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
                             let arg_ty = self.program[f].finished_arg.unwrap();
@@ -2252,8 +2260,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         let (arg, ret) = Func::known_args(TypeId::unit, ret_ty, e.loc);
         let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false);
-        fake_func.set_flag(FuncFlags::ResolvedBody, true);
-        fake_func.set_flag(FuncFlags::ResolvedSign, true);
+        fake_func.set_flag(ResolvedBody, true);
+        fake_func.set_flag(ResolvedSign, true);
         fake_func.finished_arg = Some(TypeId::unit);
         fake_func.finished_ret = Some(ret_ty);
         fake_func.scope = Some(ScopeId::from_index(0));
@@ -2297,7 +2305,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // TODO: calling this in infer is wrong because it might fail and lose the function
-    pub fn promote_closure(&mut self, expr: &mut FatExpr<'p>, _req_arg: Option<TypeId>, req_ret: Option<TypeId>) -> Res<'p, FuncId> {
+    pub fn promote_closure(&mut self, expr: &mut FatExpr<'p>, req_arg: Option<TypeId>, req_ret: Option<TypeId>) -> Res<'p, FuncId> {
         let Expr::Closure(func) = expr.deref_mut() else { ice!("want closure") };
 
         // TODO: use :ClosureRequestType
@@ -2306,31 +2314,34 @@ impl<'a, 'p> Compile<'a, 'p> {
         self[scope].funcs.push(f);
         self.ensure_resolved_sign(f)?;
 
-        if !self.program[f].has_tag(Flag::Generic) {
-            // If the closure doesn't have type annotations but our caller asked for something specific,
-            // insert that as a type annotation and don't bother looking at the body to infer.
-            // It will get typechecked later when the callsite actually gets compiled.
-            // TODO: this is wrong because it means overloading can't call this function! -- May 5
-            if matches!(self.program[f].ret, LazyType::Infer) {
-                if let Some(ret) = req_ret {
-                    self.program[f].ret = LazyType::Finished(ret);
-                }
+        // If the closure doesn't have type annotations but our caller asked for something specific,
+        // insert that as a type annotation and don't bother looking at the body to infer.
+        // It will get typechecked later when the callsite actually gets compiled.
+        // TODO: this is wrong because it means overloading can't call this function! -- May 5
+        if matches!(self.program[f].ret, LazyType::Infer) {
+            if let Some(ret) = req_ret {
+                self.program[f].ret = LazyType::Finished(ret);
             }
+        }
 
-            if self.infer_types(f)?.is_none() {
-                // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
-                if let FuncImpl::Normal(body) = &mut self.program[f].body.clone() {
-                    // debug_
-                    assert!(
-                        self.program[f].get_flag(FuncFlags::ResolvedBody),
-                        "ICE: closures aren't lazy currently. missing =>?"
-                    );
-                    // TODO: this is very suspisious! what if it has captures
-                    let res = self.type_of(body);
-                    debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
-                    if let Some(ret_ty) = res? {
-                        self.program[f].finished_ret = Some(ret_ty);
-                    }
+        // like above, if the arg doesn't have a type annotation but we know what we want from context, fill that in.
+        // TODO: same when multiple args.
+        if self.program[f].arg.bindings.len() == 1 && matches!(self.program[f].arg.bindings[0].ty, LazyType::Infer) {
+            if let Some(arg) = req_arg {
+                self.program[f].arg.bindings[0].ty = LazyType::Finished(arg);
+            }
+        }
+
+        if !self.program[f].get_flag(Generic) && self.infer_types(f)?.is_none() {
+            // TODO: i only do this for closures becuase its a pain to thread the &mut result through everything that calls infer_types().
+            if let FuncImpl::Normal(body) = &mut self.program[f].body.clone() {
+                // debug_
+                assert!(self.program[f].get_flag(ResolvedBody), "ICE: closures aren't lazy currently. missing =>?");
+                // TODO: this is very suspisious! what if it has captures
+                let res = self.type_of(body);
+                debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
+                if let Some(ret_ty) = res? {
+                    self.program[f].finished_ret = Some(ret_ty);
                 }
             }
         }
@@ -2840,7 +2851,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: you really want to compile as much of the body as possible before you start baking things.
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
-        if self.program[fid].has_tag(Flag::Generic) {
+        if self.program[fid].get_flag(Generic) {
             self.compile_expr(arg_expr, None)?;
         } else {
             let arg_ty = self.infer_arg(fid)?;
@@ -2859,19 +2870,19 @@ impl<'a, 'p> Compile<'a, 'p> {
         let force_inline = func.cc == Some(CallConv::Inline);
         let deny_inline = func.has_tag(Flag::NoInline);
         assert!(!(force_inline && deny_inline), "{fid:?} is both @inline and @noinline");
-        let will_inline = force_inline || func.get_flag(FuncFlags::AllowRtCapture) || !func.capture_vars.is_empty();
+        let will_inline = force_inline || func.get_flag(AllowRtCapture) || !func.capture_vars.is_empty();
         assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
         if will_inline {
             // If we're just inlining for #inline, compile first so some work on the ast is only done once.
             // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
-            if !func.get_flag(FuncFlags::AllowRtCapture) && func.capture_vars.is_empty() {
+            if !func.get_flag(AllowRtCapture) && func.capture_vars.is_empty() {
                 self.compile(fid, ExecTime::Both)?;
             }
 
             // TODO: check that you're calling from the same place as the definition.
             Ok((self.emit_capturing_call(fid, expr)?, true))
-        } else if !done && func.get_flag(FuncFlags::TryConstantFold) && arg_expr.as_const().is_some() {
+        } else if !done && func.get_flag(TryConstantFold) && arg_expr.as_const().is_some() {
             // TODO: this should be smarter. like if fn add is #fold, then (1.add(2.add(3))) doesn't need to do the fold at both levels,
             // it can just emit one function for doing the top one. idk if thats better. probably depends how complicated the expression is.
             let ty = self.program.func_type(fid);
@@ -3004,8 +3015,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(new_f);
         }
 
-        if self.program[original_f].get_flag(FuncFlags::AllowRtCapture) {
-            debug_assert!(self.program[original_f].get_flag(FuncFlags::ResolvedBody));
+        if self.program[original_f].get_flag(AllowRtCapture) {
+            debug_assert!(self.program[original_f].get_flag(ResolvedBody));
         } else {
             self.program[original_f].assert_body_not_resolved()?;
         }
@@ -3017,11 +3028,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         // Closures always resolve up front, so they need to renumber the clone.
         // TODO: HACK but closures get renumbered when inlined anyway, so its just the const args that matter. im just being lazy and doing the whole thing redundantly -- May 9
         // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
-        // TODO: the special case for generics is for my new thing where args can reference previous ones
-        //       so they have to resolve sign earlier.
-        assert!(!(self.program[original_f].has_tag(Flag::Generic) && self.program[original_f].get_flag(FuncFlags::AllowRtCapture)));
+        // the special case for generics is when args can reference previous ones so they have to resolve sign earlier.
 
-        let needs_renumber = self.program[original_f].get_flag(FuncFlags::AllowRtCapture) || self.program[original_f].has_tag(Flag::Generic);
+        let needs_renumber = self.program[original_f].get_flag(AllowRtCapture) || self.program[original_f].get_flag(Generic);
         if needs_renumber {
             let mut mapping = Default::default();
             let mut renumber = RenumberVars {
@@ -3033,8 +3042,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             renumber.ty(&mut new_func.ret);
             let FuncImpl::Normal(body) = &mut new_func.body else { unreachable!() };
             renumber.expr(body);
-            // TODO: allow closure here because why not. the cond can be generic && !BodyResolved
-            if self.program[original_f].has_tag(Flag::Generic) {
+            if self.program[original_f].get_flag(Generic) && !self.program[original_f].get_flag(ResolvedBody) {
                 // the sign has already been resolved so we need to renumber before binding arguments.
                 // however, the body hasn't been resolved yet, so we can't just renumber in place.
                 // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
@@ -3044,7 +3052,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
                 // so they get inserted back in the old one's constants/rt_types again later.
                 // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
-                debug_assert!(self.program[original_f].get_flag(FuncFlags::ResolvedSign));
+                debug_assert!(self.program[original_f].get_flag(ResolvedSign));
+                debug_assert!(!self.program[original_f].get_flag(AllowRtCapture));
                 self.program[original_f].assert_body_not_resolved()?;
                 debug_assert!(
                     !matches!(body.expr, Expr::Block { .. }),
@@ -3095,8 +3104,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.bind_const_arg(new_fid, name, value, ty, arg_expr.loc)?;
             self.set_literal(arg_expr, ())?;
 
-            if self.program[new_fid].has_tag(Flag::Generic) {
-                self.program[new_fid].annotations.retain(|a| a.name != Flag::Generic.ident());
+            if self.program[new_fid].get_flag(Generic) {
+                self.program[new_fid].set_flag(Generic, false);
                 self.infer_types(new_fid)?;
             }
 
@@ -3111,7 +3120,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 err!("TODO: pattern match on non-tuple",)
             };
             let pattern = func.arg.clone();
-            let is_generic = func.has_tag(Flag::Generic);
+            let is_generic = func.get_flag(Generic);
             let mut removed_count = 0;
             for (i, mut b) in pattern.bindings.into_iter().enumerate() {
                 if b.kind != VarType::Const {
@@ -3142,7 +3151,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert_ne!(new_fid, original_f);
 
             if is_generic {
-                self.program[new_fid].annotations.retain(|a| a.name != Flag::Generic.ident());
+                self.program[new_fid].set_flag(Generic, false);
                 let ty = self.infer_types(new_fid)?;
                 assert!(ty.is_some(), "failed to infer types of #generic function");
             }

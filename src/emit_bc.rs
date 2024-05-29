@@ -6,7 +6,7 @@ use codemap::Span;
 use std::ops::Deref;
 use std::usize;
 
-use crate::ast::{CallConv, Expr, FatExpr, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::compiler::{CErr, Compile, ExecTime, Res};
 use crate::logging::PoolLog;
@@ -398,7 +398,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let TypeInfo::Fn(_) = self.program[f.ty] {
                     let f_id = unwrap!(f.as_const(), "tried to call non-const fn").unwrap_func_id();
                     let func = &self.program[f_id];
-                    assert!(!func.has_tag(Flag::Generic));
+                    assert!(!func.get_flag(FnFlag::Generic));
                     return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
                 }
                 if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {

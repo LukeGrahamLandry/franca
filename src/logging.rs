@@ -103,7 +103,7 @@ macro_rules! unwrap {
 
 pub use unwrap;
 
-use crate::ast::{FatStmt, FuncFlags, FuncImpl, Pattern};
+use crate::ast::{FatStmt, FnFlag, FuncImpl, Pattern};
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
@@ -392,7 +392,7 @@ impl<'p> PoolLog<'p> for Var<'p> {
 
 impl<'p> PoolLog<'p> for Func<'p> {
     fn log(&self, pool: &StringPool<'p>) -> String {
-        if !self.get_flag(FuncFlags::NotEvilUninit) {
+        if !self.get_flag(FnFlag::NotEvilUninit) {
             return "[UNINIT (wip/dropped)]".to_string();
         }
         format!(
