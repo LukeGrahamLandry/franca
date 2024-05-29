@@ -464,7 +464,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     } else {
                         result.push_block(0, 0)
                     };
-                    result.inlined_return_addr.insert(*ret_var, (return_block, result_location));
+                    let prev = result.inlined_return_addr.insert(*ret_var, (return_block, result_location));
+                    assert!(prev.is_none());
                     result.current_block = entry_block;
 
                     for stmt in body {
@@ -578,9 +579,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 };
                 match name {
                     Flag::If => self.emit_call_if(result, arg, result_location, can_tail)?,
-                    Flag::While => {
+                    Flag::Loop => {
                         debug_assert_eq!(result_location, Discard);
-                        self.emit_call_while(result, arg)?;
+                        self.emit_call_loop(result, arg)?;
                     }
                     Flag::Addr => self.addr_macro(result, arg, result_location)?,
                     Flag::Quote => unreachable!(),
@@ -752,53 +753,31 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn emit_call_while(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, ()> {
-        let Expr::Tuple(parts) = &arg.expr else {
-            ice!("while args must be tuple not {:?}", arg);
-        };
-        let (cond_fn, body_fn) = (&parts[0], &parts[1]);
-
-        debug_assert_eq!(body_fn.ty, TypeId::unit);
+    fn emit_call_loop(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>) -> Res<'p, ()> {
+        debug_assert_eq!(arg.ty, TypeId::unit);
 
         let prev_block = result.current_block;
-        let start_cond_block = result.push_block(0, 0);
-        result.current_block = start_cond_block;
+        let start_body_block = result.push_block(0, 0);
+        result.current_block = start_body_block;
         result.push_to(
             prev_block,
             Bc::Goto {
-                ip: start_cond_block,
+                ip: start_body_block,
                 slots: 0,
             },
         );
 
-        self.compile_expr(result, cond_fn, PushStack, false)?;
-        let end_cond_block = result.current_block;
-
-        let start_body_block = result.push_block(0, 0);
-        self.compile_expr(result, body_fn, Discard, false)?;
+        self.compile_expr(result, arg, Discard, false)?;
         let end_body_block = result.current_block;
 
-        let exit_block = result.push_block(0, 0);
         result.push_to(
             end_body_block,
             Bc::Goto {
-                ip: start_cond_block,
+                ip: start_body_block,
                 slots: 0,
             },
         );
-        result.push_to(
-            end_cond_block,
-            Bc::JumpIf {
-                true_ip: start_body_block,
-                false_ip: exit_block,
-                slots: 0,
-            },
-        );
-        result.blocks[start_cond_block.0 as usize].incoming_jumps += 2;
-        result.blocks[start_body_block.0 as usize].incoming_jumps += 1;
-        result.blocks[exit_block.0 as usize].incoming_jumps += 1;
-
-        result.bump_clock(exit_block);
+        result.blocks[start_body_block.0 as usize].incoming_jumps += 2;
         Ok(())
     }
 

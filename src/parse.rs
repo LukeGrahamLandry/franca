@@ -414,8 +414,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.eat(Bang)?;
                 let name = self.ident()?;
-                let prefix = Box::new(self.raw_unit());
-                Ok(self.expr(Expr::SuffixMacro(name, prefix)))
+                // HACK
+                if name == Flag::Return.ident() {
+                    self.end_subexpr();
+                    Ok(self.expr(Expr::GetNamed(Flag::__Return.ident())))
+                } else {
+                    let prefix = Box::new(self.raw_unit());
+                    Ok(self.expr(Expr::SuffixMacro(name, prefix)))
+                }
             }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }

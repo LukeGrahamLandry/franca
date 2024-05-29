@@ -1,3 +1,18 @@
+## improving inference (May 29)
+
+made it so overloading checks one argument at a time,
+so it can decide which loop iter function you're calling based on just the collection,
+and then infer the types for the closure, so you dont have to write the element types a billion times.
+and then in promote_closure, slot in the types if they're missing, like i did in @match a while a go.
+also had to carry through the requested type to each tuple element so it gets passed from the resolved function arg
+all the way to compiling the closure.
+
+gonna replace !while with !loop and implement fn while with early returns.
+eventually want it to just be expressed as tail recursion but this is a good start.
+it really doesn't like me writing while with a loop tho, `Missing value result.inlined_return_addr.get(&return_from)`.
+Oh its because of my reducing Block with empty stmts to just the result expr and Block is the only place I hang a return label from.
+So just need to check if that's been defined (which is only done by emit_captuing_call).
+
 ## remove #comptime (May 28)
 
 another attempt at removing #comptime because const args should do the same thing.

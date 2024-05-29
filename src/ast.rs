@@ -1706,7 +1706,7 @@ pub enum Flag {
     Builtin_If,
     Builtin_While,
     If,
-    While,
+    Loop,
     Addr,
     Tag,
     Reflect_Print,

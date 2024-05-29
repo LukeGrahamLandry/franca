@@ -1279,6 +1279,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 body,
                 result: value,
                 hoisted_constants,
+                ret_label,
                 ..
             } => {
                 if !*hoisted_constants {
@@ -1294,7 +1295,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // TODO: insert drops for locals
                 let res = self.compile_expr(value, requested)?;
-                if body.is_empty() {
+                if body.is_empty() && ret_label.is_none() {
                     *expr = mem::take(value); // Not required but makes debugging easier cause there's less stuff.
                 }
                 expr.ty = res;
@@ -1348,7 +1349,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: make `let` deeply immutable so only const addr
                     // Note: arg is not evalutated
                     Flag::If => self.emit_call_if(expr, requested)?,
-                    Flag::While => self.emit_call_while(arg)?,
+                    Flag::Loop => self.emit_call_loop(arg)?,
                     Flag::Addr => self.addr_macro(expr, requested)?,
                     // :UnquotePlaceholders
                     Flag::Quote => {
@@ -1860,7 +1861,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(None);
                     }
                     Flag::Quote => FatExpr::get_or_create_type(self.program),
-                    Flag::While => TypeId::unit,
+                    Flag::Loop => TypeId::never,
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
                     Flag::If => return Ok(None),
                     Flag::As => {
@@ -2446,46 +2447,29 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(true_ty)
     }
 
-    fn emit_call_while(&mut self, while_macro_arg: &mut FatExpr<'p>) -> Res<'p, TypeId> {
+    fn emit_call_loop(&mut self, while_macro_arg: &mut FatExpr<'p>) -> Res<'p, TypeId> {
         if !while_macro_arg.ty.is_unknown() {
             // We've been here before and already replaced closures with calls.
             return Ok(TypeId::unit);
         }
 
-        let sig = "while(fn(Unit) bool, fn(Unit) Unit)";
+        let sig = "loop(fn(Unit) Unit)";
         let mut unit_expr = self.as_literal((), while_macro_arg.loc)?;
-        let Expr::Tuple(parts) = while_macro_arg.deref_mut() else {
-            ice!("if args must be tuple not {:?}", while_macro_arg);
-        };
-        if let Some(cond_fn) = self.maybe_direct_fn(&mut parts[0], &mut unit_expr, Some(TypeId::bool()))? {
-            self.program[cond_fn].set_cc(CallConv::Inline)?; // hack
-            let cond_arg = self.infer_arg(cond_fn)?;
-            self.type_check_arg(cond_arg, TypeId::unit, sig)?;
-            let cond_ret = self.emit_call_on_unit(cond_fn, &mut parts[0], None)?;
-            self.type_check_arg(cond_ret, TypeId::bool(), sig)?;
-        } else {
-            todo!("shouldnt get here twice")
-        }
-        self.finish_closure(&mut parts[0]);
 
-        // TODO: compile the condition to check if its obviously constant.
-        //       like if, dont compile body if unreachable. also make the result never if while(true)
-        //       tho this is going to become tail rec so maybe dont bother
-
-        if let Some(body_fn) = self.maybe_direct_fn(&mut parts[1], &mut unit_expr, Some(TypeId::unit))? {
+        if let Some(body_fn) = self.maybe_direct_fn(while_macro_arg, &mut unit_expr, Some(TypeId::unit))? {
             self.program[body_fn].set_cc(CallConv::Inline)?; // hack
             let body_arg = self.infer_arg(body_fn)?;
             self.type_check_arg(body_arg, TypeId::unit, sig)?;
-            let body_ret = self.emit_call_on_unit(body_fn, &mut parts[1], None)?;
+            self.finish_closure(while_macro_arg);
+            let body_ret = self.emit_call_on_unit(body_fn, while_macro_arg, Some(TypeId::unit))?;
             self.type_check_arg(body_ret, TypeId::unit, sig)?;
         } else {
             todo!("shouldnt get here twice")
         }
-        self.finish_closure(&mut parts[1]);
-
         while_macro_arg.ty = TypeId::unit;
+        while_macro_arg.done = true;
 
-        Ok(TypeId::unit)
+        Ok(TypeId::never)
     }
 
     // TODO: I think this can just be (arg, target) = '{ let v: <arg> = <target>; v }'
