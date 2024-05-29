@@ -164,6 +164,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if result_location == ResAddr {
             result.push(Bc::AddrFnResult);
         }
+
         // TODO: flat_call tail
         self.compile_expr(result, body, result_location, !is_flat_call)?;
 

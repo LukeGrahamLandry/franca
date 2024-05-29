@@ -660,6 +660,10 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         debug_assert!(body_expr.as_suffix_macro_mut(Flag::Asm).is_none(), "special should handle");
 
+        if !self.program[f].get_flag(Generic) && !matches!(self.program[f].ret, LazyType::Infer) {
+            self.infer_types(f)?;
+        }
+
         let hint = self.program[f].finished_ret;
         if let Some(return_var) = self.program[f].return_var {
             if let Some(ret_ty) = hint {
@@ -2325,10 +2329,22 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         // like above, if the arg doesn't have a type annotation but we know what we want from context, fill that in.
-        // TODO: same when multiple args.
-        if self.program[f].arg.bindings.len() == 1 && matches!(self.program[f].arg.bindings[0].ty, LazyType::Infer) {
-            if let Some(arg) = req_arg {
-                self.program[f].arg.bindings[0].ty = LazyType::Finished(arg);
+        if let Some(arg) = req_arg {
+            if self.program[f].arg.bindings.iter().any(|b| matches!(b.ty, LazyType::Infer)) {
+                if self.program[f].arg.bindings.len() == 1 {
+                    self.program[f].arg.bindings[0].ty = LazyType::Finished(arg);
+                } else if let Some(types) = self.program.tuple_types(arg) {
+                    if types.len() == self.program[f].arg.bindings.len() {
+                        for (ty, b) in types.into_iter().zip(self.program[f].arg.bindings.iter_mut()) {
+                            if matches!(b.ty, LazyType::Infer) {
+                                b.ty = LazyType::Finished(ty);
+                            }
+                            // TODO: typecheck the ones we're skipping.
+                            //       its a massive problem if you tried to pattern match destructure differently than i assumed
+                            //       -- May 29
+                        }
+                    }
+                }
             }
         }
 
