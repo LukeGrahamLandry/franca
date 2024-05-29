@@ -91,10 +91,19 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let generic = func.has_tag(Flag::Generic); // ret is allowed to depend on previous args.
 
         func.set_flag(FuncFlags::ResolvedSign, true);
-        for b in &mut func.arg.bindings {
-            self.resolve_binding(b)?;
-        }
-        if !generic {
+
+        if generic {
+            for b in &mut func.arg.bindings {
+                self.declare_binding(b, func.loc)?;
+            }
+            for b in &mut func.arg.bindings {
+                self.resolve_binding(b)?;
+            }
+            self.walk_ty(&mut func.ret);
+        } else {
+            for b in &mut func.arg.bindings {
+                self.resolve_binding(b)?;
+            }
             self.walk_ty(&mut func.ret);
         }
         self.pop_block();
@@ -114,11 +123,11 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
         self.push_scope(None);
 
-        for b in &mut func.arg.bindings {
-            self.declare_binding(b, func.loc)?;
-        }
         if generic {
-            self.walk_ty(&mut func.ret);
+        } else {
+            for b in &mut func.arg.bindings {
+                self.declare_binding(b, func.loc)?;
+            }
         }
         self.push_scope(None);
         func.set_flag(FuncFlags::ResolvedBody, true);

@@ -81,7 +81,7 @@ pub struct Compile<'a, 'p> {
     pending_redirects: Vec<(FuncId, FuncId)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scope<'p> {
     pub parent: ScopeId,
     pub constants: Map<Var<'p>, (FatExpr<'p>, LazyType<'p>)>,
@@ -93,7 +93,7 @@ pub struct Scope<'p> {
     pub block_in_parent: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockScope<'p> {
     pub vars: Vec<Var<'p>>,
     pub parent: usize,
@@ -827,7 +827,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // I don't want to renumber, so make sure to do the clone before resolving.
         // TODO: reslove captured constants anyway so dont haveto do the chain lookup redundantly on each speciailization. -- Apr 24
         debug_assert!(self.program[o_f].get_flag(FuncFlags::ResolvedBody) && self.program[o_f].get_flag(FuncFlags::ResolvedSign));
-
+        // println!("bind {}", arg_name.log(self.pool));
         let mut arg_x = self.program[o_f].arg.clone();
         let arg_ty = self.get_type_for_arg(&mut arg_x, arg_name)?;
         self.program[o_f].arg = arg_x;
@@ -3022,7 +3022,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         // normal functions with const args havent had their body resolved yet so don't have to deal with it, we only resolve on the clone.
         // TODO: the special case for generics is for my new thing where args can reference previous ones
         //       so they have to resolve sign earlier.
-        if self.program[original_f].get_flag(FuncFlags::AllowRtCapture) {
+        // self.program[original_f].get_flag(FuncFlags::AllowRtCapture)
+        // || self.program[original_f].has_tag(Flag::Generic)
+        // self.program[original_f].get_flag(FuncFlags::ResolvedBody)
+        //
+        assert!(!(self.program[original_f].has_tag(Flag::Generic) && self.program[original_f].get_flag(FuncFlags::AllowRtCapture)));
+
+        let mut needs_renumber = self.program[original_f].get_flag(FuncFlags::AllowRtCapture);
+        needs_renumber |= self.program[original_f].has_tag(Flag::Generic);
+        if needs_renumber {
             let mut mapping = Default::default();
             let mut renumber = RenumberVars {
                 vars: self.program.next_var,
@@ -3036,6 +3044,29 @@ impl<'a, 'p> Compile<'a, 'p> {
             } else {
                 unreachable!()
             }
+            if self.program[original_f].has_tag(Flag::Generic) {
+                debug_assert!(self.program[original_f].get_flag(FuncFlags::ResolvedSign));
+                self.program[original_f].assert_body_not_resolved()?;
+                let mut scope = self[new_func.scope.unwrap()].clone();
+                debug_assert!(scope.rt_types.is_empty());
+                let old_constants = mem::take(&mut scope.constants); // because need to rehash
+                for (k, v) in old_constants {
+                    if let Some(new) = mapping.get(&k) {
+                        scope.constants.insert(*new, v);
+                    }
+                }
+                for block in &mut scope.vars {
+                    for k in &mut block.vars {
+                        if let Some(new) = mapping.get(k) {
+                            *k = *new;
+                        }
+                    }
+                }
+                self.scopes.push(scope);
+                let id = ScopeId::from_index(self.scopes.len() - 1);
+                new_func.scope = Some(id);
+            }
+            // println!("renumber ret {}", new_func.ret.log(self.pool));
         }
         let scope = new_func.scope.unwrap();
         let new_fid = self.program.add_func(new_func);
