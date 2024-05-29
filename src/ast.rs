@@ -710,6 +710,7 @@ pub enum FuncImpl<'p> {
     /// Lines of llvm ir text to be concatenated as the body of a function.
     /// The compiler creates the signeture, prefix arg ssa references with '%', you cant declare globals.
     LlvmIr(Ident<'p>),
+    CSource(Ident<'p>),
     EmitCranelift(usize), // CfEmit
     PendingRedirect {
         arg: TypeId,
@@ -1681,7 +1682,6 @@ pub enum Flag {
     Llvm,
     Cranelift,
     _Reserved_End_Arch_, // It's important which are above and below this point.
-    Comptime,
     Generic,
     As,
     Inline,
@@ -1758,7 +1758,9 @@ pub enum Flag {
     Fold,
     Ptr,
     Len,
+    Export,
     __Tag_Check,
+    C,
     _Reserved_Count_,
 }
 
@@ -1879,5 +1881,9 @@ impl<'p> FuncImpl<'p> {
 
     pub fn comptime_addr(&self) -> Option<&usize> {
         func_impl_getter!(self, ComptimeAddr)
+    }
+
+    pub fn c_source(&self) -> Option<&Ident<'p>> {
+        func_impl_getter!(self, CSource)
     }
 }

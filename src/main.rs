@@ -5,6 +5,7 @@
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc::Values,
+    c::emit_c,
     compiler::{Compile, ExecTime, Res},
     export_ffi::{end_raw, get_include_std, start_raw, STDLIB_PATH},
     find_std_lib,
@@ -69,6 +70,7 @@ fn main() {
     let mut path = None;
     let mut args = env::args();
     let mut exe_path = None;
+    let mut c = false;
     args.next().unwrap(); // exe path
 
     #[cfg(target_arch = "aarch64")]
@@ -110,6 +112,7 @@ fn main() {
                 }
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats"),
                 "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
+                "c" => c = true,
                 _ => panic!("unknown argument --{name}"),
             }
         } else {
@@ -150,6 +153,32 @@ fn main() {
             log_err(&comp, *e);
             exit(1);
         });
+
+        if c {
+            if comp.export.is_empty() {
+                let name = comp.program.pool.intern("main");
+                if let Some(f) = comp.program.find_unique_func(name) {
+                    comp.export.push(f);
+                }
+            }
+            if comp.export.is_empty() {
+                comp.export.extend(&comp.tests);
+            }
+            match emit_c(&mut comp) {
+                Ok(s) => {
+                    println!("{}", s);
+                    if stats {
+                        println!("/*{:#?}*/", unsafe { &STATS });
+                    }
+                    exit(0);
+                }
+                Err(e) => {
+                    log_err(&comp, *e);
+                    eprintln!("failed");
+                    exit(1);
+                }
+            }
+        }
 
         for f in comp.tests.clone() {
             println!("{}();", comp.program.pool.get(comp.program[f].name));

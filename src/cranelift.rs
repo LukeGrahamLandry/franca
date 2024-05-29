@@ -31,6 +31,7 @@ use crate::{
     emit_bc::{emit_bc, empty_fn_body},
     err, extend_options,
     logging::make_err,
+    pops,
     reflect::BitSet,
     unwrap,
 };
@@ -69,6 +70,7 @@ pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectP
         for callee in comp.program[f].callees.clone() {
             emit(comp, m, callee)?;
         }
+        // TODO: mutual callees
 
         if comp.program[f].has_tag(Flag::Ct) {
             return Ok(()); // TODO: why am i trying to call Unique?
@@ -544,6 +546,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     self.stack.push(builder.ins().global_value(I64, local));
                 }
                 Bc::JumpIf { true_ip, false_ip, slots } => {
+                    debug_assert_eq!(slots, 0, "this is probably fine. but not tested cause emit_bc never does it");
                     let cond = self.stack.pop().unwrap();
                     let t = self.blocks[true_ip.0 as usize];
                     let f = self.blocks[false_ip.0 as usize];
@@ -784,12 +787,6 @@ fn wrap(e: ModuleError) -> Box<CompileError<'static>> {
 #[track_caller]
 fn wrapg(e: cranelift::codegen::CodegenError) -> Box<CompileError<'static>> {
     make_err(CErr::Fatal(format!("cranelift: {:?}", e)))
-}
-
-fn pops<T>(v: &mut Vec<T>, count: usize) {
-    for _ in 0..count {
-        v.pop().unwrap();
-    }
 }
 
 macro_rules! inst {

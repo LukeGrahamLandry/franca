@@ -571,3 +571,9 @@ impl BitSet {
         }
     }
 }
+
+impl Default for BitSet {
+    fn default() -> Self {
+        Self::empty()
+    }
+}

@@ -149,8 +149,8 @@ extern "C" {
 // pub fn __clear_cache(beg: *mut libc::c_char, end: *mut libc::c_char);
 // IMPORTANT: since compile is repr(C), &mut &mut Program === &mut Compile
 pub const COMPILER: &[(&str, *const u8)] = &[
-    ("fn Ptr(Inner: Type) Type", do_ptr_type as *const u8),
-    ("fn operator_star_prefix(Inner: Type) Type", do_ptr_type as *const u8),
+    ("fn Ptr(Inner: Type) Type #fold", do_ptr_type as *const u8),
+    ("fn operator_star_prefix(Inner: Type) Type #fold", do_ptr_type as *const u8),
     ("#no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
     ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("#fold fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),

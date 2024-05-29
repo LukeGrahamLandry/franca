@@ -122,6 +122,7 @@ macro_rules! mut_replace {
 pub mod ast;
 pub mod bc;
 pub mod bc_to_asm;
+pub mod c;
 pub mod compiler;
 #[cfg(feature = "cranelift")]
 pub mod cranelift;
@@ -390,5 +391,11 @@ pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
     v.reserve(count);
     for _ in 0..count {
         v.push(None);
+    }
+}
+
+fn pops<T>(v: &mut Vec<T>, count: usize) {
+    for _ in 0..count {
+        v.pop().unwrap();
     }
 }

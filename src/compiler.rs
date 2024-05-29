@@ -16,8 +16,9 @@ use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
 use crate::ast::{
-    Annotation, Binding, CallConv, FatStmt, Flag, FnFlag::*, FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars,
-    ScopeId, TargetArch, Var, VarType, WalkAst,
+    Annotation, Binding, CallConv, FatStmt, Flag,
+    FnFlag::{self, *},
+    FuncImpl, IntTypeInfo, LabelId, Name, OverloadSet, OverloadSetId, Pattern, RenumberVars, ScopeId, TargetArch, Var, VarType, WalkAst,
 };
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
@@ -78,6 +79,7 @@ pub struct Compile<'a, 'p> {
     pub cranelift: crate::cranelift::JittedCl<cranelift_jit::JITModule>,
     pub make_slice_t: Option<FuncId>,
     pending_redirects: Vec<(FuncId, FuncId)>,
+    pub export: Vec<FuncId>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +124,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         let parsing = ParseTasks::new(pool);
         let mut c = Self {
+            export: vec![],
             pending_redirects: vec![],
             make_slice_t: None,
             wip_stack: vec![],
@@ -1077,6 +1080,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if func.has_tag(Flag::Fold) {
             func.set_flag(TryConstantFold, true);
+        }
+        if func.has_tag(Flag::Export) {
+            assert!(!func.any_const_args(), "functions with const arguments cannot be exported.");
+            assert!(
+                !func.get_flag(FnFlag::AllowRtCapture),
+                "functions with runtime captures cannot be exported (declare with '=' instead of '=>')."
+            );
+            self.export.push(id);
         }
 
         Ok(out)
@@ -3187,7 +3198,10 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, FuncImpl<'p>> {
         self.last_loc = Some(self.program[f].loc);
         assert!(
-            self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
+            self.program[f].has_tag(Flag::C)
+                || self.program[f].has_tag(Flag::C_Call)
+                || self.program[f].has_tag(Flag::Flat_Call)
+                || self.program[f].has_tag(Flag::One_Ret_Pic),
             "inline asm msut specify calling convention. but just: {:?}",
             self.program[f].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
         );
@@ -3244,6 +3258,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             let Ok(ir) = std::str::from_utf8(ir) else { err!("wanted utf8 llvmir",) };
             self.program.inline_llvm_ir.push(f);
             Ok(FuncImpl::LlvmIr(self.pool.intern(ir)))
+        } else if self.program[f].has_tag(Flag::C) {
+            // TODO: copy paste.
+            let ty = <(*mut u8, i64) as InterpSend>::get_or_create_type(self.program);
+            let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(asm.clone())), asm.loc, ty);
+            let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
+            let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
+            let Ok(ir) = std::str::from_utf8(ir) else {
+                err!("wanted utf8 csource ",)
+            };
+            Ok(FuncImpl::CSource(self.pool.intern(ir)))
         } else {
             err!("!asm require arch tag",)
         }
@@ -3489,6 +3513,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 }
 
+#[repr(i64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, InterpSend)]
 pub enum ExecTime {
     Comptime,
