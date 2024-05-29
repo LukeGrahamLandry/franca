@@ -824,7 +824,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn sub(_: i64, __: i64) i64;", inst!(isub)),
     ("fn mul(_: i64, __: i64) i64;", inst!(imul)),
     ("fn div(_: i64, __: i64) i64;", inst!(sdiv)),
-    ("fun eq(_: i64, __: i64) bool;", icmp!(Equal)),
+    ("fn eq(_: i64, __: i64) bool;", icmp!(Equal)),
     ("fn ne(_: i64, __: i64) bool;", icmp!(NotEqual)),
     ("fn lt(_: i64, __: i64) bool;", icmp!(SignedLessThan)),
     ("fn gt(_: i64, __: i64) bool;", icmp!(SignedGreaterThan)),
@@ -834,7 +834,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn sub(_: f64, __: f64) f64;", inst!(fsub)),
     ("fn mul(_: f64, __: f64) f64;", inst!(fmul)),
     ("fn div(_: f64, __: f64) f64;", inst!(fdiv)),
-    ("fun eq(_: f64, __: f64) bool;", fcmp!(Equal)),
+    ("fn eq(_: f64, __: f64) bool;", fcmp!(Equal)),
     ("fn ne(_: f64, __: f64) bool;", fcmp!(NotEqual)),
     ("fn lt(_: f64, __: f64) bool;", fcmp!(LessThan)),
     ("fn gt(_: f64, __: f64) bool;", fcmp!(GreaterThan)),
@@ -843,7 +843,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn bit_or(_: i64, __: i64) i64;", inst!(bor)),
     ("fn bit_and(_: i64, __: i64) i64;", inst!(band)),
     ("fn shift_left(_: i64, __: i64) i64;", inst!(ishl)),
-    ("fun offset(_: rawptr, bytes: i64) rawptr;", inst!(iadd)),
+    ("fn offset(_: rawptr, bytes: i64) rawptr;", inst!(iadd)),
     ("fn bit_not(_: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bnot(v[0])
     }),
@@ -859,7 +859,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn int_to_ptr(_: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
     // it seems this matches what i do.
     // https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/aarch64/inst/emit.rs#L2183
-    ("fun int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_to_sint_sat(I64, v[0])
     }),
     ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
@@ -869,13 +869,13 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn store(_: *Unit, val: Unit) Unit;", |builder: &mut FunctionBuilder, _: &[Value]| {
         builder.ins().iconst(I64, 0)
     }),
-    ("fun float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_from_sint(F64, v[0])
     }),
-    ("fun bitcast(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn bitcast(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(F64, MemFlags::new(), v[0])
     }),
-    ("fun bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(I64, MemFlags::new(), v[0])
     }),
     ("fn load(_: *u32) u32;", |builder: &mut FunctionBuilder, v: &[Value]| {

@@ -25,7 +25,6 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -904,16 +903,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Don't match on res being const because the function might still have side effects
                 if expr.is_raw_unit() {
                     stmt.stmt = Stmt::Noop; // TODO: might need to remove this for janky @namespace but should find better fix. having less stuff makes it nicer to debug -- May 1
-                                            // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                 }
             }
             Stmt::Set { .. } => self.set_deref(stmt)?,
             Stmt::DeclNamed { .. } => {
                 ice!("Scope resolution failed {}", stmt.log(self.pool))
             }
-            Stmt::Noop => {
-                // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
-            }
+            Stmt::Noop => {}
             Stmt::DeclFunc(_) => unreachable!("DeclFunc gets hoisted"),
             // TODO: make value not optonal and have you explicitly call uninitilized() if you want that for some reason.
             Stmt::DeclVar { name, ty, value, .. } => {
@@ -928,7 +924,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if value.is_raw_unit() {
                     stmt.stmt = Stmt::Noop;
 
-                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                     return Ok(());
                 }
                 let arguments = binding.flatten();
@@ -944,7 +939,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(());
                     } else {
                         if value.is_raw_unit() {
-                            // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                             stmt.stmt = Stmt::Noop; // not required. just want less stuff around when debugging
                         } else {
                             self.compile_expr(value, Some(ty))?;
@@ -983,7 +977,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.set_literal(value, ())?; // redundant now
                     stmt.stmt = Stmt::Noop;
 
-                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TODO
                     return Ok(());
                 } else if exprs.len() == 1 {
                     *value = mem::take(exprs.iter_mut().next().unwrap());
@@ -1022,7 +1015,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             func.add_tag(Flag::Ct);
         }
 
-        let public = func.has_tag(Flag::Pub);
         let id = self.add_func(func)?;
 
         let mut out = (None, None);
@@ -1037,7 +1029,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert_eq!(overloads.1, TypeId::overload_set);
                 let i: OverloadSetId = from_values(self.program, overloads.0)?;
                 let os = &mut self.program[i];
-                assert_eq!(os.public, public, "Overload visibility mismatch: {}", var.log(self.pool));
 
                 os.pending.push(id);
                 out = (Some(id), Some(i));
@@ -1047,7 +1038,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ready: vec![],
                     name: var.name,
                     pending: vec![id],
-                    public,
                     just_resolved: vec![],
                 });
                 self.save_const_values(var, (index.as_raw()).into(), TypeId::overload_set, loc)?;
@@ -1294,7 +1284,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
                 for stmt in body.iter_mut() {
-                    // stmt.annotations.retain(|a| a.name != Flag::Pub.ident()); // TPPD
                     self.compile_stmt(stmt)?;
                 }
                 // body.retain(|s| !(matches!(s.stmt, Stmt::Noop) && s.annotations.is_empty())); // Not required but makes debugging easier cause there's less stuff.
@@ -3044,19 +3033,24 @@ impl<'a, 'p> Compile<'a, 'p> {
             renumber.ty(&mut new_func.ret);
             let FuncImpl::Normal(body) = &mut new_func.body else { unreachable!() };
             renumber.expr(body);
+            // TODO: allow closure here because why not. the cond can be generic && !BodyResolved
             if self.program[original_f].has_tag(Flag::Generic) {
                 // the sign has already been resolved so we need to renumber before binding arguments.
                 // however, the body hasn't been resolved yet, so we can't just renumber in place.
                 // instead, remap the sign as normal and then, insert a new scope containing the remapped variables,
                 // and use that as the starting point when we resolve the body of new new function.
                 // that way when it iterates up the scopes to resolve names, it will see our remapped shadows instead of the original.
-                // this allows #generic argument types that reference the values of other argument.  -- May 29
+                // this allows #generic argument types that reference the values of other argument.
+                // but doing this is a bit creepy because the Var.scope isn't updated to the new one,
+                // so they get inserted back in the old one's constants/rt_types again later.
+                // that's why its fine when we can't find a remap for something in constants or vars.      -- May 29
                 debug_assert!(self.program[original_f].get_flag(FuncFlags::ResolvedSign));
                 self.program[original_f].assert_body_not_resolved()?;
                 debug_assert!(
                     !matches!(body.expr, Expr::Block { .. }),
                     "Block should be GetParsed because body is not resolved yet. "
                 );
+                // TODO: just take the part you need. rn this copys more and more every time! -- May 29
                 let mut scope = self[new_func.scope.unwrap()].clone();
                 // TODO: don't need to copy these. they should be empty the first time,
                 //       but when you call the function multiple times, the results from the old one will be there.
@@ -3068,11 +3062,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 for block in &mut scope.vars {
-                    for k in &mut block.vars {
+                    block.vars.retain_mut(|k| {
                         if let Some(new) = mapping.get(k) {
                             *k = *new;
+                            true
+                        } else {
+                            false
                         }
-                    }
+                    });
                 }
                 self.scopes.push(scope);
                 let id = ScopeId::from_index(self.scopes.len() - 1);
@@ -3219,7 +3216,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         }
                     }
                 }
-                todo!("this is sketchy with new u32");
+                todo!("untested");
                 let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
                 ops
             };

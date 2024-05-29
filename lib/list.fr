@@ -1,67 +1,67 @@
 // TODO: fix scope resolution for generics 
 // TODO: These are just cringe forward declarations to create the overload sets. 
-fun list() Unit;
-fun push() Unit;
-fun items() Unit;
-fun drop() Unit;
-fun push_all() Unit;
-fun clone() Unit;
-fun pop_last() Unit;
-fun reserve() Unit;
-fun repeated() Unit;
-fun clear() Unit;
-fun as_ptr() Unit;
+fn list() Unit;
+fn push() Unit;
+fn items() Unit;
+fn drop() Unit;
+fn push_all() Unit;
+fn clone() Unit;
+fn pop_last() Unit;
+fn reserve() Unit;
+fn repeated() Unit;
+fn clear() Unit;
+fn as_ptr() Unit;
 
-fun List(const T: Type) Type = {
+fn List(const T: Type) Type = {
     const Self = @struct(maybe_uninit: Slice(T), len: i64);
-    fun list(cap: i64) Self = { 
+    fn list(cap: i64) Self = { 
         let ptr: rawptr = alloc(T, cap);
         (maybe_uninit = (ptr = ptr, len = cap), len = 0)  // todo: no alloc if len 0 since i dont free
     }
-    fun list() Self = list(0);
+    fn list() Self = list(0);
     
-    fun repeated(t: T, count: i64) Self = {
+    fn repeated(t: T, count: i64) Self = {
         var self = list(count);
         range(0, count, fn(_: i64) Unit => self&.push(t));
         self
     }
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
-    fun clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
+    fn clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
         var self = list(from.len());
         self&.push_all(from);
         self
     }
     
-    fun items(self: *Self) Slice(T) = {
+    fn items(self: *Self) Slice(T) = {
         self.maybe_uninit.slice(0, self.len)
     }
-    fun items(var self: Self) Slice(T) = self&.items();
+    fn items(var self: Self) Slice(T) = self&.items();
     
     // A pointer to the first element of the list. 
     // SAFETY: dont use the pointer if the list is empty. invalidated by resize. 
-    fun as_ptr(self: *Self) *T = self.maybe_uninit.ptr;
+    fn as_ptr(self: *Self) *T = self.maybe_uninit.ptr;
     
     #inline
-    fun index(self: *Self, i: i64) *T = {
+    fn index(self: *Self, i: i64) *T = {
         assert(i.lt(self.len), "OOB");
         self.maybe_uninit.index(i)
     }
     
     // TODO: hack because auto deref doesn't work through function calls
     // TODO: self shouldn't have to be var just to read fields
-    fun index(var self: Self, i: i64) *T = {
+    fn index(var self: Self, i: i64) *T = {
         assert(i.lt(self.len), "OOB");
         self.maybe_uninit.index(i)
     }
     
-    fun len(self: Self) i64 #inline = self.len;
-    fun len(self: *Self) i64 #inline = self.len;
+    fn len(self: Self) i64 #inline = self.len;
+    fn len(self: *Self) i64 #inline = self.len;
 
     ::DeriveIndexable(Self, T);
     ::DeriveIndexable(*Self, T);
 
-    fun reserve(self: *Self, extra: i64) Unit = {
+    fn reserve(self: *Self, extra: i64) Unit = {
         let total = self.len.add(extra);
         let old_cap = self.maybe_uninit.len;
         if(lt(old_cap, total)) {|
@@ -77,34 +77,34 @@ fun List(const T: Type) Type = {
         };
     }
     
-    fun push(self: *Self, v: T) Unit = {
+    fn push(self: *Self, v: T) Unit = {
         reserve(self, 1);
         let last = self.maybe_uninit.index(self.len); 
         last[] = v;
         self.len = add(self.len, 1);
     }
     
-    fun pop_last(self: *Self) T = {
+    fn pop_last(self: *Self) T = {
         assert(gt(self.len, 0), "OOB");
         let i = sub(self.len, 1);
         self.len = i;
         self.maybe_uninit.get(i)
     }
     
-    fun push_all(self: *Self, new: Slice(T)) Unit = {
+    fn push_all(self: *Self, new: Slice(T)) Unit = {
         reserve(self, len(new));
         let dest = subslice(self.maybe_uninit, self.len, len(new));
         memcpy(dest, new);
         self.len = add(self.len, len(new));
     }
     
-    fun push_all(self: *Self, owned: *Self) Unit = {
+    fn push_all(self: *Self, owned: *Self) Unit = {
         self.push_all(owned.items());
         owned.drop();
     }
     
     // TODO: this doesn't drop the entries. 
-    fun drop(self: *Self) Unit = {
+    fn drop(self: *Self) Unit = {
         if(self.maybe_uninit.len.ne(0)) {|
             let ptr: rawptr = self.maybe_uninit.ptr;
             // TODO: calling this makes fmt.fr fail when runtime target is aarch64,
@@ -119,7 +119,7 @@ fun List(const T: Type) Type = {
     }
     
     /// Retains capacity
-    fun clear(self: *Self) Unit = {
+    fn clear(self: *Self) Unit = {
         self.len = 0;
     }
     
@@ -128,7 +128,7 @@ fun List(const T: Type) Type = {
 
 // TODO: can't do this because of circular dependency. 
 //       in List it needs to call the other assert which means it needs the types of the whole overload set so it needs to compile List$i64
-fun assert(cond: bool, const msg: Fn(Unit, List(u8))) Unit = {
+fn assert(cond: bool, const msg: Fn(Unit, List(u8))) Unit = {
     if(cond.not()){|
         var msg = msg();
         let msg: Str = msg&.items();
@@ -138,7 +138,7 @@ fun assert(cond: bool, const msg: Fn(Unit, List(u8))) Unit = {
 
 
 // TODO: this is really inefficient if you already own 'a'
-fun concat(a: Str, b: Str) List(u8) = {
+fn concat(a: Str, b: Str) List(u8) = {
     var c: List(u8) = list(a.len().add(b.len()));
     c&.push_all(a);
     c&.push_all(b);
@@ -146,7 +146,7 @@ fun concat(a: Str, b: Str) List(u8) = {
 }
 
 /// The returned strings are subslices of the original. 
-fun split(haystack: Str, needle: Str) List(Str) = {
+fn split(haystack: Str, needle: Str) List(Str) = {
     assert(needle.len().gt(0), "OOB");
     var lines: List(Str) = list(1);
     var i = 0;
@@ -170,17 +170,17 @@ fun split(haystack: Str, needle: Str) List(Str) = {
 }
 
 // TODO: better error message if you call this on Ptr(Str)
-fun splitlines(s: Str) List(Str) = {
+fn splitlines(s: Str) List(Str) = {
     var lf: Str = (@as(u8) 10)!slice;  // TODO: string escapes
     split(s, lf)
 }
 
-fun str() Unit = { unit };  // TODO: scope.rs support recursion. 
+fn str() Unit = { unit };  // TODO: scope.rs support recursion. 
 
 // It's such a pain to google an ascii table every time.  
 // This takes a constant argument to ensure the length check happens during compilation.
 // So this function can take the place of a char literal in other languages without new syntax. 
-fun char(const s: Str) i64 = {
+fn char(const s: Str) i64 = {
     :: {
         // TODO: can't get field of const cause cant take pointer. 
         // TODO: @assert that takes a format string so its less painful to print the arg as well. 
@@ -190,7 +190,7 @@ fun char(const s: Str) i64 = {
 }
 
 
-fun ascii(const s: Str) u8 = {
+fn ascii(const s: Str) u8 = {
     :: {
         c := s.char();
         // TODO: auto bounds checks on @as?
@@ -200,5 +200,5 @@ fun ascii(const s: Str) u8 = {
 }
 
 // TODO
-fun push(self: *List(u8), v: i64) Unit = self.push(@as(u8) v);
+fn push(self: *List(u8), v: i64) Unit = self.push(@as(u8) v);
 

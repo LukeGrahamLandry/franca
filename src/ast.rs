@@ -858,7 +858,6 @@ pub struct OverloadSet<'p> {
     pub ready: Vec<OverloadOption>,
     pub name: Ident<'p>,
     pub pending: Vec<FuncId>,
-    pub public: bool,
     pub just_resolved: Vec<Func<'p>>,
 }
 
@@ -1713,7 +1712,6 @@ pub enum Flag {
     Fn_Ptr,
     TopLevel,
     Include_Std,
-    Pub,
     Unreachable,
     Rt,
     Test,

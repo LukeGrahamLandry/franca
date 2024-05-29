@@ -64,6 +64,7 @@ fn main() {
     }
 
     let mut no_fork = false;
+    let mut stats = false;
     let mut do_60fps_ = false;
     let mut path = None;
     let mut args = env::args();
@@ -86,6 +87,7 @@ fn main() {
         if let Some(name) = name.strip_prefix("--") {
             match name {
                 "no-fork" => no_fork = true,
+                "stats" => stats = true,
                 "60fps" => do_60fps_ = true,
                 "anon-names" => unsafe { ANON_BODY_AS_NAME = true },
                 #[cfg(feature = "cranelift")]
@@ -106,7 +108,7 @@ fn main() {
                     let program = Program::new(pool, arch, arch);
                     println!("{}", program.ffi_definitions);
                 }
-                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi"),
+                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats"),
                 "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
                 _ => panic!("unknown argument --{name}"),
             }
@@ -118,7 +120,9 @@ fn main() {
 
     if no_fork {
         run_tests_serial(arch);
-        println!("{:#?}", unsafe { &STATS });
+        if stats {
+            println!("{:#?}", unsafe { &STATS });
+        }
         return;
     }
     if do_60fps_ {
@@ -182,8 +186,11 @@ fn main() {
                 run_one(&mut comp, f);
             }
         }
-        // println!("{:#?}", unsafe { &STATS });
+        if stats {
+            println!("{:#?}", unsafe { &STATS });
+        }
     } else {
+        assert!(!stats, "run with --no-fork to show --stats");
         if !PathBuf::from("tests").exists() {
             eprint!("Directory 'tests' does not exist in cwd");
             exit(1);

@@ -187,7 +187,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
     ("fn IntType(bits: i64, signed: bool) Type #fold;", make_int_type as *const u8),
     // measured in bytes
-    ("#fold fun size_of(T: Type) i64 #fold", get_size_of as *const u8),
+    ("#fold fn size_of(T: Type) i64 #fold", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // useful when everything's broken so can't even compile the one defined in the language.
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
@@ -246,7 +246,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             writeln!(out, "const DlHandle = rawptr; const CStr = Unique(Ptr(u8));").unwrap();
             writeln!(out, "TimeSpec :: @struct(seconds: i64, nanoseconds: i64);").unwrap();
             for (sig, ptr) in LIBC {
-                writeln!(out, "#pub #comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -254,10 +254,10 @@ pub fn get_include_std(name: &str) -> Option<String> {
             let mut out = String::new();
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER {
-                writeln!(out, "#pub #comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
             }
             for (sig, ptr) in COMPILER_FLAT {
-                writeln!(out, "#pub #comptime_addr({}) #ct #flat_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#comptime_addr({}) #ct #flat_call {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -569,35 +569,35 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         bounce_flat_call!((TypeId, TypeId), bool, type_check_arg),
     ),
     (
-        "#macro #outputs(Type) fun enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+        "#macro #outputs(Type) fn enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
     ),
     (
-        "#macro fun namespace(block: FatExpr) FatExpr;",
+        "#macro fn namespace(block: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, namespace_macro),
     ),
     (
-        "#macro #outputs(Type) fun tagged(cases: FatExpr) FatExpr;",
+        "#macro #outputs(Type) fn tagged(cases: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, tagged_macro),
     ),
     (
-        "#macro #outputs(Type) fun struct(fields: FatExpr) FatExpr;",
+        "#macro #outputs(Type) fn struct(fields: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, struct_macro),
     ),
     (
-        "#macro #outputs(Symbol) fun symbol(fields: FatExpr) FatExpr;",
+        "#macro #outputs(Symbol) fn symbol(fields: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, symbol_macro),
     ),
     (
-        "#macro #outputs(Unit) fun assert_compile_error(fields: FatExpr) FatExpr;",
+        "#macro #outputs(Unit) fn assert_compile_error(fields: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, assert_compile_error_macro),
     ),
     (
-        "#macro #outputs(Type) fun type(e: FatExpr) FatExpr;",
+        "#macro #outputs(Type) fn type(e: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, type_macro),
     ),
     (
-        "#macro #outputs(i64) fun BITS(parts: FatExpr) FatExpr;",
+        "#macro #outputs(i64) fn BITS(parts: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, bits_macro),
     ),
     (
@@ -609,7 +609,7 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, resolve_os),
     ),
     (
-        "#macro fun as(T: FatExpr, e: FatExpr) FatExpr;",
+        "#macro fn as(T: FatExpr, e: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
     ),
 ];

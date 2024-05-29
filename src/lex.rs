@@ -38,7 +38,6 @@ pub enum TokenType<'p> {
     Bang,
     Dot,
     Fn,
-    Fun,
     At,
     Comma,
     Colon,
@@ -373,7 +372,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
         }
         let ty = match &self.src.source_slice(self.root)[self.start..self.current] {
             "fn" => Fn,
-            "fun" => Fun,
             "let" => Qualifier(VarType::Let),
             "var" => Qualifier(VarType::Var),
             "const" => Qualifier(VarType::Const),

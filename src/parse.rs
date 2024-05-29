@@ -248,6 +248,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     return Err(self.expected("'=' or '=>' to indicate function body"));
                 };
 
+                // TODO: if '=', should suspend parsing like fn_stmt does.
                 let body = self.parse_expr()?;
 
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
@@ -267,7 +268,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let func = Func::new(name, Pattern::empty(loc), LazyType::Infer, Some(body), loc, true);
                 Ok(self.expr(Expr::Closure(Box::new(func))))
             }
-            Fun => Err(self.error_next("use 'fn' for lambda expression. 'fun' means public which doesn't make sense for an expression".to_string())),
             LeftSquiggle => {
                 self.start_subexpr();
                 self.eat(LeftSquiggle)?;
@@ -579,17 +579,10 @@ impl<'a, 'p> Parser<'a, 'p> {
         let stmt = self.parse_stmt_inner()?;
         // TODO: if you're sad that this check is slow... fix the ambiguity problem...
         if !stmt.annotations.is_empty() && !matches!(stmt.stmt, Stmt::DeclFunc(_)) {
-            for s in &stmt.annotations {
-                match Flag::try_from(s.name) {
-                    Ok(Flag::Pub) => {}
-                    _ => {
-                        // TODO: error in wrong place.
-                        return Err(self.error_next(
-                            "TODO: unknown stmt annotation would be ignored. for now you can wrap the expression in brackets to invoke the macro as an expression".to_string(),
-                        ));
-                    }
-                }
-            }
+            // TODO: error in wrong place.
+            return Err(self.error_next(
+                "TODO: unknown stmt annotation would be ignored. for now you can wrap the expression in brackets to invoke the macro as an expression".to_string(),
+            ));
         }
         Ok(stmt)
     }
@@ -597,7 +590,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn fn_stmt(&mut self) -> Res<'p, Stmt<'p>> {
         let loc = self.next_span();
         match self.pop().kind {
-            Fn | Fun => {}
+            Fn => {}
             _ => return Err(self.expected("fn or fun")),
         }
 
@@ -615,7 +608,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
             Equals => {
                 self.eat(Equals)?;
-
                 if self.peek() == LeftSquiggle {
                     self.start_subexpr();
                     let span = self.lexer.skip_to_closing_squigle();
@@ -626,6 +618,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     Some(self.parse_expr()?)
                 }
             }
+            FatRightArrow => return Err(self.expected("'=' for fn body. fn stmt cannot reference parent scope so cannot use '=>'.")),
             _ => return Err(self.expected("'='Expr for fn body OR ';' for ffi decl.")),
         };
 
@@ -636,17 +629,10 @@ impl<'a, 'p> Parser<'a, 'p> {
 
     fn parse_stmt_inner(&mut self) -> Res<'p, FatStmt<'p>> {
         self.start_subexpr();
-        let mut annotations = self.parse_annotations()?;
+        let annotations = self.parse_annotations()?;
         let stmt = match self.peek() {
             // Require name, optional body.
             Fn => self.fn_stmt()?,
-            Fun => {
-                annotations.push(Annotation {
-                    name: Flag::Pub.ident(),
-                    args: None,
-                });
-                self.fn_stmt()?
-            }
             Qualifier(kind) => {
                 self.pop();
                 let binding = self.parse_type_binding(false)?;
