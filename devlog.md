@@ -6,6 +6,8 @@ Also nice for the lox example program, can have a gc allocator and still use the
 need to be able to do flat call through function pointer if i want it to return a slice,
 but other than that it works for all the lib collections.
 
+just tracking cc on fnptr was tedious but now i need to actually use it to make flat call in the backends.
+
 ## improving inference (May 29)
 
 made it so overloading checks one argument at a time,

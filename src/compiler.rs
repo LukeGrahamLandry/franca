@@ -1267,11 +1267,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // Compile 'f' as normal, its fine if its a macro that expands to a callable or a closure we don't know the types for yet.
                 self.compile_expr(f, None)?;
 
-                if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
-                    self.compile_expr(arg, Some(f_ty.arg))?;
+                if let TypeInfo::FnPtr { ty, .. } = self.program[f.ty] {
+                    self.compile_expr(arg, Some(ty.arg))?;
                     expr.done = f.done && arg.done;
-                    expr.ty = f_ty.ret;
-                    return Ok(f_ty.ret);
+                    expr.ty = ty.ret;
+                    return Ok(ty.ret);
                 }
 
                 if let TypeInfo::Label(arg_ty) = self.program[f.ty] {
@@ -1481,7 +1481,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // The backend still needs to do something with this, so just leave it
                             let fn_ty = self.program.func_type(id);
                             let ty = self.program.fn_ty(fn_ty).unwrap();
-                            let ty = self.program.intern_type(TypeInfo::FnPtr(ty)); // TODO: callconv as part of type
+                            let cc = unwrap!(self.program[id].cc, "unknown calling convention");
+                            let ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc }); // TODO: callconv as part of type
                             arg.set((id.as_raw()).into(), fn_ty);
                             expr.ty = ty;
                             ty
@@ -1761,7 +1762,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             }
                         }
                     } else if let Some(ty) = self[i.scope].rt_types.get(i) {
-                        if let TypeInfo::FnPtr(f_ty) = self.program[*ty] {
+                        if let TypeInfo::FnPtr { ty: f_ty, .. } = self.program[*ty] {
                             return Ok(Some(f_ty.ret));
                         }
                     }
@@ -1867,11 +1868,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                     Flag::Tag => self.program.ptr_type(TypeId::i64()),
                     Flag::Fn_Ptr => {
-                        if let Some(f_ty) = self.type_of(arg)? {
-                            if let Some(f_ty) = self.program.fn_ty(f_ty) {
-                                return Ok(Some(self.program.intern_type(TypeInfo::FnPtr(f_ty))));
-                            }
-                        }
+                        // if let Some(f_ty) = self.type_of(arg)? {
+                        //     if let Some(f_ty) = self.program.fn_ty(f_ty) {
+                        //         // TODO: need to know the function because it might specify non-default calling convention.
+                        //         return Ok(Some(self.program.intern_type(TypeInfo::FnPtr(f_ty))));
+                        //     }
+                        // }
                         return Ok(None);
                     }
                     Flag::Quote => FatExpr::get_or_create_type(self.program),
@@ -2545,7 +2547,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
-                (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
+                (TypeInfo::FnPtr { .. }, TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr { .. }) => return Ok(()),
 
                 (TypeInfo::Unit, TypeInfo::Type) => {
                     // :Coercion
@@ -2553,9 +2555,14 @@ impl<'a, 'p> Compile<'a, 'p> {
                     return Ok(());
                 }
                 // TODO: correct varience
-                // TODO: calling convention for FnPtr
-                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) | (&TypeInfo::FnPtr(f), &TypeInfo::FnPtr(e)) => {
+                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
                     if self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok() {
+                        return Ok(());
+                    }
+                }
+                (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
+                    if cc_f == cc_e && self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok()
+                    {
                         return Ok(());
                     }
                 }
@@ -2608,12 +2615,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
-                (TypeInfo::FnPtr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr(_)) => return Ok(()),
+                (TypeInfo::FnPtr { .. }, TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr { .. }) => return Ok(()),
 
                 // TODO: correct varience
-                // TODO: calling convention for FnPtr
-                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) | (&TypeInfo::FnPtr(f), &TypeInfo::FnPtr(e)) => {
+                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
                     if self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
+                        return Ok(());
+                    }
+                }
+                (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
+                    if cc_f == cc_e && self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
                         return Ok(());
                     }
                 }

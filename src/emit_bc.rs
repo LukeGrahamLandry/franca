@@ -11,7 +11,6 @@ use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Pro
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecTime, Res};
-use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
 use crate::{bc::*, extend_options, Map};
@@ -407,19 +406,46 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(!func.get_flag(FnFlag::Generic));
                     return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
                 }
-                if let TypeInfo::FnPtr(f_ty) = self.program[f.ty] {
+                if let TypeInfo::FnPtr { ty: f_ty, cc } = self.program[f.ty] {
+                    let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
+                    let res_ptr = if force_flat { Some(result.add_var(f_ty.ret)) } else { None };
                     self.compile_expr(result, f, PushStack, false)?;
-                    self.compile_for_arg(result, arg, false)?; // TODO: im assuming no flat call
-                    result.push(Bc::CallFnPtr {
-                        ty: f_ty,
-                        comp_ctx: false, // TODO
-                    });
+                    if cc == CallConv::Arg8Ret1Ct {
+                        result.push(Bc::GetCompCtx);
+                    }
+
+                    if let Some(id) = res_ptr {
+                        result.push(Bc::AddrVar { id });
+                    }
+
+                    if let Some(flat_arg_loc) = self.compile_for_arg(result, arg, force_flat)? {
+                        result.push(Bc::AddrVar { id: flat_arg_loc });
+                    }
+
+                    result.push(Bc::CallFnPtr { ty: f_ty, cc });
                     let slots = self.slot_count(f_ty.ret);
                     if slots > 0 {
-                        match result_location {
-                            PushStack => {}
-                            ResAddr => result.push(Bc::StorePre { slots }),
-                            Discard => result.push(Bc::Pop { slots }),
+                        if let Some(id) = res_ptr {
+                            let bytes = self.program.get_info(f_ty.ret).stride_bytes;
+                            match result_location {
+                                PushStack => {
+                                    result.push(Bc::AddrVar { id });
+                                    result.push(Bc::Load { slots });
+                                }
+                                ResAddr => {
+                                    // Extra copy needed because caller puts target addr on the stack before we eval fn ptr expr,
+                                    // but we need the ret ptr after that.
+                                    result.push(Bc::AddrVar { id });
+                                    result.push(Bc::CopyBytesToFrom { bytes });
+                                }
+                                Discard => {}
+                            }
+                        } else {
+                            match result_location {
+                                PushStack => {}
+                                ResAddr => result.push(Bc::StorePre { slots }),
+                                Discard => result.push(Bc::Pop { slots }),
+                            }
                         }
                     } else if result_location == ResAddr {
                         todo!("untested. assign to variable a call that returns unit through a function ptr");
@@ -903,7 +929,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let raw = self.program.raw_type(ty);
 
         match &self.program[raw] {
-            TypeInfo::FnPtr(ty) => {
+            TypeInfo::FnPtr { ty, .. } => {
                 // TODO: this is sad and slow.
                 let want: i64 = from_values(self.program, value.clone())?;
                 for (i, check) in self.asm.dispatch.iter().enumerate() {

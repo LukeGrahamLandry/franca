@@ -316,10 +316,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                         break;
                     }
                 }
-                Bc::CallFnPtr { ty, comp_ctx } => {
-                    assert!(!comp_ctx);
+                Bc::CallFnPtr { ty, cc } => {
+                    assert!(cc == CallConv::Arg8Ret1);
 
-                    let ptr_ty = self.program.intern_type(TypeInfo::FnPtr(ty));
+                    let ptr_ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc });
                     render_typedef(self.program, self.result, ptr_ty)?;
                     let (arg, ret) = self.program.get_infos(ty);
                     // self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
@@ -529,7 +529,8 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
         TypeInfo::Bool => {
             writeln!(out.types, "typedef _Bool _TY{};", ty.as_index()).unwrap();
         }
-        &TypeInfo::FnPtr(f) => {
+        &TypeInfo::FnPtr { ty: f, cc } => {
+            assert!(cc == CallConv::Arg8Ret1); // TODO: flat call sig
             render_typedef(program, out, f.arg)?;
             render_typedef(program, out, f.ret)?;
 

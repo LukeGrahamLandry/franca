@@ -1,33 +1,43 @@
 Alloc :: @struct(data: rawptr, vptr: *AllocVTable);
 AllocVTable :: @struct(
-    alloc: FnPtr(Ty(rawptr, i64, u8), *u8), // TODO: return slice 
-    free: FnPtr(Ty(rawptr, Slice(u8), u8), Unit),
+    // TODO: it would be nice to be allowed to put names for the argmuents. 
+    //       alloc: @fnptr(self: rawptr, bytes: i64, log_align: u8) Slice(u8) #flat;
+    alloc: FnPtr(Ty(rawptr, i64, u8), Slice(u8), .Flat),   
+    free: FnPtr(Ty(rawptr, Slice(u8), u8), Unit, .C),
 );
-
-libc_allocator: Alloc : (data = 0.int_to_ptr(), vptr = {
-    vtable := @static(AllocVTable);
-    // TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and that's almost always good enough. 
-    libc_alloc :: fn(_: rawptr, size: i64, log_align: u8) *u8 = @as(*u8) @as(rawptr) malloc(size); // (ptr = @as(*u8) @as(rawptr) malloc(size), len = size);
-    libc_free :: fn(_: rawptr, buf: Slice(u8), log_align: u8) Unit = free(@as(rawptr) buf.ptr);
-    vtable[] = (alloc = libc_alloc!fn_ptr, free = libc_free!fn_ptr);
-    vtable
-});
 
 fn alloc(allocator: Alloc, const Element: Type, count: i64) rawptr = {
     let bytes = (:: Element.size_of()).mul(count);
-    // TODO: the problem here (when alloc returns slice) is that you can't flat call through a function pointer. 
-    alloc := allocator.vptr.alloc;
+    alloc := allocator.vptr.alloc; // TODO: calling through a field is ass
     mem := alloc(allocator.data, bytes, @as(u8) 4); // TODO: alignment
-    @as(rawptr) mem
+    @as(rawptr) mem.ptr
 }
 
 // This is only const because it has to match on all arches and it's reasonable for an implementation to want it const. 
 fn dealloc(allocator: Alloc, const Element: Type, ptr: rawptr, len: i64) Unit = {
     let bytes = (:: Element.size_of()).mul(len);
     mem: Slice(u8) = (ptr = @as(*u8) ptr, len = bytes);
-    free := allocator.vptr.free;
+    free := allocator.vptr.free; // TODO: calling through a field is ass
     free(allocator.data, mem, @as(u8) 4); // TODO: alignment
 }
+
+libc_allocator: Alloc : (data = 0.int_to_ptr(), vptr = {
+    vtable := @static(AllocVTable);
+    // TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and that's almost always good enough. 
+    libc_alloc :: fn(_: rawptr, size: i64, log_align: u8) Slice(u8) = (ptr = @as(*u8) @as(rawptr) malloc(size), len = size);
+    libc_free :: fn(_: rawptr, buf: Slice(u8), log_align: u8) Unit = free(@as(rawptr) buf.ptr);
+    vtable[] = (alloc = libc_alloc!fn_ptr, free = libc_free!fn_ptr);
+    vtable
+});
+
+page_allocator: Alloc : (data = 0.int_to_ptr(), vptr = {
+    vtable := @static(AllocVTable);
+    // TODO: respect alignment. but im pretty sure malloc always gives you 16 bits and that's almost always good enough. 
+    alloc :: fn(_: rawptr, size: i64, log_align: u8) Slice(u8) = (ptr = @as(*u8) @as(rawptr) malloc(size), len = size);
+    free :: fn(_: rawptr, buf: Slice(u8), log_align: u8) Unit = free(@as(rawptr) buf.ptr);
+    vtable[] = (alloc = alloc!fn_ptr, free = free!fn_ptr);
+    vtable
+});
 
 /// https://man7.org/linux/man-pages/man2/mmap.2.html
 fn os_alloc(bytes: i64) Slice(u8) = {

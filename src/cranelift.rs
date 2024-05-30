@@ -519,9 +519,9 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         break;
                     }
                 }
-                Bc::CallFnPtr { ty, comp_ctx } => {
-                    assert!(!comp_ctx);
-                    let sig = builder.import_signature(self.make_sig(ty, false, comp_ctx));
+                Bc::CallFnPtr { ty, cc } => {
+                    assert!(cc == CallConv::Arg8Ret1);
+                    let sig = builder.import_signature(self.make_sig(ty, false, false));
                     let (arg, ret) = self.program.get_infos(ty);
                     self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
                     let first_arg = self.stack.len() - arg.size_slots as usize;
@@ -668,7 +668,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             TypeInfo::Unknown => todo!(),
             TypeInfo::Never => todo!(),
             TypeInfo::F64 => F64,
-            TypeInfo::FnPtr(_)
+            TypeInfo::FnPtr { .. }
             | TypeInfo::Label(_)
             | TypeInfo::Type
             | TypeInfo::Unit

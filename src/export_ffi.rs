@@ -3,7 +3,7 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{garbage_loc, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
+use crate::ast::{garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{to_values, ReadBytes, Values};
 use crate::compiler::{Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
@@ -176,6 +176,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     //   but they could be implemented on top of this by taking an environment data pointer as an argument.
     // - The function cannot have any const arguments, they must be baked before creating the pointer.
     ("fn FnPtr(Arg: Type, Ret: Type) Type #fold;", fn_ptr_type as *const u8),
+    ("fn FnPtr(Arg: Type, Ret: Type, cc: CallConv) Type #fold;", fn_ptr_type_conv as *const u8),
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("#fold fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
@@ -252,6 +253,13 @@ pub fn get_include_std(name: &str) -> Option<String> {
         }
         "compiler" => {
             let mut out = String::new();
+            writeln!(
+                out,
+                "const CallConv = @enum(i64) (C = {}, Flat = {});",
+                CallConv::Arg8Ret1 as u8,
+                CallConv::Flat as u8,
+            )
+            .unwrap();
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER {
                 writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
@@ -356,11 +364,26 @@ extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeI
     })
 }
 
+extern "C-unwind" fn fn_ptr_type_conv(program: &mut &mut Program, arg: TypeId, ret: TypeId, cc: CallConv) -> TypeId {
+    hope(|| {
+        assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
+        assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
+        Ok(program.intern_type(TypeInfo::FnPtr { ty: FnType { arg, ret }, cc }))
+    })
+}
+
 extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {
         assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
-        Ok(program.intern_type(TypeInfo::FnPtr(FnType { arg, ret })))
+        program.finish_layout(arg)?;
+        program.finish_layout(ret)?;
+        let cc = if program.get_info(arg).size_slots > 8 || program.get_info(ret).size_slots > 1 {
+            CallConv::Flat
+        } else {
+            CallConv::Arg8Ret1
+        };
+        Ok(program.intern_type(TypeInfo::FnPtr { ty: FnType { arg, ret }, cc }))
     })
 }
 

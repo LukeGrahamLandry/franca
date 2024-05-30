@@ -54,7 +54,10 @@ pub enum TypeInfo<'p> {
     Int(IntTypeInfo),
     Bool,
     Fn(FnType),
-    FnPtr(FnType),
+    FnPtr {
+        ty: FnType,
+        cc: CallConv,
+    },
     Ptr(TypeId), // One element
     Array {
         inner: TypeId,
@@ -693,7 +696,7 @@ impl<'p> Func<'p> {
 }
 
 #[repr(i64)]
-#[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq, Hash)]
 pub enum CallConv {
     Arg8Ret1, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
     Arg8Ret1Ct,
@@ -1116,7 +1119,7 @@ impl<'p> Program<'p> {
         self.finish_layout(ty)?;
         let ty = self.raw_type(ty);
         match &self[ty] {
-            &TypeInfo::Fn(f) | &TypeInfo::FnPtr(f) => {
+            &TypeInfo::Fn(f) | &TypeInfo::FnPtr { ty: f, .. } => {
                 self.finish_layout_deep(f.arg)?;
                 self.finish_layout_deep(f.ret)?;
             }
@@ -1229,7 +1232,7 @@ impl<'p> Program<'p> {
             TypeInfo::OverloadSet | TypeInfo::Type | TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
-            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr(_) | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => {
+            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => {
                 todo!()
             }
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
@@ -1469,7 +1472,7 @@ impl<'p> Program<'p> {
             TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false, 8),
             TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0),
             TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1), // :SmallTypes
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr(_) => TypeMeta::new(1, 8, 0, false, true, 8),
+            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, false, true, 8),
             TypeInfo::Type => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),

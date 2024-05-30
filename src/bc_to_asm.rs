@@ -440,7 +440,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 return Ok(tail);
             }
             Bc::CallDirectFlat { f } => {
-                self.call_direct_flat(f);
+                let ty = self.program[f].finished_ty().unwrap();
+                let ct = matches!(self.program[f].cc.unwrap(), CallConv::FlatCt);
+                self.call_flat(ty, ct, |s| {
+                    let addr = s.asm.get_fn(f).map(|v| v as u64);
+                    s.branch_func(f, true);
+                });
             }
             Bc::Ret => {
                 let ff = &self.program[self.f];
@@ -530,16 +535,30 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.drop_reg(working);
                 // don't drop <reg>, we just peeked it
             }
-            Bc::CallFnPtr { ty, comp_ctx } => {
+            Bc::CallFnPtr { ty, cc } => {
                 // TODO: tail call
-                assert!(!comp_ctx, "flat call needs special handling");
-                self.dyn_c_call(ty, comp_ctx, |s| {
-                    // dyn_c_call will have popped the args, so now stack is just the pointer to call
-                    // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
-                    let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
-                    s.asm.push(br(reg, 1));
-                    s.drop_reg(reg);
-                });
+                match cc {
+                    CallConv::OneRetPic | CallConv::Arg8Ret1 => {
+                        self.dyn_c_call(ty, false, |s| {
+                            // dyn_c_call will have popped the args, so now stack is just the pointer to call
+                            // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
+                            let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
+                            s.asm.push(br(reg, 1));
+                            s.drop_reg(reg);
+                        });
+                    }
+                    CallConv::FlatCt | CallConv::Flat => {
+                        let ct = matches!(cc, CallConv::FlatCt);
+                        self.call_flat(ty, ct, |s| {
+                            // call_flat will have popped the args, so now stack is just the pointer to call
+                            // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
+                            let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
+                            s.asm.push(br(reg, 1));
+                            s.drop_reg(reg);
+                        });
+                    }
+                    _ => todo!(),
+                }
             }
             Bc::Unreachable => {
                 self.asm.push(brk(0xbabe));
@@ -1012,24 +1031,15 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     // stack must be [<ret_ptr>, <arg_ptr>]. bc needs to deal with loading/storing stuff from memory.
-    fn call_direct_flat(&mut self, f: FuncId) -> Res<'p, ()> {
-        let target = &self.program[f];
-        let f_ty = target.unwrap_ty();
-
+    fn call_flat(&mut self, f_ty: FnType, comp_ctx: bool, do_call: impl FnOnce(&mut Self)) -> Res<'p, ()> {
         debugln!("flat_call");
         // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64s)
-
-        let addr = self.asm.get_fn(f).map(|v| v as u64);
 
         let arg_ptr = self.state.stack.pop().unwrap();
         let ret_ptr = self.state.stack.pop().unwrap();
         let (arg, ret) = self.program.get_infos(f_ty);
 
-        let c = match target.cc.unwrap() {
-            CallConv::Flat => 0,
-            CallConv::FlatCt => self.compile_ctx_ptr as i64,
-            _ => unreachable!(),
-        };
+        let c = if comp_ctx { self.compile_ctx_ptr as i64 } else { 0 };
         self.state.stack.push(Val::Literal(c));
         self.state.stack.push(arg_ptr);
         self.state.stack.push(Val::Literal(arg.stride_bytes as i64));
@@ -1038,7 +1048,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         self.stack_to_ccall_reg(5, 0);
         self.spill_abi_stompable();
-        self.branch_func(f, true);
+        do_call(self);
 
         for i in 0..8 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.

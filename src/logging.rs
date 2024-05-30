@@ -151,8 +151,8 @@ impl<'p> Program<'p> {
                     TypeInfo::Enum { raw: inner, .. } | TypeInfo::Unique(inner, _) => self.log_type(*inner),
                     TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
                     TypeInfo::Fn(f) => format!("fn({}) {}", self.log_type(f.arg), self.log_type(f.ret)),
-                    TypeInfo::FnPtr(f) => {
-                        format!("&(fn({}) {})", self.log_type(f.arg), self.log_type(f.ret))
+                    TypeInfo::FnPtr { ty: f, cc } => {
+                        format!("&(fn({}) {} #{cc:?})", self.log_type(f.arg), self.log_type(f.ret))
                     }
                     TypeInfo::Label(e) => format!("Label({})", self.log_type(*e)),
 

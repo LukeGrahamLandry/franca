@@ -1,6 +1,6 @@
 //! Low level instructions
 
-use crate::ast::{LabelId, Program, TypeInfo, Var};
+use crate::ast::{CallConv, LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
 use crate::{
@@ -19,7 +19,7 @@ pub struct BbId(pub u16);
 pub enum Bc {
     CallDirect { f: FuncId, tail: bool },                 // <args:m> -> <ret:n>
     CallDirectFlat { f: FuncId },                         // <ret_ptr:1> <arg_ptr:1> -> _
-    CallFnPtr { ty: FnType, comp_ctx: bool },             // <ptr:1> <args:m> -> <ret:n>
+    CallFnPtr { ty: FnType, cc: CallConv },               // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
     PushConstant { value: i64 },                          // _ -> <v:1>
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !
     Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
@@ -154,7 +154,7 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
     let ty = program.raw_type(ty);
     match &program[ty] {
         TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
-        TypeInfo::F64 | TypeInfo::FnPtr(_) | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => out.push(unwrap!(bytes.next_i64(), "")),
+        TypeInfo::F64 | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => out.push(unwrap!(bytes.next_i64(), "")),
         TypeInfo::Int(_) => match program.get_info(ty).stride_bytes {
             1 => out.push(unwrap!(bytes.next_u8(), "") as i64),
             2 => out.push(unwrap!(bytes.next_u16(), "") as i64),
