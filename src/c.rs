@@ -187,6 +187,7 @@ struct CProgram {
     types: String,
     forward: String,
     functions: String,
+    next_constant_index: usize,
 }
 
 struct Emit<'z, 'p> {
@@ -352,7 +353,18 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.stack.push(out);
                 }
                 Bc::PushRelocatablePointer { bytes } => {
-                    todo!()
+                    let i = self.result.next_constant_index;
+                    self.result.next_constant_index += 1;
+
+                    writeln!(self.result.forward, "    unsigned char _const{i}[{}] = {{", bytes.len()).unwrap();
+                    for b in bytes {
+                        write!(self.result.forward, "{b},").unwrap();
+                    }
+                    self.result.forward.remove(self.result.forward.len() - 1); // comma
+                    writeln!(self.result.forward, "}};").unwrap();
+                    let var = self.next_var();
+                    writeln!(self.code, "    _{var} = &_const{i};").unwrap();
+                    self.stack.push(var);
                 }
                 Bc::JumpIf { true_ip, false_ip, slots } => {
                     debug_assert_eq!(slots, 0);

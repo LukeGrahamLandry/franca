@@ -147,7 +147,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             cranelift: crate::cranelift::JittedCl::default(),
         };
         c.new_scope(ScopeId::from_index(0), Flag::TopLevel.ident(), 0);
-        // println!("EMPTY fn ptr: {}", Jitted::empty());
+        // TODO: HACK: for emit_relocatable_constant
+        let ty = <(i64, i64)>::get_or_create_type(c.program);
+        c.program.finish_layout(ty).unwrap();
         c
     }
 

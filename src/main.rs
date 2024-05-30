@@ -187,7 +187,7 @@ fn main() {
 
         if comp.tests.is_empty() {
             let f = comp.program.find_unique_func(comp.pool.intern("main")).expect("fn main");
-            let result = comp.compile(f, ExecTime::Runtime);
+            let result = comp.compile(f, ExecTime::Both);
             if let Err(e) = result {
                 log_err(&comp, *e);
                 exit(1);
@@ -437,14 +437,14 @@ fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)])
 }
 
 fn run_one(comp: &mut Compile, f: FuncId) {
-    let result = comp.compile(f, ExecTime::Runtime);
+    let result = comp.compile(f, ExecTime::Both);
     if let Err(e) = comp.tag_err(result) {
         log_err(comp, *e);
         exit(1);
     }
 
     // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
-    comp.run(f, Values::many(vec![0, 0, 0, 0, 0, 0, 0, 0]), ExecTime::Runtime).unwrap();
+    comp.run(f, Values::many(vec![0, 0, 0, 0, 0, 0, 0, 0]), ExecTime::Both).unwrap();
 }
 
 fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
@@ -549,7 +549,7 @@ fn do_60fps(arch: TargetArch) {
         ResolveScope::run(&mut global, &mut comp, ScopeId::from_index(0)).unwrap();
         comp.compile_top_level(global).unwrap();
         let f = comp.program.find_unique_func(comp.pool.intern("main")).unwrap();
-        comp.compile(f, ExecTime::Runtime).unwrap();
+        comp.compile(f, ExecTime::Both).unwrap();
 
         println!("\x1B[2J");
         run_one(&mut comp, f);
