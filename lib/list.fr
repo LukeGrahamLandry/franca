@@ -13,22 +13,22 @@ fn clear() Unit;
 fn as_ptr() Unit;
 
 fn List(const T: Type) Type = {
-    const Self = @struct(maybe_uninit: Slice(T), len: i64);
-    fn list(cap: i64) Self = { 
-        let ptr: rawptr = alloc(T, cap);
-        (maybe_uninit = (ptr = ptr, len = cap), len = 0)  // todo: no alloc if len 0 since i dont free
+    const Self = @struct(maybe_uninit: Slice(T), len: i64, gpa: Alloc);
+    fn list(cap: i64, gpa: Alloc) Self = { 
+        let ptr: rawptr = gpa.alloc(T, cap);
+        (maybe_uninit = (ptr = ptr, len = cap), len = 0, gpa = gpa)  // todo: no alloc if len 0 since i dont free
     }
-    fn list() Self = list(0);
+    fn list(gpa: Alloc) Self = list(0, gpa);
     
-    fn repeated(t: T, count: i64) Self = {
-        var self = list(count);
+    fn repeated(t: T, count: i64, gpa: Alloc) Self = {
+        var self = list(count, gpa);
         range(0, count, fn(_) => self&.push(t));
         self
     }
     
     // Can't reuse the allocation because drop() will free it. TODO: COW
-    fn clone(from: Slice(T)) Self = {  // TODO: better error message if you put the = on the wrong side of the type
-        var self = list(from.len());
+    fn clone(from: Slice(T), gpa: Alloc) Self = {  // TODO: better error message if you put the = on the wrong side of the type
+        var self = list(from.len(), gpa);
         self&.push_all(from);
         self
     }
@@ -66,7 +66,7 @@ fn List(const T: Type) Type = {
         let old_cap = self.maybe_uninit.len;
         if(lt(old_cap, total)) {|
             let cap = 4.max(old_cap.add(extra).max(old_cap.mul(2)));
-            var new: Self = list(cap);
+            var new: Self = list(cap, self.gpa);
             if(self.len.gt(0)) {|  // TODO: it doesnt let you create a zero length slice in items()
                 let dest: Slice(T) = new.maybe_uninit.subslice(0, self.len);
                 memcpy(dest, items(self));
@@ -112,7 +112,7 @@ fn List(const T: Type) Type = {
             //       its a poison on taking args of a SplitFunc. 
             //       but its fine when collections.fr calls drop and that targets both too tho maybe doesnt cause a split because simpler comptime. 
             //       
-            dealloc(T, ptr, self.maybe_uninit.len);
+            self.gpa.dealloc(T, ptr, self.maybe_uninit.len);
             self.maybe_uninit.len = 0;
             self.len = 0;
         };
@@ -138,17 +138,17 @@ fn assert(cond: bool, const msg: Fn(Unit, List(u8))) Unit = {
 
 
 // TODO: this is really inefficient if you already own 'a'
-fn concat(a: Str, b: Str) List(u8) = {
-    var c: List(u8) = list(a.len().add(b.len()));
+fn concat(a: Str, b: Str, gpa: Alloc) List(u8) = {
+    var c: List(u8) = list(a.len().add(b.len()), gpa);
     c&.push_all(a);
     c&.push_all(b);
     c
 }
 
 /// The returned strings are subslices of the original. 
-fn split(haystack: Str, needle: Str) List(Str) = {
+fn split(haystack: Str, needle: Str, gpa: Alloc) List(Str) = {
     assert(needle.len().gt(0), "OOB");
-    var lines: List(Str) = list(1);
+    var lines: List(Str) = list(1, gpa);
     var i = 0;
     let last = sub(len(haystack), len(needle));
     var start = 0;
@@ -170,9 +170,9 @@ fn split(haystack: Str, needle: Str) List(Str) = {
 }
 
 // TODO: better error message if you call this on Ptr(Str)
-fn splitlines(s: Str) List(Str) = {
+fn splitlines(s: Str, gpa: Alloc) List(Str) = {
     var lf: Str = (@as(u8) 10)!slice;  // TODO: string escapes
-    split(s, lf)
+    split(s, lf, gpa)
 }
 
 fn str() Unit = { unit };  // TODO: scope.rs support recursion. 

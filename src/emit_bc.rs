@@ -9,6 +9,7 @@ use std::usize;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
+use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecTime, Res};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
@@ -19,6 +20,7 @@ use crate::{assert, assert_eq, err, ice, unwrap};
 
 struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
+    asm: &'z Jitted,
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
@@ -26,7 +28,7 @@ struct EmitBc<'z, 'p: 'z> {
 }
 
 pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, FnBody<'p>> {
-    let mut emit = EmitBc::new(compile.program);
+    let mut emit = EmitBc::new(compile.program, &compile.aarch64);
     let body = emit.compile_inner(f, when)?;
     Ok(body)
 }
@@ -57,8 +59,9 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecTime) ->
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
-    fn new(program: &'z Program<'p>) -> Self {
+    fn new(program: &'z Program<'p>, asm: &'z Jitted) -> Self {
         Self {
+            asm,
             last_loc: None,
             program,
             locals: vec![],
@@ -895,21 +898,56 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
+    // TODO: i should have constant pointers as a concept in my language.
     fn emit_relocatable_constant(&mut self, ty: TypeId, value: &Values, result: &mut FnBody<'p>, result_location: ResultLoc) -> Res<'p, ()> {
         let raw = self.program.raw_type(ty);
 
         match &self.program[raw] {
-            TypeInfo::FnPtr(_) => err!("TODO: fnptr in constant",),
+            TypeInfo::FnPtr(ty) => {
+                // TODO: this is sad and slow.
+                let want: i64 = from_values(self.program, value.clone())?;
+                for (i, check) in self.asm.dispatch.iter().enumerate() {
+                    if *check as i64 == want {
+                        let f = FuncId::from_index(i);
+                        assert_eq!(*ty, self.program[f].finished_ty().unwrap());
+                        result.push(Bc::GetNativeFnPtr(f));
+                        if result_location == ResAddr {
+                            result.push(Bc::StorePre { slots: 1 });
+                        }
+                        break;
+                    }
+                }
+            }
             &TypeInfo::Ptr(inner) => {
+                let inner_info = self.program.get_info(inner);
+                let bytes = inner_info.stride_bytes as usize;
+                let ptr: i64 = from_values(self.program, value.clone())?;
+
                 // TODO: CStr is special...
                 if self.program.get_info(inner).contains_pointers {
-                    err!("TODO: nested constant pointers",)
-                } else {
-                    let inner_info = self.program.get_info(inner);
-                    let bytes = inner_info.stride_bytes as usize;
+                    // TODO: this is wrong! need @static to only take baked value once.
+
+                    result.push(Bc::PushRelocatablePointer {
+                        bytes: &[0, 0, 0, 0, 0, 0, 0, 0],
+                    });
+                    result.push(Bc::Dup);
+
+                    // load the pointer and recurse
                     let ptr: i64 = from_values(self.program, value.clone())?;
                     let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
+                    let inner_value = Values::many(data.to_vec());
+                    // this will store contents into our new variable
+                    self.emit_relocatable_constant(inner, &inner_value, result, ResultLoc::ResAddr)?;
+                    // now just new var addr is on the stack.
+                    if result_location == ResAddr {
+                        result.push(Bc::StorePre { slots: 1 });
+                    }
+                } else {
+                    let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
                     result.push(Bc::PushRelocatablePointer { bytes: data });
+                    if result_location == ResAddr {
+                        result.push(Bc::StorePre { slots: 1 });
+                    }
                 }
             }
             TypeInfo::Struct { fields, .. } => {
@@ -936,6 +974,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
 
                     result.push(Bc::PushConstant { value: len });
+                    if result_location == ResAddr {
+                        result.push(Bc::StorePre { slots: 2 });
+                    }
                 } else {
                     todo!()
                 }
@@ -948,10 +989,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             _ => err!("ICE: bad constant",),
         }
 
-        if result_location == ResAddr {
-            let slots = self.slot_count(ty);
-            result.push(Bc::StorePre { slots });
-        }
         Ok(())
     }
 }

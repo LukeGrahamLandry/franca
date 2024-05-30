@@ -112,6 +112,7 @@ fn main() {
                 }
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats"),
                 "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
+                // TODO: need to have a -o flag so you can seperate logging of compile time execution from output c source code.
                 "c" => c = true,
                 _ => panic!("unknown argument --{name}"),
             }

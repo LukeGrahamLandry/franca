@@ -31,12 +31,12 @@ fn fmt(arg: AstExpr) AstExpr = {
     let params = args.rest(2);  // TODO: fix bounds check when this is one long?
     
     let fmt_string = const_eval_string(args[1]);
-    var parts: List(Str) = fmt_string.split("%");  // TODO: dont leak
+    var parts: List(Str) = fmt_string.split("%", libc_allocator);  // TODO: dont leak
     var parts: Slice(Str) = parts&.items();
     parts.len().eq(params.len().add(1)).assert("Fmt specifier count mismatch");
 
     let count = parts.len().add(params.len());
-    var actions: List(AstExpr) = list(count);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
+    var actions: List(AstExpr) = list(count, libc_allocator);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
     
     // TODO: reserve space for known length args. 
     const emit = fn(msg: AstExpr) Unit => {
@@ -59,10 +59,10 @@ fn fmt(arg: AstExpr) AstExpr = {
 #macro 
 fn concat(var arg: AstExpr) AstExpr = {
     let args: Slice(AstExpr) = arg.expr.Tuple;
-    var actions: List(AstExpr) = list(args.len());
+    var actions: List(AstExpr) = list(args.len(), libc_allocator);
     
     '{
-        var join_list: List(u8) = list();
+        var join_list: List(u8) = list(libc_allocator);
         <{
             args.enumerate(fn(i, param) => {  // TODO: zip iterators 
                 // TODO: having () in the cast instead of lit(Unit) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
@@ -84,7 +84,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
     // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     target.ty = UnknownType;
     var original: Slice(AstExpr) = target.expr.Tuple;
-    var tuple: List(AstExpr) = list(original.len.add(1));
+    var tuple: List(AstExpr) = list(original.len.add(1), libc_allocator);
     tuple&.push(arg);
     tuple&.push_all(original);
     target.expr.Tuple = (tuple.maybe_uninit.ptr, tuple.len); // TODO
@@ -93,7 +93,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
 
 #macro 
 fn println(arg: AstExpr) AstExpr = '{
-    var out: List(u8) = list(0);
+    var out: List(u8) = list(0, libc_allocator);
     @fmt(@prepend_tuple(out&) <arg>);
     println(out&.items());
     out&.drop();
@@ -130,7 +130,7 @@ fn display(self: Symbol, writer: *List(u8)) Unit = {
 
 // You probably don't want to be calling this often, it has to iterate the string to get the length. 
 fn display(self: CStr, writer: *List(u8)) Unit = {
-    self.for {(c: u8) Unit|
+    self.for {(c)|
         writer.push(c);
     };
 }
@@ -196,7 +196,7 @@ fn __string_escapes(raw: Str) Str #fold = {
     carriage_return : u8 : 13;
     new_line        : u8 : 0x0A;
 
-    out : List(u8) = list(raw.len);
+    out : List(u8) = list(raw.len, libc_allocator);
     i := 0;
     while(=> i.lt(raw.len)){|
         c := raw[i]; i += 1;
@@ -232,7 +232,8 @@ fn println(msg: bool) Unit = {
 }
 
 fn println(i: i64) Unit = {
-    mem: List(u8) = list(i.div(10).abs().add(2));
+    // TODO: static alloc
+    mem: List(u8) = list(i.div(10).abs().add(2), libc_allocator);
     i.display(mem&);
     mem&.push_all("\n");
     print(mem&.items());
@@ -241,7 +242,8 @@ fn println(i: i64) Unit = {
 fn println(msg: u8) Unit = println(@as(i64) msg);
 
 fn print(i: i64) Unit = {
-    mem: List(u8) = list(i.div(10).abs().add(1));
+    // TODO: static alloc
+    mem: List(u8) = list(i.div(10).abs().add(1), libc_allocator);
     i.display(mem&);
     print(mem&.items());
     mem&.drop();

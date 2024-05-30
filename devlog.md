@@ -1,3 +1,11 @@
+## (May 30)
+
+I think i want explicit allocators.
+Can have a comptime one to use whatever arena the compiler wants ast nodes in.
+Also nice for the lox example program, can have a gc allocator and still use the standard containers.
+need to be able to do flat call through function pointer if i want it to return a slice,
+but other than that it works for all the lib collections.
+
 ## improving inference (May 29)
 
 made it so overloading checks one argument at a time,

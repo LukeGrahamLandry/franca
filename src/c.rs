@@ -1,11 +1,9 @@
 //! This generates a text file that a C compiler can convert into an executable.
 //! If you look at the output you'll see why I'm reluctant to refer to it as a C program.
+//! And now a small blessing: May the code in this file be as ugly as the code it generates.
 // TODO: safe fn names. '//' is not enough, am i totally sure i never leave a new line in there?
-// TODO: cast arguments
-// TODO: save args to ssa slots
-// TODO: correct signeture for flat call decls
-// TODO: cast fn ptr to right signature before call
-
+// TODO: cast fn ptr arguments
+// TODO: put 'static' on everything that's not exported beacuse that makes clang -O2 not leave them in the exe if it decides to inline.
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program, TypeId, TypeInfo},
     bc::{Bc, FnBody},
@@ -30,16 +28,24 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
         if use_arg_names {
             for b in &comp.program[f].arg.bindings {
                 let ty = b.ty.unwrap();
+                if ty.is_unit() {
+                    continue;
+                }
                 let name = comp.program.pool.get(b.name().unwrap());
                 write!(out, "_TY{} {},", ty.as_index(), name).unwrap();
             }
         } else {
             for (i, ty) in comp.program.flat_tuple_types(ty.arg).into_iter().enumerate() {
+                if ty.is_unit() {
+                    continue;
+                }
                 write!(out, "_TY{} _arg_{i},", ty.as_index()).unwrap();
             }
         }
 
-        out.remove(out.len() - 1); // comma
+        if out.ends_with(',') {
+            out.remove(out.len() - 1); // comma
+        }
     }
     write!(out, ")").unwrap();
 }
@@ -51,6 +57,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
         if out.fn_emitted.get(f.as_index()) {
             return Ok(());
         }
+        out.fn_emitted.set(f.as_index());
 
         if comp.program[f].has_tag(Flag::Ct) {
             return Ok(()); // TODO: why am i trying to call Unique?
@@ -163,7 +170,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
         } else {
             println!("/* ERROR: No c compatible body for \n{}*/", comp.program[f].log(comp.pool))
         }
-        out.fn_emitted.set(f.as_index());
 
         Ok(())
     }
@@ -406,8 +412,9 @@ impl<'z, 'p> Emit<'z, 'p> {
                     break;
                 }
                 Bc::GetNativeFnPtr(f) => {
+                    // TODO: it might not be in the callees because it might be from an emit_relocatable_pointer because someone used a @static as a hacky forward declaration.
                     let out = self.next_var();
-                    writeln!(self.code, "    _{out} = &_FN{}", f.as_index()).unwrap();
+                    writeln!(self.code, "    _{out} = (void*) &_FN{};", f.as_index()).unwrap();
                     self.stack.push(out);
                 }
                 Bc::Load { slots } => {

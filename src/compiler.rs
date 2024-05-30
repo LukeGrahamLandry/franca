@@ -26,6 +26,7 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -1212,9 +1213,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       so maybe its better to have more consistant use of the context stack so you always know what you're doing and forwarding typecheck responsibility doesnt mean poor error messages.
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
-
             // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
-            self.coerce_type_check_arg(res, requested, "sanity ICE req_expr")?;
+            let msg = "sanity ICE req_expr";
+            self.coerce_type_check_arg(res, requested, msg)?;
         }
 
         expr.ty = res;
