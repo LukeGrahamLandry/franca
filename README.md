@@ -10,6 +10,7 @@
 - no blessed methods, call any function with dot syntax (like d/nim)
 - lazy analysis, functions/constants that are statically unreachable may contain invalid code (like zig)
 - nonlocal returns from inline lambdas (like kotlin/ruby)
+- manual memory management with explicit allocators (like zig, tho i don't care about fallibility)
 
 ## Backends
 
@@ -32,7 +33,6 @@
   It is the job of the source code to contain exactly the information required to compile the program.
   You should be able to download the compiler, point at a file, and produce a program.
 - macros that derive implimentations of common operations on your types (like rust).
-- manual memory management with explicit allocators (like zig)
 - the goal is to pull as much as possible out of the compiler and into the library. but I do like being able to build from source easily without a complicated bootstrapping problem.
 - parse declarations from other languages and generate ffi bindings.
 - checked mode with less undefined behaviour.

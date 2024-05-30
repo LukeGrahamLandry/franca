@@ -445,8 +445,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert_eq!(addr as usize % 4, 0);
 
         debugln!(
-            "Call {f:?} {} flat:{flat_call};      callees={:?}",
+            "Call {f:?} {} 0x{:x} flat:{flat_call};      callees={:?}",
             self.pool.get(self.program[f].name),
+            addr as usize,
             self.program[f].callees
         );
         self.flush_cpu_instruction_cache();

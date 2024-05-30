@@ -30,6 +30,7 @@ macro_rules! bounce_flat_call {
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
             pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, retptr: *mut u8, ret_count: i64) {
+                debugln!("bounce_flat_call {}", stringify!($f));
                 let ty = <$Arg>::get_or_create_type(compile.program);
                 compile.program.finish_layout_deep(ty).unwrap();
                 let ty = <$Ret>::get_or_create_type(compile.program);
@@ -51,6 +52,14 @@ macro_rules! bounce_flat_call {
                     argslice.fill(0); // TODO: remove
                     debugln!("bounce RET: {out:?}");
                 }
+                // Since we just called into a compiler function, it might have emitted new code and left it in write mode...
+                // but our caller might be jitted code (like a macro), so before returning to them, we need to make sure they're executable. 
+                // this avoids a `exc_bad_access (code=2, <some code address>)`. The problem only happened in the lox demo, not my small tests, so its fairly rare. 
+                // -- May 30
+                // TODO: i probably have to do this before returning from any export_ffi function, not just flat_call ones. 
+                //       its wasteful to leave the map in exec mode if we're going to be writing to it again soon. 
+                compile.flush_cpu_instruction_cache();
+                compile.aarch64.make_exec();
             }
         }
 
@@ -188,7 +197,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
     ("fn IntType(bits: i64, signed: bool) Type #fold;", make_int_type as *const u8),
     // measured in bytes
-    ("#fold fn size_of(T: Type) i64 #fold", get_size_of as *const u8),
+    ("fn size_of(T: Type) i64 #fold", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // useful when everything's broken so can't even compile the one defined in the language.
     ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
@@ -527,7 +536,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut arg: Values, ret_type: TypeId) -> Res<'p, Values> {
     let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
-    debugln!("IN: {arg:?}");
+    debugln!("IN: {arg:?} addr=0x{:x}", f as usize);
     let mut ret = vec![0u8; ret_count];
     f(
         compile,
