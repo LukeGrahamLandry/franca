@@ -2893,7 +2893,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             // TODO: check that you're calling from the same place as the definition.
             Ok((self.emit_capturing_call(fid, expr)?, true))
-        } else if !done && func.get_flag(TryConstantFold) && arg_expr.as_const().is_some() {
+        } else if !done && func.get_flag(TryConstantFold) && arg_expr.is_const() {
             // TODO: this should be smarter. like if fn add is #fold, then (1.add(2.add(3))) doesn't need to do the fold at both levels,
             // it can just emit one function for doing the top one. idk if thats better. probably depends how complicated the expression is.
             let ty = self.program.func_type(fid);

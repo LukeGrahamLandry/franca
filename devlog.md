@@ -13,6 +13,12 @@ it really doesn't like me writing while with a loop tho, `Missing value result.i
 Oh its because of my reducing Block with empty stmts to just the result expr and Block is the only place I hang a return label from.
 So just need to check if that's been defined (which is only done by emit_captuing_call).
 
+trying to emit shitty c.
+its a problem that there's #ct functions that try to get called at "runtime".
+like assert_eq-ing on a tag_value doesn't get folded.
+same for some basic.fr assertions on Ty(...), i started fixing those manually before i noticed it was so common.
+its because expr.as_const doesn't check tuples.
+
 ## remove #comptime (May 28)
 
 another attempt at removing #comptime because const args should do the same thing.

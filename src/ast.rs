@@ -389,11 +389,23 @@ impl<'p> FatExpr<'p> {
         ctx.vars
     }
 
+    // TODO: this is weak! should replace with is_const then immediate_eval_expr.
     pub fn as_const(&self) -> Option<Values> {
         if let Expr::Value { value } = &self.expr {
             Some(value.clone())
         } else {
             None
+        }
+    }
+
+    // this is intended to be called after compile_expr.
+    pub fn is_const(&self) -> bool {
+        match &self.expr {
+            Expr::String(_) | Expr::Closure(_) | Expr::AddToOverloadSet(_) | Expr::WipFunc(_) | Expr::Value { .. } => true,
+            Expr::Block { .. } => false, // TODO
+            Expr::Tuple(parts) => parts.iter().all(|e| e.is_const()),
+            Expr::PtrOffset { ptr: inner, .. } | Expr::Cast(inner) => inner.is_const(),
+            _ => false,
         }
     }
 
@@ -1296,11 +1308,17 @@ impl<'p> Program<'p> {
     pub fn tuple_types(&self, ty: TypeId) -> Option<Vec<TypeId>> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => Some(fields.iter().map(|f| f.ty).collect()),
-            &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
+            &TypeInfo::Named(ty, _) | &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
             _ => None,
         }
     }
-
+    pub fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
+        match &self[ty] {
+            TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
+            &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) | &TypeInfo::Unique(ty, _) => self.flat_tuple_types(ty),
+            _ty => vec![ty],
+        }
+    }
     // TODO: skip through named and unique as well.
     pub fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
         ptr_ty = self.raw_type(ptr_ty);
