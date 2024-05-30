@@ -3080,10 +3080,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                 debug_assert!(self.program[original_f].get_flag(ResolvedSign));
                 debug_assert!(!self.program[original_f].get_flag(AllowRtCapture));
                 self.program[original_f].assert_body_not_resolved()?;
-                debug_assert!(
-                    !matches!(body.expr, Expr::Block { .. }),
-                    "Block should be GetParsed because body is not resolved yet. "
-                );
+                // TODO: not true for 'name :: fn() = {}' exprs because they don't stop.
+                // debug_assert!(
+                //     !matches!(body.expr, Expr::Block { .. }),
+                //     "Block should be GetParsed because body is not resolved yet. "
+                // );
                 // TODO: just take the part you need. rn this copys more and more every time! -- May 29
                 let mut scope = self[new_func.scope.unwrap()].clone();
                 // TODO: don't need to copy these. they should be empty the first time,
