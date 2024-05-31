@@ -353,6 +353,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.eat(RightParen)?;
                         res
                     }
+                    LeftSquare => {
+                        self.eat(LeftSquare)?;
+                        let e = self.parse_expr()?;
+                        self.eat(RightSquare)?;
+                        return Ok(self.expr(Expr::SuffixMacro(Flag::Unquote.ident(), Box::new(e))));
+                    }
                     _ => return Err(self.expected("ident or '(' for macro expr (arbitrary expr must be wrapped in parens)")),
                 };
 
@@ -367,7 +373,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 };
 
                 let target = match self.peek() {
-                    Semicolon | Comma | RightParen | RightSquiggle | Dot | RightAngle => {
+                    Semicolon | Comma | RightParen | RightSquiggle | Dot | RightSquare => {
                         // target is optional.
                         self.start_subexpr();
                         Box::new(self.raw_unit())
@@ -387,13 +393,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let name = self.ident()?;
                 let e = self.expr(Expr::GetNamed(name));
                 Ok(self.expr(Expr::SuffixMacro(Flag::Contextual_Field.ident(), Box::new(e))))
-            }
-            LeftAngle => {
-                self.start_subexpr();
-                self.eat(LeftAngle)?;
-                let e = self.parse_expr()?;
-                self.eat(RightAngle)?;
-                Ok(self.expr(Expr::SuffixMacro(Flag::Unquote.ident(), Box::new(e))))
             }
             Quote => {
                 self.start_subexpr();

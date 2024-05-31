@@ -5,20 +5,20 @@
 //       can't decide if this macro is good enough or want ^ as more general solution. 
 #macro #outputs(AstExpr)
 fn literal(arg: AstExpr, target: AstExpr) AstExpr = '{
-    var value: <arg> = <target>;
-    literal_ast(<arg>, @as(rawptr) value&)
+    var value: @[arg] = @[target];
+    literal_ast(@[arg], @as(rawptr) value&)
 }';
 
 // Same as the two argument version but infers the type. 
 // TODO: assert that arg isn't 'Unit' because then its ambigous with the two argument version. -- Apr 21
 #macro #outputs(AstExpr)
 fn literal(arg: AstExpr) AstExpr = '{
-    var value = <arg>;
+    var value = @[arg];
     literal_ast(@type value, @as(rawptr) value&)
 }';
 
 /// Ast<?> -> Ast<T>
-fn as(T: Type, expr: FatExpr) FatExpr = '@(<@literal(as)>)(<@literal(T)>) <expr>';
+fn as(T: Type, expr: FatExpr) FatExpr = '@(@[@literal(as)])(@[@literal(T)]) @[expr]';
 
 // TODO: need to have an actual clone method because just relying on stack copy will share heap ptrs. 
 // TODO: once i have an asm backend, this can become a jump table which is pretty cool. 
@@ -64,10 +64,10 @@ fn match(var arg: FatExpr, var target: FatExpr) FatExpr = {
     
     ::if(FatExpr);
     '{
-        var arg_val = <if(is_ptr, =>'@as(Unit)unit', => arg)>;
-        var arg_ptr = <if(is_ptr, =>arg, =>'arg_val&')>;
+        var arg_val = @[if(is_ptr, =>'@as(Unit)unit', => arg)];
+        var arg_ptr = @[if(is_ptr, =>arg, =>'arg_val&')];
         let tag_val = arg_ptr!tag[];
-        <{
+        @[{
             count := 0;
             each(stmts) { (stmt) | 
                 if(eq(stmt[].stmt&!tag[], tag_value(Stmt, @symbol(Eval)))) {|  // (1)
@@ -98,12 +98,12 @@ fn match(var arg: FatExpr, var target: FatExpr) FatExpr = {
                     };
                     var case_access = 'arg_ptr.___';
                     case_access.expr.FieldAccess._1 = name;  // (3)
-                    let tag = 'tag_value(<@literal(Type) enum_type>, <@literal(name)>)';
+                    let tag = 'tag_value(@[@literal(Type) enum_type], @[@literal(name)])';
                     if(is_ptr){|
-                        case_access = '<case_access>&';
+                        case_access = '@[case_access]&';
                     };
                     count = count.add(1);
-                    body = '(eq(tag_val, <tag>), => <handler_body[]>(<case_access>), => <body>)!if';
+                    body = '(eq(tag_val, @[tag]), => @[handler_body[]](@[case_access]), => @[body])!if';
                 };
             };
             if(count.ne(varients.len)) {|
@@ -114,7 +114,7 @@ fn match(var arg: FatExpr, var target: FatExpr) FatExpr = {
                 println(count);
             };
             body
-        }>
+        }]
     }'
 }
 
@@ -133,8 +133,8 @@ fn switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
     // Declaring variables is weird because name resolution has already run. 
     // All the references to it need to be in its lexical scope, so the whole code is in an unquote. 
     '{
-        var arg_var = <arg>;
-        <{
+        var arg_var = @[arg];
+        @[{
             while(=> i.ge(0)) {|
                 stmt: *FatStmt = handlers.index(i); 
                 // TODO: typecheck err message (forgot to deref !tag) points at the wrong location in the expression. 
@@ -152,12 +152,12 @@ fn switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
                     if(name.eq(@symbol(case)), => {
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
-                        cond := 'eq(arg_var, <as(inspected_ty, arg[])>)';
-                        body = '(<cond>, =><action>(), =><body>)!if';
+                        cond := 'eq(arg_var, @[as(inspected_ty, arg[])])';
+                        body = '(@[cond], =>@[action](), =>@[body])!if';
                     }, =>if(name.eq(@symbol(default)), => {
                         if(first) {|
                             // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
-                            body = '<action>(arg_var)';
+                            body = '@[action](arg_var)';
                         }{|
                             panic("@default must be the last handler in @switch");
                         };
@@ -174,7 +174,7 @@ fn switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
                 i = i.sub(1);
             };
             body
-        }>
+        }]
     }'
 }
 
@@ -199,12 +199,12 @@ fn bits(var arg: AstExpr) AstExpr = {
         let next = if(int.signed, 
             => {
                 let part_ast = as(i64, part[]);
-                'signed_truncate(<part_ast>, <@literal(i64) int.bit_count>)'
+                'signed_truncate(@[part_ast], @[@literal(i64) int.bit_count])'
             },
             => as(u32, part[])
         );
-        let next = 'shift_left(<next>, <@literal(shift)>)';
-        expr = 'bit_or(<expr>, <next>)';
+        let next = 'shift_left(@[next], @[@literal(shift)])';
+        expr = 'bit_or(@[expr], @[next])';
     });
     
     // TODO: want to be able to just have a version of assert that does this but there's a weird dependency. 
@@ -224,7 +224,7 @@ fn bits(var arg: AstExpr) AstExpr = {
 #macro #outputs(Unit) fn operator_minus_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, sub);
 #macro #outputs(Unit) fn operator_star_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, mul);
 #macro #outputs(Unit) fn operator_slash_equal(place: FatExpr, value: FatExpr) FatExpr = assignment_operator(place, value, div);
-#macro fn operator_index(container: FatExpr, i: FatExpr) FatExpr = '<container>.index(<i>)[]';
+#macro fn operator_index(container: FatExpr, i: FatExpr) FatExpr = '@[container].index(@[i])[]';
 
 /// All the  'a _= b' operators logically expand to 'a = _(a, b)'.
 /// Like normal assignment, the left hand side can be a variable name or a pointer dereference. 
@@ -246,7 +246,7 @@ fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatEx
     
     if(is_var_access){|
         // This type of macro can't return a stmt, so it has to be wrapped in a block. Maybe we should use the other kind once that exists. 
-        '{ <place> = <@literal(f)>(<place>, <value>); }'
+        '{ @[place] = @[@literal(f)](@[place], @[value]); }'
     } {|
         // TODO: nice report_compile_error api that lets you attatch the Span so you get useful error message rendering. 
         assert(kind.ne(tag_value(Expr, @symbol(PrefixMacro))), "TODO: support macro expansion in place expr");
@@ -257,7 +257,7 @@ fn assignment_operator(var place: FatExpr, value: FatExpr, f: OverloadSet) FatEx
         assert(is_deref, "_= operator left hand side must be a place expr.");
         // we know the lhs is 'whatever[]', but we want to just access the pointer and add the deref later. 
         ptr_expr := place.expr.SuffixMacro._1[];
-        '{ let ptr = <ptr_expr>; ptr[] = <@literal(f)>(ptr[], <value>); }'
+        '{ let ptr = @[ptr_expr]; ptr[] = @[@literal(f)](ptr[], @[value]); }'
     }
 }
 
@@ -299,13 +299,13 @@ fn enum(var names: FatExpr) FatExpr = {
     cases := cases.items();
     varients.expr.StructLiteralP.bindings = @as(Ty(*Binding, i64)) cases;
     
-    '@enum(i64) <varients>'
+    '@enum(i64) @[varients]'
 }
 
 // TODO: this is still a massive hack. it still looks for @as specifically by name. -- May 5
-// #macro fn as(T: FatExpr, e: FatExpr) FatExpr = '(<T>, <e>)!as';
+// #macro fn as(T: FatExpr, e: FatExpr) FatExpr = '(@[T], @[e])!as';
 
 #macro fn static(T: FatExpr) FatExpr = {
     t := @literal const_eval_type(T);
-    ':: @as(*<t>) @as(rawptr) malloc(<t>.size_of())'
+    ':: @as(*@[t]) @as(rawptr) malloc(@[t].size_of())'
 }

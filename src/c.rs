@@ -385,8 +385,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                     let (arg, ret) = self.program.get_infos(f_ty);
                     // self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
-                    let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
-
                     let ty = self.program[f].unwrap_ty();
                     // TODO
                     // assert!(
@@ -396,11 +394,12 @@ impl<'z, 'p> Emit<'z, 'p> {
                     // );
                     let ret = self.next_var();
                     let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
-                    if self.program.slot_count(ty.ret) != 0 {
+                    match self.program.slot_count(ty.ret) {
+                        0 => write!(self.code, "    ").unwrap(),
                         // TODO: bit cast float??
-                        write!(self.code, "    _{ret} = (void*)").unwrap();
-                    } else {
-                        write!(self.code, "    ").unwrap();
+                        1 => write!(self.code, "    _{ret} = (void*)").unwrap(),
+                        2 => todo!(),
+                        _ => err!("ICE: emit bc never does this. it used flat call instead",),
                     }
 
                     write!(self.code, "_FN{}(", f.as_index()).unwrap();
@@ -527,6 +526,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                             1 => {
                                 let v = self.stack.pop().unwrap();
                                 writeln!(self.code, "    return (_TY{}) _{v};", ret_ty.as_index()).unwrap()
+                            }
+                            2 => {
+                                let snd = self.stack.pop().unwrap();
+                                let fst = self.stack.pop().unwrap();
+                                writeln!(self.code, "    return {{ _{fst}, _{snd} }};").unwrap()
                             }
                             _ => err!("ICE: emit_bc never does this. it used flat call instead.",),
                         };

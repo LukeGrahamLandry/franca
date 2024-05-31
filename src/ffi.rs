@@ -601,6 +601,7 @@ pub mod c {
         let bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1
         } else if arg.float_mask.count_ones() == arg.size_slots as u32 && ret.float_mask.count_ones() == ret.size_slots as u32 {
+            assert!(ret.size_slots <= 1, "TODO: float call with multiple returns at comptime");
             arg8ret1_all_floats
         } else {
             err!("ICE: i dont do mixed int/float registers but backend does",)
