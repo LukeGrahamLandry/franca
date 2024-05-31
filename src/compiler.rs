@@ -241,7 +241,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program.finish_layout(ty.arg)?;
             self.program.finish_layout(ty.ret)?;
             let args = self.slot_count(ty.arg);
-            let is_big = (args > 8) || (args == 8 && comp_ctx) || self.slot_count(ty.ret) > 1;
+            let is_big = (args > 8) || (args == 8 && comp_ctx) || self.slot_count(ty.ret) > 2;
             if self.program[f].has_tag(Flag::Flat_Call) || is_big {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 // TODO: my c_Call can;t handle agragates
@@ -256,18 +256,18 @@ impl<'a, 'p> Compile<'a, 'p> {
                 //     self.program[f].comptime_addr.is_some(),
                 //     "compiler context is implicitly passed as first argument for #ct builtins, dont need to put it on your own functions. TODO: inline asm could allow i guess?"
                 // );
-                self.program[f].set_cc(CallConv::Arg8Ret1Ct)?;
+                self.program[f].set_cc(CallConv::CCallRegCt)?;
             }
             if self.program[f].has_tag(Flag::C_Call) {
                 if comp_ctx {
-                    self.program[f].set_cc(CallConv::Arg8Ret1Ct)?;
+                    self.program[f].set_cc(CallConv::CCallRegCt)?;
                 } else {
-                    self.program[f].set_cc(CallConv::Arg8Ret1)?;
+                    self.program[f].set_cc(CallConv::CCallReg)?;
                 }
             }
 
             if self.program[f].cc.is_none() {
-                self.program[f].set_cc(CallConv::Arg8Ret1)?;
+                self.program[f].set_cc(CallConv::CCallReg)?;
             }
         }
 
@@ -438,7 +438,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             )
         }
         let cc = self.program[f].cc.unwrap();
-        let c_call = matches!(cc, CallConv::Arg8Ret1 | CallConv::Arg8Ret1Ct | CallConv::OneRetPic);
+        let c_call = matches!(cc, CallConv::CCallReg | CallConv::CCallRegCt | CallConv::OneRetPic);
         let flat_call = matches!(cc, CallConv::Flat | CallConv::FlatCt);
 
         #[cfg(target_arch = "aarch64")]
@@ -459,15 +459,16 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut ints = vec![];
             deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints)?;
             debugln!("IN: {ints:?}");
-            let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::Arg8Ret1Ct)?;
-            debugln!("OUT: {r}");
+            let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt)?;
+            debugln!("OUT: {r:?}");
 
             match expected_ret_bytes {
                 0 => to_values(self.program, ()),
-                1 => to_values(self.program, r as u8),
-                2 => to_values(self.program, r as u16),
-                4 => to_values(self.program, r as u32),
-                8 => to_values(self.program, r as u64),
+                1 => to_values(self.program, r.0 as u8),
+                2 => to_values(self.program, r.0 as u16),
+                4 => to_values(self.program, r.0 as u32),
+                8 => to_values(self.program, r.0 as u64),
+                16 => to_values(self.program, r),
                 n => todo!("c call ret {n} bytes"),
             }
         } else {

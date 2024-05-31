@@ -242,7 +242,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
                 // Note: we rely on NameFlagArgOffset or whatever to remember how to actually access the parts you're interested in.
             }
-            CallConv::Arg8Ret1 => {
+            CallConv::CCallReg => {
                 debug_assert!(arg.size_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
                 self.ccall_reg_to_stack(arg.size_slots, arg.float_mask);
                 let int_count = arg.size_slots as u32 - arg.float_mask.count_ones();
@@ -252,7 +252,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 debug_assert_eq!(self.state.stack.len() as u16, arg.size_slots);
             }
-            CallConv::Inline | CallConv::OneRetPic | CallConv::Arg8Ret1Ct => unreachable!("unsupported cc {cc:?}"),
+            CallConv::Inline | CallConv::OneRetPic | CallConv::CCallRegCt => unreachable!("unsupported cc {cc:?}"),
         }
 
         debugln!("entry: ({:?})", self.state.stack);
@@ -430,7 +430,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::CallDirect { f, tail } => {
                 let target = &self.program[f];
                 let f_ty = target.unwrap_ty();
-                let comp_ctx = target.cc.unwrap() == CallConv::Arg8Ret1Ct;
+                let comp_ctx = target.cc.unwrap() == CallConv::CCallRegCt;
 
                 // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
                 // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
@@ -454,7 +454,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 let ff = &self.program[self.f];
                 let cc = ff.cc.unwrap();
                 match cc {
-                    CallConv::Arg8Ret1 => {
+                    CallConv::CCallReg => {
                         let ret_ty = ff.finished_ret.unwrap();
                         let ret = self.program.get_info(ret_ty);
                         // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
@@ -541,7 +541,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::CallFnPtr { ty, cc } => {
                 // TODO: tail call
                 match cc {
-                    CallConv::OneRetPic | CallConv::Arg8Ret1 => {
+                    CallConv::OneRetPic | CallConv::CCallReg => {
                         self.dyn_c_call(ty, false, |s| {
                             // dyn_c_call will have popped the args, so now stack is just the pointer to call
                             // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.

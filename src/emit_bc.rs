@@ -161,7 +161,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             self.bind_args(result, &func.arg)?;
         }
 
-        debug_assert!(is_flat_call || ret.size_slots <= 1); // change ret handling if fix real c_call?
+        debug_assert!(is_flat_call || ret.size_slots <= 2); // change ret handling if fix real c_call?
         let result_location = if is_flat_call { ResAddr } else { PushStack };
         let return_block = result.push_block(ret.size_slots, ret.float_mask);
 
@@ -213,7 +213,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = matches!(self.program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
-        if self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct {
+        if self.program[f].cc.unwrap() == CallConv::CCallRegCt {
             result.push(Bc::GetCompCtx);
         }
         let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
@@ -411,7 +411,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
                     let res_ptr = if force_flat { Some(result.add_var(f_ty.ret)) } else { None };
                     self.compile_expr(result, f, PushStack, false)?;
-                    if cc == CallConv::Arg8Ret1Ct {
+                    if cc == CallConv::CCallRegCt {
                         result.push(Bc::GetCompCtx);
                     }
 
@@ -981,30 +981,44 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
                 //       because List doesn't really want to keep its uninitialized memory.
                 let (ptr, len): (i64, i64) = from_values(program, value.clone())?;
 
-                let inner = program.unptr_ty(fields[0].ty).unwrap();
-                let inner_info = program.get_info(inner);
-                if inner_info.contains_pointers {
-                    err!("TODO: nested constant pointers",)
-                }
-
+                let len = len as usize;
                 if len == 0 {
                     // an empty slice can have a null data ptr i guess.
                     let ptr = program.baked.make(BakedVar::Num(0), null());
                     let len = program.baked.make(BakedVar::Num(0), null());
-                    Ok(program.baked.make(BakedVar::VoidPtrArray(vec![ptr, len]), jit_ptr))
-                } else {
-                    assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
-                    let bytes = len as usize * inner_info.stride_bytes as usize;
-                    let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) }.to_vec();
-                    if !program.get_info(inner).contains_pointers {
-                        let value = program.baked.make(BakedVar::Bytes(data.to_vec()), null());
-                        let addr = program.baked.make(BakedVar::AddrOf(value), null());
-                        let len = program.baked.make(BakedVar::Num(len), null());
-                        Ok(program.baked.make(BakedVar::VoidPtrArray(vec![addr, len]), jit_ptr))
-                    } else {
-                        todo!()
-                    }
+                    return Ok(program.baked.make(BakedVar::VoidPtrArray(vec![ptr, len]), jit_ptr));
                 }
+
+                let inner = program.unptr_ty(fields[0].ty).unwrap();
+                let inner_info = program.get_info(inner);
+                assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
+                let bytes = len * inner_info.stride_bytes as usize;
+                let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) }.to_vec();
+
+                let value = if inner_info.contains_pointers {
+                    let mut ptrs = vec![];
+
+                    let stride = inner_info.stride_bytes as usize;
+                    for i in 0..len {
+                        let v = data[i * stride..(i + 1) * stride].to_vec();
+                        let id = emit_relocatable_constant(inner, &Values::many(v), program, dispatch)?;
+                        match program.baked.get(id).0 {
+                            BakedVar::Zeros { .. } | BakedVar::Bytes(_) => todo!(),
+                            BakedVar::Num(_) => ptrs.push(id),
+                            BakedVar::FnPtr(_) => ptrs.push(id),
+                            BakedVar::AddrOf(_) => ptrs.push(id),
+                            BakedVar::VoidPtrArray(parts) => ptrs.extend(parts),
+                        }
+                    }
+
+                    program.baked.make(BakedVar::VoidPtrArray(ptrs), null())
+                } else {
+                    program.baked.make(BakedVar::Bytes(data.to_vec()), null())
+                };
+
+                let addr = program.baked.make(BakedVar::AddrOf(value), null());
+                let len = program.baked.make(BakedVar::Num(len as i64), null());
+                Ok(program.baked.make(BakedVar::VoidPtrArray(vec![addr, len]), jit_ptr))
             } else {
                 if fields.iter().all(|f| program.get_info(f.ty).stride_bytes == 8) {
                     let mut ptrs = vec![];

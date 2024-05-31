@@ -265,7 +265,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             writeln!(
                 out,
                 "const CallConv = @enum(i64) (C = {}, Flat = {});",
-                CallConv::Arg8Ret1 as u8,
+                CallConv::CCallReg as u8,
                 CallConv::Flat as u8,
             )
             .unwrap();
@@ -390,7 +390,7 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
         let cc = if program.get_info(arg).size_slots > 8 || program.get_info(ret).size_slots > 1 {
             CallConv::Flat
         } else {
-            CallConv::Arg8Ret1
+            CallConv::CCallReg
         };
         Ok(program.intern_type(TypeInfo::FnPtr { ty: FnType { arg, ret }, cc }))
     })

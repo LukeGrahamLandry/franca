@@ -594,8 +594,9 @@ pub mod c {
     use crate::compiler::Res;
     use crate::err;
     use std::arch::global_asm;
+    use std::mem::transmute;
 
-    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, i64> {
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, (i64, i64)> {
         let (arg, ret) = program.program.get_infos(f_ty);
         let bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1
@@ -604,7 +605,7 @@ pub mod c {
         } else {
             err!("ICE: i dont do mixed int/float registers but backend does",)
         };
-        assert!(ret.size_slots <= 1, "i dont do struct calling convention yet");
+        assert!(ret.size_slots <= 2, "i dont do struct calling convention yet");
         if comp_ctx {
             args.insert(0, program as *mut Compile as i64);
         }
@@ -620,23 +621,45 @@ pub mod c {
                 args.push(0);
             }
         }
-        let ret: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
-        Ok(ret)
+        if ret.size_slots <= 1 {
+            let ret: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
+            Ok((ret, 0))
+        } else if ret.size_slots == 2 {
+            // TODO: floats!
+            let ret = arg8ret2(ptr, args.as_mut_ptr());
+            Ok((ret.fst, ret.snd))
+        } else {
+            unreachable!()
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
     extern "C" {
         // loads 8 words from args into x0-x7 then calls fnptr
         fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+        // indirect return address is first arg
+        fn arg8ret_struct(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
         // loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
         fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+    }
+
+    #[repr(C)]
+    struct IntPair {
+        fst: i64,
+        snd: i64,
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    extern "C" fn arg8ret2(fnptr: usize, first_of_eight_args: *mut i64) -> IntPair {
+        let iknowthecallingconventionisthesame: extern "C" fn(usize, *mut i64) -> IntPair = unsafe { transmute(arg8ret1 as *const ()) };
+        iknowthecallingconventionisthesame(fnptr, first_of_eight_args)
     }
 
     // NOTE: you have to put this in the same module ::c! you cant put it outside and then import it .
     #[cfg(target_arch = "aarch64")]
     global_asm!(
         r#"
-        _arg8ret1:
+        _arg8ret1_impl:
         mov x16, x0 ; save callee since we need to use this register for args
         mov x17, x1
         ldr x0, [x17, #0]
@@ -647,8 +670,16 @@ pub mod c {
         ldr x5, [x17, #40]
         ldr x6, [x17, #48]
         ldr x7, [x17, #56]
-        mov x8, #0 ; extra debug check: set indirect return ptr to null so they segfault if they try to return a struct. 
         br x16 ; tail call
+        
+        _arg8ret1:
+        mov x8, #0 ; extra debug check: set indirect return ptr to null so they segfault if they try to return a struct. 
+        b _arg8ret1_impl
+        
+        _arg8ret_struct:
+        ldr x8, [x1] ; arm cc has return address in x8 but we want to represent it as first argument. 
+        add x1, x1, #8
+        b _arg8ret1_impl
     "#
     );
 
@@ -681,6 +712,7 @@ pub mod c {
     "#
     );
 
+    // TODO: is there a stack redzone?
     // args 1-6: RDI, RSI, RDX, RCX, R8, R9; then stack
     // floats: xmm0 - xmm7
     #[cfg(target_arch = "x86_64")]
@@ -700,13 +732,19 @@ pub mod c {
             mov r9,  [r11 + 40]
             push [r11 + 48]
             push [r11 + 56]
+            push [r11 + 64] // want to always allow 8 args but we might have a struct return pointer as a fake first arg. 
             call rax
-            add sp, 16 // i have to fix the stack pointer
+            add sp, 24 // i have to fix the stack pointer
             ret
             "#,
                 options(noreturn)
             )
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    extern "C" fn arg8ret_struct(fnptr: usize, first_of_eight_args: *mut i64) -> i64 {
+        unsafe { arg8ret1(fnptr, first_of_eight_args) }
     }
 
     #[cfg(target_arch = "x86_64")]

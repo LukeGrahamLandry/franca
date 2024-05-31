@@ -698,8 +698,8 @@ impl<'p> Func<'p> {
 #[repr(i64)]
 #[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq, Hash)]
 pub enum CallConv {
-    Arg8Ret1, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
-    Arg8Ret1Ct,
+    CCallReg, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
+    CCallRegCt,
     // #flat_call
     Flat,   // first arg is a zero
     FlatCt, // first arg is compiler context pointer
@@ -777,12 +777,12 @@ impl<'p> Func<'p> {
         if cc == CallConv::Inline {
             assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
         }
-        if self.cc == Some(CallConv::OneRetPic) && cc == CallConv::Arg8Ret1 {
+        if self.cc == Some(CallConv::OneRetPic) && cc == CallConv::CCallReg {
             // TODO: HACK. now with merging. the aarch64 version says OneRetPic and llvm version says Arg8Ret1 but thats fine cause really they're different functions.
             //       so treating them as the same one is kinda but also the old SplitFunc system was more dumb.
             return Ok(());
         }
-        if self.cc == Some(CallConv::Arg8Ret1) && cc == CallConv::OneRetPic {
+        if self.cc == Some(CallConv::CCallReg) && cc == CallConv::OneRetPic {
             // TODO: HACK.
             self.cc = Some(CallConv::OneRetPic);
             return Ok(());

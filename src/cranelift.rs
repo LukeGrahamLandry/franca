@@ -234,7 +234,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         ctx.func.signature = if self.is_flat {
             self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
         } else {
-            assert!(self.program[f].cc.unwrap() != CallConv::Arg8Ret1Ct);
+            assert!(self.program[f].cc.unwrap() != CallConv::CCallRegCt);
             self.make_sig(f_ty, true, false)
         };
 
@@ -367,7 +367,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 Bc::CallDirect { f, tail } => {
                     let f_ty = self.program[f].unwrap_ty();
                     let (mut arg, ret) = self.program.get_infos(f_ty);
-                    if self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct {
+                    if self.program[f].cc.unwrap() == CallConv::CCallRegCt {
                         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
                         arg.size_slots += 1;
                     }
@@ -442,7 +442,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                                 }
                             });
 
-                        let comp_ctx = self.program[f].cc.unwrap() == CallConv::Arg8Ret1Ct;
+                        let comp_ctx = self.program[f].cc.unwrap() == CallConv::CCallRegCt;
                         let sig = self.make_sig(ty, false, comp_ctx);
                         let sig = builder.import_signature(sig);
                         let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
@@ -520,7 +520,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     }
                 }
                 Bc::CallFnPtr { ty, cc } => {
-                    assert!(cc == CallConv::Arg8Ret1);
+                    assert!(cc == CallConv::CCallReg);
                     let sig = builder.import_signature(self.make_sig(ty, false, false));
                     let (arg, ret) = self.program.get_infos(ty);
                     self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
@@ -738,16 +738,28 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         let ret = self.program.raw_type(t.ret);
         if !ret.is_never() && !ret.is_unit() {
             // TODO: ArgumentPurpose::StructReturn for real c abi. dont just slots==1 because never (and eventually unit) are 0
-            let extension = if ret == TypeId::f64() {
-                ArgumentExtension::None
+            if let TypeInfo::Tagged { .. } = &self.program[ret] {
+                for _ in 0..self.program.slot_count(ret) {
+                    sig.returns.push(AbiParam {
+                        value_type: I64,
+                        purpose: ArgumentPurpose::Normal,
+                        extension: ArgumentExtension::None,
+                    })
+                }
             } else {
-                ArgumentExtension::Sext
-            };
-            sig.returns.push(AbiParam {
-                value_type: self.make_type(ret),
-                purpose: ArgumentPurpose::Normal,
-                extension,
-            });
+                for ret in self.program.flat_tuple_types(ret) {
+                    let extension = if ret == TypeId::f64() {
+                        ArgumentExtension::None
+                    } else {
+                        ArgumentExtension::Sext
+                    };
+                    sig.returns.push(AbiParam {
+                        value_type: self.make_type(ret),
+                        purpose: ArgumentPurpose::Normal,
+                        extension,
+                    });
+                }
+            }
         }
 
         sig

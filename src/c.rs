@@ -6,8 +6,8 @@
 // TODO: cast fn ptr arguments
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, Bc, FnBody},
-    compiler::{Compile, ExecStyle, Res},
+    bc::{BakedVar, BakedVarId, Bc, FnBody},
+    compiler::{add_unique, Compile, ExecStyle, Res},
     emit_bc::emit_bc,
     err,
     logging::PoolLog,
@@ -267,7 +267,14 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
                     let v = comp.program.baked.values.borrow();
                     match v[p.0 as usize].0 {
                         BakedVar::Zeros { .. } => todo!(),
-                        BakedVar::Bytes(_) => todo!(),
+                        BakedVar::Bytes(ref b) => {
+                            if b.len() == 8 {
+                                let v = u64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]); //fuck
+                                write!(constants, "(void*){v},").unwrap()
+                            } else {
+                                todo!("{b:?}")
+                            }
+                        }
                         BakedVar::Num(v) => write!(constants, "(void*){v},").unwrap(),
                         BakedVar::FnPtr(f) => {
                             write!(constants, "(void*)&_FN{},", f.as_index()).unwrap();
@@ -441,7 +448,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     }
                 }
                 Bc::CallFnPtr { ty, cc } => {
-                    assert!(cc == CallConv::Arg8Ret1);
+                    assert!(cc == CallConv::CCallReg);
 
                     let ptr_ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc });
                     render_typedef(self.program, self.result, ptr_ty)?;
@@ -652,7 +659,7 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
             writeln!(out.types, "typedef _Bool _TY{};", ty.as_index()).unwrap();
         }
         &TypeInfo::FnPtr { ty: f, cc } => {
-            assert!(cc == CallConv::Arg8Ret1); // TODO: flat call sig
+            assert!(cc == CallConv::CCallReg); // TODO: flat call sig
             render_typedef(program, out, f.arg)?;
             render_typedef(program, out, f.ret)?;
 
