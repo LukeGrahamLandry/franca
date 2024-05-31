@@ -139,10 +139,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
         let _ = p.end_subexpr();
         debug_assert!(p.spans.is_empty(), "leaked parse loc context");
-        unsafe {
-            STATS.inflated_lexer_lines += p.lexer.raw_lines;
-            STATS.skipped_lexer_lines += p.lexer.skipped_lines;
-        };
+
         Ok(stmts)
     }
 
@@ -158,10 +155,6 @@ impl<'a, 'p> Parser<'a, 'p> {
         let expr = p.parse_expr()?;
         let _ = p.end_subexpr();
         debug_assert!(p.spans.is_empty(), "leaked parse loc context");
-        unsafe {
-            STATS.inflated_lexer_lines += p.lexer.raw_lines;
-            STATS.skipped_lexer_lines += p.lexer.skipped_lines;
-        };
 
         Ok(expr)
     }
@@ -345,6 +338,11 @@ impl<'a, 'p> Parser<'a, 'p> {
                     TokenType::Symbol(name) => {
                         self.start_subexpr();
                         self.pop();
+                        // HACK
+                        if name == Flag::Return.ident() {
+                            self.end_subexpr();
+                            return Ok(self.expr(Expr::GetNamed(Flag::__Return.ident())));
+                        }
                         self.expr(Expr::GetNamed(name))
                     }
                     TokenType::LeftParen => {
@@ -413,14 +411,8 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.eat(Bang)?;
                 let name = self.ident()?;
-                // HACK
-                if name == Flag::Return.ident() {
-                    self.end_subexpr();
-                    Ok(self.expr(Expr::GetNamed(Flag::__Return.ident())))
-                } else {
-                    let prefix = Box::new(self.raw_unit());
-                    Ok(self.expr(Expr::SuffixMacro(name, prefix)))
-                }
+                let prefix = Box::new(self.raw_unit());
+                Ok(self.expr(Expr::SuffixMacro(name, prefix)))
             }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }

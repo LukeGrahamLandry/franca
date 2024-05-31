@@ -1,0 +1,96 @@
+// TODO: I don't think panicking on invalid spans is acceptable, 
+//       given how annoying it is that the library I use does that,
+//       when I might have got my spans from buggy jitted code reading garbage memory. 
+//       But since I don't have error return traces, a panic is less annoying to debug. 
+//       I should try to steal what zig does, but I don't want a blessed error type.
+//       https://ziglang.org/documentation/master/#Error-Return-Traces
+//
+
+CodeMap :: @struct(
+    files: List(File),
+    total_len: u32,
+);
+Span2 :: @struct(low: u32, high: u32);
+File :: @struct(name: Str, content: Str, start: u32);
+
+fn init(gpa: Alloc) CodeMap = {
+    // TODO: if you name the field gpa, it shadows the argument so you can't use it in later field initializers. -- May 31
+    (files = list(gpa), total_len = 0)
+}
+
+// The caller is responsible for ensuring name/src outlive the codemap. 
+fn add_file(self: *CodeMap, name: Str, content: Str) Span2 = {
+    span: Span2 = (low = self.total_len, high = self.total_len.add(@as(u32) content.len));
+    self.total_len += @as(u32) content.len;
+    self.files&.push((name = name, content = content, start = span.low));
+    span
+}
+
+fn find_single_file(self: *CodeMap, span: Span2) *File = {
+    done :: @return;
+    assert(span.high.ge(span.low), "invalid span");
+    assert(span.high.le(self.total_len), "span is not in codemap");
+    skipped: u32 = 0;
+    each(self.files){(file)|
+        end := skipped.add(@as(u32) file.content.len);
+        if(span.low.ge(skipped)){|
+            if(span.high.le(end)) {|
+                done(file);
+            };
+        };
+        skipped = end;
+    };
+    // TODO: if you let the never fall through it typechecks but the return block has the wrong number of slots. 
+    //       :fall_through_never -- May 31
+    panic("span covers multiple files.");
+    unreachable_hack(*File)
+};
+
+fn source_slice(self: *CodeMap, span: Span2) Str = {
+    skipped: u32 = 0;
+    file := self.find_single_file(span);
+    start := span.low.sub(file.start);
+    file.content.subslice(start, span.len())
+}
+
+// indexes are relative to the start of self. 
+fn subspan(self: Span2, start: u32, end: u32) Span2 = {
+    assert(start.le(self.low).and(end.le(self.high)), "OOB");
+    assert(start.le(end), "invalid range");
+    // TODO: you get garbage out if you try to directly return the struct literal. :return_u32_pair
+    res: Span2 = (low = self.low.add(start), high = self.low.add(end));
+    res
+}
+
+// recall: it is an error to call source_slice on one that spans multiple files. 
+fn merge(a: Span2, b: Span2) Span2 = {
+    // TODO: you get garbage out if you try to directly return the struct literal. :return_u32_pair
+    res: Span2 = (
+        low = a.low.min(b.low),
+        high = a.high.max(b.high),
+    );
+    res
+}
+
+fn len(self: Span2) i64 = @as(i64) @as(u32) self.high.sub(self.low);
+
+#test fn test_code_map() = {
+    ::assert_eq(Str);
+    
+    codemap: CodeMap = init(libc_allocator);
+    file_a := "Hello World!";
+    file_b := "This is some text.\n It has multiple lines.\n";
+    span_a := codemap&.add_file("file_a", file_a);
+    span_b := codemap&.add_file("file_b", file_b);
+    
+    assert_eq(file_a, codemap&.source_slice(span_a));
+    assert_eq(file_b, codemap&.source_slice(span_b));
+    
+    is := span_b.subspan(@as(u32) 5, @as(u32) 7);
+    assert_eq("is", codemap&.source_slice(is));
+    some := span_b.subspan(@as(u32) 8, @as(u32) 12);
+    assert_eq("some", codemap&.source_slice(some));
+    
+    is_some := is.merge(some);
+    assert_eq("is some", codemap&.source_slice(is_some));
+}

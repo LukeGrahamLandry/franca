@@ -187,7 +187,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.locals.pop().unwrap();
         assert!(self.locals.is_empty());
 
-        if !body.ty.is_never() {
+        // Note: this is different from the body expr type because of early returns.
+        if !self.program[f].finished_ret.unwrap().is_never() {
             result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
         }
         if result.want_log {

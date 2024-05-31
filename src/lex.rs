@@ -80,14 +80,12 @@ pub enum LexErr {
 
 pub struct Lexer<'a, 'p> {
     pool: &'p StringPool<'p>,
-    pub root: Span,
+    root: Span,
     pub src: Arc<File>,
     start: usize,
     current: usize,
     chars: Peekable<Chars<'a>>,
     peeked: VecDeque<Token<'p>>,
-    pub(crate) raw_lines: usize,
-    pub(crate) skipped_lines: usize,
     hack: Option<Token<'p>>,
 }
 
@@ -104,8 +102,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
             chars: hack.chars().peekable(),
             root,
             pool,
-            raw_lines: 0,
-            skipped_lines: 0,
             hack: None,
         }
     }
@@ -117,8 +113,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
         let start = self.start;
         debug_assert!(self.peeked.is_empty());
 
-        let start_line = self.raw_lines;
-        let start_line_skipped = self.skipped_lines;
         while depth > 0 {
             self.eat_whitespace();
             self.start = self.current;
@@ -141,10 +135,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 }
             }
         }
-        let end_line = self.raw_lines;
-        let end_line_skipped = self.skipped_lines;
-        self.skipped_lines += end_line - start_line;
-        self.skipped_lines -= end_line_skipped - start_line_skipped; // don't double count inner comments
         let end = self.current;
         self.start = self.current;
         self.root.subspan(start as u64, end as u64)
@@ -386,7 +376,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
             // let mut first = true;
             while self.peek_c().is_whitespace() {
                 if self.pop() == '\n' {
-                    self.raw_lines += 1;
                     // if !first {
                     // todo!("untested");
                     // self.skipped_lines += 1;
@@ -410,8 +399,6 @@ impl<'a, 'p> Lexer<'a, 'p> {
                 match self.pop() {
                     '\0' => break,
                     '\n' => {
-                        self.raw_lines += 1;
-                        self.skipped_lines += 1;
                         break;
                     }
                     _ => {}
@@ -437,10 +424,7 @@ impl<'a, 'p> Lexer<'a, 'p> {
                                 depth += 1;
                             }
                         }
-                        '\n' => {
-                            self.raw_lines += 1;
-                            self.skipped_lines += 1;
-                        }
+                        '\n' => {}
                         _ => {}
                     }
                 }

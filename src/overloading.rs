@@ -307,7 +307,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         // It could be a builtin (like add) that exists for different architectures. Merge them into one.
         for opt in overloads.drain(1..) {
             debug_assert!(merged.len() < 10); // wtf
-            assert!(opt.arg == output.arg && opt.ret == output.ret, "overload missmatch. unreachable?");
+            assert!(opt.arg == output.arg, "overload missmatch. unreachable?");
+            assert!(opt.ret == output.ret, "overload missmatch. unreachable? {:?} {:?}", opt.ret, output.ret);
 
             let f = opt.func;
             // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.

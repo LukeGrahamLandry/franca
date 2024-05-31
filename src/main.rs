@@ -24,7 +24,7 @@ use std::{
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
-    process::{exit, Command, ExitStatus},
+    process::{exit, Command},
     str::pattern::Pattern,
     thread::sleep_until,
     time::{Duration, Instant},

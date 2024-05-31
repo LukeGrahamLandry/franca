@@ -6,8 +6,8 @@
 // TODO: cast fn ptr arguments
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, BakedVarId, Bc, FnBody},
-    compiler::{add_unique, Compile, ExecStyle, Res},
+    bc::{BakedVar, Bc, FnBody},
+    compiler::{Compile, ExecStyle, Res},
     emit_bc::emit_bc,
     err,
     logging::PoolLog,

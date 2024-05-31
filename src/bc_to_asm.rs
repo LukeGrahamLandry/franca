@@ -612,7 +612,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     // TODO: refactor this. its a problem that im afraid of it! -- May 8
-    #[track_caller]
     fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
         debug_assert!((slots as u32 - float_mask.count_ones()) <= 8);
         debug_assert!(self.state.stack.len() >= slots as usize);

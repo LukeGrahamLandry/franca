@@ -608,7 +608,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             if found.len() > 1 {
                 self.do_merges(&mut found, os)?;
             }
-            assert!(found.len() == 1);
+            assert!(found.len() == 1, "{found:?}");
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
             debug_assert_ne!(f, found[0].func);
             self.program[f].body = FuncImpl::Redirect(found[0].func);
