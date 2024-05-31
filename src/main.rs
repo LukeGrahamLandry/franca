@@ -6,7 +6,7 @@ use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc::Values,
     c::emit_c,
-    compiler::{Compile, ExecTime, Res},
+    compiler::{Compile, ExecStyle, Res},
     export_ffi::{end_raw, get_include_std, start_raw, STDLIB_PATH},
     find_std_lib,
     lex::Lexer,
@@ -20,11 +20,11 @@ use std::{
     env,
     fs::{self, File},
     io::Read,
-    mem::{self},
+    mem,
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
-    process::exit,
+    process::{exit, Command, ExitStatus},
     str::pattern::Pattern,
     thread::sleep_until,
     time::{Duration, Instant},
@@ -71,6 +71,8 @@ fn main() {
     let mut args = env::args();
     let mut exe_path = None;
     let mut c = false;
+    let mut run_with_clang = false;
+    let mut sanitize = false;
     args.next().unwrap(); // exe path
 
     #[cfg(target_arch = "aarch64")]
@@ -110,16 +112,25 @@ fn main() {
                     let program = Program::new(pool, arch, arch);
                     println!("{}", program.ffi_definitions);
                 }
-                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats"),
+                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats, --c, --run-clang"),
                 "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
                 // TODO: need to have a -o flag so you can seperate logging of compile time execution from output c source code.
                 "c" => c = true,
+                "run-clang" => run_with_clang = true,
+                "san" => sanitize = true,
                 _ => panic!("unknown argument --{name}"),
             }
         } else {
             assert!(path.is_none(), "please specify only one input file");
             path = Some(name);
         }
+    }
+
+    if c && !run_with_clang {
+        print!("/*");
+    }
+    if sanitize {
+        assert!(run_with_clang);
     }
 
     if no_fork {
@@ -155,7 +166,13 @@ fn main() {
             exit(1);
         });
 
-        if c {
+        let log_time = || {
+            let end = timestamp();
+            let seconds = end - start;
+            println!("Compilation (parse/bytecode/jit) finished in {seconds:.3} seconds;",);
+        };
+
+        if c || run_with_clang {
             if comp.export.is_empty() {
                 let name = comp.program.pool.intern("main");
                 if let Some(f) = comp.program.find_unique_func(name) {
@@ -167,7 +184,14 @@ fn main() {
             }
             match emit_c(&mut comp) {
                 Ok(s) => {
-                    println!("{}", s);
+                    log_time();
+                    if run_with_clang {
+                        fs::write("./target/temp.c", s).unwrap();
+                        run_clang_on_temp_c(sanitize);
+                    } else {
+                        println!("*/{}", s);
+                    }
+
                     if stats {
                         println!("/*{:#?}*/", unsafe { &STATS });
                     }
@@ -188,16 +212,11 @@ fn main() {
 
         if comp.tests.is_empty() {
             let f = comp.program.find_unique_func(comp.pool.intern("main")).expect("fn main");
-            let result = comp.compile(f, ExecTime::Both);
+            let result = comp.compile(f, ExecStyle::Jit);
             if let Err(e) = result {
                 log_err(&comp, *e);
                 exit(1);
             }
-            let log_time = || {
-                let end = timestamp();
-                let seconds = end - start;
-                println!("Compilation (parse+comptime+bytecode+asm) finished in {seconds:.3} seconds; main();",);
-            };
             #[cfg(feature = "cranelift")]
             if let Some(output) = exe_path {
                 let obj = franca::cranelift::emit_cl_exe(&mut comp, f).unwrap();
@@ -228,6 +247,30 @@ fn main() {
         run_tests_find_failures(arch);
         check_broken(arch);
     }
+}
+
+fn run_clang_on_temp_c(sanitize: bool) {
+    let start = timestamp();
+    let mut cmd = Command::new("clang");
+    let mut cmd = cmd.args([
+        "target/temp.c",
+        "-Wno-int-to-void-pointer-cast",
+        "-Wno-void-pointer-to-int-cast",
+        "-o",
+        "target/a.out",
+        "-Wno-incompatible-library-redeclaration",
+        "-Wno-int-conversion",
+    ]);
+    if sanitize {
+        cmd = cmd.args(["-fsanitize=undefined", "-fsanitize=address", "-g"]);
+    }
+    let res = cmd.status().unwrap();
+    let end = timestamp();
+    let seconds = end - start;
+    println!("clang finished in {seconds:.3} seconds.");
+    assert!(res.success());
+    let res = Command::new("./target/a.out").status().unwrap();
+    assert!(res.success());
 }
 
 /// The normal cargo test harness combines the tests of a package into one exe and catches panics to continue after one fails.
@@ -289,7 +332,7 @@ fn run_tests_serial(arch: TargetArch) {
     }
 
     let assertion_count = if let Some(f) = comp.program.find_unique_func(Flag::__Get_Assertions_Passed.ident()) {
-        let actual: usize = comp.call_jitted(f, ExecTime::Comptime, ()).unwrap();
+        let actual: usize = comp.call_jitted(f, ()).unwrap();
         // assert_eq!(actual, assertion_count, "vm missed assertions?");
         actual
     } else {
@@ -438,14 +481,14 @@ fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)])
 }
 
 fn run_one(comp: &mut Compile, f: FuncId) {
-    let result = comp.compile(f, ExecTime::Both);
+    let result = comp.compile(f, ExecStyle::Jit);
     if let Err(e) = comp.tag_err(result) {
         log_err(comp, *e);
         exit(1);
     }
 
     // HACK: rn this works for canary int or just unit because asm just treats unit as an int thats always 0.
-    comp.run(f, Values::many(vec![0, 0, 0, 0, 0, 0, 0, 0]), ExecTime::Both).unwrap();
+    comp.run(f, Values::many(vec![0, 0, 0, 0, 0, 0, 0, 0])).unwrap();
 }
 
 fn fork_and_catch(f: impl FnOnce()) -> (bool, String, String) {
@@ -550,7 +593,7 @@ fn do_60fps(arch: TargetArch) {
         ResolveScope::run(&mut global, &mut comp, ScopeId::from_index(0)).unwrap();
         comp.compile_top_level(global).unwrap();
         let f = comp.program.find_unique_func(comp.pool.intern("main")).unwrap();
-        comp.compile(f, ExecTime::Both).unwrap();
+        comp.compile(f, ExecStyle::Jit).unwrap();
 
         println!("\x1B[2J");
         run_one(&mut comp, f);

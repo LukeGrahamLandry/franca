@@ -166,7 +166,7 @@ impl<'p> Program<'p> {
                     TypeInfo::Scope => "ScopeId".to_owned(),
                 }
             } else {
-                format!("INVALID")
+                "INVALID".to_string()
             }
 
             // format!("{t:?}={s}")

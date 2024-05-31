@@ -6,7 +6,7 @@ use crate::ast::{
     VarType,
 };
 use crate::bc::from_values;
-use crate::compiler::{Compile, DebugState, ExecTime, Res};
+use crate::compiler::{Compile, DebugState, ExecStyle, Res};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::{assert, assert_eq, err, unwrap};
@@ -302,7 +302,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut merged = vec![];
 
         let output = overloads[0].clone();
-        self.ensure_compiled(output.func, ExecTime::Both)?;
+        self.ensure_compiled(output.func, ExecStyle::Jit)?; // we're hoping its inline asm so ExecStyle doesn't matter
 
         // It could be a builtin (like add) that exists for different architectures. Merge them into one.
         for opt in overloads.drain(1..) {
@@ -311,7 +311,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let f = opt.func;
             // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.
-            self.ensure_compiled(f, ExecTime::Both)?;
+            self.ensure_compiled(f, ExecStyle::Jit)?; // we're hoping its inline asm so ExecStyle doesn't matter
 
             match &self.program[f].body {
                 FuncImpl::Redirect(_) => {} // TODO: i'd rather not get here a billion times

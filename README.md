@@ -10,7 +10,7 @@
 - no blessed methods, call any function with dot syntax (like d/nim)
 - lazy analysis, functions/constants that are statically unreachable may contain invalid code (like zig)
 - nonlocal returns from inline lambdas (like kotlin/ruby)
-- manual memory management with explicit allocators (like zig, tho i don't care about fallibility)
+- manual memory management with explicit allocators (like zig)
 
 ## Backends
 
@@ -47,6 +47,7 @@ there must be proportional terrible things or I'm probably just lying.
 - I don't care about being pragmatic for large corporations. My main goal is to make sure its not boring.
 - I don't care about being easy to learn. I want it to be fun. Rust is fun.
 - Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { let a: *i64 = 123.int_to_ptr(); println(a[]);` will compile, run, and (probably) crash.
+- I don't care about fallibile memory allocation
 - (TEMP?) there are no arithmetic operators, if you want to add, just call the function add.
 - (TEMP) completely incomprehensible error messages.
 - (TEMP) no caching. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).

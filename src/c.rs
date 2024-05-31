@@ -1,13 +1,13 @@
 //! This generates a text file that a C compiler can convert into an executable.
 //! If you look at the output you'll see why I'm reluctant to refer to it as a C program.
 //! And now a small blessing: May the code in this file be as ugly as the code it generates.
+
 // TODO: safe fn names. '//' is not enough, am i totally sure i never leave a new line in there?
 // TODO: cast fn ptr arguments
-// TODO: put 'static' on everything that's not exported beacuse that makes clang -O2 not leave them in the exe if it decides to inline.
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program, TypeId, TypeInfo},
     bc::{BakedVar, Bc, FnBody},
-    compiler::{Compile, ExecTime, Res},
+    compiler::{Compile, ExecStyle, Res},
     emit_bc::emit_bc,
     err,
     logging::PoolLog,
@@ -16,14 +16,14 @@ use crate::{
 };
 use std::fmt::Write;
 
+// try put 'static' on everything that's not exported beacuse that makes clang -O2 not leave them in the exe if it decides to inline.
 fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_names: bool) {
     let name = comp.program.pool.get(comp.program[f].name);
     let ty = comp.program[f].finished_ty().unwrap();
     if use_name {
         write!(out, "_TY{} {name}(", ty.ret.as_index()).unwrap();
     } else {
-        // static
-        write!(out, "/* fn {name} */  \n_TY{} _FN{}(", ty.ret.as_index(), f.as_index()).unwrap();
+        write!(out, "/* fn {name} */ static \n_TY{} _FN{}(", ty.ret.as_index(), f.as_index()).unwrap();
     }
     if !ty.arg.is_unit() {
         if use_arg_names {
@@ -60,13 +60,13 @@ fn forward_declare(comp: &mut Compile, out: &mut CProgram, callee: FuncId) {
     let is_flat = matches!(comp.program[callee].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
     if is_flat {
         let name = comp.program.pool.get(comp.program[callee].name);
-        //static
-        writeln!(out.forward, " /* fn {name} */\nvoid _FN{}{FLAT_ARGS_SIGN}", callee.as_index()).unwrap();
+        writeln!(out.forward, " /* fn {name} */ static \nvoid _FN{}{FLAT_ARGS_SIGN}", callee.as_index()).unwrap();
     } else {
         declare(comp, &mut out.forward, callee, false, false);
     }
     writeln!(out.forward, ";").unwrap();
 }
+
 const FLAT_ARGS_SIGN: &str = "(int _a, void* _flat_arg_ptr, int _b, void* _flat_ret_ptr, int _c)";
 pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
     let mut out = CProgram::default();
@@ -103,12 +103,12 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
             if comp.program[f].cc.unwrap() != CallConv::Inline {
                 let is_flat = matches!(comp.program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
                 if is_flat {
-                    writeln!(out.functions, "/* fn {name} */\nvoid _FN{}{FLAT_ARGS_SIGN}", f.as_index()).unwrap();
+                    writeln!(out.functions, "/* fn {name} */ static \nvoid _FN{}{FLAT_ARGS_SIGN}", f.as_index()).unwrap();
                 } else {
                     declare(comp, &mut out.functions, f, false, false);
                 }
 
-                let body = emit_bc(comp, f, ExecTime::Runtime)?;
+                let body = emit_bc(comp, f, ExecStyle::Aot)?;
                 let mut wip = Emit {
                     result: out,
                     program: comp.program,
@@ -181,7 +181,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
 
     // extra calls emitted by the compiler here
     let memcpy = comp.program.find_unique_func(comp.pool.intern("memcpy")).unwrap();
-    comp.compile(memcpy, ExecTime::Runtime)?;
+    comp.compile(memcpy, ExecStyle::Aot)?;
     emit(comp, &mut out, memcpy)?;
 
     let mut any_called_main = false;
@@ -191,7 +191,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
     for f in exports.iter().copied() {
         any_called_main |= comp.program[f].name == Flag::Main.ident();
         all_are_tests &= comp.program[f].has_tag(Flag::Test);
-        comp.compile(f, ExecTime::Runtime)?;
+        comp.compile(f, ExecStyle::Aot)?;
         emit(comp, &mut out, f)?;
 
         // TODO: this is copy paste from comptime_addr one
@@ -233,11 +233,18 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
         let Some((data, _)) = v.get(i) else { break };
 
         match data {
-            BakedVar::Zeros { bytes } => todo!(),
+            BakedVar::Zeros { .. } => todo!(),
             BakedVar::Bytes(bytes) => {
-                writeln!(constants, "    unsigned char _const{i}[{}] = {{", bytes.len()).unwrap();
+                let len = bytes.len().max(8);
+                writeln!(constants, "    unsigned char _const{i}[{}] = {{", len).unwrap();
                 for b in bytes {
                     write!(constants, "{b},").unwrap();
+                }
+                if bytes.len() < 8 {
+                    // HACK. it always tries to load as void* but emits bool constants like this stupidly.
+                    for _ in bytes.len()..8 {
+                        write!(constants, "0,").unwrap();
+                    }
                 }
                 constants.remove(constants.len() - 1); // comma
                 writeln!(constants, "}};").unwrap();
@@ -246,7 +253,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
                 drop(v);
                 writeln!(constants, "    void* _const{i} = (void*) &_FN{};", f.as_index()).unwrap();
                 forward_declare(comp, &mut out, f);
-                comp.compile(f, ExecTime::Runtime)?;
+                comp.compile(f, ExecStyle::Aot)?;
                 emit(comp, &mut out, f)?;
             }
             BakedVar::AddrOf(id) => {
@@ -259,14 +266,14 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
                 for p in parts {
                     let v = comp.program.baked.values.borrow();
                     match v[p.0 as usize].0 {
-                        BakedVar::Zeros { bytes } => todo!(),
+                        BakedVar::Zeros { .. } => todo!(),
                         BakedVar::Bytes(_) => todo!(),
                         BakedVar::Num(v) => write!(constants, "(void*){v},").unwrap(),
                         BakedVar::FnPtr(f) => {
                             write!(constants, "(void*)&_FN{},", f.as_index()).unwrap();
                             drop(v);
                             forward_declare(comp, &mut out, f);
-                            comp.compile(f, ExecTime::Runtime)?;
+                            comp.compile(f, ExecStyle::Aot)?;
                             emit(comp, &mut out, f)?;
                         }
                         BakedVar::AddrOf(v) => write!(constants, "(void*)&_const{},", v.0).unwrap(),
@@ -298,7 +305,6 @@ struct CProgram {
     types: String,
     forward: String,
     functions: String,
-    next_constant_index: usize,
 }
 
 struct Emit<'z, 'p> {
@@ -365,11 +371,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.flat_args_already_offset.push(var);
                 }
                 // TODO: tail. at least warn if it was forced?
-                Bc::CallDirect { f, tail } => {
+                Bc::CallDirect { f, .. } => {
                     let f_ty = self.program[f].unwrap_ty();
                     render_typedef(self.program, self.result, f_ty.arg)?;
                     render_typedef(self.program, self.result, f_ty.ret)?;
-                    let (mut arg, ret) = self.program.get_infos(f_ty);
+                    let (arg, ret) = self.program.get_infos(f_ty);
                     // self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
                     let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
@@ -393,7 +399,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     write!(self.code, "_FN{}(", f.as_index()).unwrap();
                     if !args.is_empty() {
                         let types = self.program.flat_tuple_types(f_ty.arg);
-                        assert_eq!(types.len(), args.len());
+                        assert_eq!(types.len(), args.len(), "{}", self.program.log_type(f_ty.arg));
                         for (arg, ty) in args.iter().zip(types) {
                             write!(self.code, "(_TY{}) _{arg},", ty.as_index()).unwrap();
                         }
@@ -587,10 +593,12 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::CopyBytesToFrom { bytes } => {
                     let from = self.stack.pop().unwrap();
                     let to = self.stack.pop().unwrap();
-                    if bytes == 1 {
-                        // HACK that makes bool vars work
-                        writeln!(self.code, "    _{to} = {from};").unwrap();
-                    } else if bytes % 8 == 0 && bytes <= 32 {
+                    // TODO: is this worth it?
+                    // if bytes == 1 {
+                    //     // HACK that makes bool vars less stupid
+                    //     writeln!(self.code, "  *(cast)  _{to} = *(cast){from};").unwrap();
+                    // }
+                    if bytes % 8 == 0 && bytes <= 32 {
                         for i in 0..bytes / 8 {
                             writeln!(self.code, "    *(((void**)_{to}) + {i}) = *(((void**)_{from}) + {i});").unwrap();
                         }

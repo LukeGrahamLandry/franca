@@ -27,7 +27,7 @@ use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
     bc::{BakedVar, BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
-    compiler::{CErr, Compile, CompileError, ExecTime, Res},
+    compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     emit_bc::{emit_bc, empty_fn_body},
     err, extend_options,
     logging::make_err,
@@ -84,11 +84,11 @@ pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectP
             crate::cranelift::emit_cl_intrinsic(comp.program, m, f)?;
         } else if let FuncImpl::Normal(_) = comp.program[f].body {
             if comp.program[f].cc.unwrap() != CallConv::Inline {
-                let body = emit_bc(comp, f, ExecTime::Runtime)?;
+                let body = emit_bc(comp, f, ExecStyle::Aot)?;
                 emit_cl_inner(comp.program, m, None, &body, f, 0)?;
             }
         } else if comp.program[f].body.comptime_addr().is_some() {
-            let body = emit_bc(comp, f, ExecTime::Runtime)?;
+            let body = emit_bc(comp, f, ExecStyle::Aot)?;
             emit_cl_inner(comp.program, m, None, &body, f, 0)?;
         }
         m.funcs_done.set(f.as_index());
@@ -149,7 +149,7 @@ fn emit_cl_inner<'p, M: Module>(
 }
 
 pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &mut JittedCl<M>, f: FuncId) -> Res<'p, ()> {
-    let mut body = empty_fn_body(program, f, ExecTime::Both);
+    let mut body = empty_fn_body(program, f, ExecStyle::Aot);
     body.func = f;
     let arg = program[f].finished_arg.unwrap();
     let arg = program.get_info(arg);

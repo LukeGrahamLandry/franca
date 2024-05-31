@@ -6,7 +6,7 @@
 
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
 use crate::bc::{BbId, Bc, Value, Values};
-use crate::compiler::{add_unique, Compile, ExecTime, Res};
+use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
@@ -65,7 +65,7 @@ const sp: i64 = 31;
 // const W32: i64 = 0b0;
 const X64: i64 = 0b1;
 
-pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecTime, body: &FnBody<'p>) -> Res<'p, ()> {
+pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle, body: &FnBody<'p>) -> Res<'p, ()> {
     debug_assert!(!compile.program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
     compile.aarch64.extend_blanks(f);
     let mut a = BcToAsm::new(compile, when, body);
@@ -82,7 +82,7 @@ struct BcToAsm<'z, 'p> {
     next_slot: SpOffset,
     f: FuncId,
     wip: Vec<FuncId>, // make recursion work
-    when: ExecTime,
+    when: ExecStyle,
     flat_result: Option<SpOffset>,
     patch_cbz: Vec<(*const u8, BbId, i64)>,
     patch_b: Vec<(*const u8, BbId)>,
@@ -106,7 +106,7 @@ struct BlockState {
 }
 
 impl<'z, 'p> BcToAsm<'z, 'p> {
-    fn new(compile: &'z mut Compile<'_, 'p>, when: ExecTime, body: &'z FnBody<'p>) -> Self {
+    fn new(compile: &'z mut Compile<'_, 'p>, when: ExecStyle, body: &'z FnBody<'p>) -> Self {
         Self {
             compile_ctx_ptr: compile as *mut Compile as usize,
             asm: &mut compile.aarch64,

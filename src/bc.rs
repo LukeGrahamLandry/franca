@@ -7,7 +7,7 @@ use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
 use crate::{
     ast::{FnType, FuncId, TypeId},
-    compiler::{ExecTime, Res},
+    compiler::{ExecStyle, Res},
     err,
     ffi::InterpSend,
 };
@@ -60,7 +60,7 @@ pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
     pub var_names: Vec<Option<Var<'p>>>,
-    pub when: ExecTime,
+    pub when: ExecStyle,
     pub func: FuncId,
     pub current_block: BbId,
     pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,

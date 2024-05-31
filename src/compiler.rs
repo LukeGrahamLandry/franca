@@ -26,7 +26,6 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -75,7 +74,7 @@ pub struct Compile<'a, 'p> {
     pub scopes: Vec<Scope<'p>>,
     pub parsing: ParseTasks<'p>,
     pub next_label: usize,
-    pub wip_stack: Vec<FuncId>,
+    pub wip_stack: Vec<(FuncId, ExecStyle)>,
     #[cfg(feature = "cranelift")]
     pub cranelift: crate::cranelift::JittedCl<cranelift_jit::JITModule>,
     pub make_slice_t: Option<FuncId>,
@@ -106,7 +105,7 @@ impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebugState<'p> {
     Compile(FuncId, Ident<'p>),
-    EnsureCompiled(FuncId, Ident<'p>, ExecTime),
+    EnsureCompiled(FuncId, Ident<'p>, ExecStyle),
     RunInstLoop(FuncId, Ident<'p>),
     ComptimeCall(FuncId, Ident<'p>),
     ResolveFnType(FuncId, Ident<'p>),
@@ -215,7 +214,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn compile_top_level(&mut self, ast: Func<'p>) -> Res<'p, FuncId> {
         let f = self.add_func(ast)?;
 
-        if let Err(mut e) = self.ensure_compiled(f, ExecTime::Comptime) {
+        if let Err(mut e) = self.ensure_compiled(f, ExecStyle::Jit) {
             e.loc = e.loc.or(self.last_loc);
             return Err(e);
         }
@@ -275,12 +274,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn compile(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+    pub fn compile(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         let r = self.compile_inner(f, when);
         self.tag_err(r)
     }
 
-    pub fn compile_inner(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+    pub fn compile_inner(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         // TODO: this is a little sketchy. can one merged arch cause asm_done to be set and then other arches don't get processed?
         //       i dont think so cause overloading short circuits, and what ever arch did happen will be in the dispatch table.
         //       need to revisit when not jitting tho.   -- May 16
@@ -320,7 +319,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+    fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         self.last_loc = Some(self.program[f].loc);
 
         let use_cl =
@@ -378,12 +377,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         callees_done
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values, when: ExecTime) -> Res<'p, Values> {
+    pub fn run(&mut self, f: FuncId, arg: Values) -> Res<'p, Values> {
         let loc = self.last_loc;
         unsafe { STATS.jit_call += 1 };
         let state2 = DebugState::RunInstLoop(f, self.program[f].name);
         self.push_state(&state2);
-        self.compile(f, when)?;
+        self.compile(f, ExecStyle::Jit)?;
         assert!(!matches!(self.program[f].body, FuncImpl::Empty));
 
         let ty = self.program[f].unwrap_ty();
@@ -413,11 +412,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: need to recurse on the mutual_callees somewhere. this is just a hack.
         //       need ensure_compiled, compile, and like really_super_compile.
         for c in self.program[f].mutual_callees.clone() {
-            self.wip_stack.push(c);
-            self.ensure_compiled_force(f, when)?;
-            self.compile_asm_no_rec(c, when)?;
+            let wip = (c, ExecStyle::Jit);
+            self.wip_stack.push(wip);
+            self.ensure_compiled_force(f, ExecStyle::Jit)?;
+            self.compile_asm_no_rec(c, ExecStyle::Jit)?;
             let cc = self.wip_stack.pop();
-            debug_assert_eq!(Some(c), cc);
+            debug_assert_eq!(Some(wip), cc);
         }
 
         #[cfg(feature = "cranelift")]
@@ -483,8 +483,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         result
     }
 
-    pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, when: ExecTime, arg: Arg) -> Res<'p, Ret> {
-        self.ensure_compiled(f, when)?;
+    pub fn call_jitted<Arg: InterpSend<'p>, Ret: InterpSend<'p>>(&mut self, f: FuncId, arg: Arg) -> Res<'p, Ret> {
+        self.ensure_compiled(f, ExecStyle::Jit)?;
         let ty = self.program[f].unwrap_ty();
         let arg_ty = Arg::get_or_create_type(self.program);
         self.type_check_arg(arg_ty, ty.arg, "sanity ICE jit_arg")?;
@@ -496,7 +496,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // let again = Arg::deserialize_from_ints(self.program, &mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
         // debug_assert!(again.is_some());
         let arg = Values::many(bytes);
-        let ret = self.run(f, arg, when)?;
+        let ret = self.run(f, arg)?;
         from_values(self.program, ret)
     }
 
@@ -532,7 +532,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    pub fn ensure_compiled(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+    pub fn ensure_compiled(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         if !add_unique(&mut self.currently_compiling, f) {
             // This makes recursion work.
             return Ok(());
@@ -543,13 +543,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // Don't pass constants in because the function declaration must have closed over anything it needs.
-    pub fn ensure_compiled_force(&mut self, f: FuncId, when: ExecTime) -> Res<'p, ()> {
+    pub fn ensure_compiled_force(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         if self.program[f].get_flag(EnsuredCompiled) {
             return Ok(());
         }
         self.program[f].set_flag(EnsuredCompiled, true);
         let func = &self.program[f];
-        self.wip_stack.push(f);
+        let wip = (f, when);
+        self.wip_stack.push(wip);
         debug_assert!(func.get_flag(NotEvilUninit));
         self.ensure_resolved_body(f)?;
         assert!(self.program[f].capture_vars.is_empty(), "closures need to be specialized");
@@ -567,7 +568,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // TODO: error safety ^
         let end = self.wip_stack.pop();
-        assert_eq!(end, Some(f), "ICE: fucked up the stack. {:?}", self.wip_stack);
+        assert_eq!(end, Some(wip), "ICE: fucked up the stack. {:?}", self.wip_stack);
         Ok(())
     }
 
@@ -722,7 +723,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         assert!(!force_inline);
         assert!(!func.any_const_args());
         self.add_callee(f);
-        self.compile(f, ExecTime::Both)?; // TODO
+        self.compile(f, self.exec_style())?;
         let ret_ty = unwrap!(self.program[f].finished_ret, "fn ret");
         Ok(ret_ty)
     }
@@ -738,7 +739,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     self.pool.get(self.program[wip].name),
         //     self.pool.get(self.program[f].name)
         // )
-        let wip = *self.wip_stack.last().unwrap();
+        let wip = self.wip_stack.last().unwrap().0;
         let callees = if !self.currently_compiling.contains(&f) {
             &mut self.program[wip].callees
         } else {
@@ -1483,7 +1484,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // TODO: for now you just need to not make a mistake lol
                             //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
                             self.add_callee(id);
-                            self.ensure_compiled(id, ExecTime::Both)?;
+                            self.ensure_compiled(id, self.exec_style())?;
                             // The backend still needs to do something with this, so just leave it
                             let fn_ty = self.program.func_type(id);
                             let ty = self.program.fn_ty(fn_ty).unwrap();
@@ -1632,9 +1633,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let f = f.func;
                     assert!(self.program[f].has_tag(Flag::Macro));
                     self.infer_types(f)?;
-                    self.compile(f, ExecTime::Comptime)?;
+                    self.compile(f, ExecStyle::Jit)?;
                     self.typecheck_macro_outputs(f, requested)?;
-                    let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, arg)?;
+                    let new_expr: FatExpr<'p> = self.call_jitted(f, arg)?;
                     *expr = new_expr;
                     if expr.done {
                         assert!(!expr.ty.is_unknown());
@@ -1648,7 +1649,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.infer_types(f)?;
 
                 self.typecheck_macro_outputs(f, requested)?;
-                let new_expr: FatExpr<'p> = self.call_jitted(f, ExecTime::Comptime, (arg, target))?;
+                let new_expr: FatExpr<'p> = self.call_jitted(f, (arg, target))?;
                 *expr = new_expr;
                 if expr.done {
                     assert!(!expr.ty.is_unknown());
@@ -2143,7 +2144,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
         // }
 
-        let res = self.call_jitted(func_id, ExecTime::Comptime, ());
+        let res = self.call_jitted(func_id, ());
         self.discard(func_id);
         res
     }
@@ -2258,7 +2259,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // currently this mostly just helps with a bunch of SInt/Unique/UInt calls on easy constants at the beginning.
                             let arg_ty = self.program[f].finished_arg.unwrap();
                             let arg = self.immediate_eval_expr(mem::take(arg), arg_ty)?;
-                            return Ok(Some(self.run(f, arg, ExecTime::Comptime)?));
+                            return Ok(Some(self.run(f, arg)?));
                         }
                         // fallthrough
                     }
@@ -2314,7 +2315,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     return Ok(res);
         // }
 
-        let res = self.run(func_id, Values::unit(), ExecTime::Comptime);
+        let res = self.run(func_id, Values::unit());
         self.discard(func_id);
         res
     }
@@ -2908,7 +2909,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // If we're just inlining for #inline, compile first so some work on the ast is only done once.
             // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
             if !func.get_flag(AllowRtCapture) && func.capture_vars.is_empty() {
-                self.compile(fid, ExecTime::Both)?;
+                self.compile(fid, self.exec_style())?;
             }
 
             // TODO: check that you're calling from the same place as the definition.
@@ -2922,7 +2923,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             expr.done = true; // don't infinitly recurse!
             expr.ty = ret_ty;
 
-            self.compile(fid, ExecTime::Comptime)?;
+            self.compile(fid, ExecStyle::Jit)?;
             let value = self.immediate_eval_expr(expr.clone(), ret_ty)?;
             expr.set(value, ret_ty);
             Ok((ret_ty, true))
@@ -3261,8 +3262,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 todo!("untested");
-                let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
-                ops
+                // let ops: Vec<u32> = self.immediate_eval_expr_known(asm.clone())?;
+                // ops
             };
             Ok(FuncImpl::JittedAarch64(ops))
         } else if self.program[f].has_tag(Flag::Llvm) {
@@ -3515,6 +3516,10 @@ impl<'a, 'p> Compile<'a, 'p> {
         Some((IntTypeInfo { bit_count, signed: false }, val))
     }
 
+    fn exec_style(&self) -> ExecStyle {
+        self.wip_stack.last().unwrap().1
+    }
+
     pub fn arity(&mut self, expr: &FatExpr<'p>) -> u16 {
         if !expr.ty.is_unknown() {
             let raw = self.program.raw_type(expr.ty);
@@ -3536,10 +3541,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
 #[repr(i64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, InterpSend)]
-pub enum ExecTime {
-    Comptime,
-    Runtime,
-    Both,
+pub enum ExecStyle {
+    Jit,
+    Aot,
 }
 
 pub fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {

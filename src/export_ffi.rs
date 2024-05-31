@@ -5,7 +5,7 @@ use libc::c_void;
 
 use crate::ast::{garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
 use crate::bc::{to_values, ReadBytes, Values};
-use crate::compiler::{Compile, ExecTime, Res, Unquote, EXPECT_ERR_DEPTH};
+use crate::compiler::{Compile, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::pool::Ident;
@@ -758,7 +758,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let found_ty = compile.compile_expr(&mut block, Some(ty)).unwrap();
     let id = block.as_const().unwrap().unwrap_func_id();
     debug_assert_eq!(ty, found_ty);
-    compile.compile(id, ExecTime::Comptime).unwrap();
+    compile.compile(id, ExecStyle::Jit).unwrap();
     let func = &mut compile.program[id];
     let s = func.scope.unwrap();
     compile.as_literal(s, loc).unwrap()
@@ -859,7 +859,7 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         panic!("Expected @Bits(Tuple...)")
     };
     let shift_or_slice = compile.program.find_unique_func(Flag::__Shift_Or_Slice.ident()).unwrap();
-    compile.compile(shift_or_slice, ExecTime::Comptime).unwrap();
+    compile.compile(shift_or_slice, ExecStyle::Jit).unwrap();
 
     let mut new_args = Vec::with_capacity(parts.len() * 2);
     let loc = arg.loc;

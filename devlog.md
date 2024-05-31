@@ -24,6 +24,9 @@ The frames might be wrong in debugger because it hasn't gotten to the part where
 - needed to use flat_tuple_types instead of tuple_types for c fn ptr type because want to see struct fields as seperate args.
 - stack buffer overflow because i was making vars that were right byte size (like 1 for a bool) and then writing to them as a u64 i think.
 - something emitting a comptime pointer as a pushconstant is getting through.
+  i thought it was some subtle thing about threading the right exec time through but actually
+  i was emitting bool constant values as a memcpy because the backend isn't supposed to know how to load a single byte.
+  cry.
 
 ## improving inference (May 29)
 

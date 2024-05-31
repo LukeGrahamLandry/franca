@@ -302,7 +302,7 @@ impl<'p> InterpSend<'p> for TypeId {
     }
 
     fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(TypeId::from_raw(values.next_u32()? as u32))
+        Some(TypeId::from_raw(values.next_u32()?))
     }
 
     fn name() -> String {

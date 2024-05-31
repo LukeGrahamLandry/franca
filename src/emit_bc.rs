@@ -10,7 +10,7 @@ use std::usize;
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
-use crate::compiler::{CErr, Compile, ExecTime, Res, ToBytes};
+use crate::compiler::{CErr, Compile, ExecStyle, Res};
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
 use crate::{bc::*, extend_options, Map};
@@ -26,7 +26,7 @@ struct EmitBc<'z, 'p: 'z> {
     is_flat_call: bool,
 }
 
-pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, FnBody<'p>> {
+pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
     let mut emit = EmitBc::new(compile.program, &compile.aarch64);
 
     let body = emit.compile_inner(f, when)?;
@@ -41,7 +41,7 @@ pub enum ResultLoc {
 }
 use ResultLoc::*;
 
-pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecTime) -> FnBody<'p> {
+pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -> FnBody<'p> {
     let mut jump_targets = BitSet::empty();
     jump_targets.set(0); // entry is the first instruction
     FnBody {
@@ -70,7 +70,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    fn compile_inner(&mut self, f: FuncId, when: ExecTime) -> Res<'p, FnBody<'p>> {
+    fn compile_inner(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
         if self.program[f].has_tag(Flag::Log_Ast) {
             println!("{}", self.program[f].log(self.program.pool));
         }
@@ -557,9 +557,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if result_location == Discard {
                     return Ok(());
                 }
-                if result.when == ExecTime::Runtime && self.program.get_info(expr.ty).contains_pointers {
+                let want_emit_by_memcpy = self.program.get_info(expr.ty).stride_bytes % 8 != 0 || value.0.len() > 64 || value.0.len() % 8 != 0;
+                if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     // TODO: this is dumb because a slice becomes a pointer to a slice.
-                    let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch, result_location)?;
+                    let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
                     result.push(Bc::PushGlobalAddr { id });
                     let info = self.program.get_info(expr.ty);
                     match result_location {
@@ -587,7 +588,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
                     ResAddr => {
-                        if self.program.get_info(expr.ty).stride_bytes % 8 != 0 || value.0.len() > 64 || value.0.len() % 8 != 0 {
+                        if want_emit_by_memcpy {
+                            // TODO: i really need to not do this for the constant 'true'!
                             // TODO: HACK
                             //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
                             //       this solution is extra bad becuase it relies on the value vec not being free-ed
@@ -935,13 +937,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 }
 
 // TODO: i should have constant pointers as a concept in my language.
-fn emit_relocatable_constant<'p>(
-    ty: TypeId,
-    value: &Values,
-    program: &Program<'p>,
-    dispatch: &[*const u8],
-    result_location: ResultLoc,
-) -> Res<'p, BakedVarId> {
+//       right now i could check if its in the constant data arena for a hint that should catch a few of them.
+fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'p>, dispatch: &[*const u8]) -> Res<'p, BakedVarId> {
     let raw = program.raw_type(ty);
     let jit_ptr = value.bytes().as_ptr();
 
@@ -974,7 +971,7 @@ fn emit_relocatable_constant<'p>(
             let ptr: i64 = from_values(program, value.clone())?;
             let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
             let inner_value = Values::many(data.to_vec());
-            let value = emit_relocatable_constant(inner, &inner_value, program, dispatch, ResultLoc::ResAddr)?;
+            let value = emit_relocatable_constant(inner, &inner_value, program, dispatch)?;
             Ok(program.baked.make(BakedVar::AddrOf(value), jit_ptr))
         }
         TypeInfo::Struct { fields, .. } => {
@@ -992,7 +989,9 @@ fn emit_relocatable_constant<'p>(
 
                 if len == 0 {
                     // an empty slice can have a null data ptr i guess.
-                    Ok(program.baked.make(BakedVar::Zeros { bytes: 16 }, jit_ptr))
+                    let ptr = program.baked.make(BakedVar::Num(0), null());
+                    let len = program.baked.make(BakedVar::Num(0), null());
+                    Ok(program.baked.make(BakedVar::VoidPtrArray(vec![ptr, len]), jit_ptr))
                 } else {
                     assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
                     let bytes = len as usize * inner_info.stride_bytes as usize;
@@ -1011,7 +1010,7 @@ fn emit_relocatable_constant<'p>(
                     let mut ptrs = vec![];
                     for (i, f) in fields.iter().enumerate() {
                         let v = value.bytes()[i * 8..(i + 1) * 8].to_vec();
-                        ptrs.push(emit_relocatable_constant(f.ty, &Values::many(v), program, dispatch, result_location)?)
+                        ptrs.push(emit_relocatable_constant(f.ty, &Values::many(v), program, dispatch)?)
                     }
                     return Ok(program.baked.make(BakedVar::VoidPtrArray(ptrs), jit_ptr));
                 }
@@ -1019,7 +1018,7 @@ fn emit_relocatable_constant<'p>(
             }
         }
         TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
-        TypeInfo::Enum { raw, .. } => emit_relocatable_constant(*raw, value, program, dispatch, result_location),
+        TypeInfo::Enum { raw, .. } => emit_relocatable_constant(*raw, value, program, dispatch),
         TypeInfo::VoidPtr => {
             if value.bytes().iter().all(|b| *b == 0) {
                 // You're allowed to have a constant null pointer (like for global allocator interface instances).
