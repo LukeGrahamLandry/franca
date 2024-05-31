@@ -6,7 +6,7 @@
 // TODO: put 'static' on everything that's not exported beacuse that makes clang -O2 not leave them in the exe if it decides to inline.
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{Bc, FnBody},
+    bc::{BakedVar, Bc, FnBody},
     compiler::{Compile, ExecTime, Res},
     emit_bc::emit_bc,
     err,
@@ -22,7 +22,8 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
     if use_name {
         write!(out, "_TY{} {name}(", ty.ret.as_index()).unwrap();
     } else {
-        write!(out, "/* fn {name} */ \n_TY{} _FN{}(", ty.ret.as_index(), f.as_index()).unwrap();
+        // static
+        write!(out, "/* fn {name} */  \n_TY{} _FN{}(", ty.ret.as_index(), f.as_index()).unwrap();
     }
     if !ty.arg.is_unit() {
         if use_arg_names {
@@ -50,6 +51,23 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
     write!(out, ")").unwrap();
 }
 
+fn forward_declare(comp: &mut Compile, out: &mut CProgram, callee: FuncId) {
+    if out.fn_forward.get(callee.as_index()) {
+        return;
+    }
+    out.fn_forward.insert(callee.as_index(), true);
+
+    let is_flat = matches!(comp.program[callee].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
+    if is_flat {
+        let name = comp.program.pool.get(comp.program[callee].name);
+        //static
+        writeln!(out.forward, " /* fn {name} */\nvoid _FN{}{FLAT_ARGS_SIGN}", callee.as_index()).unwrap();
+    } else {
+        declare(comp, &mut out.forward, callee, false, false);
+    }
+    writeln!(out.forward, ";").unwrap();
+}
+const FLAT_ARGS_SIGN: &str = "(int _a, void* _flat_arg_ptr, int _b, void* _flat_ret_ptr, int _c)";
 pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
     let mut out = CProgram::default();
 
@@ -67,19 +85,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
         }
         let mutual_callees = comp.program[f].mutual_callees.clone();
         for callee in mutual_callees {
-            if out.fn_forward.get(callee.as_index()) {
-                continue;
-            }
-            out.fn_forward.insert(callee.as_index(), true);
-
-            let is_flat = matches!(comp.program[callee].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
-            if is_flat {
-                let name = comp.program.pool.get(comp.program[callee].name);
-                writeln!(out.forward, "static /* fn {name} */\nvoid _FN{}{FLAT_ARGS_SIGN}", callee.as_index()).unwrap();
-            } else {
-                declare(comp, &mut out.forward, callee, false, false);
-            }
-            writeln!(out.forward, ";").unwrap();
+            forward_declare(comp, out, callee);
             emit(comp, out, callee)?;
         }
         let name = comp.program.pool.get(comp.program[f].name);
@@ -88,7 +94,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
         render_typedef(comp.program, out, ty.arg)?;
         render_typedef(comp.program, out, ty.ret)?;
 
-        const FLAT_ARGS_SIGN: &str = "(int _a, void* _flat_arg_ptr, int _b, void* _flat_ret_ptr, int _c)";
         // println!("do {}", name);
         if let Some(&body) = comp.program[f].body.c_source() {
             declare(comp, &mut out.functions, f, false, true);
@@ -98,7 +103,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
             if comp.program[f].cc.unwrap() != CallConv::Inline {
                 let is_flat = matches!(comp.program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
                 if is_flat {
-                    writeln!(out.functions, "static /* fn {name} */\nvoid _FN{}{FLAT_ARGS_SIGN}", f.as_index()).unwrap();
+                    writeln!(out.functions, "/* fn {name} */\nvoid _FN{}{FLAT_ARGS_SIGN}", f.as_index()).unwrap();
                 } else {
                     declare(comp, &mut out.functions, f, false, false);
                 }
@@ -126,7 +131,8 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
                     }
                     render_typedef(wip.program, wip.result, ty)?;
                     let _ = wip.next_var();
-                    write!(wip.result.functions, "_TY{} _s{i}; ", ty.as_index()).unwrap();
+                    let size = wip.program.get_info(ty).size_slots;
+                    write!(wip.result.functions, "void* _s{i}[{size}]; ").unwrap();
                 }
                 writeln!(wip.result.functions).unwrap();
                 wip.emit_block(0)?;
@@ -150,7 +156,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
             declare(comp, &mut out.forward, f, true, true);
             writeln!(out.forward, ";").unwrap();
 
-            write!(out.forward, "static inline ").unwrap();
             declare(comp, &mut out.forward, f, false, true);
             writeln!(out.forward, "{{").unwrap();
             write!(out.forward, "return {name}(").unwrap();
@@ -173,13 +178,113 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
 
         Ok(())
     }
+
+    // extra calls emitted by the compiler here
+    let memcpy = comp.program.find_unique_func(comp.pool.intern("memcpy")).unwrap();
+    comp.compile(memcpy, ExecTime::Runtime)?;
+    emit(comp, &mut out, memcpy)?;
+
+    let mut any_called_main = false;
+    let mut all_are_tests = true;
     // TODO: caller should pass in the list
-    for f in comp.export.clone() {
+    let exports = comp.export.clone();
+    for f in exports.iter().copied() {
+        any_called_main |= comp.program[f].name == Flag::Main.ident();
+        all_are_tests &= comp.program[f].has_tag(Flag::Test);
         comp.compile(f, ExecTime::Runtime)?;
         emit(comp, &mut out, f)?;
+
+        // TODO: this is copy paste from comptime_addr one
+        declare(comp, &mut out.functions, f, true, true);
+        writeln!(out.functions, "{{").unwrap();
+        write!(out.functions, "return _FN{}(", f.as_index()).unwrap();
+        let ty = comp.program[f].finished_ty().unwrap();
+        if !ty.arg.is_unit() {
+            for b in &comp.program[f].arg.bindings {
+                let name = comp.program.pool.get(b.name().unwrap());
+                write!(out.functions, "{name},").unwrap();
+            }
+            out.functions.remove(out.functions.len() - 1); // comma
+        }
+        writeln!(out.functions, ");").unwrap();
+        writeln!(out.functions, "}}").unwrap();
+    }
+
+    if all_are_tests && !any_called_main {
+        writeln!(out.functions, "int main(){{").unwrap();
+        for f in exports {
+            if comp.program[f].finished_arg.unwrap().is_unit() {
+                writeln!(out.functions, "_FN{}();", f.as_index()).unwrap();
+            } else {
+                writeln!(out.functions, "_FN{}(0);", f.as_index()).unwrap();
+            }
+        }
+        writeln!(out.functions, "return 0;}}").unwrap();
+    }
+
+    // This has to be done after compiling all the functions so we know all the required constants.
+    let mut constants = String::new();
+    // Since we emit more functions in the body of the loop (since constants might not be in anyone's callee list),
+    // need to check against the list's length every iteration.
+    let mut i = 0;
+    loop {
+        let v = comp.program.baked.values.borrow();
+
+        let Some((data, _)) = v.get(i) else { break };
+
+        match data {
+            BakedVar::Zeros { bytes } => todo!(),
+            BakedVar::Bytes(bytes) => {
+                writeln!(constants, "    unsigned char _const{i}[{}] = {{", bytes.len()).unwrap();
+                for b in bytes {
+                    write!(constants, "{b},").unwrap();
+                }
+                constants.remove(constants.len() - 1); // comma
+                writeln!(constants, "}};").unwrap();
+            }
+            &BakedVar::FnPtr(f) => {
+                drop(v);
+                writeln!(constants, "    void* _const{i} = (void*) &_FN{};", f.as_index()).unwrap();
+                forward_declare(comp, &mut out, f);
+                comp.compile(f, ExecTime::Runtime)?;
+                emit(comp, &mut out, f)?;
+            }
+            BakedVar::AddrOf(id) => {
+                writeln!(constants, "    const void* _const{i} = (void*) &_const{};", id.0).unwrap();
+            }
+            BakedVar::VoidPtrArray(parts) => {
+                let parts = parts.clone();
+                drop(v);
+                writeln!(constants, "    void *_const{i}[{}] = {{", parts.len()).unwrap();
+                for p in parts {
+                    let v = comp.program.baked.values.borrow();
+                    match v[p.0 as usize].0 {
+                        BakedVar::Zeros { bytes } => todo!(),
+                        BakedVar::Bytes(_) => todo!(),
+                        BakedVar::Num(v) => write!(constants, "(void*){v},").unwrap(),
+                        BakedVar::FnPtr(f) => {
+                            write!(constants, "(void*)&_FN{},", f.as_index()).unwrap();
+                            drop(v);
+                            forward_declare(comp, &mut out, f);
+                            comp.compile(f, ExecTime::Runtime)?;
+                            emit(comp, &mut out, f)?;
+                        }
+                        BakedVar::AddrOf(v) => write!(constants, "(void*)&_const{},", v.0).unwrap(),
+                        BakedVar::VoidPtrArray(_) => todo!(),
+                    }
+                }
+                constants.remove(constants.len() - 1); // comma
+                writeln!(constants, "}};").unwrap();
+            }
+            BakedVar::Num(v) => {
+                writeln!(constants, "    void* _const{i} = (void*) {v};").unwrap();
+            }
+        }
+        i += 1;
     }
 
     out.types.push_str(&out.forward);
+    out.types.push_str(&constants);
     out.types.push_str(&out.functions);
     Ok(out.types)
 }
@@ -237,8 +342,21 @@ impl<'z, 'p> Emit<'z, 'p> {
             self.stack.push(i as usize)
         }
         for inst in &block.insts {
+            // TODO: if-def this.
+            // write!(self.code, "     // {inst:?}").unwrap();
+            // if let Bc::AddrVar { id } = inst {
+            //     if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
+            //         write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
+            //     }
+            // }
+            // writeln!(self.code).unwrap();
+
             match *inst {
-                Bc::GetCompCtx => err!("ICE: GetCompCtx at runtime doesn't make sense",),
+                Bc::GetCompCtx => {
+                    // err!("ICE: GetCompCtx at runtime doesn't make sense",)
+                    self.stack.push(0);
+                    self.code.push_str("GetCompCtx at runtime doesn't make sense. you probably forgot to mark something that should only be called at compile-time as #fold\n");
+                }
                 Bc::NameFlatCallArg { id, offset_bytes } => {
                     assert!(self.is_flat);
                     debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
@@ -358,18 +476,9 @@ impl<'z, 'p> Emit<'z, 'p> {
                     writeln!(self.code, "    _{out} = (void *) {value};").unwrap();
                     self.stack.push(out);
                 }
-                Bc::PushRelocatablePointer { bytes } => {
-                    let i = self.result.next_constant_index;
-                    self.result.next_constant_index += 1;
-
-                    writeln!(self.result.forward, "    unsigned char _const{i}[{}] = {{", bytes.len()).unwrap();
-                    for b in bytes {
-                        write!(self.result.forward, "{b},").unwrap();
-                    }
-                    self.result.forward.remove(self.result.forward.len() - 1); // comma
-                    writeln!(self.result.forward, "}};").unwrap();
+                Bc::PushGlobalAddr { id } => {
                     let var = self.next_var();
-                    writeln!(self.code, "    _{var} = &_const{i};").unwrap();
+                    writeln!(self.code, "    _{var} = &_const{};", id.0).unwrap();
                     self.stack.push(var);
                 }
                 Bc::JumpIf { true_ip, false_ip, slots } => {
@@ -478,8 +587,13 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::CopyBytesToFrom { bytes } => {
                     let from = self.stack.pop().unwrap();
                     let to = self.stack.pop().unwrap();
-                    if bytes == 8 {
-                        writeln!(self.code, "    *(void**)_{to} = *(void**)_{from};").unwrap();
+                    if bytes == 1 {
+                        // HACK that makes bool vars work
+                        writeln!(self.code, "    _{to} = {from};").unwrap();
+                    } else if bytes % 8 == 0 && bytes <= 32 {
+                        for i in 0..bytes / 8 {
+                            writeln!(self.code, "    *(((void**)_{to}) + {i}) = *(((void**)_{from}) + {i});").unwrap();
+                        }
                     } else {
                         writeln!(self.code, "    memcpy(_{to}, _{from}, {bytes});").unwrap();
                     }
@@ -535,13 +649,11 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
             render_typedef(program, out, f.ret)?;
 
             write!(out.types, "typedef _TY{} (*_TY{})(", f.ret.as_index(), ty.as_index()).unwrap();
-            if let Some(types) = program.tuple_types(f.arg) {
-                for ty in types {
+            if !f.arg.is_unit() {
+                for ty in program.flat_tuple_types(f.arg) {
                     write!(out.types, "_TY{},", ty.as_index()).unwrap();
                 }
                 out.types.remove(out.types.len() - 1); // comma
-            } else {
-                writeln!(out.types, "_TY{}", f.arg.as_index()).unwrap();
             }
             writeln!(out.types, ");").unwrap();
         }

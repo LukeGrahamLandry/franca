@@ -772,6 +772,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         let hint = func.finished_ret;
         let label_ty = self.program.intern_type(TypeInfo::Label(ret_ty));
+        // TODO: mutual callees as well.
+        // for inlined or things with const args, the body will already have been compiled, but the backend needs to see the whole callgraph.
+        for callee in self.program[f].callees.clone() {
+            self.add_callee(callee);
+        }
         let func = &self.program.funcs[f.as_index()];
 
         assert!(!func.any_const_args());

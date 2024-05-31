@@ -53,11 +53,11 @@ macro_rules! bounce_flat_call {
                     debugln!("bounce RET: {out:?}");
                 }
                 // Since we just called into a compiler function, it might have emitted new code and left it in write mode...
-                // but our caller might be jitted code (like a macro), so before returning to them, we need to make sure they're executable. 
-                // this avoids a `exc_bad_access (code=2, <some code address>)`. The problem only happened in the lox demo, not my small tests, so its fairly rare. 
+                // but our caller might be jitted code (like a macro), so before returning to them, we need to make sure they're executable.
+                // this avoids a `exc_bad_access (code=2, <some code address>)`. The problem only happened in the lox demo, not my small tests, so its fairly rare.
                 // -- May 30
-                // TODO: i probably have to do this before returning from any export_ffi function, not just flat_call ones. 
-                //       its wasteful to leave the map in exec mode if we're going to be writing to it again soon. 
+                // TODO: i probably have to do this before returning from any export_ffi function, not just flat_call ones.
+                //       its wasteful to leave the map in exec mode if we're going to be writing to it again soon.
                 compile.flush_cpu_instruction_cache();
                 compile.aarch64.make_exec();
             }
@@ -101,7 +101,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     #[cfg(target_os = "macos")]
     ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
     ("fn read(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::read as *const u8),
-    ("fn c_memcpy(dest: rawptr, src: rawptr, n: i64) i64", libc::memcpy as *const u8),
+    ("fn memcpy(dest: rawptr, src: rawptr, n: i64) i64", libc::memcpy as *const u8),
     ("fn tcgetattr(fd: Fd, out: *Terminos) Unit", libc::tcgetattr as *const u8),
     (
         "fn tcsetattr(fd: Fd, optional_actions: i64, in: *Terminos) Unit",

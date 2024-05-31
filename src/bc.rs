@@ -1,5 +1,7 @@
 //! Low level instructions
 
+use std::cell::RefCell;
+
 use crate::ast::{CallConv, LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
@@ -41,7 +43,7 @@ pub enum Bc {
     GetCompCtx,                                           // _ -> <ptr:1>
     NoCompile,
     Noop,
-    PushRelocatablePointer { bytes: &'static [u8] },
+    PushGlobalAddr { id: BakedVarId },
 }
 
 #[derive(Clone)]
@@ -54,7 +56,6 @@ pub struct BasicBlock {
     pub height: u16,
 }
 
-#[derive(Clone)]
 pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
@@ -66,6 +67,52 @@ pub struct FnBody<'p> {
     pub clock: u16,
     pub name: Ident<'p>,
     pub want_log: bool,
+}
+
+#[derive(Debug, Clone, Copy, InterpSend, PartialEq)]
+pub struct BakedVarId(pub u32);
+
+// A piece of static data that can be baked into an output file (c code, object, etc).
+// TODO: deduplicate
+// TODO: track type so structs can be more than just a blob of bytes.
+// TODO: distinguish between constant and static. For now, everything is a mutable static because the language doesn't have the concept of const pointers.
+#[derive(Debug, Clone)]
+pub enum BakedVar {
+    Zeros { bytes: usize },
+    Bytes(Vec<u8>),
+    Num(i64),
+    FnPtr(FuncId),
+    AddrOf(BakedVarId),
+    VoidPtrArray(Vec<BakedVarId>),
+}
+
+#[derive(Debug, Default)]
+pub struct Baked {
+    pub values: RefCell<Vec<(BakedVar, *const u8)>>,
+}
+
+impl Baked {
+    pub(crate) fn reserve(&self, ptr: *const u8) -> BakedVarId {
+        let mut vals = self.values.borrow_mut();
+        vals.push((BakedVar::Bytes(vec![]), ptr));
+        BakedVarId(vals.len() as u32 - 1)
+    }
+
+    pub(crate) fn set(&self, id: BakedVarId, val: BakedVar) {
+        let mut vals = self.values.borrow_mut();
+        vals[id.0 as usize].0 = val;
+    }
+
+    pub(crate) fn get(&self, id: BakedVarId) -> (BakedVar, *const u8) {
+        let v = self.values.borrow();
+        v[id.0 as usize].clone()
+    }
+
+    pub(crate) fn make(&self, val: BakedVar, ptr: *const u8) -> BakedVarId {
+        let id = self.reserve(ptr);
+        self.set(id, val);
+        id
+    }
 }
 
 impl<'p> FnBody<'p> {

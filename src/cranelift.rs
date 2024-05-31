@@ -25,7 +25,7 @@ use types::I16;
 
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BasicBlock, Bc, FnBody},
+    bc::{BakedVar, BasicBlock, Bc, FnBody},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecTime, Res},
     emit_bc::{emit_bc, empty_fn_body},
@@ -536,15 +536,17 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
-                Bc::PushRelocatablePointer { bytes } => {
-                    // TODO: deduplicate. often it will be string literals with exactly the same data pointer.
-                    let id = self.cl.module.declare_anonymous_data(false, false).map_err(wrap)?;
-                    let mut data = DataDescription::new();
-                    data.define(bytes.to_owned().into_boxed_slice());
-                    self.cl.module.define_data(id, &data).map_err(wrap)?;
-                    let local = self.cl.module.declare_data_in_func(id, builder.func);
-                    self.stack.push(builder.ins().global_value(I64, local));
-                }
+                Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
+                    BakedVar::Bytes(bytes) => {
+                        let id = self.cl.module.declare_anonymous_data(false, false).map_err(wrap)?;
+                        let mut data = DataDescription::new();
+                        data.define(bytes.to_owned().into_boxed_slice());
+                        self.cl.module.define_data(id, &data).map_err(wrap)?;
+                        let local = self.cl.module.declare_data_in_func(id, builder.func);
+                        self.stack.push(builder.ins().global_value(I64, local));
+                    }
+                    _ => todo!(),
+                },
                 Bc::JumpIf { true_ip, false_ip, slots } => {
                     debug_assert_eq!(slots, 0, "this is probably fine. but not tested cause emit_bc never does it");
                     let cond = self.stack.pop().unwrap();

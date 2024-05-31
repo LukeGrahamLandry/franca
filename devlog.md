@@ -8,6 +8,23 @@ but other than that it works for all the lib collections.
 
 just tracking cc on fnptr was tedious but now i need to actually use it to make flat call in the backends.
 
+fixed confusing crash that only happened on lox demo (my asm backend. cranelift's still fucked).
+In bounce_flat_call!::bounce, needed to set the jitted page to executable.
+Since we just called into a compiler function, it might have emitted new code and left it in write mode...
+but our caller might be jitted code (like a macro), so before returning to them, we need to make sure they're executable.
+this avoids a `exc_bad_access (code=2, <some code address>)`.
+The problem only happened in the lox demo, not my small tests, so its fairly rare.
+Need to remember for future that the address it shows is the address of memory you tried to access (not the ip when you tried to access it),
+so if there's disassemblable code there, it muse be a jitting permissions/caching problem.
+The frames might be wrong in debugger because it hasn't gotten to the part where it sets the frame pointer? idk.
+
+- for emitting c, im trusting the callees list.
+  problem with VERBOSE_ASSERT where list/displace weren't being seen as callees of anyone.
+  needed to add callees in emit_capturing_call because for things with const args, the body will already have been compiled.
+- needed to use flat_tuple_types instead of tuple_types for c fn ptr type because want to see struct fields as seperate args.
+- stack buffer overflow because i was making vars that were right byte size (like 1 for a bool) and then writing to them as a u64 i think.
+- something emitting a comptime pointer as a pushconstant is getting through.
+
 ## improving inference (May 29)
 
 made it so overloading checks one argument at a time,

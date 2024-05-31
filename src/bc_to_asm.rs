@@ -367,7 +367,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::NoCompile => unreachable!("{}", self.program[self.f].log(self.program.pool)),
 
             Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
-            Bc::PushRelocatablePointer { bytes } => self.state.stack.push(Val::Literal(bytes.as_ptr() as i64)),
+            Bc::PushGlobalAddr { id } => {
+                let ptr = self.program.baked.get(id).1;
+                self.state.stack.push(Val::Literal(ptr as i64));
+            }
             Bc::GetNativeFnPtr(f) => {
                 // TODO: use adr+adrp instead of an integer. but should do that in load_imm so it always happens.
 

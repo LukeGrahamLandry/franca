@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::Values,
+    bc::{Baked, Values},
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
     ffi::InterpSend,
@@ -864,6 +864,7 @@ pub struct Program<'p> {
     pub const_bound_memo: Map<(FuncId, Vec<u8>), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
+    pub baked: Baked,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -941,6 +942,7 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
         let mut program = Self {
+            baked: Default::default(),
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             types: vec![

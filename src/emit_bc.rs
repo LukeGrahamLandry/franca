@@ -4,13 +4,13 @@
 
 use codemap::Span;
 use std::ops::Deref;
-use std::ptr::slice_from_raw_parts;
+use std::ptr::{null, slice_from_raw_parts};
 use std::usize;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
-use crate::compiler::{CErr, Compile, ExecTime, Res};
+use crate::compiler::{CErr, Compile, ExecTime, Res, ToBytes};
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
 use crate::{bc::*, extend_options, Map};
@@ -28,6 +28,7 @@ struct EmitBc<'z, 'p: 'z> {
 
 pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecTime) -> Res<'p, FnBody<'p>> {
     let mut emit = EmitBc::new(compile.program, &compile.aarch64);
+
     let body = emit.compile_inner(f, when)?;
     Ok(body)
 }
@@ -553,10 +554,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 )
             }
             Expr::Value { value } => {
-                // TODO
+                if result_location == Discard {
+                    return Ok(());
+                }
                 if result.when == ExecTime::Runtime && self.program.get_info(expr.ty).contains_pointers {
-                    if result_location != Discard {
-                        self.emit_relocatable_constant(expr.ty, value, result, result_location)?;
+                    // TODO: this is dumb because a slice becomes a pointer to a slice.
+                    let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch, result_location)?;
+                    result.push(Bc::PushGlobalAddr { id });
+                    let info = self.program.get_info(expr.ty);
+                    match result_location {
+                        PushStack => result.push(Bc::Load { slots: info.size_slots }), // TODO: non %8
+                        ResAddr => result.push(Bc::CopyBytesToFrom { bytes: info.stride_bytes }),
+                        Discard => unreachable!(),
                     }
                     return Ok(());
                 }
@@ -923,99 +932,103 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
         Ok(())
     }
+}
 
-    // TODO: i should have constant pointers as a concept in my language.
-    fn emit_relocatable_constant(&mut self, ty: TypeId, value: &Values, result: &mut FnBody<'p>, result_location: ResultLoc) -> Res<'p, ()> {
-        let raw = self.program.raw_type(ty);
+// TODO: i should have constant pointers as a concept in my language.
+fn emit_relocatable_constant<'p>(
+    ty: TypeId,
+    value: &Values,
+    program: &Program<'p>,
+    dispatch: &[*const u8],
+    result_location: ResultLoc,
+) -> Res<'p, BakedVarId> {
+    let raw = program.raw_type(ty);
+    let jit_ptr = value.bytes().as_ptr();
 
-        match &self.program[raw] {
-            TypeInfo::FnPtr { ty, .. } => {
-                // TODO: this is sad and slow.
-                let want: i64 = from_values(self.program, value.clone())?;
-                for (i, check) in self.asm.dispatch.iter().enumerate() {
-                    if *check as i64 == want {
-                        let f = FuncId::from_index(i);
-                        assert_eq!(*ty, self.program[f].finished_ty().unwrap());
-                        result.push(Bc::GetNativeFnPtr(f));
-                        if result_location == ResAddr {
-                            result.push(Bc::StorePre { slots: 1 });
-                        }
-                        break;
-                    }
+    // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
+    if !program.get_info(raw).contains_pointers {
+        return Ok(program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr));
+    }
+
+    match &program[raw] {
+        TypeInfo::FnPtr { ty, .. } => {
+            // TODO: this is sad and slow.
+            let want: i64 = from_values(program, value.clone())?;
+            for (i, check) in dispatch.iter().enumerate() {
+                if *check as i64 == want {
+                    let f = FuncId::from_index(i);
+                    assert_eq!(*ty, program[f].finished_ty().unwrap());
+                    return Ok(program.baked.make(BakedVar::FnPtr(f), jit_ptr));
                 }
             }
-            &TypeInfo::Ptr(inner) => {
-                let inner_info = self.program.get_info(inner);
-                let bytes = inner_info.stride_bytes as usize;
-                let ptr: i64 = from_values(self.program, value.clone())?;
+            err!("function not found",)
+        }
+        &TypeInfo::Ptr(inner) => {
+            let inner_info = program.get_info(inner);
+            let bytes = inner_info.stride_bytes as usize;
 
-                // TODO: CStr is special...
-                if self.program.get_info(inner).contains_pointers {
-                    // TODO: this is wrong! need @static to only take baked value once.
+            // TODO: CStr needs special handling...
 
-                    result.push(Bc::PushRelocatablePointer {
-                        bytes: &[0, 0, 0, 0, 0, 0, 0, 0],
-                    });
-                    result.push(Bc::Dup);
+            // load the pointer and recurse.
+            // TODO: deduplicate!
+            let ptr: i64 = from_values(program, value.clone())?;
+            let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
+            let inner_value = Values::many(data.to_vec());
+            let value = emit_relocatable_constant(inner, &inner_value, program, dispatch, ResultLoc::ResAddr)?;
+            Ok(program.baked.make(BakedVar::AddrOf(value), jit_ptr))
+        }
+        TypeInfo::Struct { fields, .. } => {
+            if fields.len() == 2 && fields[0].name == Flag::Ptr.ident() && fields[1].name == Flag::Len.ident() {
+                // TODO: actually construct the slice type from unptr_ty(ptr) and check that its the same.
+                // TODO: really you want to let types overload a function to do this,
+                //       because List doesn't really want to keep its uninitialized memory.
+                let (ptr, len): (i64, i64) = from_values(program, value.clone())?;
 
-                    // load the pointer and recurse
-                    let ptr: i64 = from_values(self.program, value.clone())?;
-                    let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
-                    let inner_value = Values::many(data.to_vec());
-                    // this will store contents into our new variable
-                    self.emit_relocatable_constant(inner, &inner_value, result, ResultLoc::ResAddr)?;
-                    // now just new var addr is on the stack.
-                    if result_location == ResAddr {
-                        result.push(Bc::StorePre { slots: 1 });
-                    }
+                let inner = program.unptr_ty(fields[0].ty).unwrap();
+                let inner_info = program.get_info(inner);
+                if inner_info.contains_pointers {
+                    err!("TODO: nested constant pointers",)
+                }
+
+                if len == 0 {
+                    // an empty slice can have a null data ptr i guess.
+                    Ok(program.baked.make(BakedVar::Zeros { bytes: 16 }, jit_ptr))
                 } else {
-                    let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
-                    result.push(Bc::PushRelocatablePointer { bytes: data });
-                    if result_location == ResAddr {
-                        result.push(Bc::StorePre { slots: 1 });
-                    }
-                }
-            }
-            TypeInfo::Struct { fields, .. } => {
-                if fields.len() == 2 && fields[0].name == Flag::Ptr.ident() && fields[1].name == Flag::Len.ident() {
-                    // TODO: actually construct the slice type from unptr_ty(ptr) and check that its the same.
-                    // TODO: really you want to let types overload a function to do this,
-                    //       because List doesn't really want to keep its uninitialized memory.
-                    let (ptr, len): (i64, i64) = from_values(self.program, value.clone())?;
-
-                    let inner = self.program.unptr_ty(fields[0].ty).unwrap();
-                    let inner_info = self.program.get_info(inner);
-                    if inner_info.contains_pointers {
-                        err!("TODO: nested constant pointers",)
-                    }
-
-                    if len == 0 {
-                        // an empty slice can have a null data ptr i guess.
-                        result.push(Bc::PushConstant { value: 0 });
+                    assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
+                    let bytes = len as usize * inner_info.stride_bytes as usize;
+                    let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) }.to_vec();
+                    if !program.get_info(inner).contains_pointers {
+                        let value = program.baked.make(BakedVar::Bytes(data.to_vec()), null());
+                        let addr = program.baked.make(BakedVar::AddrOf(value), null());
+                        let len = program.baked.make(BakedVar::Num(len), null());
+                        Ok(program.baked.make(BakedVar::VoidPtrArray(vec![addr, len]), jit_ptr))
                     } else {
-                        assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
-                        let bytes = len as usize * inner_info.stride_bytes as usize;
-                        let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
-                        result.push(Bc::PushRelocatablePointer { bytes: data });
+                        todo!()
                     }
-
-                    result.push(Bc::PushConstant { value: len });
-                    if result_location == ResAddr {
-                        result.push(Bc::StorePre { slots: 2 });
-                    }
-                } else {
-                    todo!()
                 }
+            } else {
+                if fields.iter().all(|f| program.get_info(f.ty).stride_bytes == 8) {
+                    let mut ptrs = vec![];
+                    for (i, f) in fields.iter().enumerate() {
+                        let v = value.bytes()[i * 8..(i + 1) * 8].to_vec();
+                        ptrs.push(emit_relocatable_constant(f.ty, &Values::many(v), program, dispatch, result_location)?)
+                    }
+                    return Ok(program.baked.make(BakedVar::VoidPtrArray(ptrs), jit_ptr));
+                }
+                todo!("{}", program.log_type(raw))
             }
-            TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
-            TypeInfo::Enum { raw, .. } => self.emit_relocatable_constant(*raw, value, result, result_location)?,
-            TypeInfo::VoidPtr => {
+        }
+        TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
+        TypeInfo::Enum { raw, .. } => emit_relocatable_constant(*raw, value, program, dispatch, result_location),
+        TypeInfo::VoidPtr => {
+            if value.bytes().iter().all(|b| *b == 0) {
+                // You're allowed to have a constant null pointer (like for global allocator interface instances).
+                Ok(program.baked.make(BakedVar::Num(0), null()))
+            } else {
                 err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)
             }
-            _ => err!("ICE: bad constant",),
         }
-
-        Ok(())
+        _ => err!("ICE: bad constant",),
     }
 }
 
