@@ -25,7 +25,7 @@ use types::I16;
 
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, BasicBlock, Bc, FnBody},
+    bc::{BakedVar, BasicBlock, Bc, FnBody, Primitive},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     emit_bc::{emit_bc, empty_fn_body},
@@ -519,22 +519,45 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         break;
                     }
                 }
-                Bc::CallFnPtr { ty, cc } => {
-                    assert!(cc == CallConv::CCallReg);
-                    let sig = builder.import_signature(self.make_sig(ty, false, false));
-                    let (arg, ret) = self.program.get_infos(ty);
-                    self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
-                    let first_arg = self.stack.len() - arg.size_slots as usize;
-                    let callee = self.stack[first_arg - 1];
-                    let args = &self.stack[first_arg..self.stack.len()];
-                    let call = builder.ins().call_indirect(sig, callee, args);
-                    pops(&mut self.stack, arg.size_slots as usize + 1);
-                    let ret_val = builder.inst_results(call);
-                    for v in ret_val {
-                        self.stack.push(*v);
+                Bc::CallFnPtr { ty, cc } => match cc {
+                    CallConv::CCallReg => {
+                        let sig = builder.import_signature(self.make_sig(ty, false, false));
+                        let (arg, ret) = self.program.get_infos(ty);
+                        self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
+                        let first_arg = self.stack.len() - arg.size_slots as usize;
+                        let callee = self.stack[first_arg - 1];
+                        let args = &self.stack[first_arg..self.stack.len()];
+                        let call = builder.ins().call_indirect(sig, callee, args);
+                        pops(&mut self.stack, arg.size_slots as usize + 1);
+                        let ret_val = builder.inst_results(call);
+                        if ty.ret.is_never() {
+                            builder.ins().trap(TrapCode::UnreachableCodeReached);
+                            break;
+                        }
+                        for v in ret_val {
+                            self.stack.push(*v);
+                        }
+                        self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                     }
-                    self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
-                }
+                    CallConv::Flat => {
+                        // TODO: copy-paste
+                        let (arg, ret) = self.program.get_infos(ty);
+                        let c = builder.ins().iconst(I64, 0);
+                        let arg_ptr = self.stack.pop().unwrap();
+                        let arg_count = builder.ins().iconst(I64, arg.stride_bytes as i64);
+                        let ret_ptr = self.stack.pop().unwrap();
+                        let ret_count = builder.ins().iconst(I64, ret.stride_bytes as i64);
+                        let callee = self.stack.pop().unwrap();
+                        let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
+                        let sig = builder.import_signature(self.flat_sig.clone());
+                        builder.ins().call_indirect(sig, callee, args);
+                        if ty.ret.is_never() {
+                            builder.ins().trap(TrapCode::UnreachableCodeReached);
+                            break;
+                        }
+                    }
+                    _ => todo!(),
+                },
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
                     BakedVar::Bytes(bytes) => {
@@ -595,31 +618,20 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         todo!()
                     }
                 }
-                Bc::Load { slots } => {
-                    debug_assert_ne!(slots, 0);
+                Bc::Load { ty } => {
                     let addr = self.stack.pop().unwrap();
-                    for s in 0..slots {
-                        let v = builder.ins().load(I64, MemFlags::new(), addr, s as i32 * 8);
-                        self.stack.push(v);
-                    }
+                    let v = builder.ins().load(primitive(ty), MemFlags::new(), addr, 0);
+                    self.stack.push(v);
                 }
-                Bc::StorePost { slots } => {
-                    debug_assert_ne!(slots, 0);
+                Bc::StorePost { ty } => {
                     let addr = self.stack.pop().unwrap();
-                    for s in 0..slots {
-                        let v = self.stack[self.stack.len() - slots as usize + s as usize];
-                        builder.ins().store(MemFlags::new(), v, addr, s as i32 * 8);
-                    }
-                    pops(&mut self.stack, slots as usize);
+                    let v = self.stack.pop().unwrap();
+                    builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
-                Bc::StorePre { slots } => {
-                    debug_assert_ne!(slots, 0);
-                    let addr = self.stack[self.stack.len() - slots as usize - 1];
-                    for s in 0..slots {
-                        let v = self.stack[self.stack.len() - slots as usize + s as usize];
-                        builder.ins().store(MemFlags::new(), v, addr, s as i32 * 8);
-                    }
-                    pops(&mut self.stack, slots as usize + 1);
+                Bc::StorePre { .. } => {
+                    let v = self.stack.pop().unwrap();
+                    let addr = self.stack.pop().unwrap();
+                    builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
                 Bc::AddrVar { id } => {
                     if let Some(&ptr) = self.flat_args_already_offset.get(id as usize) {
@@ -648,8 +660,11 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 Bc::NoCompile => err!("NoCompile",),
                 Bc::LastUse { .. } | Bc::Noop => {}
                 Bc::AddrFnResult => self.stack.push(self.indirect_ret_addr.unwrap()),
-                Bc::Dup => {
-                    self.stack.push(*self.stack.last().unwrap());
+                Bc::PeekDup(skip) => {
+                    self.stack.push(self.stack[self.stack.len() - skip as usize - 1]);
+                }
+                Bc::Snipe(skip) => {
+                    self.stack.remove(self.stack.len() - skip as usize - 1);
                 }
                 Bc::CopyBytesToFrom { bytes } => {
                     let from = self.stack.pop().unwrap();
@@ -787,6 +802,16 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 self.stack[s] = builder.ins().bitcast(I64, MemFlags::new(), self.stack[s]);
             }
         }
+    }
+}
+
+fn primitive(prim: Primitive) -> Type {
+    match prim {
+        Primitive::I8 => I8,
+        Primitive::I16 => I16,
+        Primitive::I32 => I32,
+        Primitive::I64 => I64,
+        Primitive::F64 => F64,
     }
 }
 

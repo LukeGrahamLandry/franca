@@ -371,3 +371,11 @@ pub fn align_to(offset: usize, align: usize) -> usize {
         offset + align - offset % align
     }
 }
+#[must_use]
+pub fn align_backwards(offset: usize, align: usize) -> usize {
+    if offset % align == 0 {
+        offset
+    } else {
+        offset - align + offset % align
+    }
+}

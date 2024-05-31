@@ -12,6 +12,8 @@ Confusing dereference garbage pointer in c when calling alloc. just forgot to po
 Ok this whole backend not knowing about small primitive types thing is getting a bit dumb.
 
 - spent ten thousand years on slice ptr-len wrong direction and then incrementing before re-pushing the pointer
+- interestingly cranelift was easier to make work than my asm now.
+  other than it can't arm... but x86 was fine.
 
 ## (May 30)
 

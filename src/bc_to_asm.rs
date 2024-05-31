@@ -529,7 +529,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     Primitive::I32 => {
                         self.load_one(MEM_32, dest, addr, offset_bytes);
                     }
-                    _ => todo!(),
+                    Primitive::I16 => {
+                        self.load_one(MEM_16, dest, addr, offset_bytes);
+                    }
+                    Primitive::I8 => {
+                        self.load_one(MEM_08, dest, addr, offset_bytes);
+                    }
                 }
 
                 self.state.stack.push(v);
@@ -798,7 +803,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             // TODO: track open float registers
             Primitive::F64 | Primitive::I64 => {
                 if let Val::FloatReg(r) = value {
-                    self.state.stack.pop().unwrap();
                     assert_eq!(offset_bytes % 8, 0, "TODO: align");
                     self.asm.push(f_str_uo(X64, r, reg, offset_bytes as i64 / 8))
                 } else {
@@ -810,6 +814,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Primitive::I32 => {
                 let val = self.to_reg(value);
                 self.store_one(MEM_32, val, reg, offset_bytes);
+                self.drop_reg(val);
+            }
+            Primitive::I16 => {
+                let val = self.to_reg(value);
+                self.store_one(MEM_16, val, reg, offset_bytes);
                 self.drop_reg(val);
             }
             Primitive::I8 => {

@@ -150,12 +150,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let types = self.program.flat_tuple_types(ty);
         let mut len = types.len() as u16;
         let mut i = 0;
+        let mut offset = self.program.size_bytes(ty);
+        // TODO: doing alignment backwards like thos doesn't get the same answer as
         for ty in types {
             let ty = self.program.prim(ty);
+            // offset = align_backwards(offset, ty.align_bytes()); // TODO: this is subtley wrong because of how c does nested structs. need to respect field offsets!
             result.push(Bc::PeekDup(len));
             // Note: backwards!
             result.push(Bc::IncPtrBytes { bytes: (len - 1) * 8 }); // TODO!
             result.push(Bc::StorePost { ty });
+            // offset -= ty.align_bytes(); // always the same as size.
             len -= 1;
             i += 1;
         }
@@ -166,15 +170,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn load(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
         let types = self.program.flat_tuple_types(ty);
         let mut len = 0;
+        let mut offset = 0;
         for ty in types {
             let ty = self.program.prim(ty);
+            offset = align_to(offset, ty.align_bytes()); // TODO: this is subtley wrong because of how c does nested structs. need to respect field offsets!
             result.push(Bc::PeekDup(len));
-            result.push(Bc::IncPtrBytes { bytes: len * 8 }); // TODO!
+            result.push(Bc::IncPtrBytes { bytes: offset as u16 }); // TODO!
             result.push(Bc::Load { ty });
+            offset += ty.align_bytes(); // always the same as size.
             len += 1;
         }
         result.push(Bc::Snipe(len));
-        debug_assert_eq!(len * 8, self.program.get_info(ty).stride_bytes);
     }
 
     fn emit_body(&mut self, result: &mut FnBody<'p>, f: FuncId) -> Res<'p, ()> {

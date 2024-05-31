@@ -1271,7 +1271,7 @@ impl<'p> Program<'p> {
 
             TypeInfo::Unit => todo!(),
             TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => Primitive::I32,
-            _ => todo!(),
+            _ => todo!("{}", self.log_type(ty)),
         }
     }
 }
@@ -1340,6 +1340,8 @@ impl<'p> Program<'p> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) | &TypeInfo::Unique(ty, _) => self.flat_tuple_types(ty),
+            // TODO: this is sketchy
+            TypeInfo::Tagged { .. } => vec![TypeId::i64(); self.slot_count(ty) as usize],
             _ty => vec![ty],
         }
     }
