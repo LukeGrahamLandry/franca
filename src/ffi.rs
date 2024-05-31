@@ -389,13 +389,14 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
         let len = self.len();
         let mut parts = WriteBytes::default(); // TODO: with_capacity
+        let total_bytes = T::size_bytes(program) * len;
         for e in self {
             debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
             e.serialize_to_ints(program, &mut parts);
         }
         debug_assert_eq!(
             parts.0.len(),
-            T::size_bytes(program) * len,
+            total_bytes,
             "vec![{}; {len}] one size = {}",
             T::name(),
             T::size_bytes(program)
@@ -410,8 +411,16 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let len = usize::deserialize_from_ints(program, values)?;
 
-        let entries = T::size_bytes(program) * len;
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, entries) };
+        let total_bytes = T::size_bytes(program) * len;
+        if total_bytes > 2 << 25 {
+            println!(
+                "err: i hope you didnt have a {}MB vec on purpose... (ptr = 0x{:x}, len = 0x{:x})",
+                total_bytes >> 20,
+                ptr,
+                len,
+            )
+        }
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, total_bytes) };
 
         let mut res = Vec::with_capacity(len);
         let mut reader = ReadBytes { bytes: s, i: 0 };

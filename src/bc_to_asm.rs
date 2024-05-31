@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
-use crate::bc::{BbId, Bc, Value, Values};
+use crate::bc::{BbId, Bc, Primitive, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
@@ -62,8 +62,13 @@ const x17: i64 = 17;
 const fp: i64 = 29;
 const lr: i64 = 30;
 const sp: i64 = 31;
-// const W32: i64 = 0b0;
+const W32: i64 = 0b0;
 const X64: i64 = 0b1;
+
+const MEM_64: i64 = 0b11;
+const MEM_32: i64 = 0b10;
+const MEM_16: i64 = 0b01;
+const MEM_08: i64 = 0b00;
 
 pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle, body: &FnBody<'p>) -> Res<'p, ()> {
     debug_assert!(!compile.program[f].get_flag(FnFlag::AsmDone), "ICE: tried to double compile?");
@@ -145,13 +150,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         if TRACE_ASM {
             println!();
-            println!("=== Bytecode for {f:?}: {} ===", self.program.pool.get(func.name));
-            for (b, insts) in self.body.blocks.iter().enumerate() {
-                println!("[b{b}({})]: ({} incoming)", insts.arg_slots, insts.incoming_jumps);
-                for (i, op) in insts.insts.iter().enumerate() {
-                    println!("    {i}. {op:?}");
-                }
-            }
+            println!("{}", self.body.log(self.program));
             println!("===")
         }
 
@@ -382,7 +381,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.asm.extend_blanks(f);
                     self.asm.pending_indirect.push(f);
                     self.load_imm(reg, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
-                    self.asm.push(ldr_uo(X64, reg, reg, f.as_index() as i64));
+                    self.asm.push(ldr_uo(MEM_64, reg, reg, f.as_index() as i64));
                     self.state.stack.push(Val::Increment { reg, offset_bytes: 0 })
                 }
             }
@@ -517,12 +516,35 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 Val::FloatReg(_) => err!("don't try to gep a float",),
             },
-            Bc::Load { slots } => self.emit_load(slots),
-            Bc::StorePost { slots } => self.emit_store(slots),
-            Bc::StorePre { slots } => {
-                let ptr = self.state.stack.remove(self.state.stack.len() - slots as usize - 1);
-                self.state.stack.push(ptr);
-                self.emit_store(slots);
+            Bc::Load { ty } => {
+                let (addr, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
+
+                let dest = self.get_free_reg();
+                let v = Val::Increment { reg: dest, offset_bytes: 0 };
+                match ty {
+                    // TODO: track open float registers
+                    Primitive::F64 | Primitive::I64 => {
+                        self.load_u64(dest, addr, offset_bytes);
+                    }
+                    Primitive::I32 => {
+                        self.load_one(MEM_32, dest, addr, offset_bytes);
+                    }
+                    _ => todo!(),
+                }
+
+                self.state.stack.push(v);
+                self.drop_reg(addr);
+            }
+
+            Bc::StorePost { ty } => {
+                let addr = self.state.stack.pop().unwrap();
+                let value = self.state.stack.pop().unwrap();
+                self.emit_store(addr, value, ty);
+            }
+            Bc::StorePre { ty } => {
+                let value = self.state.stack.pop().unwrap();
+                let addr = self.state.stack.pop().unwrap();
+                self.emit_store(addr, value, ty);
             }
             Bc::TagCheck { expected } => {
                 // TODO: this leaks a register if it was literal but it probably never will be -- May 1
@@ -578,8 +600,17 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     }
                 }
             }
-            Bc::Dup => {
-                let val = *self.state.stack.last().unwrap();
+            Bc::Snipe(skip) => {
+                let index = self.state.stack.len() - skip as usize - 1;
+                match self.state.stack.remove(index) {
+                    Val::Increment { reg, .. } => self.drop_reg(reg),
+                    Val::Literal(_) => {}
+                    Val::Spill(slot) => self.drop_slot(slot, 8),
+                    Val::FloatReg(_) => todo!(),
+                }
+            }
+            Bc::PeekDup(skip) => {
+                let val = self.state.stack[self.state.stack.len() - skip as usize - 1];
                 match val {
                     Val::Increment { reg, offset_bytes } => {
                         if reg == sp {
@@ -761,92 +792,79 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
     }
 
-    /// <ptr:1> -> <?:n>
-    fn emit_load(&mut self, slots: u16) {
-        debug_assert_ne!(slots, 0);
-        debug_assert!(!self.state.stack.is_empty());
-        debug!("LOAD: [{:?}] to ", self.state.stack.last().unwrap());
-        // TODO: really you want to suspend this too because the common case is probably that the next thing is a store but thats harder to think about so just gonna start with the dumb thing i was doing before -- May 1
-        let (reg, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
-
-        for _ in 0..slots {
-            let working = self.get_free_reg();
-            self.load_u64(working, reg, offset_bytes);
-            let v = Val::Increment {
-                reg: working,
-                offset_bytes: 0,
-            };
-            self.state.stack.push(v);
-            debug!("({:?}), ", self.state.stack.last().unwrap());
-            offset_bytes += 8;
-            // saved.0 += 8;
-        }
-        debugln!();
-        debug_assert!(offset_bytes / 8 < (1 << 12));
-        self.drop_reg(reg);
-    }
-
-    /// <?:n> <ptr:1> -> _
-    #[track_caller]
-    fn emit_store(&mut self, slots: u16) {
-        debug_assert_ne!(slots, 0);
-        debug_assert!(self.state.stack.len() > slots as usize, "want store {slots} slots");
-        debugln!(
-            "STORE: ({:?}) to [{:?}]",
-            &self.state.stack[self.state.stack.len() - slots as usize - 1..self.state.stack.len() - 1],
-            self.state.stack.last().unwrap()
-        );
-        let (reg, mut offset_bytes) = self.pop_to_reg_with_offset();
-        // Note: we're going backwards: popping off the stack and storing right to left.
-        for i in (0..slots).rev() {
-            let o = offset_bytes + (i * 8);
-            let v = self.state.stack.last().unwrap();
-            debug!("| [x{reg} + {o}] <- ({:?}) |", v);
-            if let &Val::FloatReg(r) = v {
-                self.state.stack.pop().unwrap();
-                assert_eq!(offset_bytes % 8, 0, "TODO: align");
-                self.asm.push(f_str_uo(X64, r, reg, o as i64 / 8))
-            } else {
-                let val = self.pop_to_reg();
-                self.store_u64(val, reg, o);
+    fn emit_store(&mut self, addr: Val, value: Val, ty: Primitive) {
+        let (reg, mut offset_bytes) = self.to_reg_with_offset(addr);
+        match ty {
+            // TODO: track open float registers
+            Primitive::F64 | Primitive::I64 => {
+                if let Val::FloatReg(r) = value {
+                    self.state.stack.pop().unwrap();
+                    assert_eq!(offset_bytes % 8, 0, "TODO: align");
+                    self.asm.push(f_str_uo(X64, r, reg, offset_bytes as i64 / 8))
+                } else {
+                    let val = self.to_reg(value);
+                    self.store_u64(val, reg, offset_bytes);
+                    self.drop_reg(val);
+                }
+            }
+            Primitive::I32 => {
+                let val = self.to_reg(value);
+                self.store_one(MEM_32, val, reg, offset_bytes);
                 self.drop_reg(val);
             }
+            Primitive::I8 => {
+                let val = self.to_reg(value);
+                self.store_one(MEM_08, val, reg, offset_bytes);
+                self.drop_reg(val);
+            }
+            _ => todo!(),
         }
         self.drop_reg(reg);
-        debugln!();
     }
 
     fn load_u64(&mut self, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
+        self.load_one(MEM_64, dest_reg, src_addr_reg, offset_bytes)
+    }
+
+    fn load_one(&mut self, register_type: i64, dest_reg: i64, src_addr_reg: i64, offset_bytes: u16) {
         debug_assert_ne!(dest_reg, sp);
-        if offset_bytes % 8 == 0 {
-            self.asm.push(ldr_uo(X64, dest_reg, src_addr_reg, (offset_bytes / 8) as i64));
-            debug_assert!(offset_bytes / 8 < (1 << 12));
+        let scale = 1 << register_type;
+        if offset_bytes as i64 % scale == 0 {
+            self.asm
+                .push(ldr_uo(register_type, dest_reg, src_addr_reg, (offset_bytes as i64 / scale)));
+            debug_assert!(offset_bytes as i64 / scale < (1 << 12));
         } else {
             // Note: this relies on the access actually being aligned once you combine the value in the register without our non %8 offset.
             let reg = self.get_free_reg();
             debug_assert!(offset_bytes < 1 << 12);
-            self.asm.push(add_im(X64, reg, src_addr_reg, offset_bytes as i64, 0));
-            self.asm.push(ldr_uo(X64, dest_reg, reg, 0));
+            self.asm.push(add_im(MEM_64, reg, src_addr_reg, offset_bytes as i64, 0));
+            self.asm.push(ldr_uo(register_type, dest_reg, reg, 0));
             self.drop_reg(reg);
         }
     }
 
     fn store_u64(&mut self, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) {
+        self.store_one(MEM_64, src_reg, dest_addr_reg, offset_bytes)
+    }
+
+    fn store_one(&mut self, register_type: i64, src_reg: i64, dest_addr_reg: i64, offset_bytes: u16) {
+        let scale = 1 << register_type;
         if src_reg == sp {
             // TODO: this is weird. can only happen for exactly the sp, not an offset from it. so i guess somewhere else is saving an add, maybe its fine. -- May 2
             let reg = self.get_free_reg();
-            self.asm.push(add_im(X64, reg, sp, 0, 0)); // not mov!
-            self.store_u64(reg, dest_addr_reg, offset_bytes);
+            self.asm.push(add_im(register_type, reg, sp, 0, 0)); // not mov!
+            self.store_one(register_type, reg, dest_addr_reg, offset_bytes);
             self.drop_reg(reg);
             return;
         }
         if offset_bytes % 8 == 0 {
-            self.asm.push(str_uo(X64, src_reg, dest_addr_reg, (offset_bytes / 8) as i64));
-            debug_assert!(offset_bytes / 8 < (1 << 12));
+            self.asm
+                .push(str_uo(register_type, src_reg, dest_addr_reg, (offset_bytes as i64 / scale)));
+            debug_assert!(offset_bytes as i64 / scale < (1 << 12));
         } else {
             let reg = self.get_free_reg();
             self.asm.push(add_im(X64, reg, dest_addr_reg, offset_bytes as i64, 0));
-            self.asm.push(str_uo(X64, src_reg, reg, 0));
+            self.asm.push(str_uo(register_type, src_reg, reg, 0));
             self.drop_reg(reg);
         }
     }
@@ -923,7 +941,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     fn pop_to_reg(&mut self) -> i64 {
-        match self.state.stack.pop().unwrap() {
+        let val = self.state.stack.pop().unwrap();
+        self.to_reg(val)
+    }
+
+    fn to_reg(&mut self, val: Val) -> i64 {
+        match val {
             Val::Increment { mut reg, offset_bytes } => {
                 if offset_bytes > 0 {
                     let out = if reg == sp { self.get_free_reg() } else { reg };
@@ -953,7 +976,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     fn peek_to_reg_with_offset(&mut self) -> (i64, u16) {
-        match self.state.stack.last().cloned().unwrap() {
+        let val = self.state.stack.last().cloned().unwrap();
+        self.to_reg_with_offset(val)
+    }
+
+    fn to_reg_with_offset(&mut self, val: Val) -> (i64, u16) {
+        match val {
             Val::Increment { reg, offset_bytes } => (reg, offset_bytes),
             Val::Literal(x) => {
                 let r = self.get_free_reg();
@@ -1111,7 +1139,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.asm.pending_indirect.push(f);
         // you don't really need to do this but i dont trust it cause im not following the calling convention
         self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
-        self.asm.push(ldr_uo(X64, x16, x16, f.as_index() as i64));
+        self.asm.push(ldr_uo(MEM_64, x16, x16, f.as_index() as i64));
 
         self.asm.push(br(x16, with_link as i64))
     }
@@ -1134,6 +1162,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let b = self.asm.prev();
         self.asm.push(brk(0));
         self.release_stack.push((a, b, self.asm.prev()));
+    }
+
+    fn drop_if_unused(&mut self, register: i64) {
+        if self.state.stack.iter().all(|r| {
+            if let Val::Increment { reg, offset_bytes } = r {
+                reg != &register
+            } else {
+                true
+            }
+        }) {
+            self.drop_reg(register)
+        }
     }
 }
 
@@ -1382,12 +1422,12 @@ mod encoding {
         0b11010110010111110000001111000000
     }
 
-    pub fn str_uo(sf: i64, src: i64, addr: i64, offset_words: i64) -> i64 {
-        0b1 << 31 | sf << 30 | 0b11100100 << 22 | offset_words << 10 | addr << 5 | src
+    pub fn str_uo(size: i64, src: i64, addr: i64, offset_words: i64) -> i64 {
+        size << 30 | 0b11100100 << 22 | offset_words << 10 | addr << 5 | src
     }
 
-    pub fn ldr_uo(sf: i64, dest: i64, addr: i64, offset_words: i64) -> i64 {
-        (0b1 << 31 | sf << 30 | 0b11100101 << 22 | offset_words << 10 | addr << 5) | dest
+    pub fn ldr_uo(size: i64, dest: i64, addr: i64, offset_words: i64) -> i64 {
+        size << 30 | 0b11100101 << 22 | offset_words << 10 | addr << 5 | dest
     }
 
     pub fn ldp_so(sf: i64, dest1: i64, dest2: i64, addr: i64, offset_words: i64) -> i64 {

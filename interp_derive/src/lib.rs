@@ -203,7 +203,7 @@ fn deserialize(name: &Ident, data: &Data) -> TokenStream {
                 let result: Option<Self> = match tag {
                     #(#recurse)*
                     t => {
-                        println!("err: bad enum tag {} for {} expected 0..={}", t, stringify!(#name), #varient_count);
+                        println!("err: bad enum tag {} for {} expected 0..={}. \nat byte {}/{}", t, stringify!(#name), #varient_count, values.i, values.bytes.len());
                         return None
                     }
                 };

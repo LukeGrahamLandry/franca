@@ -421,8 +421,8 @@ pub fn where_the_fuck_am_i(comp: &Compile, loc: Span) {
         return;
     }
     let diagnostic = Diagnostic {
-        level: Level::Error,
-        message: String::from("???"),
+        level: Level::Note,
+        message: String::from("you are here"),
         code: None,
         spans: vec![SpanLabel {
             span: loc,

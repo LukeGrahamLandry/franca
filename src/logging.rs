@@ -441,10 +441,9 @@ impl<'p> FnBody<'p> {
                     ),
                     Bc::AddrVar { id } => {
                         if let Some(&Some(name)) = self.var_names.get(id as usize) {
-                            writeln!(f, "; {}", program.pool.get(name.name))
-                        } else {
-                            writeln!(f)
+                            write!(f, "; {}", program.pool.get(name.name));
                         }
+                        writeln!(f, "; {}", program.log_type(self.vars[id as usize]))
                     }
                     _ => writeln!(f),
                 };

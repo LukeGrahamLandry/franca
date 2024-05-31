@@ -5,7 +5,6 @@
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc::Values,
-    c::emit_c,
     compiler::{Compile, ExecStyle, Res},
     export_ffi::{end_raw, get_include_std, start_raw, STDLIB_PATH},
     find_std_lib,
@@ -115,9 +114,18 @@ fn main() {
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats, --c, --run-clang"),
                 "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
                 // TODO: need to have a -o flag so you can seperate logging of compile time execution from output c source code.
-                "c" => c = true,
-                "run-clang" => run_with_clang = true,
-                "san" => sanitize = true,
+                "c" => {
+                    c = true;
+                    assert!(cfg!(feature = "c-backend"));
+                }
+                "run-clang" => {
+                    run_with_clang = true;
+                    assert!(cfg!(feature = "c-backend"));
+                }
+                "san" => {
+                    sanitize = true;
+                    assert!(cfg!(feature = "c-backend"));
+                }
                 _ => panic!("unknown argument --{name}"),
             }
         } else {
@@ -172,6 +180,7 @@ fn main() {
             println!("Compilation (parse/bytecode/jit) finished in {seconds:.3} seconds;",);
         };
 
+        #[cfg(feature = "c-backend")]
         if c || run_with_clang {
             if comp.export.is_empty() {
                 let name = comp.program.pool.intern("main");
@@ -182,7 +191,7 @@ fn main() {
             if comp.export.is_empty() {
                 comp.export.extend(&comp.tests);
             }
-            match emit_c(&mut comp) {
+            match franca::c::emit_c(&mut comp) {
                 Ok(s) => {
                     log_time();
                     if run_with_clang {

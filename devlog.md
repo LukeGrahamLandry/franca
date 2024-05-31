@@ -1,3 +1,18 @@
+## May 31
+
+```
+RUSTFLAGS="--emit=llvm-bc" cargo build --release -Z build-std=panic_abort,std --target aarch64-apple-darwin --no-default-features
+```
+
+If you don't have `panic_abort` you get `duplicate lang item in crate core: sized.`...
+idk bro https://github.com/rust-lang/wg-cargo-std-aware/issues/56
+
+Confusing dereference garbage pointer in c when calling alloc. just forgot to pop the fn ptr after a call.
+
+Ok this whole backend not knowing about small primitive types thing is getting a bit dumb.
+
+- spent ten thousand years on slice ptr-len wrong direction and then incrementing before re-pushing the pointer
+
 ## (May 30)
 
 I think i want explicit allocators.

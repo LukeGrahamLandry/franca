@@ -122,6 +122,7 @@ macro_rules! mut_replace {
 pub mod ast;
 pub mod bc;
 pub mod bc_to_asm;
+#[cfg(feature = "c-backend")]
 pub mod c;
 pub mod compiler;
 #[cfg(feature = "cranelift")]

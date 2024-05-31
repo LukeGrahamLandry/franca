@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Baked, Values},
+    bc::{Baked, Primitive, Values},
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
     ffi::InterpSend,
@@ -1254,6 +1254,25 @@ impl<'p> Program<'p> {
         }
 
         None
+    }
+
+    pub(crate) fn prim(&self, ty: TypeId) -> Primitive {
+        let ty = self.raw_type(ty);
+        match self[ty] {
+            TypeInfo::F64 => Primitive::F64,
+            TypeInfo::Int(int) => match int.bit_count {
+                8 => Primitive::I8,
+                16 => Primitive::I16,
+                32 => Primitive::I32,
+                _ => Primitive::I64,
+            },
+            TypeInfo::Bool => Primitive::I8,
+            TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) => Primitive::I64,
+
+            TypeInfo::Unit => todo!(),
+            TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => Primitive::I32,
+            _ => todo!(),
+        }
     }
 }
 

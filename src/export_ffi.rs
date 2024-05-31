@@ -8,6 +8,7 @@ use crate::bc::{to_values, ReadBytes, Values};
 use crate::compiler::{Compile, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
+use crate::overloading::where_the_fuck_am_i;
 use crate::pool::Ident;
 use crate::{err, ice};
 use std::fmt::Write;
@@ -451,6 +452,7 @@ extern "C-unwind" fn log_type(p: &mut &mut Program, a: TypeId) {
 
 extern "C-unwind" fn log_ast<'p>(p: &mut Compile<'_, 'p>, a: FatExpr<'p>) {
     println!("{}", a.log(p.program.pool));
+    where_the_fuck_am_i(p, a.loc);
 }
 
 extern "C-unwind" fn number_of_functions(program: &mut &mut Program) -> i64 {

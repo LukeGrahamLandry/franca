@@ -27,15 +27,15 @@ pub enum Bc {
     Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
     Ret,                                                  // <vals:n> -> _ OR _-> _
     GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>
-    Load { slots: u16 },                                  // <ptr:1> -> <?:n>
-    StorePost { slots: u16 },                             // <?:n> <ptr:1> -> _
-    StorePre { slots: u16 },                              // <ptr:1> <?:n> -> _
+    Load { ty: Primitive },                               // <ptr:1> -> <?:n>
+    StorePost { ty: Primitive },                          // <?:n> <ptr:1> -> _
+    StorePre { ty: Primitive },                           // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
     Pop { slots: u16 },                                   // <?:n> -> _
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     AddrFnResult,                                         // _ -> <ptr:1>
-    Dup,                                                  // <x:1> -> <x:1> <x:1>
+    PeekDup(u16),                                         // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
     CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
     NameFlatCallArg { id: u16, offset_bytes: u16 },       // _ -> _
     LastUse { id: u16 },                                  // _ -> _
@@ -44,6 +44,27 @@ pub enum Bc {
     NoCompile,
     Noop,
     PushGlobalAddr { id: BakedVarId },
+    Snipe(u16),
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum Primitive {
+    I8,
+    I16,
+    I32,
+    I64,
+    F64,
+}
+
+impl Primitive {
+    pub(crate) fn align_bytes(self) -> usize {
+        match self {
+            Primitive::I8 => 1,
+            Primitive::I16 => 2,
+            Primitive::I32 => 4,
+            Primitive::I64 | Primitive::F64 => 8,
+        }
+    }
 }
 
 #[derive(Clone)]

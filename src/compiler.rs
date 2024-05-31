@@ -322,7 +322,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn compile_asm_no_rec(&mut self, f: FuncId, when: ExecStyle) -> Res<'p, ()> {
         self.last_loc = Some(self.program[f].loc);
 
-        let use_cl =
+        let use_cl: bool =
             cfg!(feature = "cranelift") && (self.program[f].has_tag(Flag::Force_Cranelift) || self.program.comptime_arch == TargetArch::Cranelift);
 
         if let Some(code) = &self.program[f].body.jitted_aarch64() {
@@ -1610,17 +1610,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
-                let os: OverloadSetId = self.immediate_eval_expr_known(*handler.clone())?;
-                self.compute_new_overloads(os, None)?;
+                let os_id: OverloadSetId = self.immediate_eval_expr_known(*handler.clone())?;
+                self.compute_new_overloads(os_id, None)?;
 
-                let os = self.program[os].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
+                let os = self.program[os_id].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
                 let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
 
                 // This allows @a E; instead of @a(E);
                 if arg.is_raw_unit() && !target.is_raw_unit() {
                     mem::swap(&mut arg, &mut target);
                 }
-
+                debugln!(
+                    "invoke macro: @{}({}) {}",
+                    self.pool.get(self.program[os_id].name),
+                    arg.log(self.pool),
+                    target.log(self.pool)
+                );
                 // If they did '@m(e)' instead of '@m(e) s', prefer a handler that only expects one argument.
                 // TODO: should probably distinguish '@m(e) unit' just incase
                 if target.is_raw_unit() {
@@ -1655,6 +1660,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if expr.done {
                     assert!(!expr.ty.is_unknown());
                 }
+                debugln!("macro result: {}", expr.log(self.pool));
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(expr, requested);
             }
