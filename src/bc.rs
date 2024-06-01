@@ -212,7 +212,13 @@ pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut ReadBytes)
 }
 
 /// Take some opaque bytes and split them into ints. So (u8, u8) becomes a vec of two i64 but u16 becomes just one.
-pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, out: &mut Vec<i64>) -> Res<'static, ()> {
+pub fn deconstruct_values(
+    program: &Program,
+    ty: TypeId,
+    bytes: &mut ReadBytes,
+    out: &mut Vec<i64>,
+    offsets: &mut Option<&mut Vec<(Primitive, u16)>>, // this is stupid but how else do you call it in a loop??
+) -> Res<'static, ()> {
     let size = program.get_info(ty).stride_bytes as usize;
     debug_assert!(
         size <= bytes.bytes.len() - bytes.i,
@@ -222,20 +228,39 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
     let ty = program.raw_type(ty);
     match &program[ty] {
         TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
-        TypeInfo::F64 | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => out.push(unwrap!(bytes.next_i64(), "")),
-        TypeInfo::Int(_) => match program.get_info(ty).stride_bytes {
-            1 => out.push(unwrap!(bytes.next_u8(), "") as i64),
-            2 => out.push(unwrap!(bytes.next_u16(), "") as i64),
-            4 => out.push(unwrap!(bytes.next_u32(), "") as i64),
-            8 => out.push(unwrap!(bytes.next_i64(), "")),
-            n => todo!("bad int stride {n}"),
-        },
-        TypeInfo::Bool => out.push(unwrap!(bytes.next_u8(), "") as i64),
+        TypeInfo::F64 | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_i64(), ""));
+            if let Some(offsets) = offsets {
+                offsets.push((Primitive::I64, offset as u16));
+            }
+        }
+        TypeInfo::Int(_) => {
+            let offset = bytes.i;
+            let (value, prim) = match program.get_info(ty).stride_bytes {
+                1 => (unwrap!(bytes.next_u8(), "") as i64, Primitive::I8),
+                2 => (unwrap!(bytes.next_u16(), "") as i64, Primitive::I16),
+                4 => (unwrap!(bytes.next_u32(), "") as i64, Primitive::I32),
+                8 => (unwrap!(bytes.next_i64(), ""), Primitive::I64),
+                n => todo!("bad int stride {n}"),
+            };
+            out.push(value);
+            if let Some(offsets) = offsets {
+                offsets.push((prim, offset as u16));
+            }
+        }
+        TypeInfo::Bool => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_u8(), "") as i64);
+            if let Some(offsets) = offsets {
+                offsets.push((Primitive::I8, offset as u16));
+            }
+        }
         &TypeInfo::Array { inner, len } => {
             let inner_align = program.get_info(inner).align_bytes;
             for _ in 0..len {
                 bytes.align_to(inner_align as usize);
-                deconstruct_values(program, inner, bytes, out)?;
+                deconstruct_values(program, inner, bytes, out, offsets)?;
             }
         }
         TypeInfo::Struct { fields, layout_done } => {
@@ -244,17 +269,22 @@ pub fn deconstruct_values(program: &Program, ty: TypeId, bytes: &mut ReadBytes, 
             for t in fields {
                 assert!(prev <= t.byte_offset);
                 bytes.i = t.byte_offset;
-                deconstruct_values(program, t.ty, bytes, out)?;
+                deconstruct_values(program, t.ty, bytes, out, offsets)?;
                 prev = t.byte_offset;
             }
             bytes.align_to(program.get_info(ty).align_bytes as usize); // eat trailing stride padding
         }
         TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
-        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out)?,
+        &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
         TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         TypeInfo::Unit => {}
-        TypeInfo::Type => out.push(unwrap!(bytes.next_u32(), "") as i64),
-        TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => out.push(unwrap!(bytes.next_u32(), "") as i64),
+        TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_u32(), "") as i64);
+            if let Some(offsets) = offsets {
+                offsets.push((Primitive::I32, offset as u16));
+            }
+        }
     }
     Ok(())
 }

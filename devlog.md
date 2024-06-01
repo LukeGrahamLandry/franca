@@ -14,6 +14,13 @@ Ok this whole backend not knowing about small primitive types thing is getting a
 - spent ten thousand years on slice ptr-len wrong direction and then incrementing before re-pushing the pointer
 - interestingly cranelift was easier to make work than my asm now.
   other than it can't arm... but x86 was fine.
+- redirect function caused storing the result with the wrong type so unaligned (found in codemap with ubsan),
+  (ex. add u32 redirects to i64 so it things it needs to store 8 bytes).
+  but that didn't fix my problem.
+- the problem with `Expected (18446744073709551615 == 255)` in basic.fr,
+  was loading a byte as a (char) and then casting that to a (void\*),
+  char is signed so it reads -1 and then tries to preserve that so it sign extends and you get the highest number.
+  ok im kinda sold on zig's billion different names for casts now, should probably do that in my language too now that i'm getting close to non-painful generics.
 
 ## (May 30)
 

@@ -457,7 +457,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         } else if c_call {
             assert!(!flat_call);
             let mut ints = vec![];
-            deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints)?;
+            deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints, &mut None)?;
             debugln!("IN: {ints:?}");
             let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt)?;
             debugln!("OUT: {r:?}");

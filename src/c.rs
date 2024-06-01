@@ -68,7 +68,7 @@ fn forward_declare(comp: &mut Compile, out: &mut CProgram, callee: FuncId) {
 }
 
 const FLAT_ARGS_SIGN: &str = "(int _a, void* _flat_arg_ptr, int _b, void* _flat_ret_ptr, int _c)";
-pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
+pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runner_main: bool) -> Res<'p, String> {
     let mut out = CProgram::default();
 
     fn emit<'p>(comp: &mut Compile<'_, 'p>, out: &mut CProgram, f: FuncId) -> Res<'p, ()> {
@@ -157,17 +157,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
             writeln!(out.forward, ";").unwrap();
 
             declare(comp, &mut out.forward, f, false, true);
-            writeln!(out.forward, "{{").unwrap();
-            write!(out.forward, "return {name}(").unwrap();
-            if !ty.arg.is_unit() {
-                for b in &comp.program[f].arg.bindings {
-                    let name = comp.program.pool.get(b.name().unwrap());
-                    write!(out.forward, "{name},").unwrap();
-                }
-                out.forward.remove(out.forward.len() - 1); // comma
-            }
-            writeln!(out.forward, ");").unwrap();
-            writeln!(out.forward, "}}").unwrap();
+            emit_named_redirect_body(comp, &mut out.forward, f, true);
         } else if let FuncImpl::Redirect(target) = comp.program[f].body {
             // TODO: the frontend should just add the target as a callee instead.
             // this works because emit_bc redirects calls to the target.
@@ -179,6 +169,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
         Ok(())
     }
 
+    // *int*_t because we have a little self respect remaining...
     out.types.push_str("#include <stdint.h>\n");
 
     // extra calls emitted by the compiler here
@@ -186,53 +177,29 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
     comp.compile(memcpy, ExecStyle::Aot)?;
     emit(comp, &mut out, memcpy)?;
 
-    let mut any_called_main = false;
-    let mut all_are_tests = true;
-    // TODO: caller should pass in the list
-    let exports = comp.export.clone();
-    for f in exports.iter().copied() {
-        any_called_main |= comp.program[f].name == Flag::Main.ident();
-        let is_test = comp.program[f].has_tag(Flag::Test);
-        all_are_tests &= is_test;
+    for f in functions.iter().copied() {
         comp.compile(f, ExecStyle::Aot)?;
         emit(comp, &mut out, f)?;
 
-        if comp.program[f].cc.unwrap() != CallConv::Flat && !is_test {
-            // TODO: this is copy paste from comptime_addr one
+        if comp.program[f].cc.unwrap() != CallConv::Flat && !test_runner_main {
             declare(comp, &mut out.functions, f, true, true);
-            writeln!(out.functions, "{{").unwrap();
-            write!(out.functions, "return _FN{}(", f.as_index()).unwrap();
-            let ty = comp.program[f].finished_ty().unwrap();
-            if !ty.arg.is_unit() {
-                for b in &comp.program[f].arg.bindings {
-                    let name = comp.program.pool.get(b.name().unwrap());
-                    let raw = comp.program.raw_type(b.ty.unwrap());
-                    if let TypeInfo::Struct { fields, .. } = &comp.program[raw] {
-                        for i in 0..fields.len() {
-                            write!(out.functions, "{name}._{i},").unwrap();
-                        }
-                    } else {
-                        write!(out.functions, "{name},").unwrap();
-                    }
-                }
-                out.functions.remove(out.functions.len() - 1); // comma
-            }
-            writeln!(out.functions, ");").unwrap();
-            writeln!(out.functions, "}}").unwrap();
+            emit_named_redirect_body(comp, &mut out.functions, f, false);
         } else {
             writeln!(out.functions, "// Skip exporting flat call: fn {}", comp.pool.get(comp.program[f].name)).unwrap();
         }
     }
 
-    if all_are_tests {
+    if test_runner_main {
         writeln!(out.functions, "int main(){{").unwrap();
-        for f in exports {
-            if comp.program[f].finished_arg.unwrap().is_unit() {
+        for f in &functions {
+            if comp.program[*f].finished_arg.unwrap().is_unit() {
                 writeln!(out.functions, "_FN{}();", f.as_index()).unwrap();
             } else {
                 writeln!(out.functions, "_FN{}(0);", f.as_index()).unwrap();
             }
         }
+        let msg = format!("Passed {} tests.\\n", functions.len());
+        writeln!(out.functions, "write(1, (int8_t*)\"{msg}\", {});", msg.len() - 1).unwrap();
         writeln!(out.functions, "return 0;}}").unwrap();
     }
 
@@ -250,7 +217,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
             BakedVar::Zeros { .. } => todo!(),
             BakedVar::Bytes(bytes) => {
                 let len = bytes.len().max(8);
-                writeln!(constants, "    static uint8_t _const{i}[{}] = {{", len).unwrap();
+                writeln!(constants, "    static unsigned char _const{i}[{}] = {{", len).unwrap();
                 for b in bytes {
                     write!(constants, "{b},").unwrap();
                 }
@@ -317,6 +284,33 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
     Ok(out.types)
 }
 
+fn emit_named_redirect_body(comp: &mut Compile, out: &mut String, f: FuncId, callee_use_name: bool) {
+    writeln!(out, "{{").unwrap();
+    if callee_use_name {
+        let name = comp.program[f].name;
+        write!(out, "return {}(", comp.pool.get(name)).unwrap();
+    } else {
+        write!(out, "return _FN{}(", f.as_index()).unwrap();
+    }
+    let ty = comp.program[f].finished_ty().unwrap();
+    if !ty.arg.is_unit() {
+        for b in &comp.program[f].arg.bindings {
+            let name = comp.program.pool.get(b.name().unwrap());
+            let raw = comp.program.raw_type(b.ty.unwrap());
+            if let TypeInfo::Struct { fields, .. } = &comp.program[raw] {
+                for i in 0..fields.len() {
+                    write!(out, "{name}._{i},").unwrap();
+                }
+            } else {
+                write!(out, "{name},").unwrap();
+            }
+        }
+        out.remove(out.len() - 1); // comma
+    }
+    writeln!(out, ");").unwrap();
+    writeln!(out, "}}").unwrap();
+}
+
 // TODO: this uses a dumb amount of memory
 #[derive(Default)]
 struct CProgram {
@@ -370,13 +364,13 @@ impl<'z, 'p> Emit<'z, 'p> {
         }
         for inst in &block.insts {
             // TODO: if-def this.
-            // write!(self.code, "     // {inst:?}").unwrap();
-            // if let Bc::AddrVar { id } = inst {
-            //     if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
-            //         write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
-            //     }
-            // }
-            // writeln!(self.code).unwrap();
+            write!(self.code, "     // {inst:?}").unwrap();
+            if let Bc::AddrVar { id } = inst {
+                if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
+                    write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
+                }
+            }
+            writeln!(self.code).unwrap();
 
             match *inst {
                 Bc::GetCompCtx => {
@@ -658,16 +652,16 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
         TypeInfo::Int(int) => {
             write!(out.types, "typedef").unwrap();
             if int.signed {
-                write!(out.types, " u").unwrap();
+                write!(out.types, " unsigned").unwrap();
             } else {
-                write!(out.types, " ").unwrap();
+                write!(out.types, " signed").unwrap();
             }
             // TODO: use the fixed width types.
             match int.bit_count {
-                8 => write!(out.types, "int8_t").unwrap(),
-                16 => write!(out.types, "int16_t").unwrap(),
-                32 => write!(out.types, "int32_t").unwrap(),
-                _ => write!(out.types, "int64_t").unwrap(),
+                8 => write!(out.types, " char").unwrap(),
+                16 => write!(out.types, " short").unwrap(),
+                32 => write!(out.types, " int").unwrap(),
+                _ => write!(out.types, " long").unwrap(),
             }
             writeln!(out.types, " _TY{};", ty.as_index()).unwrap();
         }

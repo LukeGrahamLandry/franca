@@ -1,7 +1,6 @@
 #![feature(ptr_metadata)]
 #![feature(iter_array_chunks)]
 #![feature(vec_into_raw_parts)]
-#![feature(slice_ptr_len)]
 #![feature(slice_ptr_get)]
 #![feature(closure_track_caller)]
 #![feature(sync_unsafe_cell)]
@@ -210,7 +209,7 @@ pub const INCLUDE_STD: &[(&str, &str)] = &[
 pub static mut STACK_START: usize = 0;
 pub static mut JITTED_PAGE: (usize, usize) = (0, 0);
 pub static mut MY_CONST_DATA: (usize, usize) = (0, 0);
-pub static mut STACK_MIN: usize = usize::max_value();
+pub static mut STACK_MIN: usize = usize::MAX;
 pub static mut COMPILER_CTX_PTR: usize = 0;
 pub static mut MMAP_ARENA_START: usize = 0;
 

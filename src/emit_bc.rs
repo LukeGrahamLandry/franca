@@ -254,6 +254,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         mut can_tail: bool,
     ) -> Res<'p, ()> {
         // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
+        let f_ty = self.program[f].finished_ty().unwrap(); // kinda HACK to fix unaligned store?
         if let FuncImpl::Redirect(target) = self.program[f].body {
             f = target;
         }
@@ -272,7 +273,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             "tried to call inlined {}",
             self.program.pool.get(self.program[f].name)
         );
-        let f_ty = self.program[f].unwrap_ty();
         if let Some(id) = flat_arg_loc {
             match result_location {
                 PushStack => {
@@ -280,7 +280,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::AddrVar { id: ret_id });
                     result.push(Bc::AddrVar { id });
                     result.push(Bc::CallDirectFlat { f });
-                    let slots = self.slot_count(f_ty.ret);
                     result.push(Bc::AddrVar { id: ret_id });
                     debug_assert!(
                         self.program.get_info(f_ty.ret).stride_bytes % 8 == 0,
@@ -606,6 +605,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if result_location == Discard {
                     return Ok(());
                 }
+
                 let want_emit_by_memcpy = self.program.get_info(expr.ty).stride_bytes % 8 != 0 || value.0.len() > 64 || value.0.len() % 8 != 0;
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     // TODO: this is dumb because a slice becomes a pointer to a slice.
@@ -631,7 +631,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match result_location {
                     PushStack => {
                         let mut parts = vec![];
-                        deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
+                        deconstruct_values(
+                            self.program,
+                            expr.ty,
+                            &mut ReadBytes { bytes: value.bytes(), i: 0 },
+                            &mut parts,
+                            &mut None,
+                        )?;
                         for value in parts {
                             result.push(Bc::PushConstant { value });
                         }
@@ -650,13 +656,20 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             });
                         } else {
                             let mut parts = vec![];
-                            deconstruct_values(self.program, expr.ty, &mut ReadBytes { bytes: value.bytes(), i: 0 }, &mut parts)?;
-
-                            for value in parts.into_iter() {
+                            let mut offsets = vec![];
+                            deconstruct_values(
+                                self.program,
+                                expr.ty,
+                                &mut ReadBytes { bytes: value.bytes(), i: 0 },
+                                &mut parts,
+                                &mut Some(&mut offsets),
+                            )?;
+                            debug_assert_eq!(parts.len(), offsets.len());
+                            for (value, (ty, offset)) in parts.into_iter().zip(offsets.into_iter()) {
                                 result.push(Bc::PeekDup(0));
+                                result.push(Bc::IncPtrBytes { bytes: offset });
                                 result.push(Bc::PushConstant { value });
-                                result.push(Bc::StorePre { ty: Primitive::I64 }); // TODO
-                                result.push(Bc::IncPtrBytes { bytes: 8 });
+                                result.push(Bc::StorePre { ty });
                             }
                             result.push(Bc::Pop { slots: 1 }); // res ptr
                         }

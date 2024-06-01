@@ -24,6 +24,7 @@ use std::{
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::{exit, Command},
+    ptr::addr_of,
     str::pattern::Pattern,
     thread::sleep_until,
     time::{Duration, Instant},
@@ -72,6 +73,7 @@ fn main() {
     let mut c = false;
     let mut run_with_clang = false;
     let mut sanitize = false;
+    let mut test_c = false;
     args.next().unwrap(); // exe path
 
     #[cfg(target_arch = "aarch64")]
@@ -125,6 +127,9 @@ fn main() {
                 "san" => {
                     sanitize = true;
                     assert!(cfg!(feature = "c-backend"));
+                }
+                "test-c" => {
+                    test_c = true;
                 }
                 _ => panic!("unknown argument --{name}"),
             }
@@ -182,16 +187,17 @@ fn main() {
 
         #[cfg(feature = "c-backend")]
         if c || run_with_clang {
-            if comp.export.is_empty() {
+            let (fns, test_runner) = if comp.export.is_empty() {
                 let name = comp.program.pool.intern("main");
                 if let Some(f) = comp.program.find_unique_func(name) {
-                    comp.export.push(f);
+                    (vec![f], false)
+                } else {
+                    (comp.tests.clone(), true)
                 }
-            }
-            if comp.export.is_empty() {
-                comp.export.extend(&comp.tests);
-            }
-            match franca::c::emit_c(&mut comp) {
+            } else {
+                (comp.export.clone(), false)
+            };
+            match franca::c::emit_c(&mut comp, fns, test_runner) {
                 Ok(s) => {
                     log_time();
                     if run_with_clang {
@@ -202,7 +208,7 @@ fn main() {
                     }
 
                     if stats {
-                        println!("/*{:#?}*/", unsafe { &STATS });
+                        println!("/*{:#?}*/", unsafe { &*addr_of!(STATS) });
                     }
                     exit(0);
                 }
