@@ -680,6 +680,7 @@ pub enum FnFlag {
     TryConstantFold,
     CalleesAsmDone,
     Generic,
+    UnsafeNoopCast,
 }
 
 impl<'p> Func<'p> {
@@ -1810,6 +1811,7 @@ pub enum Flag {
     Export,
     __Tag_Check,
     C,
+    Unsafe_Noop_Cast,
     _Reserved_Count_,
 }
 

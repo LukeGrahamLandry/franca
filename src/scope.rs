@@ -52,6 +52,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
             func.set_flag(FnFlag::Generic, true);
             func.annotations.retain(|a| a.name != Flag::Generic.ident());
         }
+        if func.has_tag(Flag::Unsafe_Noop_Cast) {
+            func.set_flag(FnFlag::UnsafeNoopCast, true);
+            func.annotations.retain(|a| a.name != Flag::Unsafe_Noop_Cast.ident());
+        }
 
         let (s, b) = (self.scope, self.block);
 

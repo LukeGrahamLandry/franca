@@ -485,14 +485,94 @@ impl<'p> DebugState<'p> {
 impl<'p> CErr<'p> {
     pub fn log(&self, program: &Program<'p>, pool: &StringPool<'p>) -> String {
         match self {
-            CErr::UndeclaredIdent(i) => format!("Undeclared Ident: {i:?} = {}", pool.get(*i)),
-            CErr::TypeCheck(found, expected, msg) => format!(
-                "{msg}. Type check expected {expected:?} = {} but found {found:?} = {}",
-                program.log_type(*expected),
-                program.log_type(*found)
+            &CErr::UndeclaredIdent(i) => format!("Undeclared Ident: {i:?} = {}", pool.get(i)),
+            &CErr::TypeCheck(found, expected, msg) => format!(
+                "{msg}. Type check expected {expected:?} = {} but found {found:?} = {}\n{}",
+                program.log_type(expected),
+                program.log_type(found),
+                program.conversion_help(found, expected, 0)
             ),
             CErr::Fatal(s) => s.clone(),
             _ => format!("{:?}", self),
+        }
+    }
+}
+
+impl<'p> Program<'p> {
+    fn conversion_help(&self, found: TypeId, expected: TypeId, depth: usize) -> String {
+        let indent = "  ".repeat(depth);
+        if found == expected {
+            return format!("{indent} these are the same type");
+        }
+        let found = self.raw_type(found);
+        let expected = self.raw_type(expected);
+        if found == expected {
+            return format!(
+                "{indent} `@as({}) <value>` can be used to convert between a unique type and its backing representation.",
+                self.log_type(expected)
+            );
+        }
+
+        match (&self[found], &self[expected]) {
+            (_, TypeInfo::Never) => {
+                format!(
+                    "{indent} An expression with type Never should... never return to its caller. use `unreachable()` to assert that a codepath is never executed.",
+                )
+            }
+            // :Coercion // TODO: only one direction makes sense
+            (TypeInfo::Never, _) => {
+                format!(
+                    "ICE: Never should typecheck as any value. for now use `unreachable_hack({})` to fool the type system into thinking it has a valid value of some type, but really it just crashes if the codepath is ever reached.",
+                    self.log_type(expected)
+                )
+            }
+            (TypeInfo::Int(_), TypeInfo::Int(_)) => String::from("TODO: help message"),
+            // TODO: not this!!!
+            (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
+                if f.len() != e.len() {
+                    return format!(
+                        "{indent} Structs have a different number of fields. expected {} but found {}",
+                        e.len(),
+                        f.len()
+                    );
+                }
+                // if f.len() == e.len() {
+                //     let ok = f
+                //         .iter()
+                //         .zip(e.iter())
+                //         .all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset && f.name == e.name);
+                //     if ok {
+                //         return Ok(());
+                //     }
+                // }
+                String::from("TODO: help message")
+            }
+            (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
+                // TODO: recurse
+                format!("{indent} you can (UNSAFELY) cast between pointers with ptr_cast_unchecked(From = {}, To = {}, ptr = <value>). this cast is a noop at runtime.",
+                    self.log_type(f),
+                    self.log_type(e),
+                )
+            }
+            (&TypeInfo::Ptr(f), TypeInfo::VoidPtr) => {
+                format!(
+                    "{indent} you can coerce to a rawptr with `raw_from_ptr({}, <value>)`. this cast is a noop at runtime.",
+                    self.log_type(f)
+                )
+            }
+            (TypeInfo::VoidPtr, &TypeInfo::Ptr(e)) => {
+                format!(
+                    "{indent} you can (UNSAFELY) coerce from a rawptr with `ptr_from_raw({}, <value>)`. this cast is a noop at runtime.",
+                    self.log_type(e)
+                )
+            }
+
+            (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => format!("{indent} incompatible function types. TODO: correct varience tracking."),
+            (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
+                format!("{indent} incompatible function types. TODO: correct varience tracking.")
+            }
+            (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => format!("{indent} use @resolve to convert from a function to an overload set. "),
+            _ => format!("{indent} bad conversion"),
         }
     }
 }

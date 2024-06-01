@@ -1,0 +1,42 @@
+// TODO: make a version of this that checks alignment
+/// This function does nothing, it just lies to the typechecker. 
+/// It's a bit clunky to type but maybe that's good for morale since its wildly unsafe!
+/// SAFETY: the pointer must be aligned correctly for the new type and valid for use as the new size. 
+ptr_cast_unchecked :: fn(const From: Type, const To: Type, ptr: *From) *To #generic #unsafe_noop_cast = unreachable("This is a no-op at runtime!");
+
+raw_from_ptr :: fn(const From: Type, ptr: *From) rawptr #generic #unsafe_noop_cast = unreachable("This is a no-op at runtime!");
+ptr_from_raw :: fn(const To: Type, ptr: rawptr) *To #generic #unsafe_noop_cast = unreachable("This is a no-op at runtime!");
+
+// TODO: most of the time what you want to do with these is replace the first argument with a rawptr or reverse that. 
+//       should provide convience functions for that. 
+erase_types_fn :: fn(const Arg: Type, const Ret: Type, ptr: FnPtr(Arg, Ret)) rawptr #generic #unsafe_noop_cast = unreachable("This is a no-op at runtime!");
+assume_types_fn :: fn(const Arg: Type, const Ret: Type, ptr: rawptr) FnPtr(Arg, Ret) #generic #unsafe_noop_cast = unreachable("This is a no-op at runtime!");
+
+// TODO: HACK: this only exists because you have to do this so often because generated ffi types don't know how to create a real slice type. 
+//       previously you could use @as to do this but it seemed super fragile to have that just ignore field names,
+//       when this is the probably the only common situation you'd do that on purpose.  
+//       having @as essentually be a transmute is dumb.  -- Jun 1
+// TODO: these are dumb names because it sounds like it would be `self: *(T, T)` <-> `(ptr = self, len = 2)`
+//       but its temporary anyway. 
+slice_from_tuple :: fn(const E: Type, tuple: Ty(*E, i64)) Slice(E) #generic #inline = 
+    (ptr = tuple._0, len = tuple._1);
+
+tuple_from_slice :: fn(const E: Type, slice: Slice(E)) Ty(*E, i64) #generic #inline = 
+    (slice.ptr, slice.len);
+
+// I always use the whole register so its fine? 
+// TODO: but @as doesn't do anything so need to add a trunc for doing down. 
+//       its hard to think about why this works. 
+fn zext(v: u32) u64 = @as(u64) v;
+fn zext(v: u8)  u64 = @as(u64) v;
+fn zext(v: u8)  u32 = @as(u32) v;
+fn zext(v: u8)  i64 = @as(i64) v;
+
+fn trunc(v: u64) u32 = @as(u32) @as(u64) bit_and(v, ::0xFFFFFFFF.zext());
+fn trunc(v: u64) u8  = @as(u8)  @as(u64) bit_and(v, ::0xFF.zext());
+fn trunc(v: u32) u8  = @as(u8)  @as(u32) bit_and(v, ::0xFF.zext());
+fn trunc(v: i64) u32 = {
+    // TODO: bounds check?
+     @as(u32) @as(i64) bit_and(v, @as(i64) 0xFFFFFFFF)
+}
+fn trunc(v: i64) u8 = @as(u8) @as(i64) bit_and(v, @as(i64) ::0xFF.zext());

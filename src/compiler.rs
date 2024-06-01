@@ -1291,7 +1291,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                 // If its not a FnPtr, it should be a Fn/FuncId/OverloadSetId
                 if let Some(f_id) = self.maybe_direct_fn(f, arg, requested)? {
-                    return Ok(self.compile_call(expr, f_id, requested)?.0);
+                    return self.compile_call(expr, f_id);
                 }
 
                 self.last_loc = Some(f.loc);
@@ -2549,7 +2549,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ok = f
                             .iter()
                             .zip(e.iter())
-                            .all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset);
+                            .all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset && f.name == e.name);
                         if ok {
                             return Ok(());
                         }
@@ -2621,7 +2621,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ok = f
                             .iter()
                             .zip(e.iter())
-                            .all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset);
+                            .all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset && f.name == e.name);
                         if ok {
                             return Ok(());
                         }
@@ -2882,25 +2882,28 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     // the bool return is did_inline which will be banned if its a Split FuncRef. // TODO: remove that cause i dont do it anymore
-    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId, requested: Option<TypeId>) -> Res<'p, (TypeId, bool)> {
+    fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId) -> Res<'p, TypeId> {
         let loc = expr.loc;
         let done = expr.done;
         let (f_expr, arg_expr) = if let Expr::Call(f, arg) = expr.deref_mut() { (f, arg) } else { ice!("") };
         self.ensure_resolved_sign(fid)?;
 
+        if self.program[fid].get_flag(Generic) {
+            assert!(self.program[fid].any_const_args(), "fn with no const args redundantly marked #generic");
+            self.compile_expr(arg_expr, None)?;
+            fid = self.curry_const_args(fid, f_expr, arg_expr)?;
+        }
+
+        let arg_ty = self.infer_arg(fid)?;
+        self.compile_expr(arg_expr, Some(arg_ty))?;
+        self.last_loc = Some(loc);
+        self.type_check_arg(arg_expr.ty, arg_ty, "fn arg")?;
+
         // TODO: you really want to compile as much of the body as possible before you start baking things.
         // TODO: if its a pure function you might want to do the call at comptime
         // TODO: make sure I can handle this as well as Nim: https://news.ycombinator.com/item?id=31160234
-        if self.program[fid].get_flag(Generic) {
-            self.compile_expr(arg_expr, None)?;
-        } else {
-            let arg_ty = self.infer_arg(fid)?;
-            self.compile_expr(arg_expr, Some(arg_ty))?;
-            self.last_loc = Some(loc);
-            self.type_check_arg(arg_expr.ty, arg_ty, "fn arg")?;
-        }
-
         if self.program[fid].any_const_args() {
+            debug_assert!(!self.program[fid].get_flag(Generic), "#generic was handled above");
             fid = self.curry_const_args(fid, f_expr, arg_expr)?;
         }
 
@@ -2913,6 +2916,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         let will_inline = force_inline || func.get_flag(AllowRtCapture) || !func.capture_vars.is_empty();
         assert!(!(will_inline && deny_inline), "{fid:?} has captures but is @noinline");
 
+        if func.get_flag(FnFlag::UnsafeNoopCast) {
+            let ret_ty = func.finished_ret.unwrap();
+            self.ensure_compiled(fid, ExecStyle::Jit)?;
+            let done = arg_expr.done;
+            // TODO: do this check once per #unsafe_noop function somewhere else. after applying constant arguments.
+            assert_eq!(self.program.slot_count(arg_expr.ty), self.program.slot_count(ret_ty));
+            expr.expr = Expr::Cast(mem::take(arg_expr));
+            expr.ty = ret_ty;
+            expr.done = done;
+            return Ok(expr.ty);
+        }
+
         if will_inline {
             // If we're just inlining for #inline, compile first so some work on the ast is only done once.
             // note: compile() checks if its ::Inline before actually generating asm so it doesn't waste its time.
@@ -2921,7 +2936,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
 
             // TODO: check that you're calling from the same place as the definition.
-            Ok((self.emit_capturing_call(fid, expr)?, true))
+            self.emit_capturing_call(fid, expr)
         } else if !done && func.get_flag(TryConstantFold) && arg_expr.is_const() {
             // TODO: this should be smarter. like if fn add is #fold, then (1.add(2.add(3))) doesn't need to do the fold at both levels,
             // it can just emit one function for doing the top one. idk if thats better. probably depends how complicated the expression is.
@@ -2934,7 +2949,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.compile(fid, ExecStyle::Jit)?;
             let value = self.immediate_eval_expr(expr.clone(), ret_ty)?;
             expr.set(value, ret_ty);
-            Ok((ret_ty, true))
+            Ok(ret_ty)
         } else {
             let res = self.emit_runtime_call(fid, arg_expr)?;
             // Since we've called it, we must know the type by now.
@@ -2942,7 +2957,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ty = self.program.func_type(fid);
             f_expr.set((fid.as_raw()).into(), ty);
             arg_expr.done = true; // this saves a lot of the recursing.
-            Ok((res, false))
+            Ok(res)
         }
     }
 
@@ -3390,6 +3405,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     ) -> Res<'p, ()> {
         let no_type = matches!(ty, LazyType::Infer);
         self.infer_types_progress(ty)?;
+        self.last_loc = Some(value.loc);
 
         match kind {
             VarType::Const => self.decl_const(name, ty, value)?,

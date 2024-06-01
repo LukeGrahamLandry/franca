@@ -694,7 +694,8 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
 }
 
 fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
-    compile.compile_expr(&mut expr, None).unwrap();
+    let res = compile.compile_expr(&mut expr, None);
+    hopec(compile, || res);
     expr
 }
 
