@@ -217,7 +217,7 @@ impl<'a, 'p> Parser<'a, 'p> {
     fn anon_fn_name(&self, expr: &FatExpr<'p>) -> Ident<'p> {
         if unsafe { ANON_BODY_AS_NAME } {
             let mut name = expr.log(self.pool);
-            name.truncate(25);
+            name.truncate(35);
             self.pool.intern(&name)
         } else {
             Flag::Anon.ident()

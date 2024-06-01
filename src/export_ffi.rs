@@ -10,7 +10,7 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::pool::Ident;
-use crate::{err, ice};
+use crate::{assert, assert_eq, err, ice, log_err};
 use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::{self, transmute};
@@ -327,7 +327,10 @@ fn hope<'p, T>(res: impl FnOnce() -> Res<'p, T>) -> T {
 }
 
 fn hopec<'p, T>(comp: &Compile<'_, 'p>, res: impl FnOnce() -> Res<'p, T>) -> T {
-    comp.tag_err(res()).unwrap_or_else(|e| panic!("{e:?}"))
+    comp.tag_err(res()).unwrap_or_else(|e| {
+        log_err(comp, *e);
+        panic!("compile error in ffi")
+    })
 }
 
 extern "C-unwind" fn tag_value<'p>(program: &&Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
@@ -496,8 +499,8 @@ extern "C-unwind" fn debug_log_str(_: &mut &mut Program<'_>, s: &str) {
 }
 
 extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
-    assert!(arg_count == 3 * 8);
-    assert!(ret_count == 8);
+    debug_assert!(arg_count == 3 * 8);
+    debug_assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
         let s = &mut *slice_from_raw_parts_mut(arg as *mut i64, 3);
@@ -505,8 +508,8 @@ extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_cou
     }
 }
 extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
-    assert!(arg_count == 8);
-    assert!(ret_count == 8);
+    debug_assert!(arg_count == 8);
+    debug_assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
     unsafe {
         let addr = *(arg as *mut usize);
@@ -519,7 +522,7 @@ extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg:
         let f: FlatCallFn = transmute(addr);
         let ret = ret as *mut i64;
         *ret = do_flat_call(compile, f, ((10i64, 5i64), 7i64));
-        assert_eq!(*ret, 57);
+        debug_assert_eq!(*ret, 57);
     }
 }
 
@@ -631,7 +634,7 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         bounce_flat_call!(FatExpr, FatExpr, type_macro),
     ),
     (
-        "#macro #outputs(i64) fn BITS(parts: FatExpr) FatExpr;",
+        "#macro #outputs(u32) fn BITS(parts: FatExpr) FatExpr;",
         bounce_flat_call!(FatExpr, FatExpr, bits_macro),
     ),
     (
@@ -649,13 +652,14 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
 ];
 
 fn as_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    compile.last_loc = Some(arg.loc);
     let res = compile.as_cast_macro(arg, target);
-    res.unwrap()
+    hopec(compile, || res)
 }
 
 fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    compile.last_loc = Some(arg.loc);
     let res = compile.enum_constant_macro(arg, target);
-
     res.unwrap()
 }
 
@@ -857,55 +861,59 @@ fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
 }
 
 fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
-    let Expr::Tuple(parts) = arg.expr else {
-        panic!("Expected @Bits(Tuple...)")
-    };
-    let shift_or_slice = compile.program.find_unique_func(Flag::__Shift_Or_Slice.ident()).unwrap();
-    compile.compile(shift_or_slice, ExecStyle::Jit).unwrap();
+    hope(|| {
+        let Expr::Tuple(parts) = arg.expr else {
+            err!("Expected @Bits(Tuple...)",)
+        };
+        let shift_or_slice = compile.program.find_unique_func(Flag::__Shift_Or_Slice.ident()).unwrap();
+        compile.compile(shift_or_slice, ExecStyle::Jit)?;
 
-    let mut new_args = Vec::with_capacity(parts.len() * 2);
-    let loc = arg.loc;
-    let mut shift = 32;
-    for mut int in parts {
-        let ty = get_type_int(compile, int.clone()); // TODO: redundant work cause of clone
-        assert!(!ty.signed);
-        shift -= ty.bit_count;
-        assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
-        if let Some((_, v)) = compile.bit_literal(&int) {
-            assert!(v < 1 << ty.bit_count);
-            int = compile.as_literal(v, loc).unwrap();
+        let mut new_args = Vec::with_capacity(parts.len() * 2);
+        let loc = arg.loc;
+        let mut shift = 32;
+        for mut int in parts {
+            let ty = get_type_int(compile, int.clone()); // TODO: redundant work cause of clone
+            assert!(!ty.signed);
+            shift -= ty.bit_count;
+            assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
+            if let Some((_, v)) = compile.bit_literal(&int) {
+                assert!(v < 1 << ty.bit_count);
+                int = compile.as_literal(v, loc)?;
+            }
+            int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
+            new_args.push(int);
+            let mut sh = compile.as_literal(shift, loc)?;
+            sh.ty = TypeId::i64();
+            new_args.push(sh);
         }
-        int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
-        new_args.push(int);
-        let mut sh = compile.as_literal(shift, loc).unwrap();
-        sh.ty = TypeId::i64();
-        new_args.push(sh);
-    }
 
-    if shift != 0 {
-        panic!("shift != 0; expected 32 bits. TODO: other sizes.");
-    }
+        if shift != 0 {
+            err!("shift != 0; expected 32 bits. TODO: other sizes.",);
+        }
 
-    arg.expr = Expr::Tuple(new_args);
-    let (func, f_ty) = compile.func_expr(shift_or_slice);
-    let func = FatExpr::synthetic_ty(func, loc, f_ty);
-    let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc);
-    FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, TypeId::i64())
+        arg.expr = Expr::Tuple(new_args);
+        let (func, f_ty) = compile.func_expr(shift_or_slice);
+        let func = FatExpr::synthetic_ty(func, loc, f_ty);
+        let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc);
+        Ok(FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, TypeId::i64()))
+    })
 }
 
-extern "C-unwind" fn shift_or_slice(compilerctx: usize, ptr: *const i64, len: usize) -> i64 {
-    assert!(len < 32, "{} {} {}", compilerctx, ptr as usize, len);
-    let ints = unsafe { &*slice_from_raw_parts(ptr, len) };
-    let mut acc = 0;
-    for i in 0..ints.len() / 2 {
-        let x = ints[i * 2];
-        let sh = ints[i * 2 + 1];
-        assert!(sh < 32, "{} {} {}", compilerctx, ptr as usize, len);
-        // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
-        acc |= x << sh;
-    }
-    assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32");
-    acc
+extern "C-unwind" fn shift_or_slice(compiler: &mut Compile, ptr: *const i64, len: usize) -> i64 {
+    hopec(compiler, || {
+        assert!(len < 32, "{} {}", ptr as usize, len);
+        let ints = unsafe { &*slice_from_raw_parts(ptr, len) };
+        let mut acc = 0;
+        for i in 0..ints.len() / 2 {
+            let x = ints[i * 2];
+            let sh = ints[i * 2 + 1];
+            assert!(sh < 32, "{} {}", ptr as usize, len);
+            // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
+            acc |= x << sh;
+        }
+        assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32");
+        Ok(acc)
+    })
 }
 
 fn get_dispatch_ptr(comp: &mut Compile, _: ()) -> *mut i64 {

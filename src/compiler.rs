@@ -2605,9 +2605,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // :Coercion // TODO: only one direction makes sense
                 (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
                 (TypeInfo::Int(a), TypeInfo::Int(b)) => {
+                    if a.bit_count == b.bit_count {
+                        return Ok(());
+                    }
                     // :Coercion
-                    if a.bit_count == b.bit_count || a.bit_count == 64 || b.bit_count == 64 {
-                        return Ok(()); // TODO: not this!
+                    // TODO: not this!
+                    //
+                    if a.bit_count == 64 && b.bit_count != 32 && b.bit_count != 16 && b.bit_count != 8 {
+                        return Ok(());
+                    }
+                    if b.bit_count == 64 && a.bit_count != 32 && a.bit_count != 16 && a.bit_count != 8 {
+                        return Ok(());
                     }
                 }
 
@@ -3308,6 +3316,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         let names: Vec<_> = pattern.flatten_names();
         Ok(mut_replace!(*pattern, |mut pattern: Pattern<'p>| {
+            let loc = pattern.loc;
             // TODO: why must this suck so bad
             let values: Option<_> = pattern.flatten_defaults_mut();
             let mut values: Vec<_> = unwrap!(values, "use '=' not ':' for struct literals");
@@ -3322,6 +3331,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("Tried to assign unknown field {}", self.pool.get(*name));
                         };
                         let value = self.compile_expr(value, Some(field.ty))?;
+                        self.last_loc = Some(loc);
                         self.type_check_arg(value, field.ty, "struct field")?;
                     }
 
