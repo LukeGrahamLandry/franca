@@ -2556,23 +2556,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                     }
                 }
                 (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
-                    if self.coerce_type_check_arg(f, e, msg).is_ok() {
+                    if self.type_check_arg(f, e, msg).is_ok() {
                         return Ok(());
                     }
                 }
                 (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
                 (TypeInfo::FnPtr { .. }, TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr { .. }) => return Ok(()),
 
-                (TypeInfo::Unit, TypeInfo::Type) => {
-                    // :Coercion
-                    // TODO: more consistant handling of empty tuple?
-                    return Ok(());
-                }
                 // TODO: correct varience
                 (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
                     if self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok() {
                         return Ok(());
                     }
+                    // try casting through a rawptr first.
                 }
                 (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
                     if cc_f == cc_e && self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok()
@@ -2636,9 +2632,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(());
                     }
                 }
-                (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
-                (TypeInfo::FnPtr { .. }, TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr { .. }) => return Ok(()),
-
                 // TODO: correct varience
                 (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
                     if self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
