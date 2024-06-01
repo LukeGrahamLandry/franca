@@ -617,7 +617,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         ResAddr => result.push(Bc::CopyBytesToFrom { bytes: info.stride_bytes }),
                         Discard => unreachable!(),
                     }
-                    todo!();
                     return Ok(());
                 }
 

@@ -269,6 +269,7 @@ fn run_clang_on_temp_c(sanitize: bool) {
         "target/a.out",
         "-Wno-incompatible-library-redeclaration",
         "-Wno-int-conversion",
+        "-Wno-incompatible-function-pointer-types", // TODO: this ones probably often helpful, should fix it in the generated code. also UB san complains.
     ]);
     if sanitize {
         cmd = cmd.args(["-fsanitize=undefined", "-fsanitize=address", "-g"]);

@@ -6,7 +6,7 @@
 // TODO: cast fn ptr arguments
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, Bc, FnBody},
+    bc::{BakedVar, Bc, FnBody, Primitive},
     compiler::{Compile, ExecStyle, Res},
     emit_bc::emit_bc,
     err,
@@ -132,14 +132,14 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
                     render_typedef(wip.program, wip.result, ty)?;
                     let _ = wip.next_var();
                     let size = wip.program.get_info(ty).size_slots;
-                    write!(wip.result.functions, "void* _s{i}[{size}]; ").unwrap();
+                    write!(wip.result.functions, "void* _s{i}[{size}] = {{0}}; ").unwrap();
                 }
                 writeln!(wip.result.functions).unwrap();
                 wip.emit_block(0)?;
                 // it doesn't like if you declare variables after a goto label.
                 write!(wip.result.functions, "    void ").unwrap();
                 for var in 0..wip.var_id {
-                    write!(wip.result.functions, "*_{var}, ").unwrap();
+                    write!(wip.result.functions, "*_{var} = 0, ").unwrap();
                 }
                 writeln!(wip.result.functions, "*_;").unwrap();
                 write!(wip.result.functions, "    ").unwrap();
@@ -178,6 +178,8 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
 
         Ok(())
     }
+
+    out.types.push_str("#include <stdint.h>\n");
 
     // extra calls emitted by the compiler here
     let memcpy = comp.program.find_unique_func(comp.pool.intern("memcpy")).unwrap();
@@ -248,7 +250,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>) -> Res<'p, String> {
             BakedVar::Zeros { .. } => todo!(),
             BakedVar::Bytes(bytes) => {
                 let len = bytes.len().max(8);
-                writeln!(constants, "    static unsigned char _const{i}[{}] = {{", len).unwrap();
+                writeln!(constants, "    static uint8_t _const{i}[{}] = {{", len).unwrap();
                 for b in bytes {
                     write!(constants, "{b},").unwrap();
                 }
@@ -332,8 +334,8 @@ struct Emit<'z, 'p> {
     body: &'z FnBody<'p>,
     code: String,
     blocks_done: BitSet,
-    stack: Vec<usize>,
-    flat_args_already_offset: Vec<usize>,
+    stack: Vec<Val>,
+    flat_args_already_offset: Vec<Val>,
     f: FuncId,
     is_flat: bool,
     var_id: usize,
@@ -364,30 +366,32 @@ impl<'z, 'p> Emit<'z, 'p> {
         // We set up a few vars at the beginning to use as block arguments.
         assert!((block.arg_slots as usize) < STACK_ARG_SLOTS);
         for i in 0..block.arg_slots {
-            self.stack.push(i as usize)
+            self.stack.push(Val::of_var(i as usize))
         }
         for inst in &block.insts {
             // TODO: if-def this.
-            write!(self.code, "     // {inst:?}").unwrap();
-            if let Bc::AddrVar { id } = inst {
-                if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
-                    write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
-                }
-            }
-            writeln!(self.code).unwrap();
+            // write!(self.code, "     // {inst:?}").unwrap();
+            // if let Bc::AddrVar { id } = inst {
+            //     if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
+            //         write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
+            //     }
+            // }
+            // writeln!(self.code).unwrap();
 
             match *inst {
                 Bc::GetCompCtx => {
                     // err!("ICE: GetCompCtx at runtime doesn't make sense",)
-                    self.stack.push(0);
+                    self.stack.push(Val::literal(0));
                     self.code.push_str("GetCompCtx at runtime doesn't make sense. you probably forgot to mark something that should only be called at compile-time as #fold\n");
                 }
                 Bc::NameFlatCallArg { id, offset_bytes } => {
                     assert!(self.is_flat);
                     debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
-                    let var = self.next_var();
-                    writeln!(self.code, "    _{var} = _flat_arg_ptr + {offset_bytes};").unwrap();
-                    self.flat_args_already_offset.push(var);
+                    self.flat_args_already_offset.push(Val {
+                        ty: Some(Primitive::I64),
+                        refer: "_flat_arg_ptr".to_string(),
+                        offset: offset_bytes,
+                    });
                 }
                 // TODO: tail. at least warn if it was forced?
                 Bc::CallDirect { f, .. } => {
@@ -420,11 +424,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                     match cc {
                         CallConv::CCallReg => self.do_c_call(ty, |s| {
                             let callee = s.stack.pop().unwrap();
-                            write!(s.code, "((_TY{})_{callee})", ptr_ty.as_index()).unwrap();
+                            write!(s.code, "((_TY{}) {callee})", ptr_ty.as_index()).unwrap();
                         })?,
                         CallConv::Flat => self.do_flat_call(ty, |s| {
                             let callee = s.stack.pop().unwrap();
-                            write!(s.code, "((_TY{})_{callee})", ptr_ty.as_index()).unwrap();
+                            write!(s.code, "((_TY{}) {callee})", ptr_ty.as_index()).unwrap();
                         }),
                         _ => todo!(),
                     }
@@ -433,20 +437,20 @@ impl<'z, 'p> Emit<'z, 'p> {
                     }
                 }
                 Bc::PushConstant { value } => {
-                    let out = self.next_var();
-                    writeln!(self.code, "    _{out} = (void *) {value};").unwrap();
-                    self.stack.push(out);
+                    self.stack.push(Val::literal(value));
                 }
                 Bc::PushGlobalAddr { id } => {
-                    let var = self.next_var();
-                    writeln!(self.code, "    _{var} = &_const{};", id.0).unwrap();
-                    self.stack.push(var);
+                    self.stack.push(Val {
+                        ty: None,
+                        refer: format!("(&_const{})", id.0),
+                        offset: 0,
+                    });
                 }
                 Bc::JumpIf { true_ip, false_ip, slots } => {
                     debug_assert_eq!(slots, 0);
                     let cond = self.stack.pop().unwrap();
                     let stack = self.stack.clone();
-                    writeln!(self.code, "    if (_{cond}) goto _lbl{}; else goto _lbl{};", true_ip.0, false_ip.0).unwrap();
+                    writeln!(self.code, "    if ({cond}) goto _lbl{}; else goto _lbl{};", true_ip.0, false_ip.0).unwrap();
                     self.emit_block(true_ip.0 as usize)?;
                     self.stack = stack;
                     self.emit_block(false_ip.0 as usize)?;
@@ -455,7 +459,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::Goto { ip, slots } => {
                     let args = &self.stack[self.stack.len() - slots as usize..self.stack.len()];
                     for (i, var) in args.iter().enumerate() {
-                        writeln!(self.code, "    _{i} = _{var};").unwrap();
+                        writeln!(self.code, "    _{i} = {var};").unwrap();
                     }
                     writeln!(self.code, "    goto _lbl{};", ip.0).unwrap();
                     pops(&mut self.stack, slots as usize);
@@ -475,12 +479,12 @@ impl<'z, 'p> Emit<'z, 'p> {
                             0 => writeln!(self.code, "    return;").unwrap(),
                             1 => {
                                 let v = self.stack.pop().unwrap();
-                                writeln!(self.code, "    return (_TY{}) _{v};", ret_ty.as_index()).unwrap()
+                                writeln!(self.code, "    return (_TY{}) {v};", ret_ty.as_index()).unwrap()
                             }
                             2 => {
                                 let snd = self.stack.pop().unwrap();
                                 let fst = self.stack.pop().unwrap();
-                                writeln!(self.code, "    return (_TY{}) {{ _{fst}, _{snd} }};", ret_ty.as_index()).unwrap()
+                                writeln!(self.code, "    return (_TY{}) {{ {fst}, {snd} }};", ret_ty.as_index()).unwrap()
                             }
                             _ => err!("ICE: emit_bc never does this. it used flat call instead.",),
                         };
@@ -489,49 +493,40 @@ impl<'z, 'p> Emit<'z, 'p> {
                 }
                 Bc::GetNativeFnPtr(f) => {
                     // TODO: it might not be in the callees because it might be from an emit_relocatable_pointer because someone used a @static as a hacky forward declaration.
-                    let out = self.next_var();
-                    writeln!(self.code, "    _{out} = (void*) &_FN{};", f.as_index()).unwrap();
-                    self.stack.push(out);
+                    self.stack.push(Val {
+                        ty: Some(Primitive::I64),
+                        refer: format!("&_FN{}", f.as_index()),
+                        offset: 0,
+                    });
                 }
-                Bc::Load { slots } => {
-                    debug_assert_ne!(slots, 0);
+                Bc::Load { ty } => {
+                    let v = self.next_var();
                     let addr = self.stack.pop().unwrap();
-                    for s in 0..slots {
-                        let v = self.next_var();
-                        writeln!(self.code, "    _{v} = *(void**) (_{addr} + {});", s as i32 * 8).unwrap();
-                        self.stack.push(v);
-                    }
+                    let ty = c_type_spec(ty);
+                    writeln!(self.code, "    _{v} = *({ty}*) ({addr});").unwrap();
+                    self.stack.push(Val::of_var(v));
                 }
-                Bc::StorePost { slots } => {
-                    debug_assert_ne!(slots, 0);
+                Bc::StorePost { ty } => {
                     let addr = self.stack.pop().unwrap();
-                    for s in 0..slots {
-                        let v = self.stack[self.stack.len() - slots as usize + s as usize];
-                        writeln!(self.code, "    *(void**) (_{addr} + {}) = _{v};", s as i32 * 8).unwrap();
-                    }
-                    pops(&mut self.stack, slots as usize);
+                    let value = self.stack.pop().unwrap();
+                    let ty = c_type_spec(ty);
+                    writeln!(self.code, "    *({ty}*) ({addr}) = ({ty}) {value};").unwrap();
                 }
-                Bc::StorePre { slots } => {
-                    debug_assert_ne!(slots, 0);
-                    let addr = self.stack[self.stack.len() - slots as usize - 1];
-                    for s in 0..slots {
-                        let v = self.stack[self.stack.len() - slots as usize + s as usize];
-                        writeln!(self.code, "    *(void**) (_{addr} + {}) = _{v};", s as i32 * 8).unwrap();
-                    }
-                    pops(&mut self.stack, slots as usize + 1);
+                Bc::StorePre { ty } => {
+                    let value = self.stack.pop().unwrap();
+                    let addr = self.stack.pop().unwrap();
+                    let ty = c_type_spec(ty);
+                    writeln!(self.code, "    *({ty}*) ({addr}) = ({ty}) {value};").unwrap();
                 }
                 Bc::AddrVar { id } => {
-                    if let Some(&ptr) = self.flat_args_already_offset.get(id as usize) {
-                        self.stack.push(ptr);
+                    if let Some(ptr) = self.flat_args_already_offset.get(id as usize) {
+                        self.stack.push(ptr.clone());
                     } else {
-                        self.stack.push(id as usize + STACK_ARG_SLOTS);
+                        self.stack.push(Val::of_var(id as usize + STACK_ARG_SLOTS));
                     }
                 }
                 Bc::IncPtrBytes { bytes } => {
-                    let ptr = self.stack.pop().unwrap();
-                    let out = self.next_var();
-                    writeln!(self.code, "    _{out} = _{ptr} + {bytes};").unwrap();
-                    self.stack.push(out);
+                    self.stack.last_mut().unwrap().offset += bytes;
                 }
                 Bc::Pop { slots } => {
                     pops(&mut self.stack, slots as usize);
@@ -544,28 +539,23 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::NoCompile => err!("NoCompile",),
                 Bc::LastUse { .. } | Bc::Noop => {}
                 Bc::AddrFnResult => {
-                    let var = self.next_var();
-                    writeln!(self.code, "    _{var} = _flat_ret_ptr;").unwrap();
-                    self.stack.push(var)
+                    self.stack.push(Val {
+                        ty: Some(Primitive::I64),
+                        refer: String::from("_flat_ret_ptr"),
+                        offset: 0,
+                    });
                 }
-                Bc::Dup => {
-                    self.stack.push(*self.stack.last().unwrap());
+                Bc::PeekDup(skip) => {
+                    self.stack.push(self.stack[self.stack.len() - skip as usize - 1].clone());
+                }
+                Bc::Snipe(skip) => {
+                    self.stack.remove(self.stack.len() - skip as usize - 1);
                 }
                 Bc::CopyBytesToFrom { bytes } => {
                     let from = self.stack.pop().unwrap();
                     let to = self.stack.pop().unwrap();
-                    // TODO: is this worth it?
-                    // if bytes == 1 {
-                    //     // HACK that makes bool vars less stupid
-                    //     writeln!(self.code, "  *(cast)  _{to} = *(cast){from};").unwrap();
-                    // }
-                    if bytes % 8 == 0 && bytes <= 32 {
-                        for i in 0..bytes / 8 {
-                            writeln!(self.code, "    *(((void**)_{to}) + {i}) = *(((void**)_{from}) + {i});").unwrap();
-                        }
-                    } else {
-                        writeln!(self.code, "    memcpy(_{to}, _{from}, {bytes});").unwrap();
-                    }
+                    // TODO: don't call memcpy on every var assignment.
+                    writeln!(self.code, "    memcpy({to}, {from}, {bytes});").unwrap();
                 }
             }
         }
@@ -600,7 +590,7 @@ impl<'z, 'p> Emit<'z, 'p> {
             let types = self.program.flat_tuple_types(f_ty.arg);
             assert_eq!(types.len(), args.len(), "{}", self.program.log_type(f_ty.arg));
             for (arg, ty) in args.iter().zip(types) {
-                write!(self.code, "(_TY{}) _{arg},", ty.as_index()).unwrap();
+                write!(self.code, "(_TY{}) {arg},", ty.as_index()).unwrap();
             }
             self.code.remove(self.code.len() - 1); // comma
         }
@@ -608,16 +598,17 @@ impl<'z, 'p> Emit<'z, 'p> {
         writeln!(self.code, ");").unwrap();
 
         if ret.size_slots != 0 {
+            // TODO: we know the types here.
             match ret.size_slots {
                 0 => {}
                 // TODO: bit cast float??
                 1 => {
-                    self.stack.push(ret_var);
+                    self.stack.push(Val::of_var(ret_var));
                 }
                 2 => {
                     let ret2 = self.next_var();
-                    self.stack.push(ret_var);
-                    self.stack.push(ret2);
+                    self.stack.push(Val::of_var(ret_var));
+                    self.stack.push(Val::of_var(ret2));
                     writeln!(self.code, " _{ret_var} = tmp._0; _{ret2} = tmp._1; }} ").unwrap();
                 }
                 _ => unreachable!(),
@@ -635,7 +626,17 @@ impl<'z, 'p> Emit<'z, 'p> {
         write!(self.code, "    ").unwrap();
         // flat_call result goes into a variable somewhere, already setup by bc. so don't worry about return value here.
         write_fn_ref(self);
-        writeln!(self.code, "(0, _{arg_ptr}, {}, _{ret_ptr}, {});", arg.stride_bytes, ret.stride_bytes).unwrap();
+        writeln!(self.code, "(0, {arg_ptr}, {}, {ret_ptr}, {});", arg.stride_bytes, ret.stride_bytes).unwrap();
+    }
+}
+
+fn c_type_spec(ty: Primitive) -> &'static str {
+    match ty {
+        Primitive::I8 => "uint8_t",
+        Primitive::I16 => "uint16_t",
+        Primitive::I32 => "uint32_t",
+        Primitive::I64 => "uint64_t",
+        Primitive::F64 => "double",
     }
 }
 
@@ -657,16 +658,16 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
         TypeInfo::Int(int) => {
             write!(out.types, "typedef").unwrap();
             if int.signed {
-                write!(out.types, " unsigned").unwrap();
+                write!(out.types, " u").unwrap();
             } else {
-                write!(out.types, " signed").unwrap();
+                write!(out.types, " ").unwrap();
             }
             // TODO: use the fixed width types.
             match int.bit_count {
-                8 => write!(out.types, " char").unwrap(),
-                16 => write!(out.types, " short").unwrap(),
-                32 => write!(out.types, " int").unwrap(),
-                _ => write!(out.types, " long").unwrap(),
+                8 => write!(out.types, "int8_t").unwrap(),
+                16 => write!(out.types, "int16_t").unwrap(),
+                32 => write!(out.types, "int32_t").unwrap(),
+                _ => write!(out.types, "int64_t").unwrap(),
             }
             writeln!(out.types, " _TY{};", ty.as_index()).unwrap();
         }
@@ -737,4 +738,38 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct Val {
+    ty: Option<Primitive>,
+    refer: String,
+    offset: u16,
+}
+
+impl Val {
+    fn of_var(id: usize) -> Self {
+        Self {
+            ty: None,
+            refer: format!("_{id}"),
+            offset: 0,
+        }
+    }
+    fn literal(value: i64) -> Self {
+        Self {
+            ty: None,
+            refer: format!("{value}"),
+            offset: 0,
+        }
+    }
+}
+
+impl std::fmt::Display for Val {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.offset == 0 {
+            write!(f, "{}", self.refer)
+        } else {
+            write!(f, "(((void*){}) + {})", self.refer, self.offset)
+        }
+    }
 }
