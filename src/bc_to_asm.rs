@@ -594,17 +594,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.asm.push(brk(0xbabe));
                 return Ok(true);
             }
-            Bc::Pop { slots } => {
-                debug_assert!(self.state.stack.len() >= slots as usize);
-                for _ in 0..slots {
-                    match self.state.stack.pop().unwrap() {
-                        Val::Increment { reg, .. } => self.drop_reg(reg),
-                        Val::Literal(_) => {}
-                        Val::Spill(slot) => self.drop_slot(slot, 8),
-                        Val::FloatReg(_) => todo!(),
-                    }
-                }
-            }
             Bc::Snipe(skip) => {
                 let index = self.state.stack.len() - skip as usize - 1;
                 match self.state.stack.remove(index) {

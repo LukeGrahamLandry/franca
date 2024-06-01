@@ -1,6 +1,6 @@
 //! Converts ASTs into... simpler asts.
 //! Type checking, overload resolution, implicit function calls, inlining, monomorphization, etc.
-//! Uses the interpreter for comptime evalutation (build scripts, generics, macros, etc).
+//! The rest of the compiler can be organised as nicely as it wants but this is where we draw the rest of the fucking owl.
 
 #![allow(clippy::wrong_self_convention)]
 

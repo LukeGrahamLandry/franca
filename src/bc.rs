@@ -32,7 +32,6 @@ pub enum Bc {
     StorePre { ty: Primitive },                           // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
-    Pop { slots: u16 },                                   // <?:n> -> _
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     AddrFnResult,                                         // _ -> <ptr:1>
     PeekDup(u16),                                         // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,

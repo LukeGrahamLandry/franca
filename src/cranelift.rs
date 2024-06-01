@@ -649,9 +649,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let res = builder.ins().bitcast(I64, MemFlags::new(), res);
                     self.stack.push(res);
                 }
-                Bc::Pop { slots } => {
-                    pops(&mut self.stack, slots as usize);
-                }
+
                 Bc::TagCheck { expected: _ } => {} // TODO: !!!
                 Bc::Unreachable => {
                     builder.ins().trap(TrapCode::UnreachableCodeReached);

@@ -4,6 +4,8 @@
 
 // TODO: safe fn names. '//' is not enough, am i totally sure i never leave a new line in there?
 // TODO: cast fn ptr arguments
+// TODO: functions with const arguments that evaluate to const value body should be inlined in compiler.
+//       currently each unique character constant emits a function. im sure llvm will inline it but its still dumb to make it waste its time on that.
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
     bc::{BakedVar, Bc, FnBody, Primitive},
@@ -192,6 +194,10 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
     if test_runner_main {
         writeln!(out.functions, "int main(){{").unwrap();
         for f in &functions {
+            let name = comp.pool.get(comp.program[*f].name);
+            let msg = format!("{name};\\n");
+            writeln!(out.functions, "write(1, (int8_t*)\"{msg}\", {});", msg.len() - 1).unwrap();
+
             if comp.program[*f].finished_arg.unwrap().is_unit() {
                 writeln!(out.functions, "_FN{}();", f.as_index()).unwrap();
             } else {
@@ -217,7 +223,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
             BakedVar::Zeros { .. } => todo!(),
             BakedVar::Bytes(bytes) => {
                 let len = bytes.len().max(8);
-                writeln!(constants, "    static unsigned char _const{i}[{}] = {{", len).unwrap();
+                writeln!(constants, "    static uint8_t _const{i}[{}] = {{", len).unwrap();
                 for b in bytes {
                     write!(constants, "{b},").unwrap();
                 }
@@ -364,13 +370,13 @@ impl<'z, 'p> Emit<'z, 'p> {
         }
         for inst in &block.insts {
             // TODO: if-def this.
-            write!(self.code, "     // {inst:?}").unwrap();
-            if let Bc::AddrVar { id } = inst {
-                if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
-                    write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
-                }
-            }
-            writeln!(self.code).unwrap();
+            // write!(self.code, "     // {inst:?}").unwrap();
+            // if let Bc::AddrVar { id } = inst {
+            //     if let Some(Some(name)) = self.body.var_names.get(*id as usize) {
+            //         write!(self.code, " {}", self.program.pool.get(name.name)).unwrap();
+            //     }
+            // }
+            // writeln!(self.code).unwrap();
 
             match *inst {
                 Bc::GetCompCtx => {
@@ -487,6 +493,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                 }
                 Bc::GetNativeFnPtr(f) => {
                     // TODO: it might not be in the callees because it might be from an emit_relocatable_pointer because someone used a @static as a hacky forward declaration.
+                    assert!(self.program[self.f].callees.contains(&f));
                     self.stack.push(Val {
                         ty: Some(Primitive::I64),
                         refer: format!("&_FN{}", f.as_index()),
@@ -521,9 +528,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                 }
                 Bc::IncPtrBytes { bytes } => {
                     self.stack.last_mut().unwrap().offset += bytes;
-                }
-                Bc::Pop { slots } => {
-                    pops(&mut self.stack, slots as usize);
                 }
                 Bc::TagCheck { expected: _ } => {} // TODO: !!!
                 Bc::Unreachable => {
@@ -652,16 +656,16 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
         TypeInfo::Int(int) => {
             write!(out.types, "typedef").unwrap();
             if int.signed {
-                write!(out.types, " unsigned").unwrap();
+                write!(out.types, " u").unwrap();
             } else {
-                write!(out.types, " signed").unwrap();
+                write!(out.types, " ").unwrap();
             }
             // TODO: use the fixed width types.
             match int.bit_count {
-                8 => write!(out.types, " char").unwrap(),
-                16 => write!(out.types, " short").unwrap(),
-                32 => write!(out.types, " int").unwrap(),
-                _ => write!(out.types, " long").unwrap(),
+                8 => write!(out.types, "int8_t").unwrap(),
+                16 => write!(out.types, "int16_t").unwrap(),
+                32 => write!(out.types, "int32_t").unwrap(),
+                _ => write!(out.types, "int64_t").unwrap(),
             }
             writeln!(out.types, " _TY{};", ty.as_index()).unwrap();
         }
@@ -752,7 +756,7 @@ impl Val {
     fn literal(value: i64) -> Self {
         Self {
             ty: None,
-            refer: format!("{value}"),
+            refer: format!("{value:#0x}"),
             offset: 0,
         }
     }

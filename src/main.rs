@@ -130,6 +130,7 @@ fn main() {
                 }
                 "test-c" => {
                     test_c = true;
+                    assert!(cfg!(feature = "c-backend"));
                 }
                 _ => panic!("unknown argument --{name}"),
             }
@@ -155,6 +156,12 @@ fn main() {
     }
     if do_60fps_ {
         do_60fps(arch);
+        return;
+    }
+
+    #[cfg(feature = "c-backend")]
+    if test_c {
+        run_c_tests(arch, sanitize);
         return;
     }
 
@@ -362,7 +369,7 @@ fn run_tests_serial(arch: TargetArch) {
 
     let end = MEM.get();
     println!(
-        "ALL TESTS PASSED! {} files. {} tests. {} assertions. {} ms. {} KB.",
+        "{arch:?}: ALL TESTS PASSED! {} files. {} tests. {} assertions. {} ms. {} KB.",
         files.len(),
         test_count,
         assertion_count,
@@ -370,6 +377,54 @@ fn run_tests_serial(arch: TargetArch) {
         (end as usize - beg as usize) / 1000,
     );
     unset_colour();
+
+    mem::forget(comp);
+    mem::forget(program);
+
+    // println!("{:#?}", unsafe { &STATS });
+}
+
+#[cfg(feature = "c-backend")]
+fn run_c_tests(arch: TargetArch, sanitize: bool) {
+    let pool = Box::leak(Box::<StringPool>::default());
+    let mut program = Program::new(pool, arch, arch);
+    let mut comp = Compile::new(pool, &mut program);
+
+    let files = collect_test_files();
+    load_all_toplevel(&mut comp, &files).unwrap_or_else(|e| {
+        log_err(&comp, *e);
+        exit(1);
+    });
+
+    let tests = comp.tests.clone();
+    let mut failed = 0;
+    for f in &tests {
+        // comp.compile(*f, ExecStyle::Jit).unwrap_or_else(|e| {
+        //     log_err(&comp, *e);
+        //     exit(1);
+        // });
+        let (pass, out, err) = fork_and_catch(|| {
+            let src = franca::c::emit_c(&mut comp, vec![*f], true).unwrap_or_else(|e| {
+                log_err(&comp, *e);
+                exit(1);
+            });
+            fs::write("target/temp.c", src).unwrap();
+            run_clang_on_temp_c(sanitize);
+        });
+        if pass {
+            set_colour(0, 255, 0);
+        } else {
+            failed += 1;
+            set_colour(255, 0, 0);
+        }
+        println!("{}", comp.pool.get(comp.program[*f].name));
+        unset_colour();
+    }
+    if failed == 0 {
+        println!("passed all {} tests.", tests.len());
+    } else {
+        println!("failed {}/{} tests.", failed, tests.len());
+    }
 
     mem::forget(comp);
     mem::forget(program);
@@ -442,8 +497,6 @@ fn check_broken(arch: TargetArch) {
     for f in tests {
         let fname = comp.pool.get(comp.program[f].name);
         let (success, _, _) = fork_and_catch(|| {
-            println!(" ");
-            println!(" ");
             run_one(&mut comp, f);
         });
         if success {

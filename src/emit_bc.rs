@@ -13,7 +13,7 @@ use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
-use crate::{bc::*, extend_options, Map};
+use crate::{bc::*, extend_options, Map, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
@@ -30,6 +30,7 @@ pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res
     let mut emit = EmitBc::new(compile.program, &compile.aarch64);
 
     let body = emit.compile_inner(f, when)?;
+    unsafe { STATS.bytecodes += body.blocks.iter().map(|b| b.insts.len()).sum::<usize>() };
     Ok(body)
 }
 
@@ -163,7 +164,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             len -= 1;
             i += 1;
         }
-        result.push(Bc::Pop { slots: 1 });
+        result.push(Bc::Snipe(0));
         // debug_assert_eq!(i * 8, self.program.get_info(ty).stride_bytes); // TODO
     }
 
@@ -255,7 +256,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     ) -> Res<'p, ()> {
         // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
         let f_ty = self.program[f].finished_ty().unwrap(); // kinda HACK to fix unaligned store?
-        if let FuncImpl::Redirect(target) = self.program[f].body {
+        while let FuncImpl::Redirect(target) = self.program[f].body {
             f = target;
         }
 
@@ -308,8 +309,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             if func.has_tag(Flag::No_Tail) {
                 can_tail = false;
             }
-            // TODO: check if any args are pointers cause they might be to the stack and then you probably can't tail call.
-            result.push(Bc::CallDirect { f, tail: can_tail });
+            // if any args are pointers, they might be to the stack and then you probably can't tail call.
+            // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
+            // TODO: !tail to force it when you know its fine.
+            let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers;
+            result.push(Bc::CallDirect { f, tail });
             let slots = self.slot_count(f_ty.ret);
             if slots > 0 {
                 match result_location {
@@ -323,11 +327,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         // );
                         self.store_pre(result, f_ty.ret);
                     }
-                    Discard => result.push(Bc::Pop { slots }),
+                    Discard => {
+                        for i in 0..slots {
+                            result.push(Bc::Snipe(0));
+                        }
+                    }
                 }
             } else if result_location == ResAddr {
                 // pop dest!
-                result.push(Bc::Pop { slots: 1 });
+                result.push(Bc::Snipe(0));
             }
         }
         if func.finished_ret.unwrap().is_never() {
@@ -493,7 +501,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             match result_location {
                                 PushStack => {}
                                 ResAddr => self.store_pre(result, f_ty.ret),
-                                Discard => result.push(Bc::Pop { slots }),
+                                Discard => {
+                                    for i in 0..slots {
+                                        result.push(Bc::Snipe(0));
+                                    }
+                                }
                             }
                         }
                     } else if result_location == ResAddr {
@@ -592,7 +604,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 if result_location == ResAddr {
-                    result.push(Bc::Pop { slots: 1 });
+                    result.push(Bc::Snipe(0));
                 }
             }
             Expr::GetVar(var) => {
@@ -606,7 +618,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     return Ok(());
                 }
 
-                let want_emit_by_memcpy = self.program.get_info(expr.ty).stride_bytes % 8 != 0 || value.0.len() > 64 || value.0.len() % 8 != 0;
+                let want_emit_by_memcpy = value.0.len() > 64;
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     // TODO: this is dumb because a slice becomes a pointer to a slice.
                     let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
@@ -671,7 +683,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                 result.push(Bc::PushConstant { value });
                                 result.push(Bc::StorePre { ty });
                             }
-                            result.push(Bc::Pop { slots: 1 }); // res ptr
+                            result.push(Bc::Snipe(0)); // res ptr
                         }
                     }
                     Discard => {}
@@ -710,9 +722,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                 result.push(Bc::StorePost { ty: Primitive::I64 });
                                 result.push(Bc::PeekDup(1));
                                 result.push(Bc::StorePost { ty: Primitive::I64 });
-                                result.push(Bc::Pop { slots: 1 })
+                                result.push(Bc::Snipe(0));
                             }
-                            Discard => result.push(Bc::Pop { slots: 2 }),
+                            Discard => {
+                                result.push(Bc::Snipe(0));
+                                result.push(Bc::Snipe(0));
+                            }
                         }
                         self.locals.last_mut().unwrap().push(id);
                     }
@@ -729,8 +744,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         );
                         if slots == 0 {
                             match result_location {
-                                ResAddr => result.push(Bc::Pop { slots: 2 }), // pop dest too!
-                                PushStack | Discard => result.push(Bc::Pop { slots: 1 }),
+                                ResAddr => {
+                                    // pop dest too!
+                                    result.push(Bc::Snipe(0));
+                                    result.push(Bc::Snipe(0));
+                                }
+                                PushStack | Discard => result.push(Bc::Snipe(0)),
                             };
                         } else {
                             match result_location {
@@ -739,7 +758,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                     let bytes = self.program.get_info(expr.ty).stride_bytes;
                                     result.push(Bc::CopyBytesToFrom { bytes });
                                 }
-                                Discard => result.push(Bc::Pop { slots: 1 }),
+                                Discard => result.push(Bc::Snipe(0)),
                             };
                         }
                     }
@@ -749,12 +768,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::Fn_Ptr => {
                         debug_assert!(matches!(self.program[arg.ty], TypeInfo::Fn(_)));
-                        let f = unwrap!(arg.as_const(), "expected fn for ptr").unwrap_func_id();
+                        let mut f = unwrap!(arg.as_const(), "expected fn for ptr").unwrap_func_id();
+                        // For jit, the redirects go in the dispatch table so it doesn't matter,
+                        // but for emitting c, you need to get the real name.
+                        while let FuncImpl::Redirect(target) = self.program[f].body {
+                            f = target;
+                        }
                         result.push(Bc::GetNativeFnPtr(f));
                         match result_location {
                             PushStack => {}
                             ResAddr => result.push(Bc::StorePre { ty: Primitive::I64 }),
-                            Discard => result.push(Bc::Pop { slots: 1 }),
+                            Discard => result.push(Bc::Snipe(0)),
                         };
                     }
                     Flag::Unreachable => {
@@ -773,7 +797,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                     result.push(Bc::PushConstant { value: 0 });
                                 }
                             }
-                            ResAddr => result.push(Bc::Pop { slots: 1 }), // just pop the res ptr
+                            ResAddr => result.push(Bc::Snipe(0)), // just pop the res ptr
                             Discard => {}
                         };
                         return Ok(());
@@ -790,7 +814,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match result_location {
                     PushStack => {}
                     ResAddr => result.push(Bc::StorePre { ty: Primitive::I64 }),
-                    Discard => result.push(Bc::Pop { slots: 1 }),
+                    Discard => result.push(Bc::Snipe(0)),
                 }
             }
             Expr::StructLiteralP(pattern) => self.construct_struct(result, pattern, expr.ty, result_location)?,
@@ -821,7 +845,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         match result_location {
             PushStack => {}
             ResAddr => result.push(Bc::StorePre { ty: Primitive::I64 }),
-            Discard => result.push(Bc::Pop { slots: 1 }),
+            Discard => result.push(Bc::Snipe(0)),
         }
 
         Ok(())
@@ -950,7 +974,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 if result_location == ResAddr {
-                    result.push(Bc::Pop { slots: 1 }); // res ptr
+                    result.push(Bc::Snipe(0)); // res ptr
                 }
             }
             // TODO: make this constexpr in compiler
