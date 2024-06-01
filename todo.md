@@ -1,16 +1,18 @@
+- generic Read/Write instead of hardcoding List(u8).
+- remove flat call from backends, just do it in bc.
+- dont allow variable assignment silently changing int type.
+- make sure fn load is always correctly inlined by #one_ret_pic
+
 ## regressions
 
 - @tagged tag check on field access
 
 ## Deeply annoying
 
-- no u32/u16/u8
-- no typechecking through fn arg/ret so if/loop body closures need annotations
 - no narrowing overloads with partial argument typecheck.
 - can't output an exe, only jit
 - no way to say trait bounds on generics (it just tries to compile like c++ templates). at least have fn require_overload(Ident, Type, Type);
 - need to explicitly instantiate generics
-- asm no print stack traces
 - stdlib isn't in seperate modules. need to allow nested modules.
 - test runner glue code is done in rust instead of fancy metaprogram
 - sometimes it can't show the codemap. should never use garbage_loc.

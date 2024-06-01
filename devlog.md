@@ -1,4 +1,14 @@
-## May 31
+## (Jun 1)
+
+- I think now that i store correct sizes, i can't have my loose int casting,
+  because just putting a u8 in an i64 variable stores 1 then reads 8 and my asm backend doesn't zero the stack.
+  it used to work because i stored the whole register, and it works on cranelift because
+  store get type info from the value not my bc instruction and i zero extend all ints from before i was tracking primitive types.
+  calling zext on the digit byte fixes parsing_hex, parsing_float, and escape_characters.
+  bf_interp was same problem.
+  the aarch64_jit problem is also clearly the same but hard to see where cause its in an ffi macro.
+
+## (May 31)
 
 ```
 RUSTFLAGS="--emit=llvm-bc" cargo build --release -Z build-std=panic_abort,std --target aarch64-apple-darwin --no-default-features

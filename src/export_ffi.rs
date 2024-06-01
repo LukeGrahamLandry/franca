@@ -872,6 +872,7 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         shift -= ty.bit_count;
         assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
         if let Some((_, v)) = compile.bit_literal(&int) {
+            assert!(v < 1 << ty.bit_count);
             int = compile.as_literal(v, loc).unwrap();
         }
         int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
@@ -900,8 +901,10 @@ extern "C-unwind" fn shift_or_slice(compilerctx: usize, ptr: *const i64, len: us
         let x = ints[i * 2];
         let sh = ints[i * 2 + 1];
         assert!(sh < 32, "{} {} {}", compilerctx, ptr as usize, len);
+        // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
         acc |= x << sh;
     }
+    assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32");
     acc
 }
 
