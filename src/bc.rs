@@ -25,11 +25,10 @@ pub enum Bc {
     PushConstant { value: i64 },                          // _ -> <v:1>
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !
     Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
-    Ret,                                                  // <vals:n> -> _ OR _-> _
     GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>
-    Load { ty: Primitive },                               // <ptr:1> -> <?:n>
-    StorePost { ty: Primitive },                          // <?:n> <ptr:1> -> _
-    StorePre { ty: Primitive },                           // <ptr:1> <?:n> -> _
+    Load { ty: Prim },                                    // <ptr:1> -> <?:n>
+    StorePost { ty: Prim },                               // <?:n> <ptr:1> -> _
+    StorePre { ty: Prim },                                // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
@@ -41,27 +40,38 @@ pub enum Bc {
     Unreachable,                                          // _ -> !
     GetCompCtx,                                           // _ -> <ptr:1>
     NoCompile,
-    Noop,
     PushGlobalAddr { id: BakedVarId },
     Snipe(u16),
+    Ret0, // flat call uses this too because code has already written to indirect return address.
+    Ret1(Prim),
+    Ret2((Prim, Prim)),
 }
 
 #[derive(Clone, Debug, Copy, PartialEq)]
-pub enum Primitive {
+pub enum Prim {
     I8,
     I16,
     I32,
     I64,
     F64,
+    P64,
 }
 
-impl Primitive {
+impl Prim {
     pub(crate) fn align_bytes(self) -> usize {
         match self {
-            Primitive::I8 => 1,
-            Primitive::I16 => 2,
-            Primitive::I32 => 4,
-            Primitive::I64 | Primitive::F64 => 8,
+            Prim::I8 => 1,
+            Prim::I16 => 2,
+            Prim::I32 => 4,
+            Prim::P64 | Prim::I64 | Prim::F64 => 8,
+        }
+    }
+
+    pub(crate) fn float(self) -> u32 {
+        if self == Prim::F64 {
+            1
+        } else {
+            0
         }
     }
 }
@@ -216,7 +226,7 @@ pub fn deconstruct_values(
     ty: TypeId,
     bytes: &mut ReadBytes,
     out: &mut Vec<i64>,
-    offsets: &mut Option<&mut Vec<(Primitive, u16)>>, // this is stupid but how else do you call it in a loop??
+    offsets: &mut Option<&mut Vec<(Prim, u16)>>, // this is stupid but how else do you call it in a loop??
 ) -> Res<'static, ()> {
     let size = program.get_info(ty).stride_bytes as usize;
     debug_assert!(
@@ -231,16 +241,16 @@ pub fn deconstruct_values(
             let offset = bytes.i;
             out.push(unwrap!(bytes.next_i64(), ""));
             if let Some(offsets) = offsets {
-                offsets.push((Primitive::I64, offset as u16));
+                offsets.push((Prim::I64, offset as u16));
             }
         }
         TypeInfo::Int(_) => {
             let offset = bytes.i;
             let (value, prim) = match program.get_info(ty).stride_bytes {
-                1 => (unwrap!(bytes.next_u8(), "") as i64, Primitive::I8),
-                2 => (unwrap!(bytes.next_u16(), "") as i64, Primitive::I16),
-                4 => (unwrap!(bytes.next_u32(), "") as i64, Primitive::I32),
-                8 => (unwrap!(bytes.next_i64(), ""), Primitive::I64),
+                1 => (unwrap!(bytes.next_u8(), "") as i64, Prim::I8),
+                2 => (unwrap!(bytes.next_u16(), "") as i64, Prim::I16),
+                4 => (unwrap!(bytes.next_u32(), "") as i64, Prim::I32),
+                8 => (unwrap!(bytes.next_i64(), ""), Prim::I64),
                 n => todo!("bad int stride {n}"),
             };
             out.push(value);
@@ -252,7 +262,7 @@ pub fn deconstruct_values(
             let offset = bytes.i;
             out.push(unwrap!(bytes.next_u8(), "") as i64);
             if let Some(offsets) = offsets {
-                offsets.push((Primitive::I8, offset as u16));
+                offsets.push((Prim::I8, offset as u16));
             }
         }
         &TypeInfo::Array { inner, len } => {
@@ -281,7 +291,7 @@ pub fn deconstruct_values(
             let offset = bytes.i;
             out.push(unwrap!(bytes.next_u32(), "") as i64);
             if let Some(offsets) = offsets {
-                offsets.push((Primitive::I32, offset as u16));
+                offsets.push((Prim::I32, offset as u16));
             }
         }
     }

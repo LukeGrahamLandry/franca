@@ -5,7 +5,6 @@
 use codemap::Span;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
-use std::usize;
 
 use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
@@ -123,7 +122,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let slots = self.slot_count(ty);
 
                 if slots != 0 {
-                    let mut i = 0;
                     let types = self.program.flat_tuple_types(ty);
                     let mut len = types.len() as u16;
                     for ty in types {
@@ -131,7 +129,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::AddrVar { id });
                         result.push(Bc::IncPtrBytes { bytes: (len - 1) * 8 }); // Note: backwards!
                         result.push(Bc::StorePost { ty });
-                        i += 1;
                         len -= 1;
                     }
                     // debug_assert_eq!(i * 8, self.program.get_info(ty).stride_bytes); // TODO
@@ -150,22 +147,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn store_pre(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
         let types = self.program.flat_tuple_types(ty);
         let mut len = types.len() as u16;
-        let mut i = 0;
-        let mut offset = self.program.size_bytes(ty);
-        // TODO: doing alignment backwards like thos doesn't get the same answer as
         for ty in types {
             let ty = self.program.prim(ty);
-            // offset = align_backwards(offset, ty.align_bytes()); // TODO: this is subtley wrong because of how c does nested structs. need to respect field offsets!
             result.push(Bc::PeekDup(len));
             // Note: backwards!
             result.push(Bc::IncPtrBytes { bytes: (len - 1) * 8 }); // TODO!
             result.push(Bc::StorePost { ty });
-            // offset -= ty.align_bytes(); // always the same as size.
             len -= 1;
-            i += 1;
         }
-        result.push(Bc::Snipe(0));
-        // debug_assert_eq!(i * 8, self.program.get_info(ty).stride_bytes); // TODO
+        result.pop(1)
     }
 
     fn load(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
@@ -236,8 +226,21 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert!(self.locals.is_empty());
 
         // Note: this is different from the body expr type because of early returns.
-        if !self.program[f].finished_ret.unwrap().is_never() {
-            result.push(Bc::Ret); // TODO: this could just be implicit  -- May 1
+        let ret = self.program[f].finished_ret.unwrap();
+        if !ret.is_never() {
+            let slots = self.program.slot_count(ret);
+            let op = if self.is_flat_call {
+                Bc::Ret0
+            } else {
+                match slots {
+                    0 => Bc::Ret0,
+                    1 => Bc::Ret1(self.program.prim(ret)),
+                    2 => Bc::Ret2(self.program.prim_pair(ret)?),
+                    _ => todo!(),
+                }
+            };
+
+            result.push(op);
         }
         if result.want_log {
             println!("{}", result.log(self.program));
@@ -318,24 +321,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             if slots > 0 {
                 match result_location {
                     PushStack => {}
-                    ResAddr => {
-                        // TODO
-                        // debug_assert!(
-                        //     self.program.get_info(f_ty.ret).stride_bytes % 8 == 0,
-                        //     "{}",
-                        //     self.program.log_type(f_ty.ret)
-                        // );
-                        self.store_pre(result, f_ty.ret);
-                    }
-                    Discard => {
-                        for i in 0..slots {
-                            result.push(Bc::Snipe(0));
-                        }
-                    }
+                    ResAddr => self.store_pre(result, f_ty.ret),
+                    Discard => result.pop(slots),
                 }
             } else if result_location == ResAddr {
                 // pop dest!
-                result.push(Bc::Snipe(0));
+                result.pop(1)
             }
         }
         if func.finished_ret.unwrap().is_never() {
@@ -501,11 +492,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             match result_location {
                                 PushStack => {}
                                 ResAddr => self.store_pre(result, f_ty.ret),
-                                Discard => {
-                                    for i in 0..slots {
-                                        result.push(Bc::Snipe(0));
-                                    }
-                                }
+                                Discard => result.pop(slots),
                             }
                         }
                     } else if result_location == ResAddr {
@@ -604,7 +591,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 if result_location == ResAddr {
-                    result.push(Bc::Snipe(0));
+                    result.pop(1)
                 }
             }
             Expr::GetVar(var) => {
@@ -683,7 +670,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                 result.push(Bc::PushConstant { value });
                                 result.push(Bc::StorePre { ty });
                             }
-                            result.push(Bc::Snipe(0)); // res ptr
+                            result.pop(1) // res ptr
                         }
                     }
                     Discard => {}
@@ -719,15 +706,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             ResAddr => {
                                 result.push(Bc::PeekDup(2));
                                 result.push(Bc::IncPtrBytes { bytes: 8 }); // Note: backwards!
-                                result.push(Bc::StorePost { ty: Primitive::I64 });
+                                result.push(Bc::StorePost { ty: Prim::I64 });
                                 result.push(Bc::PeekDup(1));
-                                result.push(Bc::StorePost { ty: Primitive::I64 });
-                                result.push(Bc::Snipe(0));
+                                result.push(Bc::StorePost { ty: Prim::I64 });
+                                result.pop(1)
                             }
-                            Discard => {
-                                result.push(Bc::Snipe(0));
-                                result.push(Bc::Snipe(0));
-                            }
+                            Discard => result.pop(2),
                         }
                         self.locals.last_mut().unwrap().push(id);
                     }
@@ -746,8 +730,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             match result_location {
                                 ResAddr => {
                                     // pop dest too!
-                                    result.push(Bc::Snipe(0));
-                                    result.push(Bc::Snipe(0));
+                                    result.pop(2)
                                 }
                                 PushStack | Discard => result.push(Bc::Snipe(0)),
                             };
@@ -777,7 +760,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::GetNativeFnPtr(f));
                         match result_location {
                             PushStack => {}
-                            ResAddr => result.push(Bc::StorePre { ty: Primitive::I64 }),
+                            ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
                             Discard => result.push(Bc::Snipe(0)),
                         };
                     }
@@ -813,7 +796,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::IncPtrBytes { bytes: *bytes as u16 });
                 match result_location {
                     PushStack => {}
-                    ResAddr => result.push(Bc::StorePre { ty: Primitive::I64 }),
+                    ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
                     Discard => result.push(Bc::Snipe(0)),
                 }
             }
@@ -844,7 +827,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         match result_location {
             PushStack => {}
-            ResAddr => result.push(Bc::StorePre { ty: Primitive::I64 }),
+            ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
             Discard => result.push(Bc::Snipe(0)),
         }
 
@@ -974,7 +957,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 if result_location == ResAddr {
-                    result.push(Bc::Snipe(0)); // res ptr
+                    result.pop(1) // res ptr
                 }
             }
             // TODO: make this constexpr in compiler
@@ -1005,7 +988,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     ResAddr => {
                         result.push(Bc::PeekDup(0));
                         result.push(Bc::PushConstant { value: i as i64 });
-                        result.push(Bc::StorePre { ty: Primitive::I64 });
+                        result.push(Bc::StorePre { ty: Prim::I64 });
                         result.push(Bc::IncPtrBytes { bytes: 8 }); // TODO: differetn sizes of tag
                         self.compile_expr(result, values[0], result_location, false)?;
                     }
@@ -1168,5 +1151,11 @@ impl<'p> FnBody<'p> {
     #[track_caller]
     fn push_to(&mut self, b: BbId, inst: Bc) {
         self.blocks[b.0 as usize].insts.push(inst);
+    }
+
+    pub(crate) fn pop(&mut self, slots: u16) {
+        for _ in 0..slots {
+            self.push(Bc::Snipe(0));
+        }
     }
 }

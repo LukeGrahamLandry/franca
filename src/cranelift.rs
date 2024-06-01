@@ -25,7 +25,7 @@ use types::I16;
 
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, BasicBlock, Bc, FnBody, Primitive},
+    bc::{BakedVar, BasicBlock, Bc, FnBody, Prim},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     emit_bc::{emit_bc, empty_fn_body},
@@ -592,18 +592,16 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     self.emit_block(ip.0 as usize, builder)?;
                     break;
                 }
-                Bc::Ret => {
-                    if self.indirect_ret_addr.is_some() {
-                        // flat_call so we must have already put the values there.
-                        debug_assert!(self.flat_arg_addr.is_some());
-                        builder.ins().return_(&[]);
-                    } else {
-                        let ret = self.program.get_info(self.program[self.f].finished_ret.unwrap());
-                        self.cast_args_to_float(builder, ret.size_slots, ret.float_mask);
-                        let args = &self.stack[self.stack.len() - ret.size_slots as usize..self.stack.len()];
-                        builder.ins().return_(args);
-                        pops(&mut self.stack, ret.size_slots as usize);
-                    }
+                Bc::Ret0 => {
+                    builder.ins().return_(&[]);
+                    break;
+                }
+                Bc::Ret1(prim) => {
+                    self.emit_return(builder, 1, prim.float());
+                    break;
+                }
+                Bc::Ret2((a, b)) => {
+                    self.emit_return(builder, 2, a.float() << 1 | b.float());
                     break;
                 }
                 Bc::GetNativeFnPtr(f) => {
@@ -623,7 +621,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = builder.ins().load(primitive(ty), MemFlags::new(), addr, 0);
                     self.stack.push(v);
                 }
-                Bc::StorePost { ty } => {
+                Bc::StorePost { .. } => {
                     let addr = self.stack.pop().unwrap();
                     let v = self.stack.pop().unwrap();
                     builder.ins().store(MemFlags::new(), v, addr, 0);
@@ -656,7 +654,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     break;
                 }
                 Bc::NoCompile => err!("NoCompile",),
-                Bc::LastUse { .. } | Bc::Noop => {}
+                Bc::LastUse { .. } => {}
                 Bc::AddrFnResult => self.stack.push(self.indirect_ret_addr.unwrap()),
                 Bc::PeekDup(skip) => {
                     self.stack.push(self.stack[self.stack.len() - skip as usize - 1]);
@@ -801,15 +799,22 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             }
         }
     }
+
+    fn emit_return(&mut self, builder: &mut FunctionBuilder, count: u16, float: u32) {
+        self.cast_args_to_float(builder, count, float);
+        let args = &self.stack[self.stack.len() - count as usize..self.stack.len()];
+        builder.ins().return_(args);
+        pops(&mut self.stack, count as usize);
+    }
 }
 
-fn primitive(prim: Primitive) -> Type {
+fn primitive(prim: Prim) -> Type {
     match prim {
-        Primitive::I8 => I8,
-        Primitive::I16 => I16,
-        Primitive::I32 => I32,
-        Primitive::I64 => I64,
-        Primitive::F64 => F64,
+        Prim::I8 => I8,
+        Prim::I16 => I16,
+        Prim::I32 => I32,
+        Prim::P64 | Prim::I64 => I64,
+        Prim::F64 => F64,
     }
 }
 

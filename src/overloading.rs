@@ -132,10 +132,9 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Ok(Some(arg_ty)) => {
                     // TODO: need to factor this part out so that 'const F: <> = some_overload_set' works properly.
                     // TODO: Never needs to not be a special case. Have like an auto cast graph thingy.
-                    let accept = |f_arg: TypeId, f_ret: Option<TypeId>| arg_ty == f_arg;
 
                     // TODO: PROBLEM: this doiesnt do voidptr check. it worked before because i did filter_arch first and there happened to only be one so it didnt even get here and then th e type check passed latter because it knows the rules.
-                    overloads.ready.retain(|check| accept(check.arg, check.ret));
+                    overloads.ready.retain(|check| check.arg == arg_ty);
 
                     if overloads.ready.len() > 1 {
                         self.do_merges(&mut overloads.ready, i)?;
@@ -157,11 +156,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                     };
 
                     // TODO: put the message in the error so !assert_compile_error doesn't print it.
+                    // TODO: do this for the other case too! its probably more common anyway.
                     let mut msg = String::new();
                     use std::fmt::Write;
                     writeln!(msg, "not found {}", log_goal(self)).unwrap();
                     for f in original.ready {
-                        let yes = accept(f.arg, f.ret);
+                        let yes = f.arg == arg_ty;
                         let prefix = if yes { "[YES]" } else { "[ NO]" };
                         writeln!(
                             msg,

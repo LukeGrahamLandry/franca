@@ -8,7 +8,7 @@
 //       currently each unique character constant emits a function. im sure llvm will inline it but its still dumb to make it waste its time on that.
 use crate::{
     ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, Bc, FnBody, Primitive},
+    bc::{BakedVar, Bc, FnBody, Prim},
     compiler::{Compile, ExecStyle, Res},
     emit_bc::emit_bc,
     err,
@@ -388,7 +388,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     assert!(self.is_flat);
                     debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
                     self.flat_args_already_offset.push(Val {
-                        ty: Some(Primitive::I64),
+                        _ty: Some(Prim::I64),
                         refer: "_flat_arg_ptr".to_string(),
                         offset: offset_bytes,
                     });
@@ -441,7 +441,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                 }
                 Bc::PushGlobalAddr { id } => {
                     self.stack.push(Val {
-                        ty: None,
+                        _ty: None,
                         refer: format!("(&_const{})", id.0),
                         offset: 0,
                     });
@@ -466,36 +466,27 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.emit_block(ip.0 as usize)?;
                     break;
                 }
-                Bc::Ret => {
-                    if self.is_flat {
-                        // flat_call so we must have already put the values there.
-                        writeln!(self.code, "    return;").unwrap();
-                    } else {
-                        let ret_ty = self.program[self.f].finished_ret.unwrap();
-                        let ret = self.program.get_info(ret_ty);
-                        // self.cast_args_to_float(builder, ret.size_slots, ret.float_mask);
-
-                        match ret.size_slots {
-                            0 => writeln!(self.code, "    return;").unwrap(),
-                            1 => {
-                                let v = self.stack.pop().unwrap();
-                                writeln!(self.code, "    return (_TY{}) {v};", ret_ty.as_index()).unwrap()
-                            }
-                            2 => {
-                                let snd = self.stack.pop().unwrap();
-                                let fst = self.stack.pop().unwrap();
-                                writeln!(self.code, "    return (_TY{}) {{ {fst}, {snd} }};", ret_ty.as_index()).unwrap()
-                            }
-                            _ => err!("ICE: emit_bc never does this. it used flat call instead.",),
-                        };
-                    }
+                Bc::Ret0 => {
+                    writeln!(self.code, "    return;").unwrap();
+                    break;
+                }
+                Bc::Ret1(prim) => {
+                    let v = self.stack.pop().unwrap();
+                    writeln!(self.code, "    return ({}) {v};", c_type_spec(prim)).unwrap();
+                    break;
+                }
+                Bc::Ret2(_) => {
+                    let snd = self.stack.pop().unwrap();
+                    let fst = self.stack.pop().unwrap();
+                    let ty = self.program[self.f].finished_ret.unwrap().as_index(); // :(... its not worse than it was before tho.
+                    writeln!(self.code, "    return (_TY{ty}) {{ {fst}, {snd} }};",).unwrap();
                     break;
                 }
                 Bc::GetNativeFnPtr(f) => {
                     // TODO: it might not be in the callees because it might be from an emit_relocatable_pointer because someone used a @static as a hacky forward declaration.
                     assert!(self.program[self.f].callees.contains(&f));
                     self.stack.push(Val {
-                        ty: Some(Primitive::I64),
+                        _ty: Some(Prim::I64),
                         refer: format!("&_FN{}", f.as_index()),
                         offset: 0,
                     });
@@ -535,10 +526,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                     break;
                 }
                 Bc::NoCompile => err!("NoCompile",),
-                Bc::LastUse { .. } | Bc::Noop => {}
+                Bc::LastUse { .. } => {}
                 Bc::AddrFnResult => {
                     self.stack.push(Val {
-                        ty: Some(Primitive::I64),
+                        _ty: Some(Prim::I64),
                         refer: String::from("_flat_ret_ptr"),
                         offset: 0,
                     });
@@ -628,13 +619,14 @@ impl<'z, 'p> Emit<'z, 'p> {
     }
 }
 
-fn c_type_spec(ty: Primitive) -> &'static str {
+fn c_type_spec(ty: Prim) -> &'static str {
     match ty {
-        Primitive::I8 => "uint8_t",
-        Primitive::I16 => "uint16_t",
-        Primitive::I32 => "uint32_t",
-        Primitive::I64 => "uint64_t",
-        Primitive::F64 => "double",
+        Prim::I8 => "uint8_t",
+        Prim::I16 => "uint16_t",
+        Prim::I32 => "uint32_t",
+        Prim::I64 => "uint64_t",
+        Prim::F64 => "double",
+        Prim::P64 => "void*",
     }
 }
 
@@ -740,7 +732,7 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
 
 #[derive(Debug, Clone)]
 struct Val {
-    ty: Option<Primitive>,
+    _ty: Option<Prim>,
     refer: String,
     offset: u16,
 }
@@ -748,14 +740,14 @@ struct Val {
 impl Val {
     fn of_var(id: usize) -> Self {
         Self {
-            ty: None,
+            _ty: None,
             refer: format!("_{id}"),
             offset: 0,
         }
     }
     fn literal(value: i64) -> Self {
         Self {
-            ty: None,
+            _ty: None,
             refer: format!("{value:#0x}"),
             offset: 0,
         }

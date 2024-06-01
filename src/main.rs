@@ -403,7 +403,7 @@ fn run_c_tests(arch: TargetArch, sanitize: bool) {
         //     log_err(&comp, *e);
         //     exit(1);
         // });
-        let (pass, out, err) = fork_and_catch(|| {
+        let (pass, _, _) = fork_and_catch(|| {
             let src = franca::c::emit_c(&mut comp, vec![*f], true).unwrap_or_else(|e| {
                 log_err(&comp, *e);
                 exit(1);

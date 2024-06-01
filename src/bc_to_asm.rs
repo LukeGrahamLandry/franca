@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
-use crate::bc::{BbId, Bc, Primitive, Value, Values};
+use crate::bc::{BbId, Bc, Prim, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
@@ -349,7 +349,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     todo!() // x8
                 }
             }
-            Bc::Noop => {}
             Bc::LastUse { id } => {
                 if id < self.flat_arg_offsets.len() as u16 {
                     return Ok(false);
@@ -449,27 +448,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     s.branch_func(f, true);
                 });
             }
-            Bc::Ret => {
-                let ff = &self.program[self.f];
-                let cc = ff.cc.unwrap();
-                match cc {
-                    CallConv::CCallReg => {
-                        let ret_ty = ff.finished_ret.unwrap();
-                        let ret = self.program.get_info(ret_ty);
-                        // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
-                        self.stack_to_ccall_reg(ret.size_slots, ret.float_mask)
-                    }
-                    // We now require the bytecode to deal with putting values in the result address.
-                    // so nothing to do here.
-                    CallConv::FlatCt | CallConv::Flat => {}
-                    _ => unreachable!("unsupported cc {cc:?}"),
-                }
-                // debug_assert!(self.state.stack.is_empty()); // todo
-
-                self.emit_stack_fixup();
-                self.asm.push(ret(()));
-                return Ok(true);
-            }
+            Bc::Ret0 => return self.emit_return(0, 0),
+            Bc::Ret1(prim) => return self.emit_return(1, prim.float()),
+            Bc::Ret2((a, b)) => return self.emit_return(2, a.float() << 1 | b.float()),
             Bc::AddrVar { id } => {
                 if id < self.flat_arg_offsets.len() as u16 {
                     if let Some(arg) = self.flat_arg {
@@ -522,20 +503,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 let dest = self.get_free_reg();
                 let v = Val::Increment { reg: dest, offset_bytes: 0 };
                 match ty {
-                    // TODO: track open float registers
-                    Primitive::F64 | Primitive::I64 => {
-                        self.load_u64(dest, addr, offset_bytes);
-                    }
-                    Primitive::I32 => {
-                        self.load_one(MEM_32, dest, addr, offset_bytes);
-                    }
-                    Primitive::I16 => {
-                        self.load_one(MEM_16, dest, addr, offset_bytes);
-                    }
-                    Primitive::I8 => {
-                        self.load_one(MEM_08, dest, addr, offset_bytes);
-                    }
-                }
+                    // TODO: track open float registers so this can just switch over MEM type.
+                    Prim::P64 | Prim::F64 | Prim::I64 => self.load_u64(dest, addr, offset_bytes),
+                    Prim::I32 => self.load_one(MEM_32, dest, addr, offset_bytes),
+                    Prim::I16 => self.load_one(MEM_16, dest, addr, offset_bytes),
+                    Prim::I8 => self.load_one(MEM_08, dest, addr, offset_bytes),
+                };
 
                 self.state.stack.push(v);
                 self.drop_reg(addr);
@@ -786,32 +759,32 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
     }
 
-    fn emit_store(&mut self, addr: Val, value: Val, ty: Primitive) {
-        let (reg, mut offset_bytes) = self.to_reg_with_offset(addr);
+    fn emit_store(&mut self, addr: Val, value: Val, ty: Prim) {
+        let (reg, mut offset_bytes) = self.in_reg_with_offset(addr);
         match ty {
             // TODO: track open float registers
-            Primitive::F64 | Primitive::I64 => {
+            Prim::P64 | Prim::F64 | Prim::I64 => {
                 if let Val::FloatReg(r) = value {
                     assert_eq!(offset_bytes % 8, 0, "TODO: align");
                     self.asm.push(f_str_uo(X64, r, reg, offset_bytes as i64 / 8))
                 } else {
-                    let val = self.to_reg(value);
+                    let val = self.in_reg(value);
                     self.store_u64(val, reg, offset_bytes);
                     self.drop_reg(val);
                 }
             }
-            Primitive::I32 => {
-                let val = self.to_reg(value);
+            Prim::I32 => {
+                let val = self.in_reg(value);
                 self.store_one(MEM_32, val, reg, offset_bytes);
                 self.drop_reg(val);
             }
-            Primitive::I16 => {
-                let val = self.to_reg(value);
+            Prim::I16 => {
+                let val = self.in_reg(value);
                 self.store_one(MEM_16, val, reg, offset_bytes);
                 self.drop_reg(val);
             }
-            Primitive::I8 => {
-                let val = self.to_reg(value);
+            Prim::I8 => {
+                let val = self.in_reg(value);
                 self.store_one(MEM_08, val, reg, offset_bytes);
                 self.drop_reg(val);
             }
@@ -940,10 +913,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     fn pop_to_reg(&mut self) -> i64 {
         let val = self.state.stack.pop().unwrap();
-        self.to_reg(val)
+        self.in_reg(val)
     }
 
-    fn to_reg(&mut self, val: Val) -> i64 {
+    fn in_reg(&mut self, val: Val) -> i64 {
         match val {
             Val::Increment { mut reg, offset_bytes } => {
                 if offset_bytes > 0 {
@@ -975,10 +948,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     fn peek_to_reg_with_offset(&mut self) -> (i64, u16) {
         let val = self.state.stack.last().cloned().unwrap();
-        self.to_reg_with_offset(val)
+        self.in_reg_with_offset(val)
     }
 
-    fn to_reg_with_offset(&mut self, val: Val) -> (i64, u16) {
+    fn in_reg_with_offset(&mut self, val: Val) -> (i64, u16) {
         match val {
             Val::Increment { reg, offset_bytes } => (reg, offset_bytes),
             Val::Literal(x) => {
@@ -1172,6 +1145,16 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }) {
             self.drop_reg(register)
         }
+    }
+
+    fn emit_return(&mut self, count: u16, floats: u32) -> Res<'p, bool> {
+        // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
+        if count != 0 {
+            self.stack_to_ccall_reg(count, floats);
+        }
+        self.emit_stack_fixup();
+        self.asm.push(ret(()));
+        Ok(true)
     }
 }
 

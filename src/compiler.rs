@@ -3564,16 +3564,6 @@ pub fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {
 // i like when my code is rocks not rice
 // its a lot more challenging to eat but at least you can Find it
 
-pub(crate) trait ToBytes {
-    fn to_bytes(self) -> u64;
-}
-
-impl ToBytes for i64 {
-    fn to_bytes(self) -> u64 {
-        u64::from_le_bytes(self.to_le_bytes())
-    }
-}
-
 pub struct Unquote<'z, 'a, 'p> {
     pub compiler: &'z mut Compile<'a, 'p>,
     pub placeholders: Vec<Option<FatExpr<'p>>>,

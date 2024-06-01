@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Baked, Primitive, Values},
+    bc::{Baked, Prim, Values},
     compiler::{CErr, Compile, CompileError, Res},
     err, extend_options,
     ffi::InterpSend,
@@ -695,7 +695,6 @@ impl<'p> Func<'p> {
     }
 }
 
-#[repr(i64)]
 #[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq, Hash)]
 pub enum CallConv {
     CCallReg, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
@@ -1055,7 +1054,7 @@ impl<'p> Program<'p> {
             };
 
             let named = self.intern_type(TypeInfo::Named(ty, self.pool.intern(type_info.name)));
-            self.types[placeholder] = TypeInfo::Unique(named, (id & usize::max_value() as u128) as usize);
+            self.types[placeholder] = TypeInfo::Unique(named, (id & usize::MAX as u128) as usize);
             ty_final
         })
     }
@@ -1256,23 +1255,29 @@ impl<'p> Program<'p> {
         None
     }
 
-    pub(crate) fn prim(&self, ty: TypeId) -> Primitive {
+    pub(crate) fn prim(&self, ty: TypeId) -> Prim {
         let ty = self.raw_type(ty);
         match self[ty] {
-            TypeInfo::F64 => Primitive::F64,
+            TypeInfo::F64 => Prim::F64,
             TypeInfo::Int(int) => match int.bit_count {
-                8 => Primitive::I8,
-                16 => Primitive::I16,
-                32 => Primitive::I32,
-                _ => Primitive::I64,
+                8 => Prim::I8,
+                16 => Prim::I16,
+                32 => Prim::I32,
+                _ => Prim::I64,
             },
-            TypeInfo::Bool => Primitive::I8,
-            TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) => Primitive::I64,
+            TypeInfo::Bool => Prim::I8,
+            TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) => Prim::P64,
 
             TypeInfo::Unit => todo!(),
-            TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => Primitive::I32,
+            TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => Prim::I32,
             _ => todo!("{}", self.log_type(ty)),
         }
+    }
+
+    pub(crate) fn prim_pair(&self, ty: TypeId) -> Res<'p, (Prim, Prim)> {
+        let types = self.flat_tuple_types(ty); // TODO: don't allocate
+        assert_eq!(types.len(), 2);
+        Ok((self.prim(types[0]), self.prim(types[1])))
     }
 }
 
@@ -1820,7 +1825,7 @@ macro_rules! flag_subset {
                 // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
                 // I defined thier values to be the values in Flag (where I made sure they're consecutive)
                 if value.0 > $before as u32 && value.0 < $after as u32 {
-                    Ok(unsafe { transmute(value.0 as u8) })
+                    Ok(unsafe { transmute::<u8, $ty>(value.0 as u8) })
                 } else {
                     // TODO: just return an option?
                     // TODO: make sure getting Caller::locatiom isn't slow
