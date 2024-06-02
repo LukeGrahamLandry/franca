@@ -490,7 +490,7 @@ impl<'p> CErr<'p> {
                 "{msg}. Type check expected {expected:?} = {} but found {found:?} = {}\n{}",
                 program.log_type(expected),
                 program.log_type(found),
-                program.conversion_help(found, expected, 0)
+                program.conversion_help(found, expected, 1)
             ),
             CErr::Fatal(s) => s.clone(),
             _ => format!("{:?}", self),
@@ -526,7 +526,36 @@ impl<'p> Program<'p> {
                     self.log_type(expected)
                 )
             }
-            (TypeInfo::Int(_), TypeInfo::Int(_)) => String::from("TODO: help message"),
+            (TypeInfo::Int(f), TypeInfo::Int(e)) => {
+                if !sane_int_size(f.bit_count) || !sane_int_size(e.bit_count) {
+                    return format!("TODO: error message");
+                }
+                let fname = format!("{}{}", if f.signed { "i" } else { "u" }, f.bit_count);
+                let ename = format!("{}{}", if e.signed { "i" } else { "u" }, e.bit_count);
+                // TODO: && !f.signed && !e.signed discuss preserving the sign bit.
+                if e.bit_count > f.bit_count {
+                    let warn = if f.signed {
+                        "since zext does not extend the sign bits, negative inputs result in high positive numbers.".to_string()
+                    } else {
+                        format!("{ename} can represent all values of {fname} so this conversion is safe.")
+                    };
+                    return format!(
+                        "{indent}trying to convert {fname} to larger integer {ename}. \n{indent}use `zext(<value>)` to fill the extra space with zeros. \n{indent}{warn}"
+                    );
+                }
+                if e.bit_count < f.bit_count {
+                    let warn = if f.signed && !e.signed {
+                        "converting signed to unsigned will leave low order sign bits, so negative numbers become high positive numbers"
+                    } else {
+                        ""
+                    };
+                    return format!(
+                        "{indent}trying to convert {fname} to smaller integer {ename}. \n{indent}use `trunc(<value>)` to chop off the most signifigant bits. \n{indent}{warn}"
+                    );
+                }
+
+                String::from("TODO: help message")
+            }
             // TODO: not this!!!
             (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
                 if f.len() != e.len() {
@@ -605,4 +634,8 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
             &FuncImpl::CSource(ir) => pool.get(ir).to_string(),
         }
     }
+}
+
+fn sane_int_size(bits: i64) -> bool {
+    matches!(bits, 8 | 16 | 32 | 64 | 128)
 }

@@ -896,7 +896,8 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         let (func, f_ty) = compile.func_expr(shift_or_slice);
         let func = FatExpr::synthetic_ty(func, loc, f_ty);
         let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), Box::new(arg)), loc);
-        Ok(FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, TypeId::i64()))
+        let ty = u32::get_type(compile.program);
+        Ok(FatExpr::synthetic_ty(Expr::Call(Box::new(func), Box::new(arg)), loc, ty))
     })
 }
 

@@ -1208,7 +1208,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.last_loc = Some(expr.loc);
             // let msg = format!("sanity ICE {} {res:?}", expr.log(self.pool)).leak();
 
-            self.coerce_type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
+            self.type_check_arg(expr.ty, res, "sanity ICE post_expr")?;
         }
         // TODO: its kinda sad to do this every time. better to keep track of pending ones and somehow have safe points you know you're probably not in the middle of mutual recursion.
         self.program.finish_layout_deep(res)?;
@@ -1223,13 +1223,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       -- Apr 19
             // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
             let msg = "sanity ICE req_expr";
-            self.coerce_type_check_arg(res, requested, msg)?;
+            self.type_check_arg(res, requested, msg)?;
         }
 
         expr.ty = res;
         if !old.is_unknown() {
             // TODO: cant just assert_eq because it does change for rawptr.
-            self.coerce_type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
+            self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
         }
 
         Ok(res)
@@ -2514,7 +2514,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // have to do this here because it doesn't pass requested in from saved infered type.  // TODO: maybe it should? -- Apr 21
         // but not calling the normal compile_expr because it has stricter typechecking on the requested type.
         let found = self.compile_expr_inner(&mut target, Some(ty))?;
-        self.coerce_type_check_arg(found, ty, "@as")?;
+        self.type_check_arg(found, ty, "@as")?;
         target.ty = found;
         if found != ty {
             let loc = target.loc;
@@ -2526,66 +2526,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         // println!("{}", target.log(self.program.pool));
 
         Ok(target)
-    }
-
-    #[track_caller]
-    pub fn coerce_type_check_arg(&self, found: TypeId, expected: TypeId, msg: &'static str) -> Res<'p, ()> {
-        // TODO: dont do this. fix ffi types.
-        let found = self.program.raw_type(found);
-        let expected = self.program.raw_type(expected);
-        if found == expected {
-            Ok(())
-        } else {
-            match (&self.program[found], &self.program[expected]) {
-                // :Coercion // TODO: only one direction makes sense
-                (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
-                (TypeInfo::Int(_), TypeInfo::Int(_)) => {
-                    // :Coercion
-                    return Ok(()); // TODO: not this!
-                }
-                // TODO: not this!!!
-                (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
-                    if f.len() == e.len() {
-                        let ok = f
-                            .iter()
-                            .zip(e.iter())
-                            .all(|(f, e)| self.coerce_type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset && f.name == e.name);
-                        if ok {
-                            return Ok(());
-                        }
-                    }
-                }
-                (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
-                    if self.type_check_arg(f, e, msg).is_ok() {
-                        return Ok(());
-                    }
-                }
-                (TypeInfo::Ptr(_), TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::Ptr(_)) => return Ok(()),
-                (TypeInfo::FnPtr { .. }, TypeInfo::VoidPtr) | (TypeInfo::VoidPtr, TypeInfo::FnPtr { .. }) => return Ok(()),
-
-                // TODO: correct varience
-                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
-                    if self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok() {
-                        return Ok(());
-                    }
-                    // try casting through a rawptr first.
-                }
-                (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
-                    if cc_f == cc_e && self.coerce_type_check_arg(f.arg, e.arg, msg).is_ok() && self.coerce_type_check_arg(f.ret, e.ret, msg).is_ok()
-                    {
-                        return Ok(());
-                    }
-                }
-                (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => {
-                    // :Coercion
-                    // scary because relies on custom handling for constdecls?
-                    return Ok(());
-                }
-                _ => {}
-            }
-
-            err!(CErr::TypeCheck(found, expected, msg))
-        }
     }
 
     #[track_caller]
@@ -2918,7 +2858,8 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         if func.get_flag(FnFlag::UnsafeNoopCast) {
             let ret_ty = func.finished_ret.unwrap();
-            self.ensure_compiled(fid, ExecStyle::Jit)?;
+            // TOOD: ideally you'd do this to run comptime code for checking but its awquard because its on the bootstrap path. -- Jun 1
+            // self.ensure_compiled(fid, ExecStyle::Jit)?;
             let done = arg_expr.done;
             // TODO: do this check once per #unsafe_noop function somewhere else. after applying constant arguments.
             assert_eq!(self.program.slot_count(arg_expr.ty), self.program.slot_count(ret_ty));
