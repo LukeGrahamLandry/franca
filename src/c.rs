@@ -22,8 +22,12 @@ use std::fmt::Write;
 fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_names: bool) {
     let name = comp.program.pool.get(comp.program[f].name);
     let ty = comp.program[f].finished_ty().unwrap();
+    let has_indirect_return = comp.program.slot_count(ty.ret) > 2;
+
     if use_name {
         write!(out, "_TY{} {name}(", ty.ret.as_index()).unwrap();
+    } else if has_indirect_return {
+        write!(out, "/* fn {name} */ static \nvoid _FN{}(", f.as_index()).unwrap();
     } else {
         write!(out, "/* fn {name} */ static \n_TY{} _FN{}(", ty.ret.as_index(), f.as_index()).unwrap();
     }
@@ -38,9 +42,15 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
                 write!(out, "_TY{} {},", ty.as_index(), name).unwrap();
             }
         } else {
-            for (i, ty) in comp.program.flat_tuple_types(ty.arg).into_iter().enumerate() {
+            if has_indirect_return {
+                write!(out, "_TY{} *_arg_0,", ty.ret.as_index()).unwrap();
+            }
+            for (mut i, ty) in comp.program.flat_tuple_types(ty.arg).into_iter().enumerate() {
                 if ty.is_unit() {
                     continue;
+                }
+                if has_indirect_return {
+                    i += 1;
                 }
                 write!(out, "_TY{} _arg_{i},", ty.as_index()).unwrap();
             }
@@ -354,7 +364,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         if b == 0 && !self.is_flat {
             let arg = self.program.get_info(self.program[self.f].finished_arg.unwrap());
-            debug_assert_eq!(arg.size_slots, block.arg_slots);
+            // debug_assert_eq!(arg.size_slots, block.arg_slots); // not true because of indirect returns
             write!(self.code, "    ").unwrap();
             for i in 0..block.arg_slots {
                 write!(self.code, "_{i} = (void*) _arg_{i}; ").unwrap();
@@ -542,16 +552,18 @@ impl<'z, 'p> Emit<'z, 'p> {
 
     // (pop args), write_fn_ref, (push ret)
     fn do_c_call(&mut self, f_ty: FnType, write_fn_ref: impl FnOnce(&mut Self)) -> Res<'p, ()> {
-        let (arg, ret) = self.program.get_infos(f_ty);
+        let (mut arg, ret) = self.program.get_infos(f_ty);
         // self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
         let ret_var = self.next_var();
         match ret.size_slots {
-            0 => write!(self.code, "    ").unwrap(),
             // TODO: bit cast float??
             1 => write!(self.code, "    _{ret_var} = (void*)").unwrap(),
             2 => write!(self.code, "    {{ _TY{} tmp = ", f_ty.ret.as_index()).unwrap(),
-            _ => err!("ICE: emit bc never does this. it used flat call instead",),
+            _ => write!(self.code, "    ").unwrap(),
+        }
+        if ret.size_slots > 2 {
+            arg.size_slots += 1;
         }
         // TODO: dumb to allocate but its easier if the fn ptr version can pop from the stack.
         let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()].to_vec();
@@ -560,7 +572,12 @@ impl<'z, 'p> Emit<'z, 'p> {
         write!(self.code, "(").unwrap();
 
         if !args.is_empty() {
-            let types = self.program.flat_tuple_types(f_ty.arg);
+            let mut types = self.program.flat_tuple_types(f_ty.arg);
+            if ret.size_slots > 2 {
+                // TODO: sad shifting
+                types.insert(0, self.program.intern_type(TypeInfo::Ptr(f_ty.ret)));
+                // indirect return
+            }
             assert_eq!(types.len(), args.len(), "{}", self.program.log_type(f_ty.arg));
             for (arg, ty) in args.iter().zip(types) {
                 write!(self.code, "(_TY{}) {arg},", ty.as_index()).unwrap();
@@ -570,22 +587,17 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         writeln!(self.code, ");").unwrap();
 
-        if ret.size_slots != 0 {
-            // TODO: we know the types here.
-            match ret.size_slots {
-                0 => {}
-                // TODO: bit cast float??
-                1 => {
-                    self.stack.push(Val::of_var(ret_var));
-                }
-                2 => {
-                    let ret2 = self.next_var();
-                    self.stack.push(Val::of_var(ret_var));
-                    self.stack.push(Val::of_var(ret2));
-                    writeln!(self.code, " _{ret_var} = tmp._0; _{ret2} = tmp._1; }} ").unwrap();
-                }
-                _ => unreachable!(),
+        // TODO: we know the types here.
+        match ret.size_slots {
+            // TODO: bit cast float??
+            1 => self.stack.push(Val::of_var(ret_var)),
+            2 => {
+                let ret2 = self.next_var();
+                self.stack.push(Val::of_var(ret_var));
+                self.stack.push(Val::of_var(ret2));
+                writeln!(self.code, " _{ret_var} = tmp._0; _{ret2} = tmp._1; }} ").unwrap();
             }
+            _ => {}
         }
         Ok(())
     }
@@ -634,7 +646,7 @@ fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<
             writeln!(out.types, " _TY{};", ty.as_index()).unwrap();
         }
         TypeInfo::Bool => {
-            writeln!(out.types, "typedef _Bool _TY{};", ty.as_index()).unwrap();
+            writeln!(out.types, "typedef uint8_t /*bool*/ _TY{};", ty.as_index()).unwrap();
         }
         &TypeInfo::FnPtr { ty: f, cc } => {
             assert!(cc == CallConv::CCallReg); // TODO: flat call sig

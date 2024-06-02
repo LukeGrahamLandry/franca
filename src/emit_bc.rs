@@ -189,7 +189,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         let f_ty = func.unwrap_ty();
         let (arg, ret) = self.program.get_infos(f_ty);
-        let slots = if is_flat_call { 0 } else { arg.size_slots };
+        let slots = if is_flat_call {
+            0
+        } else if ret.size_slots > 2 {
+            arg.size_slots + 1
+        } else {
+            arg.size_slots
+        };
         let floats = if is_flat_call { 0 } else { arg.float_mask };
         let entry_block = result.push_block(slots, floats);
 

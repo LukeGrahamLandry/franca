@@ -352,7 +352,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         }
         if b == 0 && !self.is_flat {
             let arg = self.program.get_info(self.program[self.f].finished_arg.unwrap());
-            debug_assert_eq!(arg.size_slots, block.arg_slots);
+            // debug_assert_eq!(arg.size_slots, block.arg_slots); // not true anymore because indirect return
             self.cast_ret_from_float(builder, arg.size_slots, arg.float_mask);
         }
 
@@ -374,6 +374,9 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     if self.program[f].cc.unwrap() == CallConv::CCallRegCt {
                         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
                         arg.size_slots += 1;
+                    }
+                    if ret.size_slots > 2 {
+                        arg.size_slots += 1; // indirect ret
                     }
                     self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
 
@@ -475,7 +478,10 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 }
                 Bc::CallFnPtr { ty, .. } => {
                     let sig = builder.import_signature(self.make_sig(ty, false, false));
-                    let (arg, ret) = self.program.get_infos(ty);
+                    let (mut arg, ret) = self.program.get_infos(ty);
+                    if ret.size_slots > 2 {
+                        arg.size_slots += 1; // indirect ret
+                    }
                     self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
                     let first_arg = self.stack.len() - arg.size_slots as usize;
                     let callee = self.stack[first_arg - 1];
@@ -632,9 +638,17 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
     fn make_sig(&mut self, t: FnType, _internal: bool, comp_ctx: bool) -> Signature {
         let mut sig = self.cl.module.make_signature();
+        let ret = self.program.raw_type(t.ret);
         // if internal {
         //     sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
         // }
+        if self.program.slot_count(ret) > 2 {
+            sig.params.push(AbiParam {
+                value_type: I64,
+                purpose: ArgumentPurpose::Normal,
+                extension: ArgumentExtension::None,
+            }); // indirect return. for now don't tell cranelift that because i don't use the right register in my backend and i want them to match.
+        }
         if comp_ctx {
             // TODO: should bring this all the way out into bc eventually
             sig.params.push(AbiParam {
@@ -680,8 +694,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         push(self, t.arg, &mut sig);
 
         // TODO: unit. TODO: multiple returns tuple?
-        let ret = self.program.raw_type(t.ret);
-        if !ret.is_never() && !ret.is_unit() {
+        if !ret.is_never() && !ret.is_unit() && self.program.slot_count(ret) <= 2 {
             // TODO: ArgumentPurpose::StructReturn for real c abi. dont just slots==1 because never (and eventually unit) are 0
             if let TypeInfo::Tagged { .. } = &self.program[ret] {
                 for _ in 0..self.program.slot_count(ret) {
