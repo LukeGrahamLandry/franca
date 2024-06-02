@@ -21,6 +21,7 @@ use std::process::Command;
 const ZERO_DROPPED_REG: bool = false;
 const ZERO_DROPPED_SLOTS: bool = false;
 pub const TRACE_ASM: bool = false;
+pub const TRACE_CALLS: bool = false;
 
 // I'm using u16 everywhere cause why not, extra debug mode check might catch putting a stupid big number in there. that's 65k bytes, 8k words, the uo instructions can only do 4k words.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -242,14 +243,16 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // Note: we rely on NameFlagArgOffset or whatever to remember how to actually access the parts you're interested in.
             }
             CallConv::CCallReg => {
-                debug_assert!(arg.size_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-                self.ccall_reg_to_stack(arg.size_slots, arg.float_mask);
-                let int_count = arg.size_slots as u32 - arg.float_mask.count_ones();
+                // +1 for indirect return
+                let arg_slots = if ret.size_slots > 2 { arg.size_slots + 1 } else { arg.size_slots };
+                debug_assert!(arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
+                self.ccall_reg_to_stack(arg_slots, arg.float_mask);
+                let int_count = arg_slots as u32 - arg.float_mask.count_ones();
                 // Any registers not containing args can be used.
                 for i in int_count..8 {
                     self.state.free_reg.push(i as i64);
                 }
-                debug_assert_eq!(self.state.stack.len() as u16, arg.size_slots);
+                debug_assert_eq!(self.state.stack.len() as u16, arg_slots);
             }
             CallConv::Inline | CallConv::OneRetPic | CallConv::CCallRegCt => unreachable!("unsupported cc {cc:?}"),
         }
@@ -534,10 +537,14 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 // Note: for flat call, we're lying about whether its #ct, that's fine, bc deals with it.
                 self.dyn_c_call(ty, false, |s| {
                     // call_flat will have popped the args, so now stack is just the pointer to call
-                    // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
-                    let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
-                    s.asm.push(br(reg, 1));
-                    s.drop_reg(reg);
+                    let callee = s.state.stack.pop().unwrap();
+                    // TODO: this does redundant spilling every time!
+                    match callee {
+                        Val::Literal(p) => s.load_imm(x16, p as u64),
+                        Val::Spill(offset) => s.load_u64(x16, sp, offset.0),
+                        v => unreachable!("unspilled {v:?}"),
+                    }
+                    s.asm.push(br(x16, 1));
                 });
             }
             Bc::Unreachable => {
@@ -986,14 +993,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     /// <arg:n> -> <ret:m>
     fn dyn_c_call(&mut self, f_ty: FnType, comp_ctx: bool, do_call: impl FnOnce(&mut Self)) {
         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
-        let reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
-        let (arg, ret) = self.program.get_infos(f_ty);
+        let mut reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
+        let (arg, mut ret) = self.program.get_infos(f_ty);
+        if ret.size_slots > 2 {
+            reg_offset += 1; // indirect return
+            ret = self.program.get_info(TypeId::unit);
+        }
         assert!(
             (arg.size_slots + reg_offset) <= 8,
             "indirect c_call only supports 8 arguments. TODO: pass on stack"
         );
         // TODO: this isn't the normal c abi
-        assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
+        // assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
 
         self.stack_to_ccall_reg(arg.size_slots + reg_offset, arg.float_mask);
         self.spill_abi_stompable();

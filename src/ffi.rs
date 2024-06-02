@@ -599,13 +599,15 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 }
 
 pub mod c {
+    use crate::bc::to_values;
+    use crate::bc::Values;
     use crate::compiler::Compile;
     use crate::compiler::Res;
     use crate::err;
     use std::arch::global_asm;
     use std::mem::transmute;
 
-    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, (i64, i64)> {
+    pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {
         let (arg, ret) = program.program.get_infos(f_ty);
         let bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1
@@ -615,10 +617,17 @@ pub mod c {
         } else {
             err!("ICE: i dont do mixed int/float registers but backend does",)
         };
-        assert!(ret.size_slots <= 2, "i dont do struct calling convention yet");
+
         if comp_ctx {
             args.insert(0, program as *mut Compile as i64);
         }
+        let indirect_ret = if ret.size_slots > 2 {
+            let mem = vec![0u8; ret.stride_bytes as usize];
+            args.insert(0, mem.as_ptr() as i64);
+            Some(mem)
+        } else {
+            None
+        };
         assert!(args.len() <= 8);
         // not doing this is ub but like... meh.
         // if something interesting happens to be after the args and you call with the wrong signature you could read it.
@@ -631,15 +640,25 @@ pub mod c {
                 args.push(0);
             }
         }
+
         if ret.size_slots <= 1 {
-            let ret: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
-            Ok((ret, 0))
+            let r: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
+            match ret.stride_bytes {
+                0 => to_values(program.program, ()),
+                1 => to_values(program.program, r as u8),
+                2 => to_values(program.program, r as u16),
+                4 => to_values(program.program, r as u32),
+                8 => to_values(program.program, r as u64),
+                _ => err!("bad byte size",),
+            }
         } else if ret.size_slots == 2 {
             // TODO: floats!
-            let ret = arg8ret2(ptr, args.as_mut_ptr());
-            Ok((ret.fst, ret.snd))
+            let r = arg8ret2(ptr, args.as_mut_ptr());
+            to_values(program.program, (r.fst, r.snd))
         } else {
-            unreachable!()
+            let _: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
+            let mem = indirect_ret.unwrap();
+            Ok(Values::many(mem))
         }
     }
 

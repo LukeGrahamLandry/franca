@@ -6,7 +6,7 @@ use codemap::Span;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 
-use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
+use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, LabelId, Program, Stmt, TypeId, TypeInfo};
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
@@ -199,12 +199,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             self.bind_args(result, &func.arg)?;
         }
 
-        debug_assert!(is_flat_call || ret.size_slots <= 2); // change ret handling if fix real c_call?
-        let result_location = if is_flat_call { ResAddr } else { PushStack };
+        // We represent the indirect return argument as the left-most thing on the stack,
+        // so after popping all the args, its at the top and we can emit the thing normally.
+        let result_location = if is_flat_call || ret.size_slots > 2 { ResAddr } else { PushStack };
         let return_block = result.push_block(ret.size_slots, ret.float_mask);
 
         result.current_block = entry_block;
-        if result_location == ResAddr {
+        if is_flat_call {
             result.push(Bc::AddrFnResult);
         }
 
@@ -233,10 +234,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 Bc::Ret0
             } else {
                 match slots {
-                    0 => Bc::Ret0,
                     1 => Bc::Ret1(self.program.prim(ret)),
                     2 => Bc::Ret2(self.program.prim_pair(ret)?),
-                    _ => todo!(),
+                    _ => Bc::Ret0, // void or indirect return
                 }
             };
 
@@ -252,36 +252,23 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn emit_runtime_call(
         &mut self,
         result: &mut FnBody<'p>,
-        mut f: FuncId,
+        mut f_ty: FnType,
+        cc: CallConv,
         arg_expr: &FatExpr<'p>,
         result_location: ResultLoc,
         mut can_tail: bool,
+        do_call: impl FnOnce(&mut FnBody, FnType, bool),
     ) -> Res<'p, ()> {
-        // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
-        let f_ty = self.program[f].finished_ty().unwrap(); // kinda HACK to fix unaligned store?
-        while let FuncImpl::Redirect(target) = self.program[f].body {
-            f = target;
-        }
-
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
-        let force_flat = matches!(self.program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
-        if self.program[f].cc.unwrap() == CallConv::CCallRegCt {
-            result.push(Bc::GetCompCtx);
-        }
-        let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
-        let func = &self.program[f];
-        assert!(func.capture_vars.is_empty());
-        assert!(
-            func.cc != Some(CallConv::Inline),
-            "tried to call inlined {}",
-            self.program.pool.get(self.program[f].name)
-        );
+        let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
+
         let ty = self.program.flat_call_ty.unwrap();
 
-        // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
-
-        if let Some(id) = flat_arg_loc {
+        if force_flat {
+            // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
+            let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
+            let id = flat_arg_loc.unwrap();
             match result_location {
                 PushStack => {
                     let ret_id = result.add_var(f_ty.ret);
@@ -289,7 +276,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
                     self.push_flat_lengths(result, f_ty);
-                    result.push(Bc::CallDirect { f, ty, tail: false });
+                    do_call(result, ty, false);
                     result.push(Bc::AddrVar { id: ret_id });
                     self.load(result, f_ty.ret);
                     result.push(Bc::LastUse { id: ret_id });
@@ -299,7 +286,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
                     self.push_flat_lengths(result, f_ty);
-                    result.push(Bc::CallDirect { f, ty, tail: false });
+                    do_call(result, ty, false);
                 }
                 Discard => {
                     let ret_id = result.add_var(f_ty.ret);
@@ -307,33 +294,62 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
                     self.push_flat_lengths(result, f_ty);
-                    result.push(Bc::CallDirect { f, ty, tail: false });
+                    do_call(result, ty, false);
                     result.push(Bc::LastUse { id: ret_id });
                 }
             }
             result.push(Bc::LastUse { id });
         } else {
-            if func.has_tag(Flag::No_Tail) {
-                can_tail = false;
+            let has_indirect_ret = self.program.get_info(f_ty.ret).size_slots > 2;
+
+            let result_var = if has_indirect_ret && result_location != ResAddr {
+                let id = result.add_var(f_ty.ret);
+                result.push(Bc::AddrVar { id });
+                Some(id)
+            } else {
+                None
+            };
+
+            if cc == CallConv::CCallRegCt {
+                result.push(Bc::GetCompCtx);
             }
+
+            let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
+            assert!(flat_arg_loc.is_none());
+
             // if any args are pointers, they might be to the stack and then you probably can't tail call.
             // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
             // TODO: !tail to force it when you know its fine.
             let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers;
-            result.push(Bc::CallDirect { f, tail, ty: f_ty });
+            do_call(result, f_ty, tail);
             let slots = self.slot_count(f_ty.ret);
             if slots > 0 {
                 match result_location {
-                    PushStack => {}
-                    ResAddr => self.store_pre(result, f_ty.ret),
-                    Discard => result.pop(slots),
+                    PushStack => {
+                        if has_indirect_ret {
+                            if let Some(id) = result_var {
+                                result.push(Bc::AddrVar { id });
+                            }
+                            self.load(result, f_ty.ret);
+                        }
+                    }
+                    ResAddr => {
+                        if !has_indirect_ret {
+                            self.store_pre(result, f_ty.ret);
+                        }
+                    }
+                    Discard => {
+                        if !has_indirect_ret {
+                            result.pop(slots)
+                        }
+                    }
                 }
             } else if result_location == ResAddr {
                 // pop dest!
                 result.pop(1)
             }
         }
-        if func.finished_ret.unwrap().is_never() {
+        if f_ty.ret.is_never() {
             result.push(Bc::Unreachable);
         }
         Ok(())
@@ -452,61 +468,44 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 assert!(!f.ty.is_unknown(), "Not typechecked: {}", f.log(self.program.pool));
                 assert!(!arg.ty.is_unknown(), "Not typechecked: {}", arg.log(self.program.pool));
                 if let TypeInfo::Fn(_) = self.program[f.ty] {
-                    let f_id = unwrap!(f.as_const(), "tried to call non-const fn").unwrap_func_id();
+                    let mut f_id = unwrap!(f.as_const(), "tried to call non-const fn").unwrap_func_id();
                     let func = &self.program[f_id];
                     assert!(!func.get_flag(FnFlag::Generic));
-                    return self.emit_runtime_call(result, f_id, arg, result_location, can_tail);
+                    assert!(func.capture_vars.is_empty());
+                    assert!(
+                        func.cc != Some(CallConv::Inline),
+                        "tried to call inlined {}",
+                        self.program.pool.get(func.name)
+                    );
+
+                    // TODO: ideally the redirect should just be stored in the overloadset so you don't have to have the big Func thing every time.
+                    let f_ty = self.program[f_id].finished_ty().unwrap(); // kinda HACK to fix unaligned store?
+                    while let FuncImpl::Redirect(target) = self.program[f_id].body {
+                        f_id = target;
+                    }
+                    let cc = self.program[f_id].cc.unwrap();
+
+                    let mut can_tail = can_tail;
+                    if func.has_tag(Flag::No_Tail) {
+                        can_tail = false;
+                    }
+                    return self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail, |r, ty, tail| {
+                        r.push(Bc::CallDirect { f: f_id, ty, tail })
+                    });
                 }
                 if let TypeInfo::FnPtr { ty: f_ty, cc } = self.program[f.ty] {
-                    let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
-                    let res_ptr = if force_flat { Some(result.add_var(f_ty.ret)) } else { None };
                     self.compile_expr(result, f, PushStack, false)?;
-
-                    if let Some(id) = res_ptr {
-                        result.push(Bc::AddrVar { id });
+                    let will_use_indirect_ret = cc == CallConv::Flat || cc == CallConv::CCallRegCt || self.program.slot_count(f_ty.ret) > 2;
+                    if result_location == ResAddr && will_use_indirect_ret {
+                        // grab the result pointer to the top of the stack so the layout matches a normal call.
+                        // however, if the function wants to push stack but we want it to a resaddr, we don't do this here because emit_runtime_call handles it which is kinda HACK.
+                        result.push(Bc::PeekDup(1));
                     }
-                    if cc == CallConv::CCallRegCt || force_flat {
-                        result.push(Bc::GetCompCtx);
-                    }
-
-                    if let Some(flat_arg_loc) = self.compile_for_arg(result, arg, force_flat)? {
-                        result.push(Bc::AddrVar { id: flat_arg_loc });
-                    }
-                    let cc_f_ty = if force_flat { self.program.flat_call_ty.unwrap() } else { f_ty };
-                    if force_flat {
-                        self.push_flat_lengths(result, f_ty);
-                    }
-
-                    result.push(Bc::CallFnPtr { ty: cc_f_ty, cc });
-                    let slots = self.slot_count(f_ty.ret);
-                    if slots > 0 {
-                        if let Some(id) = res_ptr {
-                            let bytes = self.program.get_info(f_ty.ret).stride_bytes;
-                            match result_location {
-                                PushStack => {
-                                    result.push(Bc::AddrVar { id });
-
-                                    self.load(result, f_ty.ret);
-                                }
-                                ResAddr => {
-                                    // Extra copy needed because caller puts target addr on the stack before we eval fn ptr expr,
-                                    // but we need the ret ptr after that.
-                                    result.push(Bc::AddrVar { id });
-                                    result.push(Bc::CopyBytesToFrom { bytes });
-                                }
-                                Discard => {}
-                            }
-                        } else {
-                            match result_location {
-                                PushStack => {}
-                                ResAddr => self.store_pre(result, f_ty.ret),
-                                Discard => result.pop(slots),
-                            }
-                        }
-                    } else if result_location == ResAddr {
-                        todo!("untested. assign to variable a call that returns unit through a function ptr");
-                        // pop the dest!
-                        // result.push(Bc::Pop { slots: 1 })
+                    self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail, |r, ty, _| {
+                        r.push(Bc::CallFnPtr { ty, cc })
+                    })?;
+                    if result_location == ResAddr && will_use_indirect_ret {
+                        result.push(Bc::Snipe(0)); // original ret ptr
                     }
                     return Ok(());
                 }

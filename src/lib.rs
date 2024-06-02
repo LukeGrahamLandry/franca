@@ -89,6 +89,15 @@ macro_rules! debugln {
     }};
 }
 
+#[macro_export]
+macro_rules! debugln_call {
+    ($($arg:tt)*) => {{
+        if $crate::bc_to_asm::TRACE_CALLS  {
+            println!($($arg)*);
+        }
+    }};
+}
+
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::cell::UnsafeCell;

@@ -241,7 +241,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program.finish_layout(ty.arg)?;
             self.program.finish_layout(ty.ret)?;
             let args = self.slot_count(ty.arg);
-            let is_big = (args > 8) || (args == 8 && comp_ctx) || self.slot_count(ty.ret) > 2;
+            let is_big = (args > 8) || (args == 8 && (comp_ctx || self.slot_count(ty.ret) > 2));
             if self.program[f].has_tag(Flag::Flat_Call) || is_big {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 // TODO: my c_Call can;t handle agragates
@@ -444,7 +444,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
 
-        debugln!(
+        debugln_call!(
             "Call {f:?} {} 0x{:x} flat:{flat_call};      callees={:?}",
             self.pool.get(self.program[f].name),
             addr as usize,
@@ -458,19 +458,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             assert!(!flat_call);
             let mut ints = vec![];
             deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints, &mut None)?;
-            debugln!("IN: {ints:?}");
-            let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt)?;
-            debugln!("OUT: {r:?}");
-
-            match expected_ret_bytes {
-                0 => to_values(self.program, ()),
-                1 => to_values(self.program, r.0 as u8),
-                2 => to_values(self.program, r.0 as u16),
-                4 => to_values(self.program, r.0 as u32),
-                8 => to_values(self.program, r.0 as u64),
-                16 => to_values(self.program, r),
-                n => todo!("c call ret {n} bytes"),
-            }
+            debugln_call!("IN: {ints:?}");
+            let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt);
+            debugln_call!("OUT: {r:?}");
+            r
         } else {
             todo!()
         };
@@ -1620,7 +1611,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if arg.is_raw_unit() && !target.is_raw_unit() {
                     mem::swap(&mut arg, &mut target);
                 }
-                debugln!(
+                debugln_call!(
                     "invoke macro: @{}({}) {}",
                     self.pool.get(self.program[os_id].name),
                     arg.log(self.pool),
@@ -1660,7 +1651,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if expr.done {
                     assert!(!expr.ty.is_unknown());
                 }
-                debugln!("macro result: {}", expr.log(self.pool));
+                debugln_call!("macro result: {}", expr.log(self.pool));
                 // Now evaluate whatever the macro gave us.
                 return self.compile_expr(expr, requested);
             }

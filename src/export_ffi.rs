@@ -391,7 +391,7 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
         program.finish_layout(arg)?;
         program.finish_layout(ret)?;
-        let cc = if program.get_info(arg).size_slots > 8 || program.get_info(ret).size_slots > 1 {
+        let cc = if program.get_info(arg).size_slots > 8 {
             CallConv::Flat
         } else {
             CallConv::CCallReg
@@ -541,7 +541,7 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
 // This the interpreter call a flat_call without knowing its types
 pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
     let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
-    debugln!("IN: {arg:?} addr=0x{:x}", f as usize);
+    debugln_call!("IN: {arg:?} addr=0x{:x}", f as usize);
     let mut ret = vec![0u8; ret_count];
     f(
         ret.as_mut_ptr(),
@@ -551,7 +551,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
         arg.bytes().len() as i64,
         ret.len() as i64,
     );
-    debugln!("OUT: {ret:?}");
+    debugln_call!("OUT: {ret:?}");
     Ok(Values::many(ret))
 }
 

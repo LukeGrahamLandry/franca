@@ -1,3 +1,9 @@
+## (Jun 2)
+
+indirect return address for large structs instead of using flat_call.
+
+- bc_to_asm setup and dyn_c_call have a hacky +1 to arg_count to include that ret ptr.
+
 ## (Jun 1)
 
 - I think now that i store correct sizes, i can't have my loose int casting,
