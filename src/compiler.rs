@@ -3493,7 +3493,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 }
 
-#[repr(i64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, InterpSend)]
 pub enum ExecStyle {
     Jit,

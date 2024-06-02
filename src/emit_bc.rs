@@ -277,32 +277,35 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             "tried to call inlined {}",
             self.program.pool.get(self.program[f].name)
         );
+
+        // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
+
         if let Some(id) = flat_arg_loc {
             match result_location {
                 PushStack => {
                     let ret_id = result.add_var(f_ty.ret);
                     result.push(Bc::AddrVar { id: ret_id });
+                    result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
+                    self.push_flat_lengths(result, f_ty);
                     result.push(Bc::CallDirectFlat { f });
                     result.push(Bc::AddrVar { id: ret_id });
-                    debug_assert!(
-                        self.program.get_info(f_ty.ret).stride_bytes % 8 == 0,
-                        "flat call to stack {} -> {}",
-                        self.program.pool.get(self.program[f].name),
-                        self.program.log_type(f_ty.ret)
-                    );
                     self.load(result, f_ty.ret);
                     result.push(Bc::LastUse { id: ret_id });
                 }
                 ResAddr => {
                     // res ptr was already on stack
+                    result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
+                    self.push_flat_lengths(result, f_ty);
                     result.push(Bc::CallDirectFlat { f });
                 }
                 Discard => {
                     let ret_id = result.add_var(f_ty.ret);
                     result.push(Bc::AddrVar { id: ret_id });
+                    result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
+                    self.push_flat_lengths(result, f_ty);
                     result.push(Bc::CallDirectFlat { f });
                     result.push(Bc::LastUse { id: ret_id });
                 }
@@ -457,19 +460,23 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
                     let res_ptr = if force_flat { Some(result.add_var(f_ty.ret)) } else { None };
                     self.compile_expr(result, f, PushStack, false)?;
-                    if cc == CallConv::CCallRegCt {
-                        result.push(Bc::GetCompCtx);
-                    }
 
                     if let Some(id) = res_ptr {
                         result.push(Bc::AddrVar { id });
+                    }
+                    if cc == CallConv::CCallRegCt || force_flat {
+                        result.push(Bc::GetCompCtx);
                     }
 
                     if let Some(flat_arg_loc) = self.compile_for_arg(result, arg, force_flat)? {
                         result.push(Bc::AddrVar { id: flat_arg_loc });
                     }
+                    let cc_f_ty = if force_flat { self.program.flat_call_ty.unwrap() } else { f_ty };
+                    if force_flat {
+                        self.push_flat_lengths(result, f_ty);
+                    }
 
-                    result.push(Bc::CallFnPtr { ty: f_ty, cc });
+                    result.push(Bc::CallFnPtr { ty: cc_f_ty, cc });
                     let slots = self.slot_count(f_ty.ret);
                     if slots > 0 {
                         if let Some(id) = res_ptr {
@@ -1012,6 +1019,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             _ => err!("struct literal but expected {:?}", requested),
         }
         Ok(())
+    }
+
+    fn push_flat_lengths(&self, result: &mut FnBody, f_ty: crate::ast::FnType) {
+        let (arg, ret) = self.program.get_infos(f_ty);
+        result.push(Bc::PushConstant {
+            value: arg.stride_bytes as i64,
+        });
+        result.push(Bc::PushConstant {
+            value: ret.stride_bytes as i64,
+        });
     }
 }
 

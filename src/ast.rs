@@ -35,7 +35,6 @@ pub struct FnType {
     pub ret: TypeId,
 }
 
-#[repr(i64)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
@@ -148,7 +147,6 @@ pub struct Var<'p> {
 //     }
 // }
 // TODO: should really get an arena going because boxes make me sad.
-#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Poison,
@@ -646,7 +644,6 @@ pub struct FatStmt<'p> {
 }
 
 // NOTE: you can't store the FuncId in here because I clone it!
-#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
@@ -669,7 +666,6 @@ pub struct Func<'p> {
     pub flags: u32,
 }
 
-#[repr(i64)]
 pub enum FnFlag {
     NotEvilUninit,
     ResolvedBody,
@@ -710,7 +706,6 @@ pub enum CallConv {
 }
 
 // TODO: use this instead of having a billion fields.
-#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
@@ -865,6 +860,7 @@ pub struct Program<'p> {
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
     pub baked: Baked,
+    pub flat_call_ty: Option<FnType>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -972,11 +968,20 @@ impl<'p> Program<'p> {
             ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
+            flat_call_ty: None,
         };
 
         for (i, ty) in program.types.iter().enumerate() {
             program.type_lookup.insert(ty.clone(), TypeId::from_index(i));
         }
+
+        let arg = program.intern_type(TypeInfo::Array {
+            inner: TypeId::i64(),
+            len: 5,
+        });
+        let f_ty = FnType { arg, ret: TypeId::unit };
+        program.intern_type(TypeInfo::Fn(f_ty));
+        program.flat_call_ty = Some(f_ty);
 
         program
     }

@@ -216,12 +216,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let cc = unwrap!(self.program[func.func].cc, "ICE: missing calling convention");
         match cc {
             CallConv::FlatCt | CallConv::Flat => {
-                // (x0=compiler, x1=arg_ptr, x2=arg_len, x3=ret_ptr, x4=ret_len)
+                // (x0=ret_ptr, x1=compiler, x2=arg_ptr, x3=arg_len, x4=ret_len)
                 // Runtime check that caller agrees on type sizes.
                 // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
                 assert!(arg.stride_bytes < (1 << 12));
                 assert!(ret.stride_bytes < (1 << 12));
-                self.asm.push(cmp_im(X64, x2, arg.stride_bytes as i64, 0));
+                self.asm.push(cmp_im(X64, x3, arg.stride_bytes as i64, 0));
                 self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
                 self.asm.push(brk(0xbad0));
                 self.asm.push(cmp_im(X64, x4, ret.stride_bytes as i64, 0));
@@ -230,10 +230,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
                 // Save the result pointer.
                 self.flat_result = Some(self.next_slot);
-                self.store_u64(x3, sp, self.next_slot.0);
+                self.store_u64(x0, sp, self.next_slot.0);
                 self.next_slot.0 += 8;
                 self.flat_arg = Some(self.next_slot);
-                self.store_u64(x1, sp, self.next_slot.0);
+                self.store_u64(x2, sp, self.next_slot.0);
                 self.next_slot.0 += 8;
                 for i in 0..8 {
                     self.state.free_reg.push(i as i64);
@@ -441,12 +441,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 return Ok(tail);
             }
             Bc::CallDirectFlat { f } => {
-                let ty = self.program[f].finished_ty().unwrap();
-                let ct = matches!(self.program[f].cc.unwrap(), CallConv::FlatCt);
-                self.call_flat(ty, ct, |s| {
-                    let addr = s.asm.get_fn(f).map(|v| v as u64);
-                    s.branch_func(f, true);
-                });
+                // Note: we're lying about whether its #ct, that's fine, bc deals with it.
+                self.dyn_c_call(self.program.flat_call_ty.unwrap(), false, |s| s.branch_func(f, true));
             }
             Bc::Ret0 => return self.emit_return(0, 0),
             Bc::Ret1(prim) => return self.emit_return(1, prim.float()),
@@ -551,8 +547,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                         });
                     }
                     CallConv::FlatCt | CallConv::Flat => {
-                        let ct = matches!(cc, CallConv::FlatCt);
-                        self.call_flat(ty, ct, |s| {
+                        // Note: we're lying about whether its #ct, that's fine, bc deals with it.
+                        self.dyn_c_call(self.program.flat_call_ty.unwrap(), false, |s| {
                             // call_flat will have popped the args, so now stack is just the pointer to call
                             // TODO: this is for sure a bug!!!! make a test that calls something with lots of argument through a dynamic function pointer.
                             let reg = s.pop_to_reg(); // TODO: i'd rather be able to specify that this be x16 so you know its not part of the cc. -- May 1
@@ -1041,10 +1037,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let (arg, ret) = self.program.get_infos(f_ty);
 
         let c = if comp_ctx { self.compile_ctx_ptr as i64 } else { 0 };
+        self.state.stack.push(ret_ptr);
         self.state.stack.push(Val::Literal(c));
         self.state.stack.push(arg_ptr);
         self.state.stack.push(Val::Literal(arg.stride_bytes as i64));
-        self.state.stack.push(ret_ptr);
         self.state.stack.push(Val::Literal(ret.stride_bytes as i64));
 
         self.stack_to_ccall_reg(5, 0);

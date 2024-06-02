@@ -30,7 +30,7 @@ macro_rules! bounce_flat_call {
             // TODO: can't do this because of lifetimes. you still get the error message if it doesn't compile so its not a big deal but I find it less clear.
             // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
 
-            pub extern "C-unwind" fn bounce(compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, retptr: *mut u8, ret_count: i64) {
+            pub extern "C-unwind" fn bounce(retptr: *mut u8, compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, ret_count: i64) {
                 debugln!("bounce_flat_call {}", stringify!($f));
                 let ty = <$Arg>::get_or_create_type(compile.program);
                 compile.program.finish_layout_deep(ty).unwrap();
@@ -498,7 +498,7 @@ extern "C-unwind" fn debug_log_str(_: &mut &mut Program<'_>, s: &str) {
     println!("{s}");
 }
 
-extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
+extern "C-unwind" fn test_flat_call(ret: *mut u8, compile: &mut Compile, arg: *mut u8, arg_count: i64, ret_count: i64) {
     debug_assert!(arg_count == 3 * 8);
     debug_assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
@@ -507,7 +507,7 @@ extern "C-unwind" fn test_flat_call(compile: &mut Compile, arg: *mut u8, arg_cou
         *(ret as *mut i64) = (s[0] * s[1]) + s[2];
     }
 }
-extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64) {
+extern "C-unwind" fn test_flat_call_callback(ret: *mut u8, compile: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret_count: i64) {
     debug_assert!(arg_count == 8);
     debug_assert!(ret_count == 8);
     let _ = black_box(compile.program.assertion_count); // dereference the pointer.
@@ -526,7 +526,7 @@ extern "C-unwind" fn test_flat_call_callback(compile: &mut Compile<'_, '_>, arg:
     }
 }
 
-pub type FlatCallFn = extern "C-unwind" fn(program: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret: *mut u8, ret_count: i64);
+pub type FlatCallFn = extern "C-unwind" fn(ret: *mut u8, program: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret_count: i64);
 
 // This lets rust _call_ a flat_call like its normal
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
@@ -534,21 +534,21 @@ pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut 
     Ret::get_or_create_type(compile.program); // sigh
     let mut arg = arg.serialize_to_ints_one(compile.program);
     let mut ret = vec![0u8; Ret::size_bytes(compile.program)];
-    f(compile, arg.as_mut_ptr(), arg.len() as i64, ret.as_mut_ptr(), ret.len() as i64);
+    f(ret.as_mut_ptr(), compile, arg.as_mut_ptr(), arg.len() as i64, ret.len() as i64);
     Ret::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: &ret, i: 0 }).unwrap()
 }
 
 // This the interpreter call a flat_call without knowing its types
-pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut arg: Values, ret_type: TypeId) -> Res<'p, Values> {
+pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
     let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
     debugln!("IN: {arg:?} addr=0x{:x}", f as usize);
     let mut ret = vec![0u8; ret_count];
     f(
+        ret.as_mut_ptr(),
         compile,
         // TODO: decide if flat call is allowed to mutate its args.
         arg.bytes().as_ptr() as *mut u8,
         arg.bytes().len() as i64,
-        ret.as_mut_ptr(),
         ret.len() as i64,
     );
     debugln!("OUT: {ret:?}");
