@@ -24,7 +24,6 @@
 
 - `src` contains the frontend and the jit used for comptime execution.
 - The programs in `tests`, `lib`, and `examples` actually work with the existing jit compiler.
-- The programs in `plan` are just trying out how potential language features feel.
 
 ## Future Goals
 
