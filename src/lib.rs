@@ -397,3 +397,17 @@ fn pops<T>(v: &mut Vec<T>, count: usize) {
         v.pop().unwrap();
     }
 }
+
+// There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
+/// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
+fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
+    debug_assert!(x > -(1 << (bit_count)) && (x < (1 << (bit_count))));
+    let mask = (1 << bit_count) - 1;
+    if x < 0 {
+        x *= -1;
+        x = !x;
+        x += 1;
+        x &= mask;
+    }
+    x
+}

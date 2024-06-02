@@ -311,7 +311,7 @@ impl<'p> Expr<'p> {
                 let args: String = args.join(", ");
                 format!("[{}]", args)
             }
-            Expr::Value { value } => format!("{:?}", value.0),
+            Expr::Value { value } => format!("{:?}", value.bytes()),
             Expr::GetVar(v) => v.log(pool),
             Expr::Closure(f) => format!("closure(fn {:?})", pool.get(f.name)),
             Expr::SuffixMacro(i, e) => format!("{}!{}", e.logd(pool, depth), pool.get(*i)),

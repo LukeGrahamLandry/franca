@@ -1,6 +1,7 @@
 //! Low level instructions
 
 use std::cell::RefCell;
+use std::ptr::slice_from_raw_parts;
 
 use crate::ast::{CallConv, LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
@@ -154,32 +155,53 @@ impl<'p> FnBody<'p> {
 
 pub type Value = i64;
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq, Debug)]
-pub struct Values(pub Vec<u8>);
+pub enum Values {
+    Big(Vec<u8>),
+    Small(i64, u8),
+}
 
 impl From<u32> for Values {
     fn from(value: u32) -> Self {
-        Values::many(value.to_le_bytes().to_vec())
+        Self::Small(value as i64, 4)
     }
 }
 
 impl Values {
     pub fn bytes(&self) -> &[u8] {
-        &self.0
+        match self {
+            Values::Big(bytes) => bytes,
+            Values::Small(value, len) => unsafe { &*slice_from_raw_parts(value as *const i64 as *const u8, *len as usize) },
+        }
     }
     pub fn unit() -> Self {
-        Self(vec![])
+        Self::Small(0, 0)
     }
 
     pub fn one(v: i64) -> Self {
-        Self(v.to_le_bytes().to_vec())
+        Self::Small(v, 8)
     }
 
-    pub fn many(v: Vec<u8>) -> Self {
-        Self(v)
+    pub fn many(mut v: Vec<u8>) -> Self {
+        if v.len() <= 8 {
+            let len = v.len() as u8;
+            while v.len() < 8 {
+                v.push(0);
+            }
+            Self::Small(i64::from_ne_bytes([v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]]), len)
+        } else {
+            Self::Big(v)
+        }
     }
 
     pub fn is_unit(&self) -> bool {
-        self.0.is_empty()
+        self.bytes().is_empty()
+    }
+
+    pub(crate) fn vec(self) -> Vec<u8> {
+        match self {
+            Values::Big(v) => v,
+            Values::Small(v, len) => v.to_ne_bytes()[0..len as usize].to_vec(),
+        }
     }
 }
 
@@ -191,8 +213,8 @@ impl From<Value> for Values {
 
 impl Values {
     pub(crate) fn unwrap_func_id(&self) -> FuncId {
-        debug_assert_eq!(self.0.len(), 4);
-        let i = ReadBytes { bytes: &self.0, i: 0 }.next_u32().unwrap();
+        debug_assert_eq!(self.bytes().len(), 4);
+        let i = ReadBytes { bytes: self.bytes(), i: 0 }.next_u32().unwrap();
         FuncId::from_raw(i)
     }
 }
@@ -205,7 +227,7 @@ pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<
 }
 
 pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, t: Values) -> Res<'p, T> {
-    let mut reader = ReadBytes { bytes: &t.0, i: 0 };
+    let mut reader = ReadBytes { bytes: t.bytes(), i: 0 };
     let res = Ok(unwrap!(T::deserialize_from_ints(program, &mut reader), "{} from {reader:?}", T::name()));
     assert_eq!(reader.i, reader.bytes.len());
     res

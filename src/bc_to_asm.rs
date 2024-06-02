@@ -1349,19 +1349,7 @@ const CMP_EQ: i64 = 0b0000;
 
 use encoding::*;
 mod encoding {
-    // There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
-    /// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
-    fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
-        debug_assert!(x > -(1 << (bit_count)) && (x < (1 << (bit_count))));
-        let mask = (1 << bit_count) - 1;
-        if x < 0 {
-            x *= -1;
-            x = !x;
-            x += 1;
-            x &= mask;
-        }
-        x
-    }
+    use crate::signed_truncate;
 
     pub fn add_im(sf: i64, dest: i64, src: i64, imm: i64, lsl_12: i64) -> i64 {
         sf << 31 | 0b100010 << 23 | lsl_12 << 22 | imm << 10 | src << 5 | dest

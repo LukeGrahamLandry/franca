@@ -605,7 +605,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     return Ok(());
                 }
 
-                let want_emit_by_memcpy = value.0.len() > 64;
+                let want_emit_by_memcpy = value.bytes().len() > 64;
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     // TODO: this is dumb because a slice becomes a pointer to a slice.
                     let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
@@ -647,7 +647,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             // TODO: HACK
                             //       for a constant ast node, you need to load an enum but my deconstruct_values can't handle it.
                             //       this solution is extra bad becuase it relies on the value vec not being free-ed
-                            let ptr = value.0.clone().leak().as_ptr();
+                            // TODO: need to leak when small by value?
+                            let ptr = value.bytes().as_ptr();
                             result.push(Bc::PushConstant { value: ptr as i64 });
 
                             result.push(Bc::CopyBytesToFrom {

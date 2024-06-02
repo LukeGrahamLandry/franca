@@ -477,7 +477,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let result = self.tag_err(result);
         if let Ok(result) = &result {
-            assert_eq!(result.0.len(), expected_ret_bytes as usize, "{}", self.program.log_type(ty.ret));
+            assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}", self.program.log_type(ty.ret));
             self.pop_state(state2);
         }
         // println!("Done {f:?} {}", self.pool.get(self.program[f].name),);
@@ -2211,7 +2211,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             while pls.len() < f.byte_offset {
                                 pls.push(0);
                             }
-                            pls.extend(v.0);
+                            pls.extend(v.bytes());
                         }
                         while pls.len() < self.program.get_info(ty).stride_bytes as usize {
                             pls.push(0);
@@ -2541,7 +2541,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 // :Coercion // TODO: only one direction makes sense
                 (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
                 (TypeInfo::Int(a), TypeInfo::Int(b)) => {
-                    if a.bit_count == b.bit_count {
+                    if a.bit_count == b.bit_count && a.signed == b.signed {
                         return Ok(());
                     }
                     // :Coercion
@@ -2554,8 +2554,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(());
                     }
                 }
-
-                // TODO: not this!!! at the very least only do it in the coerceon verion!
                 (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
                     if f.len() == e.len() {
                         let ok = f
@@ -2569,17 +2567,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
                 (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
                     if self.type_check_arg(f, e, msg).is_ok() {
-                        return Ok(());
-                    }
-                }
-                // TODO: correct varience
-                (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => {
-                    if self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
-                        return Ok(());
-                    }
-                }
-                (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
-                    if cc_f == cc_e && self.type_check_arg(f.arg, e.arg, msg).is_ok() && self.type_check_arg(f.ret, e.ret, msg).is_ok() {
                         return Ok(());
                     }
                 }
@@ -2909,7 +2896,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             if !matches!(arg_expr.expr, Expr::Value { .. }) {
                 arg_expr.set(value.clone(), arg_ty);
             }
-            Ok(value.0)
+            Ok(value.vec())
         } else {
             let check_len = |len| {
                 assert_eq!(

@@ -10,7 +10,7 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::pool::Ident;
-use crate::{assert, assert_eq, err, ice, log_err};
+use crate::{assert, assert_eq, err, ice, log_err, signed_truncate};
 use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::{self, transmute};
@@ -546,7 +546,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, mut
     f(
         compile,
         // TODO: decide if flat call is allowed to mutate its args.
-        arg.0.as_mut_ptr(),
+        arg.bytes().as_ptr() as *mut u8,
         arg.bytes().len() as i64,
         ret.as_mut_ptr(),
         ret.len() as i64,
@@ -874,12 +874,17 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         let mut shift = 32;
         for mut int in parts {
             let ty = get_type_int(compile, int.clone()); // TODO: redundant work cause of clone
-            assert!(!ty.signed);
+
             shift -= ty.bit_count;
             assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
-            if let Some((_, v)) = compile.bit_literal(&int) {
+            if let Some((_, mut v)) = compile.bit_literal(&int) {
+                if ty.signed {
+                    v = signed_truncate(v, ty.bit_count);
+                }
                 assert!(v < 1 << ty.bit_count);
                 int = compile.as_literal(v, loc)?;
+            } else {
+                assert!(!ty.signed);
             }
             int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
             new_args.push(int);
@@ -913,7 +918,7 @@ extern "C-unwind" fn shift_or_slice(compiler: &mut Compile, ptr: *const i64, len
             // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
             acc |= x << sh;
         }
-        assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32");
+        assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32: {ints:?}");
         Ok(acc)
     })
 }
