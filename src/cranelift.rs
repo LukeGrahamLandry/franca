@@ -154,7 +154,11 @@ pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &m
     let arg = program[f].finished_arg.unwrap();
     let arg = program.get_info(arg);
     body.blocks.push(BasicBlock {
-        insts: vec![Bc::CallDirect { f, tail: true }],
+        insts: vec![Bc::CallDirect {
+            f,
+            tail: true,
+            ty: program[f].unwrap_ty(),
+        }],
         arg_slots: arg.size_slots,
         arg_float_mask: arg.float_mask,
         incoming_jumps: 0,
@@ -295,8 +299,9 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             builder.switch_to_block(entry);
 
             builder.append_block_params_for_function_params(entry);
-            self.indirect_ret_addr = Some(builder.block_params(entry)[3]);
-            self.flat_arg_addr = Some(builder.block_params(entry)[1]);
+            debug_assert_eq!(builder.block_params(entry).len(), 5);
+            self.indirect_ret_addr = Some(builder.block_params(entry)[0]);
+            self.flat_arg_addr = Some(builder.block_params(entry)[2]);
 
             for block in &self.body.blocks {
                 self.blocks.push(builder.create_block());
@@ -364,8 +369,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let ptr = builder.ins().iadd(ptr, offset);
                     self.flat_args_already_offset.push(ptr);
                 }
-                Bc::CallDirect { f, tail } => {
-                    let f_ty = self.program[f].unwrap_ty();
+                Bc::CallDirect { f, tail, ty: f_ty } => {
                     let (mut arg, ret) = self.program.get_infos(f_ty);
                     if self.program[f].cc.unwrap() == CallConv::CCallRegCt {
                         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
@@ -401,8 +405,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
                     // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
                     // without slowing compilation for all of them. So when trying to call something, check if my asm backend has it.
-
-                    let ty = self.program[f].unwrap_ty();
+                    let ty = f_ty;
                     // Note: check cl funcs first because ptrs go in the asm dispatch table anyway.
                     // TODO: actually forward declare if none to make mutual recursion work.
                     let call = if let Some(&Some(func_id)) = self.cl.funcs.get(f.as_index()) {
@@ -470,94 +473,25 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     }
                     self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
-                Bc::CallDirectFlat { f } => {
-                    let f_ty = self.program[f].unwrap_ty();
-                    // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64)
-                    let c = match self.program[f].cc.unwrap() {
-                        CallConv::Flat => 0,
-                        CallConv::FlatCt => self.compile_ctx_ptr as i64,
-                        _ => unreachable!(),
-                    };
-                    let (arg, ret) = self.program.get_infos(f_ty);
-                    let c = builder.ins().iconst(I64, c);
-                    let arg_ptr = self.stack.pop().unwrap();
-                    let arg_count = builder.ins().iconst(I64, arg.stride_bytes as i64);
-                    let ret_ptr = self.stack.pop().unwrap();
-                    let ret_count = builder.ins().iconst(I64, ret.stride_bytes as i64);
-
-                    let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
-                    // flat_call result goes into a variable somewhere, already setup by bc. so don't worry about return value here.
-                    // need to check cl.funcs first because we put our functions in .dispatch too.
-                    if let Some(&Some(func_id)) = self.cl.funcs.get(f.as_index()) {
-                        let callee = self.cl.module.declare_func_in_func(func_id, builder.func);
-                        builder.ins().call(callee, args);
-                    } else {
-                        let callee = self
-                            .asm
-                            .as_mut()
-                            .and_then(|a| a.get_fn(f))
-                            .map(|a| a as u64)
-                            .map(|addr| builder.ins().iconst(I64, addr as i64))
-                            .unwrap_or_else(|| {
-                                if let Some(asm) = &mut self.asm {
-                                    // TODO: HACK: this is really stupid. this is how my asm does it but cl has relocation stuff so just have to forward declare the funcid.
-                                    //       its just annoying because then i need to make sure i know if im supposed to be declaring
-                                    //       or jsut waiting on it to be done by a different backend if i want to allow you mixing them    -- May 16
-                                    asm.extend_blanks(f);
-                                    asm.pending_indirect.push(f);
-                                    let dispatch = builder.ins().iconst(I64, asm.get_dispatch() as i64);
-                                    builder.ins().load(I64, MemFlags::new(), dispatch, f.as_index() as i32 * 8)
-                                } else {
-                                    todo!()
-                                }
-                            });
-                        let sig = builder.import_signature(self.flat_sig.clone());
-                        builder.ins().call_indirect(sig, callee, args);
-                    }
-                    if f_ty.ret.is_never() {
+                Bc::CallFnPtr { ty, .. } => {
+                    let sig = builder.import_signature(self.make_sig(ty, false, false));
+                    let (arg, ret) = self.program.get_infos(ty);
+                    self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
+                    let first_arg = self.stack.len() - arg.size_slots as usize;
+                    let callee = self.stack[first_arg - 1];
+                    let args = &self.stack[first_arg..self.stack.len()];
+                    let call = builder.ins().call_indirect(sig, callee, args);
+                    pops(&mut self.stack, arg.size_slots as usize + 1);
+                    let ret_val = builder.inst_results(call);
+                    if ty.ret.is_never() {
                         builder.ins().trap(TrapCode::UnreachableCodeReached);
                         break;
                     }
+                    for v in ret_val {
+                        self.stack.push(*v);
+                    }
+                    self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
-                Bc::CallFnPtr { ty, cc } => match cc {
-                    CallConv::CCallReg => {
-                        let sig = builder.import_signature(self.make_sig(ty, false, false));
-                        let (arg, ret) = self.program.get_infos(ty);
-                        self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
-                        let first_arg = self.stack.len() - arg.size_slots as usize;
-                        let callee = self.stack[first_arg - 1];
-                        let args = &self.stack[first_arg..self.stack.len()];
-                        let call = builder.ins().call_indirect(sig, callee, args);
-                        pops(&mut self.stack, arg.size_slots as usize + 1);
-                        let ret_val = builder.inst_results(call);
-                        if ty.ret.is_never() {
-                            builder.ins().trap(TrapCode::UnreachableCodeReached);
-                            break;
-                        }
-                        for v in ret_val {
-                            self.stack.push(*v);
-                        }
-                        self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
-                    }
-                    CallConv::Flat => {
-                        // TODO: copy-paste
-                        let (arg, ret) = self.program.get_infos(ty);
-                        let c = builder.ins().iconst(I64, 0);
-                        let arg_ptr = self.stack.pop().unwrap();
-                        let arg_count = builder.ins().iconst(I64, arg.stride_bytes as i64);
-                        let ret_ptr = self.stack.pop().unwrap();
-                        let ret_count = builder.ins().iconst(I64, ret.stride_bytes as i64);
-                        let callee = self.stack.pop().unwrap();
-                        let args = &[c, arg_ptr, arg_count, ret_ptr, ret_count];
-                        let sig = builder.import_signature(self.flat_sig.clone());
-                        builder.ins().call_indirect(sig, callee, args);
-                        if ty.ret.is_never() {
-                            builder.ins().trap(TrapCode::UnreachableCodeReached);
-                            break;
-                        }
-                    }
-                    _ => todo!(),
-                },
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
                     BakedVar::Bytes(bytes) => {
@@ -722,13 +656,13 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         extension: ArgumentExtension::None,
                     })
                 }
-            } else if let Some(types) = s.program.tuple_types(arg) {
-                let types = types.to_vec();
-                for t in types {
+            } else if let TypeInfo::Unit = &s.program[arg] {
+                //redundant
+            } else if matches!(s.program[arg], TypeInfo::Struct { .. } | TypeInfo::Array { .. }) {
+                for t in s.program.flat_tuple_types(arg) {
                     let t = s.program.raw_type(t);
                     push(s, t, sig);
                 }
-            } else if let TypeInfo::Unit = &s.program[arg] {
             } else {
                 let extension = if arg == TypeId::f64() {
                     ArgumentExtension::None

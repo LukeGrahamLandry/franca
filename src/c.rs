@@ -69,7 +69,7 @@ fn forward_declare(comp: &mut Compile, out: &mut CProgram, callee: FuncId) {
     writeln!(out.forward, ";").unwrap();
 }
 
-const FLAT_ARGS_SIGN: &str = "(int _a, void* _flat_arg_ptr, int _b, void* _flat_ret_ptr, int _c)";
+const FLAT_ARGS_SIGN: &str = "( void* _flat_ret_ptr, int _a, void* _flat_arg_ptr, int _b, int _c)";
 pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runner_main: bool) -> Res<'p, String> {
     let mut out = CProgram::default();
 
@@ -382,7 +382,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::GetCompCtx => {
                     // err!("ICE: GetCompCtx at runtime doesn't make sense",)
                     self.stack.push(Val::literal(0));
-                    self.code.push_str("GetCompCtx at runtime doesn't make sense. you probably forgot to mark something that should only be called at compile-time as #fold\n");
+                    self.code.push_str("// GetCompCtx at runtime doesn't make sense. you probably forgot to mark something that should only be called at compile-time as #fold. actually flat call always emits this now, doesnt matter.\n");
                 }
                 Bc::NameFlatCallArg { id, offset_bytes } => {
                     assert!(self.is_flat);
@@ -394,8 +394,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     });
                 }
                 // TODO: tail. at least warn if it was forced?
-                Bc::CallDirect { f, .. } => {
-                    let f_ty = self.program[f].unwrap_ty();
+                Bc::CallDirect { f, ty: f_ty, .. } => {
                     render_typedef(self.program, self.result, f_ty.arg)?;
                     render_typedef(self.program, self.result, f_ty.ret)?;
 
@@ -409,29 +408,14 @@ impl<'z, 'p> Emit<'z, 'p> {
 
                     // self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
                 }
-                Bc::CallDirectFlat { f } => {
-                    let f_ty = self.program[f].unwrap_ty();
-                    assert_eq!(self.program[f].cc.unwrap(), CallConv::Flat);
-                    let name = self.program.pool.get(self.program[f].name);
-                    self.do_flat_call(f_ty, |s| write!(s.code, "/*{name}*/ _FN{}", f.as_index()).unwrap());
-                    if f_ty.ret.is_never() {
-                        break;
-                    }
-                }
                 Bc::CallFnPtr { ty, cc } => {
                     let ptr_ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc });
                     render_typedef(self.program, self.result, ptr_ty)?;
-                    match cc {
-                        CallConv::CCallReg => self.do_c_call(ty, |s| {
-                            let callee = s.stack.pop().unwrap();
-                            write!(s.code, "((_TY{}) {callee})", ptr_ty.as_index()).unwrap();
-                        })?,
-                        CallConv::Flat => self.do_flat_call(ty, |s| {
-                            let callee = s.stack.pop().unwrap();
-                            write!(s.code, "((_TY{}) {callee})", ptr_ty.as_index()).unwrap();
-                        }),
-                        _ => todo!(),
-                    }
+                    debug_assert_ne!(cc, CallConv::CCallRegCt);
+                    self.do_c_call(ty, |s| {
+                        let callee = s.stack.pop().unwrap();
+                        write!(s.code, "((_TY{}) {callee})", ptr_ty.as_index()).unwrap();
+                    })?;
                     if ty.ret.is_never() {
                         break;
                     }
@@ -604,18 +588,6 @@ impl<'z, 'p> Emit<'z, 'p> {
             }
         }
         Ok(())
-    }
-
-    // (pop ptrs), write_fn_ref
-    fn do_flat_call(&mut self, f_ty: FnType, write_fn_ref: impl FnOnce(&mut Self)) {
-        // (compiler, arg_ptr, arg_len_i64s, ret_ptr, ret_len_i64)
-        let (arg, ret) = self.program.get_infos(f_ty);
-        let arg_ptr = self.stack.pop().unwrap();
-        let ret_ptr = self.stack.pop().unwrap();
-        write!(self.code, "    ").unwrap();
-        // flat_call result goes into a variable somewhere, already setup by bc. so don't worry about return value here.
-        write_fn_ref(self);
-        writeln!(self.code, "(0, {arg_ptr}, {}, {ret_ptr}, {});", arg.stride_bytes, ret.stride_bytes).unwrap();
     }
 }
 

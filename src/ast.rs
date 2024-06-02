@@ -1353,6 +1353,14 @@ impl<'p> Program<'p> {
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) | &TypeInfo::Unique(ty, _) => self.flat_tuple_types(ty),
             // TODO: this is sketchy
             TypeInfo::Tagged { .. } => vec![TypeId::i64(); self.slot_count(ty) as usize],
+            &TypeInfo::Array { inner, len } => {
+                let types = self.flat_tuple_types(inner);
+                let mut out = vec![];
+                for _ in 0..len {
+                    out.extend(&types);
+                }
+                out
+            }
             _ty => vec![ty],
         }
     }

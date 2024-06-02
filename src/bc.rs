@@ -20,8 +20,7 @@ pub struct BbId(pub u16);
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc {
-    CallDirect { f: FuncId, tail: bool },                 // <args:m> -> <ret:n>
-    CallDirectFlat { f: FuncId },                         // <ret_ptr:1> <arg_ptr:1> -> _
+    CallDirect { f: FuncId, ty: FnType, tail: bool },     // <args:m> -> <ret:n>
     CallFnPtr { ty: FnType, cc: CallConv },               // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
     PushConstant { value: i64 },                          // _ -> <v:1>
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !

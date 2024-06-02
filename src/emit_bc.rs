@@ -277,6 +277,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             "tried to call inlined {}",
             self.program.pool.get(self.program[f].name)
         );
+        let ty = self.program.flat_call_ty.unwrap();
 
         // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
 
@@ -288,7 +289,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
                     self.push_flat_lengths(result, f_ty);
-                    result.push(Bc::CallDirectFlat { f });
+                    result.push(Bc::CallDirect { f, ty, tail: false });
                     result.push(Bc::AddrVar { id: ret_id });
                     self.load(result, f_ty.ret);
                     result.push(Bc::LastUse { id: ret_id });
@@ -298,7 +299,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
                     self.push_flat_lengths(result, f_ty);
-                    result.push(Bc::CallDirectFlat { f });
+                    result.push(Bc::CallDirect { f, ty, tail: false });
                 }
                 Discard => {
                     let ret_id = result.add_var(f_ty.ret);
@@ -306,7 +307,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.push(Bc::AddrVar { id });
                     self.push_flat_lengths(result, f_ty);
-                    result.push(Bc::CallDirectFlat { f });
+                    result.push(Bc::CallDirect { f, ty, tail: false });
                     result.push(Bc::LastUse { id: ret_id });
                 }
             }
@@ -319,7 +320,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
             // TODO: !tail to force it when you know its fine.
             let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers;
-            result.push(Bc::CallDirect { f, tail });
+            result.push(Bc::CallDirect { f, tail, ty: f_ty });
             let slots = self.slot_count(f_ty.ret);
             if slots > 0 {
                 match result_location {

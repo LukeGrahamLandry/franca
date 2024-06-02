@@ -432,7 +432,7 @@ impl<'p> FnBody<'p> {
             for (i, op) in insts.insts.iter().enumerate() {
                 write!(f, "    {i}. {op:?}");
                 match *op {
-                    Bc::CallDirect { f: id, .. } | Bc::CallDirectFlat { f: id } => writeln!(
+                    Bc::CallDirect { f: id, .. } => writeln!(
                         f,
                         "; {}", //({}) -> {} ",
                         program.pool.get(program[id].name),
