@@ -389,6 +389,7 @@ impl<'z, 'p> Emit<'z, 'p> {
             // writeln!(self.code).unwrap();
 
             match *inst {
+                Bc::SaveSsa { .. } | Bc::LoadSsa { .. } => todo!(),
                 Bc::GetCompCtx => {
                     // err!("ICE: GetCompCtx at runtime doesn't make sense",)
                     self.stack.push(Val::literal(0));

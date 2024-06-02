@@ -528,7 +528,7 @@ impl<'p> Program<'p> {
             }
             (TypeInfo::Int(f), TypeInfo::Int(e)) => {
                 if !sane_int_size(f.bit_count) || !sane_int_size(e.bit_count) {
-                    return format!("TODO: error message");
+                    return "TODO: error message".to_string();
                 }
                 let fname = format!("{}{}", if f.signed { "i" } else { "u" }, f.bit_count);
                 let ename = format!("{}{}", if e.signed { "i" } else { "u" }, e.bit_count);
@@ -596,8 +596,8 @@ impl<'p> Program<'p> {
                 )
             }
 
-            (&TypeInfo::Fn(f), &TypeInfo::Fn(e)) => format!("{indent} incompatible function types. TODO: correct varience tracking."),
-            (&TypeInfo::FnPtr { ty: f, cc: cc_f }, &TypeInfo::FnPtr { ty: e, cc: cc_e }) => {
+            (&TypeInfo::Fn(_), &TypeInfo::Fn(_)) => format!("{indent} incompatible function types. TODO: correct varience tracking."),
+            (&TypeInfo::FnPtr { .. }, &TypeInfo::FnPtr { .. }) => {
                 format!("{indent} incompatible function types. TODO: correct varience tracking.")
             }
             (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => format!("{indent} use @resolve to convert from a function to an overload set. "),

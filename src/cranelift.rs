@@ -3,7 +3,7 @@
 //! - backtrace needs to deal with pointer authentication
 //! - soemthing makes it jump into garbage when you run too many tests
 
-use std::mem;
+use std::{collections::HashMap, mem};
 
 use cranelift::{
     codegen::{
@@ -130,12 +130,10 @@ fn emit_cl_inner<'p, M: Module>(
         body,
         blocks: vec![],
         stack: vec![],
-        indirect_ret_addr: None,
         vars: vec![],
         f: FuncId::from_index(0),
         block_done: BitSet::empty(),
-        flat_arg_addr: None,
-        flat_args_already_offset: vec![],
+        ssa_vars: Default::default(),
         compile_ctx_ptr,
         program,
         asm,
@@ -221,9 +219,8 @@ struct Emit<'z, 'p, M: Module> {
     blocks: Vec<Block>,
     block_done: BitSet,
     stack: Vec<Value>,
-    indirect_ret_addr: Option<Value>,
-    flat_arg_addr: Option<Value>,
-    flat_args_already_offset: Vec<Value>,
+    ssa_vars: HashMap<u16, Value>,
+
     vars: Vec<StackSlot>,
     f: FuncId,
     flat_sig: Signature,
@@ -293,23 +290,21 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
         self.blocks.clear();
         self.block_done.clear();
-        self.flat_args_already_offset.clear();
+        self.ssa_vars.clear();
         if self.is_flat {
             let entry = builder.create_block();
             builder.switch_to_block(entry);
 
             builder.append_block_params_for_function_params(entry);
             debug_assert_eq!(builder.block_params(entry).len(), 5);
-            self.indirect_ret_addr = Some(builder.block_params(entry)[0]);
-            self.flat_arg_addr = Some(builder.block_params(entry)[2]);
-
             for block in &self.body.blocks {
                 self.blocks.push(builder.create_block());
                 for _ in 0..block.arg_slots {
                     builder.append_block_param(*self.blocks.last().unwrap(), I64);
                 }
             }
-            builder.ins().jump(self.blocks[0], &[]);
+            let args = builder.block_params(entry).to_vec();
+            builder.ins().jump(self.blocks[0], &args);
             builder.seal_block(entry);
         } else {
             // TODO: copy-paste
@@ -322,8 +317,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 }
             }
             builder.append_block_params_for_function_params(self.blocks[0]);
-            self.indirect_ret_addr = None;
-            self.flat_arg_addr = None;
         }
 
         self.emit_block(0, builder)?;
@@ -358,16 +351,17 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
         for inst in &block.insts {
             match *inst {
+                Bc::SaveSsa { id, .. } => {
+                    let prev = self.ssa_vars.insert(id, self.stack.pop().unwrap());
+                    debug_assert!(prev.is_none());
+                }
+                Bc::LoadSsa { id } => self.stack.push(*self.ssa_vars.get(&id).unwrap()),
                 Bc::GetCompCtx => {
                     let v = builder.ins().iconst(I64, self.compile_ctx_ptr as i64);
                     self.stack.push(v);
                 }
                 Bc::NameFlatCallArg { id, offset_bytes } => {
-                    let Some(ptr) = self.flat_arg_addr else { err!("not flat call",) };
-                    debug_assert_eq!(id as usize, self.flat_args_already_offset.len());
-                    let offset = builder.ins().iconst(I64, offset_bytes as i64);
-                    let ptr = builder.ins().iadd(ptr, offset);
-                    self.flat_args_already_offset.push(ptr);
+                    unreachable!()
                 }
                 Bc::CallDirect { f, tail, ty: f_ty } => {
                     let (mut arg, ret) = self.program.get_infos(f_ty);
@@ -572,7 +566,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
                 Bc::AddrVar { id } => {
-                    if let Some(&ptr) = self.flat_args_already_offset.get(id as usize) {
+                    if let Some(&ptr) = self.ssa_vars.get(&id) {
                         self.stack.push(ptr);
                     } else {
                         let slot = self.vars[id as usize];
@@ -595,7 +589,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 }
                 Bc::NoCompile => err!("NoCompile",),
                 Bc::LastUse { .. } => {}
-                Bc::AddrFnResult => self.stack.push(self.indirect_ret_addr.unwrap()),
+                Bc::AddrFnResult => unreachable!(),
                 Bc::PeekDup(skip) => {
                     self.stack.push(self.stack[self.stack.len() - skip as usize - 1]);
                 }

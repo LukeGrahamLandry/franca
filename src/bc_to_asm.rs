@@ -10,7 +10,7 @@ use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
-use crate::{unwrap, where_am_i};
+use crate::{extend_options, unwrap, where_am_i};
 use std::arch::asm;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
@@ -89,7 +89,6 @@ struct BcToAsm<'z, 'p> {
     f: FuncId,
     wip: Vec<FuncId>, // make recursion work
     when: ExecStyle,
-    flat_result: Option<SpOffset>,
     patch_cbz: Vec<(*const u8, BbId, i64)>,
     patch_b: Vec<(*const u8, BbId)>,
     release_stack: Vec<(*const u8, *const u8, *const u8)>,
@@ -99,9 +98,6 @@ struct BcToAsm<'z, 'p> {
     markers: Vec<(String, usize)>,
     log_asm_bc: bool,
     body: &'z FnBody<'p>,
-    // rn these are (byte) offsets from the saved arg ptr but later they will be SpOffset for c abi struct args.
-    flat_arg_offsets: Vec<u16>,
-    flat_arg: Option<SpOffset>,
 }
 
 #[derive(Default, Clone)]
@@ -109,6 +105,7 @@ struct BlockState {
     stack: Vec<Val>,
     free_reg: Vec<i64>,
     open_slots: Vec<(SpOffset, u16, u16)>,
+    ssa: Vec<Option<Val>>,
 }
 
 impl<'z, 'p> BcToAsm<'z, 'p> {
@@ -122,7 +119,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             f: FuncId::from_index(0), // TODO: bad
             wip: vec![],
             when,
-            flat_result: None,
             patch_cbz: vec![], // (patch_idx, jump_idx, register)
             patch_b: vec![],
             release_stack: vec![],
@@ -132,8 +128,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             markers: vec![],
             log_asm_bc: false,
             body,
-            flat_arg: None,
-            flat_arg_offsets: vec![],
         }
     }
 
@@ -198,7 +192,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         debugln!("=== {f:?} {} flat:{is_flat_call} ===", self.program.pool.get(self.program[f].name));
         debugln!("{}", self.program[f].body.log(self.program.pool));
 
-        let (arg, ret) = self.program.get_infos(ff.unwrap_ty());
+        let (mut arg, ret) = self.program.get_infos(ff.unwrap_ty());
         let func = self.body;
         self.f = f;
         self.next_slot = SpOffset(0);
@@ -215,47 +209,21 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
         let cc = unwrap!(self.program[func.func].cc, "ICE: missing calling convention");
-        match cc {
-            CallConv::FlatCt | CallConv::Flat => {
-                // (x0=ret_ptr, x1=compiler, x2=arg_ptr, x3=arg_len, x4=ret_len)
-                // Runtime check that caller agrees on type sizes.
-                // TODO: This is not nessisary if we believe in our hearts that there are no compiler bugs...
-                assert!(arg.stride_bytes < (1 << 12));
-                assert!(ret.stride_bytes < (1 << 12));
-                self.asm.push(cmp_im(X64, x3, arg.stride_bytes as i64, 0));
-                self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
-                self.asm.push(brk(0xbad0));
-                self.asm.push(cmp_im(X64, x4, ret.stride_bytes as i64, 0));
-                self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
-                self.asm.push(brk(0xbad0));
 
-                // Save the result pointer.
-                self.flat_result = Some(self.next_slot);
-                self.store_u64(x0, sp, self.next_slot.0);
-                self.next_slot.0 += 8;
-                self.flat_arg = Some(self.next_slot);
-                self.store_u64(x2, sp, self.next_slot.0);
-                self.next_slot.0 += 8;
-                for i in 0..8 {
-                    self.state.free_reg.push(i as i64);
-                }
-
-                // Note: we rely on NameFlagArgOffset or whatever to remember how to actually access the parts you're interested in.
-            }
-            CallConv::CCallReg => {
-                // +1 for indirect return
-                let arg_slots = if ret.size_slots > 2 { arg.size_slots + 1 } else { arg.size_slots };
-                debug_assert!(arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-                self.ccall_reg_to_stack(arg_slots, arg.float_mask);
-                let int_count = arg_slots as u32 - arg.float_mask.count_ones();
-                // Any registers not containing args can be used.
-                for i in int_count..8 {
-                    self.state.free_reg.push(i as i64);
-                }
-                debug_assert_eq!(self.state.stack.len() as u16, arg_slots);
-            }
-            CallConv::Inline | CallConv::OneRetPic | CallConv::CCallRegCt => unreachable!("unsupported cc {cc:?}"),
+        // +1 for indirect return
+        let mut arg_slots = if ret.size_slots > 2 { arg.size_slots + 1 } else { arg.size_slots };
+        if matches!(cc, CallConv::FlatCt | CallConv::Flat) {
+            arg_slots = 5;
+            arg.float_mask = 0;
         }
+        debug_assert!(arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
+        self.ccall_reg_to_stack(arg_slots, arg.float_mask);
+        let int_count = arg_slots as u32 - arg.float_mask.count_ones();
+        // Any registers not containing args can be used.
+        for i in int_count..8 {
+            self.state.free_reg.push(i as i64);
+        }
+        debug_assert_eq!(self.state.stack.len() as u16, arg_slots);
 
         debugln!("entry: ({:?})", self.state.stack);
         self.emit_block(0, false)?;
@@ -311,6 +279,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.drop_reg(i as i64);
             }
         }
+        debug_assert!(self.state.stack.len() >= slots as usize);
         let func = self.body;
         let mut is_done = false;
         for i in 0..func.blocks[b].insts.len() {
@@ -336,24 +305,19 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
         }
         match inst {
+            Bc::SaveSsa { id, .. } => {
+                self.try_spill(self.state.stack.len() - 1, true);
+                let value = self.state.stack.pop().unwrap();
+                extend_options(&mut self.state.ssa, id as usize);
+                debug_assert!(self.state.ssa[id as usize].is_none());
+                self.state.ssa[id as usize] = Some(value);
+            }
+            Bc::LoadSsa { id } => self.state.stack.push(self.state.ssa[id as usize].unwrap()),
             Bc::GetCompCtx => self.state.stack.push(Val::Literal(self.compile_ctx_ptr as i64)),
-            Bc::NameFlatCallArg { id, offset_bytes } => {
-                if let Some(slot) = self.flat_arg {
-                    assert_eq!(id, self.flat_arg_offsets.len() as u16);
-                    self.flat_arg_offsets.push(offset_bytes);
-                } else {
-                    err!("only flat_call supports arg ptr currently.",)
-                }
-            }
-            Bc::AddrFnResult => {
-                if let Some(slot) = self.flat_result {
-                    self.state.stack.push(Val::Spill(slot));
-                } else {
-                    todo!() // x8
-                }
-            }
+            Bc::NameFlatCallArg { id, offset_bytes } => unreachable!(),
+            Bc::AddrFnResult => unreachable!(),
             Bc::LastUse { id } => {
-                if id < self.flat_arg_offsets.len() as u16 {
+                if self.body.is_ssa_var.get(id as usize) {
                     return Ok(false);
                 }
                 // TODO: I this doesn't work because if blocks are depth first now, not in order,
@@ -430,11 +394,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::CallDirect { f, tail, ty } => {
                 let target = &self.program[f];
-                let comp_ctx = target.cc.unwrap() == CallConv::CCallRegCt;
+                let cc = target.cc.unwrap();
 
                 // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
                 // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
-                self.dyn_c_call(ty, comp_ctx, |s| {
+                self.dyn_c_call(ty, cc, |s| {
                     if tail {
                         s.emit_stack_fixup();
                     }
@@ -446,18 +410,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::Ret1(prim) => return self.emit_return(1, prim.float()),
             Bc::Ret2((a, b)) => return self.emit_return(2, a.float() << 1 | b.float()),
             Bc::AddrVar { id } => {
-                if id < self.flat_arg_offsets.len() as u16 {
-                    if let Some(arg) = self.flat_arg {
-                        // if its an arg to a flat call, reconstruct that address
-                        let offset_bytes = self.flat_arg_offsets[id as usize];
-                        let reg = self.get_free_reg();
-                        self.load_u64(reg, sp, arg.0);
-                        self.state.stack.push(Val::Increment { reg, offset_bytes });
-                        return Ok(false);
-                    } else {
-                        unreachable!()
-                    }
-                } else if let Some(slot) = self.vars[id as usize] {
+                if let Some(slot) = self.vars[id as usize] {
                     self.state.stack.push(Val::Increment {
                         reg: sp,
                         offset_bytes: slot.0,
@@ -534,8 +487,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::CallFnPtr { ty, cc } => {
                 // TODO: tail call
-                // Note: for flat call, we're lying about whether its #ct, that's fine, bc deals with it.
-                self.dyn_c_call(ty, false, |s| {
+                self.dyn_c_call(ty, cc, |s| {
                     // call_flat will have popped the args, so now stack is just the pointer to call
                     let callee = s.state.stack.pop().unwrap();
                     // TODO: this does redundant spilling every time!
@@ -991,14 +943,17 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
     /// <arg:n> -> <ret:m>
-    fn dyn_c_call(&mut self, f_ty: FnType, comp_ctx: bool, do_call: impl FnOnce(&mut Self)) {
+    fn dyn_c_call(&mut self, f_ty: FnType, cc: CallConv, do_call: impl FnOnce(&mut Self)) {
+        let comp_ctx = cc == CallConv::CCallRegCt;
         // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
         let mut reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
         let (arg, mut ret) = self.program.get_infos(f_ty);
         if ret.size_slots > 2 {
+            debug_assert!(!matches!(cc, CallConv::Flat | CallConv::FlatCt));
             reg_offset += 1; // indirect return
             ret = self.program.get_info(TypeId::unit);
         }
+
         assert!(
             (arg.size_slots + reg_offset) <= 8,
             "indirect c_call only supports 8 arguments. TODO: pass on stack"

@@ -1,11 +1,13 @@
 //! Low level instructions
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ptr::slice_from_raw_parts;
 
 use crate::ast::{CallConv, LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
+use crate::reflect::BitSet;
 use crate::{
     ast::{FnType, FuncId, TypeId},
     compiler::{ExecStyle, Res},
@@ -30,6 +32,8 @@ pub enum Bc {
     StorePost { ty: Prim },                               // <?:n> <ptr:1> -> _
     StorePre { ty: Prim },                                // <ptr:1> <?:n> -> _
     AddrVar { id: u16 },                                  // _ -> <ptr:1>
+    SaveSsa { id: u16, ty: Prim },                        // <p:1> -> _
+    LoadSsa { id: u16 },                                  // _ -> <p:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     AddrFnResult,                                         // _ -> <ptr:1>
@@ -97,6 +101,7 @@ pub struct FnBody<'p> {
     pub clock: u16,
     pub name: Ident<'p>,
     pub want_log: bool,
+    pub is_ssa_var: BitSet,
 }
 
 #[derive(Debug, Clone, Copy, InterpSend, PartialEq)]

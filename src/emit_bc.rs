@@ -45,6 +45,7 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
     let mut jump_targets = BitSet::empty();
     jump_targets.set(0); // entry is the first instruction
     FnBody {
+        is_ssa_var: BitSet::empty(),
         var_names: vec![],
         vars: Default::default(),
         when,
@@ -91,17 +92,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let arguments = pattern.flatten();
         // TODO: cringe copy-paste
         if self.is_flat_call {
+            // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
+            result.pop(2);
+
             let mut offset = 0;
             for (name, ty, kind) in arguments.into_iter() {
+                result.push(Bc::PeekDup(0));
                 assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
 
-                let id = result.add_var(ty);
                 let info = self.program.get_info(ty);
                 offset = align_to(offset, info.align_bytes as usize);
-                result.push(Bc::NameFlatCallArg {
-                    id,
-                    offset_bytes: offset as u16,
-                });
+                result.push(Bc::IncPtrBytes { bytes: offset as u16 });
+                let id = result.save_ssa_var();
                 offset += info.stride_bytes as usize;
 
                 self.locals.last_mut().unwrap().push(id);
@@ -110,6 +112,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
                 }
             }
+            result.pop(2);
+            // Now just ret_ptr is on top of the stack, which matches normal cc.
         } else {
             // reversed because they're on the stack like [0, 1, 2]
             for (name, ty, kind) in arguments.into_iter().rev() {
@@ -126,7 +130,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let mut len = types.len() as u16;
                     for ty in types {
                         let ty = self.program.prim(ty);
-                        result.push(Bc::AddrVar { id });
+                        result.addr_var(id);
                         result.push(Bc::IncPtrBytes { bytes: (len - 1) * 8 }); // Note: backwards!
                         result.push(Bc::StorePost { ty });
                         len -= 1;
@@ -190,7 +194,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let f_ty = func.unwrap_ty();
         let (arg, ret) = self.program.get_infos(f_ty);
         let slots = if is_flat_call {
-            0
+            5
         } else if ret.size_slots > 2 {
             arg.size_slots + 1
         } else {
@@ -198,22 +202,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         };
         let floats = if is_flat_call { 0 } else { arg.float_mask };
         let entry_block = result.push_block(slots, floats);
-
-        // TODO: HACK. this opt shouldn't be nessisary, i just generate so much garbage :(
-        if let Expr::Value { .. } = &body.expr {
-        } else {
-            self.bind_args(result, &func.arg)?;
-        }
-
+        self.bind_args(result, &func.arg)?;
         // We represent the indirect return argument as the left-most thing on the stack,
         // so after popping all the args, its at the top and we can emit the thing normally.
         let result_location = if is_flat_call || ret.size_slots > 2 { ResAddr } else { PushStack };
-        let return_block = result.push_block(ret.size_slots, ret.float_mask);
+        let return_block = if is_flat_call {
+            result.push_block(0, 0)
+        } else {
+            result.push_block(ret.size_slots, ret.float_mask)
+        };
 
         result.current_block = entry_block;
-        if is_flat_call {
-            result.push(Bc::AddrFnResult);
-        }
 
         // TODO: flat_call tail
         self.compile_expr(result, body, result_location, !is_flat_call)?;
@@ -269,36 +268,35 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
 
-        let ty = self.program.flat_call_ty.unwrap();
-
         if force_flat {
             // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
             let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
             let id = flat_arg_loc.unwrap();
+            let ty = self.program.flat_call_ty.unwrap();
             match result_location {
                 PushStack => {
                     let ret_id = result.add_var(f_ty.ret);
-                    result.push(Bc::AddrVar { id: ret_id });
+                    result.addr_var(ret_id);
                     result.push(Bc::GetCompCtx);
-                    result.push(Bc::AddrVar { id });
+                    result.addr_var(id);
                     self.push_flat_lengths(result, f_ty);
                     do_call(result, ty, false);
-                    result.push(Bc::AddrVar { id: ret_id });
+                    result.addr_var(ret_id);
                     self.load(result, f_ty.ret);
                     result.push(Bc::LastUse { id: ret_id });
                 }
                 ResAddr => {
                     // res ptr was already on stack
                     result.push(Bc::GetCompCtx);
-                    result.push(Bc::AddrVar { id });
+                    result.addr_var(id);
                     self.push_flat_lengths(result, f_ty);
                     do_call(result, ty, false);
                 }
                 Discard => {
                     let ret_id = result.add_var(f_ty.ret);
-                    result.push(Bc::AddrVar { id: ret_id });
+                    result.addr_var(ret_id);
                     result.push(Bc::GetCompCtx);
-                    result.push(Bc::AddrVar { id });
+                    result.addr_var(id);
                     self.push_flat_lengths(result, f_ty);
                     do_call(result, ty, false);
                     result.push(Bc::LastUse { id: ret_id });
@@ -310,7 +308,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
             let result_var = if has_indirect_ret && result_location != ResAddr {
                 let id = result.add_var(f_ty.ret);
-                result.push(Bc::AddrVar { id });
+                result.addr_var(id);
                 Some(id)
             } else {
                 None
@@ -334,7 +332,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     PushStack => {
                         if has_indirect_ret {
                             if let Some(id) = result_var {
-                                result.push(Bc::AddrVar { id });
+                                result.addr_var(id);
                             }
                             self.load(result, f_ty.ret);
                         }
@@ -377,7 +375,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     extend_options(&mut result.var_names, id as usize);
                     result.var_names[id as usize] = Some(*name);
                 }
-                result.push(Bc::AddrVar { id });
+                result.addr_var(id);
                 self.compile_expr(result, value, ResAddr, false)?;
                 let prev = self.var_lookup.insert(*name, id);
                 self.locals.last_mut().unwrap().push(id);
@@ -411,7 +409,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             extend_options(&mut result.var_names, id as usize);
             result.var_names[id as usize] = name;
         }
-        result.push(Bc::AddrVar { id });
+        result.addr_var(id);
         self.compile_expr(result, value, ResAddr, false)?;
         self.locals.last_mut().unwrap().push(id);
         if let Some(name) = name {
@@ -425,7 +423,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         // TODO: hack
         if force_flat {
             let id = result.add_var(arg.ty); // Note: this is kinda good because it gets scary if both sides try to avoid the copy and they alias.
-            result.push(Bc::AddrVar { id });
+            result.addr_var(id);
             self.compile_expr(result, arg, ResAddr, false)?;
             Ok(Some(id))
         } else {
@@ -710,10 +708,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         let count = if let Some(types) = ty { types.len() } else { 1 };
 
                         let id = result.add_var(container_ty);
-                        result.push(Bc::AddrVar { id });
+                        result.addr_var(id);
                         self.compile_expr(result, arg, ResAddr, false)?;
 
-                        result.push(Bc::AddrVar { id });
+                        result.addr_var(id);
                         result.push(Bc::PushConstant { value: count as i64 });
                         match result_location {
                             PushStack => {}
@@ -837,7 +835,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             var.log(self.program.pool)
         );
         let id = *unwrap!(self.var_lookup.get(var), "Missing var {} (in !addr)", var.log(self.program.pool));
-        result.push(Bc::AddrVar { id });
+        result.addr_var(id);
 
         match result_location {
             PushStack => {}
@@ -1170,6 +1168,21 @@ impl<'p> FnBody<'p> {
     #[track_caller]
     fn push(&mut self, inst: Bc) {
         self.push_to(self.current_block, inst);
+    }
+
+    fn addr_var(&mut self, id: u16) {
+        if self.is_ssa_var.get(id as usize) {
+            self.push(Bc::LoadSsa { id })
+        } else {
+            self.push(Bc::AddrVar { id })
+        }
+    }
+
+    fn save_ssa_var(&mut self) -> u16 {
+        let id = self.add_var(TypeId::i64());
+        self.is_ssa_var.set(id as usize);
+        self.push(Bc::SaveSsa { id, ty: Prim::I64 });
+        id
     }
 
     #[track_caller]
