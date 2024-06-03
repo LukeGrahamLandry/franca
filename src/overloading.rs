@@ -93,7 +93,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let name = self.program[i].name;
         // This might be a bad idea. its really fucked up if you accidently create an overload with the same types but different arity.
         // should at least have an optional post-check for that.
-        let arity = self.arity(arg);
+        let arity = self.program.arity(arg);
         self.compute_new_overloads(i, Some(arity))?;
         let mut overloads = self.program[i].clone(); // Sad
         overloads.ready.retain(|o| o.arity == arity);

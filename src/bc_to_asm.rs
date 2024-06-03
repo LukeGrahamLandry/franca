@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
-use crate::bc::{BbId, Bc, Prim, Value, Values};
+use crate::bc::{BbId, Bc, Prim, PrimSig, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
@@ -192,7 +192,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         debugln!("=== {f:?} {} flat:{is_flat_call} ===", self.program.pool.get(self.program[f].name));
         debugln!("{}", self.program[f].body.log(self.program.pool));
 
-        let (mut arg, ret) = self.program.get_infos(ff.unwrap_ty());
         let func = self.body;
         self.f = f;
         self.next_slot = SpOffset(0);
@@ -210,20 +209,15 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
         let cc = unwrap!(self.program[func.func].cc, "ICE: missing calling convention");
 
-        // +1 for indirect return
-        let mut arg_slots = if ret.size_slots > 2 { arg.size_slots + 1 } else { arg.size_slots };
-        if matches!(cc, CallConv::FlatCt | CallConv::Flat) {
-            arg_slots = 5;
-            arg.float_mask = 0;
-        }
-        debug_assert!(arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-        self.ccall_reg_to_stack(arg_slots, arg.float_mask);
-        let int_count = arg_slots as u32 - arg.float_mask.count_ones();
+        let sig = self.body.signeture;
+        debug_assert!(sig.arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
+        self.ccall_reg_to_stack(sig.arg_slots, sig.arg_float_mask);
+        let int_count = sig.arg_slots as u32 - sig.arg_float_mask.count_ones();
         // Any registers not containing args can be used.
         for i in int_count..8 {
             self.state.free_reg.push(i as i64);
         }
-        debug_assert_eq!(self.state.stack.len() as u16, arg_slots);
+        debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
 
         debugln!("entry: ({:?})", self.state.stack);
         self.emit_block(0, false)?;
@@ -415,13 +409,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
                 return Ok(true);
             }
-            Bc::CallDirect { f, tail, ty } => {
-                let target = &self.program[f];
-                let cc = target.cc.unwrap();
-
+            Bc::CallDirect { f, tail, sig } => {
                 // TODO: use with_link for tail calls. need to "Leave holes for stack fixup code." like below
                 // TODO: if you already know the stack height of the callee, you could just fixup to that and jump in past the setup code. but lets start simple.
-                self.dyn_c_call(ty, cc, |s| {
+                self.dyn_c_call(sig, |s| {
                     if tail {
                         s.emit_stack_fixup();
                     }
@@ -493,9 +484,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.drop_reg(working);
                 // don't drop <reg>, we just peeked it
             }
-            Bc::CallFnPtr { ty, cc } => {
+            Bc::CallFnPtr { sig } => {
                 // TODO: tail call
-                self.dyn_c_call(ty, cc, |s| {
+                self.dyn_c_call(sig, |s| {
                     // call_flat will have popped the args, so now stack is just the pointer to call
                     let callee = s.state.stack.pop().unwrap();
                     // TODO: this does redundant spilling every time!
@@ -614,7 +605,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     unreachable!()
                 };
                 self.asm.push(f_ldr_uo(X64, next_float as i64, sp, slot.0 as i64 / 8));
-                self.drop_slot(slot, 8);
+                // self.drop_slot(slot, 8); // TODO!
 
                 next_float += 1;
                 continue;
@@ -882,7 +873,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Val::Spill(slot) => {
                 let r = self.get_free_reg();
                 self.load_u64(r, sp, slot.0);
-                self.drop_slot(slot, 8);
+                // self.drop_slot(slot, 8); TODO!
                 r
             }
             Val::FloatReg(_) => todo!(),
@@ -950,31 +941,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // Note: comp_ctx doesn't push the ctx here, bc needs to do that. this it just does the call with an extra argument.
     /// <arg:n> -> <ret:m>
-    fn dyn_c_call(&mut self, f_ty: FnType, cc: CallConv, do_call: impl FnOnce(&mut Self)) {
-        let comp_ctx = cc == CallConv::CCallRegCt;
-        // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
-        let mut reg_offset = if comp_ctx { 1 } else { 0 }; // for secret args like comp_ctx
-        let (arg, mut ret) = self.program.get_infos(f_ty);
-        if ret.size_slots > 2 {
-            debug_assert!(!matches!(cc, CallConv::Flat | CallConv::FlatCt));
-            reg_offset += 1; // indirect return
-            ret = self.program.get_info(TypeId::unit);
-        }
-
-        assert!(
-            (arg.size_slots + reg_offset) <= 8,
-            "indirect c_call only supports 8 arguments. TODO: pass on stack"
-        );
+    fn dyn_c_call(&mut self, sig: PrimSig, do_call: impl FnOnce(&mut Self)) {
+        assert!(sig.arg_slots <= 8, "indirect c_call only supports 8 arguments. TODO: pass on stack");
         // TODO: this isn't the normal c abi
         // assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
 
-        self.stack_to_ccall_reg(arg.size_slots + reg_offset, arg.float_mask);
+        self.stack_to_ccall_reg(sig.arg_slots, sig.arg_float_mask);
         self.spill_abi_stompable();
         do_call(self);
-        self.ccall_reg_to_stack(ret.size_slots, ret.float_mask);
+        self.ccall_reg_to_stack(sig.ret_slots, sig.ret_float_mask);
 
-        let float_count = ret.float_mask.count_ones();
-        let int_count = ret.size_slots as u32 - float_count;
+        let float_count = sig.ret_float_mask.count_ones();
+        let int_count = sig.ret_slots as u32 - float_count;
 
         for i in int_count..8 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.

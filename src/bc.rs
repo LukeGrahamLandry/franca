@@ -1,7 +1,6 @@
 //! Low level instructions
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ptr::slice_from_raw_parts;
 
 use crate::ast::{CallConv, LabelId, Program, TypeInfo, Var};
@@ -22,8 +21,8 @@ pub struct BbId(pub u16);
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc {
-    CallDirect { f: FuncId, ty: FnType, tail: bool },     // <args:m> -> <ret:n>
-    CallFnPtr { ty: FnType, cc: CallConv },               // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
+    CallDirect { sig: PrimSig, f: FuncId, tail: bool },   // <args:m> -> <ret:n>
+    CallFnPtr { sig: PrimSig },                           // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
     PushConstant { value: i64 },                          // _ -> <v:1>
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !
     Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
@@ -49,6 +48,15 @@ pub enum Bc {
     Ret0, // flat call uses this too because code has already written to indirect return address.
     Ret1(Prim),
     Ret2((Prim, Prim)),
+}
+
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub struct PrimSig {
+    pub arg_slots: u16,
+    pub arg_float_mask: u32,
+    pub ret_slots: u16,
+    pub ret_float_mask: u32,
+    pub first_arg_is_indirect_return: bool,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq)]
@@ -102,6 +110,7 @@ pub struct FnBody<'p> {
     pub name: Ident<'p>,
     pub want_log: bool,
     pub is_ssa_var: BitSet,
+    pub signeture: PrimSig,
 }
 
 #[derive(Debug, Clone, Copy, InterpSend, PartialEq)]

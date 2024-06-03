@@ -1,7 +1,7 @@
 - generic Read/Write instead of hardcoding List(u8).
 - remove flat call from backends, just do it in bc.
-- dont allow variable assignment silently changing int type.
 - make sure fn load is always correctly inlined by #one_ret_pic
+- handle @generic in overloading.rs so you don't have to add useless @as casts in nested expressions.
 
 ## regressions
 

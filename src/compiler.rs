@@ -1521,7 +1521,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                             err!("no contextual fields for type {ty:?}",)
                         };
                         let field = fields.iter().find(|f| f.0 == name);
-                        let (_, value) = unwrap!(field, "contextual field not found {} for {ty:?}", self.pool.get(name));
+                        let (_, value) = unwrap!(
+                            field,
+                            "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
+                            self.pool.get(name),
+                            self.program.log_type(ty),
+                            fields.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
+                        );
                         expr.set(value.clone(), ty);
                         return Ok(ty);
                     }
@@ -1551,7 +1557,14 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                         if let TypeInfo::Enum { fields, .. } = &self.program[ty] {
                             let field = fields.iter().find(|f| f.0 == *name);
-                            let (_, value) = unwrap!(field, "contextual field not found {} for {ty:?}", self.pool.get(*name));
+                            // TODO: copy-paste from the !contextual_field version.
+                            let (_, value) = unwrap!(
+                                field,
+                                "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
+                                self.pool.get(*name),
+                                self.program.log_type(ty),
+                                fields.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
+                            );
                             expr.set(value.clone(), ty);
                             return Ok(ty);
                         }
@@ -3463,24 +3476,6 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn exec_style(&self) -> ExecStyle {
         self.wip_stack.last().unwrap().1
-    }
-
-    pub fn arity(&mut self, expr: &FatExpr<'p>) -> u16 {
-        if !expr.ty.is_unknown() {
-            let raw = self.program.raw_type(expr.ty);
-            return match &self.program[raw] {
-                TypeInfo::Struct { fields, .. } => fields.len() as u16,
-                TypeInfo::Unit => 1,
-                _ => 1,
-            };
-        }
-
-        match &expr.expr {
-            Expr::Cast(_) | Expr::Value { .. } => unreachable!("ICE: expected known type"),
-            Expr::Tuple(parts) => parts.len() as u16,
-            Expr::StructLiteralP(parts) => parts.bindings.len() as u16,
-            _ => 1,
-        }
     }
 }
 

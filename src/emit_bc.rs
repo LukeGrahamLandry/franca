@@ -44,6 +44,7 @@ use ResultLoc::*;
 pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -> FnBody<'p> {
     let mut jump_targets = BitSet::empty();
     jump_targets.set(0); // entry is the first instruction
+    let f = &program[func];
     FnBody {
         is_ssa_var: BitSet::empty(),
         var_names: vec![],
@@ -51,11 +52,12 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
         when,
         func,
         blocks: vec![],
-        name: program[func].name,
+        name: f.name,
         current_block: BbId(0),
         inlined_return_addr: Default::default(),
-        want_log: program[func].has_tag(Flag::Log_Bc),
+        want_log: f.has_tag(Flag::Log_Bc),
         clock: 0,
+        signeture: prim_sig(program, f.finished_ty().unwrap(), f.cc.unwrap()),
     }
 }
 
@@ -115,17 +117,23 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             result.pop(2);
             // Now just ret_ptr is on top of the stack, which matches normal cc.
         } else {
+            let mut pushed = if result.signeture.first_arg_is_indirect_return { 1 } else { 0 };
             // reversed because they're on the stack like [0, 1, 2]
             for (name, ty, kind) in arguments.into_iter().rev() {
                 // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
                 // TODO: the frontend needs to remove the 'const' parts from the ast in DeclVarPattern
                 assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
 
-                let id = result.add_var(ty);
+                let info = self.program.get_info(ty);
 
-                let slots = self.slot_count(ty);
-
-                if slots != 0 {
+                let id = if info.size_slots == 0 {
+                    continue;
+                } else if info.pass_by_ref {
+                    pushed += 1;
+                    // TODO: callee make copy if it wants to modify
+                    result.save_ssa_var()
+                } else {
+                    let id = result.add_var(ty);
                     let types = self.program.flat_tuple_types(ty);
                     let mut len = types.len() as u16;
                     for ty in types {
@@ -134,9 +142,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.inc_ptr_bytes((len - 1) * 8); // Note: backwards!
                         result.push(Bc::StorePost { ty });
                         len -= 1;
+                        pushed += 1;
                     }
                     // debug_assert_eq!(i * 8, self.program.get_info(ty).stride_bytes); // TODO
-                }
+                    id
+                };
 
                 self.locals.last_mut().unwrap().push(id);
                 if let Some(name) = name {
@@ -144,8 +154,83 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
                 }
             }
+
+            assert_eq!(pushed, result.signeture.arg_slots);
         }
         Ok(())
+    }
+
+    fn compile_for_arg(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, arity: usize) -> Res<'p, bool> {
+        let info = self.program.get_info(arg.ty);
+        // If the whole thing is passed in registers, cool, we're done.
+        if !info.pass_by_ref {
+            // assert_eq!(arity, info.size_slots as usize); // TODO??
+            self.compile_expr(result, arg, PushStack, false)?; // TODO: tail if its for a ret of the main function?
+            return Ok(false);
+        }
+
+        if let Some(types) = self.program.tuple_types(arg.ty) {
+            debug_assert!(types.len() == self.program.arity(arg) as usize);
+
+            if types.iter().all(|t| !self.program.get_info(*t).pass_by_ref) {
+                self.compile_expr(result, arg, PushStack, false)?;
+                return Ok(false);
+            }
+
+            let mut pushed = 0;
+            if let Expr::Tuple(parts) = &arg.expr {
+                debug_assert!(types.len() == parts.len());
+
+                for (ty, val) in types.into_iter().zip(parts.iter()) {
+                    let info = self.program.get_info(ty);
+                    if !info.pass_by_ref {
+                        pushed += info.size_slots;
+                        self.compile_expr(result, val, PushStack, false)?;
+                        continue;
+                    }
+
+                    if let Expr::SuffixMacro(name, macro_arg) = &val.expr {
+                        if *name == Flag::Deref.ident() {
+                            pushed += 1;
+                            // TODO: this is probably unsound.
+                            //       we're assuming that we can defer the load to be done by the callee but that might not be true.
+                            self.compile_expr(result, macro_arg, PushStack, false)?;
+                            continue;
+                        }
+                    }
+
+                    if let Expr::Value { value } = &val.expr {
+                        // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
+                        if result.when == ExecStyle::Jit {
+                            // TODO: this gets super bad if the callee isn't properly copying it because they'll be nmodifying something we think is constant
+                            pushed += 1;
+                            result.push(Bc::PushConstant {
+                                value: value.bytes().as_ptr() as i64,
+                            });
+                            continue;
+                        }
+                    }
+
+                    pushed += 1;
+                    let id = result.add_var(ty);
+                    result.addr_var(id);
+                    self.compile_expr(result, val, ResAddr, false)?;
+                    result.addr_var(id);
+                }
+                assert_eq!(pushed as usize, arity);
+                return Ok(true);
+            }
+        }
+
+        if arity == 1 {
+            let id = result.add_var(arg.ty);
+            result.addr_var(id);
+            self.compile_expr(result, arg, ResAddr, false)?;
+            result.addr_var(id);
+            return Ok(true);
+        }
+
+        todo!("{} {arity}", self.program.log_type(arg.ty))
     }
 
     fn store_pre(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
@@ -191,26 +276,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             return Ok(());
         };
 
-        let f_ty = func.unwrap_ty();
-        let (arg, ret) = self.program.get_infos(f_ty);
-        let slots = if is_flat_call {
-            5
-        } else if ret.size_slots > 2 {
-            arg.size_slots + 1
-        } else {
-            arg.size_slots
-        };
-        let floats = if is_flat_call { 0 } else { arg.float_mask };
-        let entry_block = result.push_block(slots, floats);
+        let entry_block = result.push_block(result.signeture.arg_slots, result.signeture.arg_float_mask);
         self.bind_args(result, &func.arg)?;
         // We represent the indirect return argument as the left-most thing on the stack,
         // so after popping all the args, its at the top and we can emit the thing normally.
-        let result_location = if is_flat_call || ret.size_slots > 2 { ResAddr } else { PushStack };
-        let return_block = if is_flat_call {
-            result.push_block(0, 0)
+        let result_location = if result.signeture.first_arg_is_indirect_return {
+            ResAddr
         } else {
-            result.push_block(ret.size_slots, ret.float_mask)
+            PushStack
         };
+        let return_block = result.push_block(result.signeture.ret_slots, result.signeture.ret_float_mask);
 
         result.current_block = entry_block;
 
@@ -220,7 +295,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
             result.push(Bc::Goto {
                 ip: return_block,
-                slots: ret.size_slots,
+                slots: result.signeture.ret_slots,
             });
             result.blocks[return_block.0 as usize].incoming_jumps += 1;
             result.current_block = return_block;
@@ -262,17 +337,20 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         arg_expr: &FatExpr<'p>,
         result_location: ResultLoc,
         mut can_tail: bool,
-        do_call: impl FnOnce(&mut FnBody, FnType, bool),
+        do_call: impl FnOnce(&mut FnBody, PrimSig, bool),
+        arg_arity: usize,
     ) -> Res<'p, ()> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
-
+        let mut sig = prim_sig(self.program, f_ty, cc);
         if force_flat {
             // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
-            let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
-            let id = flat_arg_loc.unwrap();
-            let ty = self.program.flat_call_ty.unwrap();
+
+            let id = result.add_var(arg_expr.ty); // Note: this is kinda good because it gets scary if both sides try to avoid the copy and they alias.
+            result.addr_var(id);
+            self.compile_expr(result, arg_expr, ResAddr, false)?;
+
             match result_location {
                 PushStack => {
                     let ret_id = result.add_var(f_ty.ret);
@@ -280,7 +358,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.addr_var(id);
                     self.push_flat_lengths(result, f_ty);
-                    do_call(result, ty, false);
+                    do_call(result, sig, false);
                     result.addr_var(ret_id);
                     self.load(result, f_ty.ret);
                     result.push(Bc::LastUse { id: ret_id });
@@ -290,7 +368,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.addr_var(id);
                     self.push_flat_lengths(result, f_ty);
-                    do_call(result, ty, false);
+                    do_call(result, sig, false);
                 }
                 Discard => {
                     let ret_id = result.add_var(f_ty.ret);
@@ -298,15 +376,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     result.push(Bc::GetCompCtx);
                     result.addr_var(id);
                     self.push_flat_lengths(result, f_ty);
-                    do_call(result, ty, false);
+                    do_call(result, sig, false);
                     result.push(Bc::LastUse { id: ret_id });
                 }
             }
             result.push(Bc::LastUse { id });
         } else {
-            let has_indirect_ret = self.program.get_info(f_ty.ret).size_slots > 2;
-
-            let result_var = if has_indirect_ret && result_location != ResAddr {
+            let result_var = if sig.first_arg_is_indirect_return && result_location != ResAddr {
                 let id = result.add_var(f_ty.ret);
                 result.addr_var(id);
                 Some(id)
@@ -318,19 +394,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::GetCompCtx);
             }
 
-            let flat_arg_loc = self.compile_for_arg(result, arg_expr, force_flat)?;
-            assert!(flat_arg_loc.is_none());
-
+            let any_by_ref = self.compile_for_arg(result, arg_expr, arg_arity)?;
             // if any args are pointers, they might be to the stack and then you probably can't tail call.
             // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
             // TODO: !tail to force it when you know its fine.
-            let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers;
-            do_call(result, f_ty, tail);
+            let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers && !any_by_ref;
+            do_call(result, sig, tail);
             let slots = self.slot_count(f_ty.ret);
             if slots > 0 {
                 match result_location {
                     PushStack => {
-                        if has_indirect_ret {
+                        if sig.first_arg_is_indirect_return {
                             if let Some(id) = result_var {
                                 result.addr_var(id);
                             }
@@ -338,12 +412,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
                     ResAddr => {
-                        if !has_indirect_ret {
+                        if !sig.first_arg_is_indirect_return {
                             self.store_pre(result, f_ty.ret);
                         }
                     }
                     Discard => {
-                        if !has_indirect_ret {
+                        if !sig.first_arg_is_indirect_return {
                             result.pop(slots)
                         }
                     }
@@ -419,19 +493,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         Ok(())
     }
 
-    fn compile_for_arg(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, force_flat: bool) -> Res<'p, Option<u16>> {
-        // TODO: hack
-        if force_flat {
-            let id = result.add_var(arg.ty); // Note: this is kinda good because it gets scary if both sides try to avoid the copy and they alias.
-            result.addr_var(id);
-            self.compile_expr(result, arg, ResAddr, false)?;
-            Ok(Some(id))
-        } else {
-            self.compile_expr(result, arg, PushStack, false)?; // TODO: if its for a ret of the main function
-            Ok(None)
-        }
-    }
-
     // if result_location==true, the top of the stack on entry to this function has the pointer where the result should be stored.
     // otherwise, just push it to the stack.
     fn compile_expr(&mut self, result: &mut FnBody<'p>, expr: &FatExpr<'p>, result_location: ResultLoc, can_tail: bool) -> Res<'p, ()> {
@@ -493,9 +554,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     if func.has_tag(Flag::No_Tail) {
                         can_tail = false;
                     }
-                    return self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail, |r, ty, tail| {
-                        r.push(Bc::CallDirect { f: f_id, ty, tail })
-                    });
+                    let arity = func.arg.bindings.len();
+                    return self.emit_runtime_call(
+                        result,
+                        f_ty,
+                        cc,
+                        arg,
+                        result_location,
+                        can_tail,
+                        |r, sig, tail| r.push(Bc::CallDirect { f: f_id, sig, tail }),
+                        arity,
+                    );
                 }
                 if let TypeInfo::FnPtr { ty: f_ty, cc } = self.program[f.ty] {
                     self.compile_expr(result, f, PushStack, false)?;
@@ -505,9 +574,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         // however, if the function wants to push stack but we want it to a resaddr, we don't do this here because emit_runtime_call handles it which is kinda HACK.
                         result.push(Bc::PeekDup(1));
                     }
-                    self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail, |r, ty, _| {
-                        r.push(Bc::CallFnPtr { ty, cc })
-                    })?;
+
+                    let arity = self.program.flat_tuple_types(f_ty.arg).len(); // TODO: wrong. it needs to know about the bindings of the function decl somehow.
+                    self.emit_runtime_call(
+                        result,
+                        f_ty,
+                        cc,
+                        arg,
+                        result_location,
+                        can_tail,
+                        |r, sig, _| r.push(Bc::CallFnPtr { sig }),
+                        arity,
+                    )?;
                     if result_location == ResAddr && will_use_indirect_ret {
                         result.push(Bc::Snipe(0)); // original ret ptr
                     }
@@ -1218,4 +1296,61 @@ impl<'p> FnBody<'p> {
             self.push(Bc::Snipe(0));
         }
     }
+}
+
+fn prim_sig(program: &Program, f_ty: FnType, cc: CallConv) -> PrimSig {
+    if matches!(cc, CallConv::Flat | CallConv::FlatCt) {
+        return PrimSig {
+            arg_slots: 5,
+            arg_float_mask: 0,
+            ret_slots: 0,
+            ret_float_mask: 0,
+            first_arg_is_indirect_return: true,
+        };
+    }
+
+    let has_indirect_ret = program.get_info(f_ty.ret).size_slots > 2;
+
+    let (arg, ret) = program.get_infos(f_ty);
+    let mut sig = PrimSig {
+        arg_slots: arg.size_slots,
+        arg_float_mask: arg.float_mask,
+        ret_slots: ret.size_slots,
+        ret_float_mask: ret.float_mask,
+        first_arg_is_indirect_return: has_indirect_ret,
+    };
+
+    if has_indirect_ret {
+        sig.arg_slots += 1;
+        sig.ret_slots = 0;
+        sig.ret_float_mask = 0;
+    }
+
+    if matches!(cc, CallConv::CCallRegCt) {
+        sig.arg_slots += 1;
+    }
+
+    // sad copy paste from compile_for_arg
+    if arg.pass_by_ref {
+        if let Some(types) = program.tuple_types(f_ty.arg) {
+            if !types.iter().all(|t| !program.get_info(*t).pass_by_ref) {
+                for ty in types {
+                    let info = program.get_info(ty);
+                    if info.pass_by_ref {
+                        sig.arg_slots -= info.size_slots;
+                        sig.arg_slots += 1;
+                        debug_assert!(
+                            sig.arg_float_mask == 0,
+                            "TODO: shift float mask correctly to account for passing by reference"
+                        );
+                    }
+                }
+            }
+        } else {
+            // if arity == 1 ??
+            sig.arg_slots = 1;
+        }
+    }
+
+    sig
 }

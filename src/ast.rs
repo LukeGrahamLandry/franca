@@ -95,11 +95,20 @@ pub struct TypeMeta {
     pub float_mask: u32,
     pub has_special_pointer_fns: bool,
     pub contains_pointers: bool,
+    pub pass_by_ref: bool,
 }
 
 impl TypeMeta {
     #[track_caller]
-    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, has_special_pointer_fns: bool, contains_pointers: bool, stride_bytes: u16) -> Self {
+    fn new(
+        size_slots: u16,
+        align_bytes: u16,
+        float_mask: u32,
+        has_special_pointer_fns: bool,
+        contains_pointers: bool,
+        stride_bytes: u16,
+        pass_by_ref: bool,
+    ) -> Self {
         debug_assert_eq!(stride_bytes % align_bytes, 0);
         Self {
             size_slots,
@@ -108,6 +117,7 @@ impl TypeMeta {
             float_mask,
             has_special_pointer_fns,
             contains_pointers,
+            pass_by_ref,
         }
     }
 }
@@ -1285,6 +1295,24 @@ impl<'p> Program<'p> {
         assert_eq!(types.len(), 2);
         Ok((self.prim(types[0]), self.prim(types[1])))
     }
+
+    pub fn arity(&self, expr: &FatExpr<'p>) -> u16 {
+        if !expr.ty.is_unknown() {
+            let raw = self.raw_type(expr.ty);
+            return match &self[raw] {
+                TypeInfo::Struct { fields, .. } => fields.len() as u16,
+                TypeInfo::Unit => 1,
+                _ => 1,
+            };
+        }
+
+        match &expr.expr {
+            Expr::Cast(_) | Expr::Value { .. } => unreachable!("ICE: expected known type"),
+            Expr::Tuple(parts) => parts.len() as u16,
+            Expr::StructLiteralP(parts) => parts.bindings.len() as u16,
+            _ => 1,
+        }
+    }
 }
 
 impl<'p> Program<'p> {
@@ -1485,7 +1513,7 @@ impl<'p> Program<'p> {
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false, pointers, bytes)
+                TypeMeta::new(size, align, mask, false, pointers, bytes, size > 2)
             }
             TypeInfo::Tagged { cases, .. } => {
                 let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
@@ -1498,35 +1526,37 @@ impl<'p> Program<'p> {
                 }
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.
-                TypeMeta::new(size, 8, 0, false, pointers, bytes)
+                TypeMeta::new(size, 8, 0, false, pointers, bytes, size > 2)
             }
-            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false, 0),
+            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false, 0, false),
             TypeInfo::Int(int) => {
                 // TODO: u16
                 // :SmallTypes
                 match int.bit_count {
-                    8 => TypeMeta::new(1, 1, 0, true, false, 1),
-                    16 => TypeMeta::new(1, 2, 0, true, false, 2),
-                    32 => TypeMeta::new(1, 4, 0, true, false, 4),
-                    _ => TypeMeta::new(1, 8, 0, false, false, 8),
+                    8 => TypeMeta::new(1, 1, 0, true, false, 1, false),
+                    16 => TypeMeta::new(1, 2, 0, true, false, 2, false),
+                    32 => TypeMeta::new(1, 4, 0, true, false, 4, false),
+                    _ => TypeMeta::new(1, 8, 0, false, false, 8, false),
                 }
             }
-            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false, 8),
-            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0),
-            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1), // :SmallTypes
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, false, true, 8),
-            TypeInfo::Type => TypeMeta::new(1, 4, 0, true, false, 4),
-            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4),
+            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false, 8, false),
+            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0, false),
+            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1, false), // :SmallTypes
+            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, false, true, 8, false),
+            TypeInfo::Type => TypeMeta::new(1, 4, 0, true, false, 4, false),
+            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4, false),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);
+                let slots = info.size_slots * len as u16;
                 TypeMeta::new(
-                    info.size_slots * len as u16,
+                    slots,
                     info.align_bytes,
                     0,
                     false,
                     info.contains_pointers,
                     info.stride_bytes * len as u16,
+                    len > 1 || info.pass_by_ref,
                 )
             }
         };

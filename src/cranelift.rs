@@ -835,8 +835,6 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
         builder.ins().store(MemFlags::new(), val, v[0], 0);
         builder.ins().iconst(I64, 0)
     }),
-    ("fn ptr_to_int(_: rawptr) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
-    ("fn int_to_ptr(_: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
     // it seems this matches what i do.
     // https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/aarch64/inst/emit.rs#L2183
     ("fn int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
