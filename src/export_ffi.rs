@@ -3,7 +3,9 @@
 use interp_derive::Reflect;
 use libc::c_void;
 
-use crate::ast::{garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Program, TypeId, TypeInfo, WalkAst};
+use crate::ast::{
+    garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Pattern, Program, TypeId, TypeInfo, WalkAst,
+};
 use crate::bc::{to_values, ReadBytes, Values};
 use crate::compiler::{Compile, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
@@ -373,7 +375,8 @@ extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeI
     hope(|| {
         assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
-        Ok(program.intern_type(TypeInfo::Fn(FnType { arg, ret })))
+        let arity = program.tuple_types(arg).map(|t| t.len()).unwrap_or_else(|| 1) as u16;
+        Ok(program.intern_type(TypeInfo::Fn(FnType { arg, ret, arity })))
     })
 }
 
@@ -381,7 +384,11 @@ extern "C-unwind" fn fn_ptr_type_conv(program: &mut &mut Program, arg: TypeId, r
     hope(|| {
         assert!(arg.as_index() < program.types.len(), "TypeId OOB {:?}", arg);
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
-        Ok(program.intern_type(TypeInfo::FnPtr { ty: FnType { arg, ret }, cc }))
+        let arity = program.tuple_types(arg).map(|t| t.len()).unwrap_or_else(|| 1) as u16;
+        Ok(program.intern_type(TypeInfo::FnPtr {
+            ty: FnType { arg, ret, arity },
+            cc,
+        }))
     })
 }
 
@@ -396,7 +403,11 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
         } else {
             CallConv::CCallReg
         };
-        Ok(program.intern_type(TypeInfo::FnPtr { ty: FnType { arg, ret }, cc }))
+        let arity = program.tuple_types(arg).map(|t| t.len()).unwrap_or_else(|| 1) as u16;
+        Ok(program.intern_type(TypeInfo::FnPtr {
+            ty: FnType { arg, ret, arity },
+            cc,
+        }))
     })
 }
 
@@ -649,6 +660,22 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
         "#macro fn as(T: FatExpr, e: FatExpr) FatExpr;",
         bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
     ),
+    (
+        "#macro fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr;",
+        bounce_flat_call!((FatExpr, FatExpr), FatExpr, fn_type_macro),
+    ),
+    (
+        "#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;",
+        bounce_flat_call!((FatExpr, FatExpr), FatExpr, fn_ptr_type_macro),
+    ),
+    (
+        "#macro fn Fn(Ret: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, fn_type_macro_single),
+    ),
+    (
+        "#macro fn FnPtr( Ret: FatExpr) FatExpr;",
+        bounce_flat_call!(FatExpr, FatExpr, fn_ptr_type_macro_single),
+    ),
 ];
 
 fn as_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
@@ -761,6 +788,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let ty = compile.program.intern_type(TypeInfo::Fn(FnType {
         arg: TypeId::unit,
         ret: TypeId::unit,
+        arity: 0,
     }));
     let found_ty = compile.compile_expr(&mut block, Some(ty)).unwrap();
     let id = block.as_const().unwrap().unwrap_func_id();
@@ -947,4 +975,56 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
     };
     let val = to_values(comp.program, found).unwrap();
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
+}
+
+fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {
+    assert!(matches!(arg.expr, Expr::StructLiteralP(_)), "expected @fn(name: type, name: type) type");
+    let Expr::StructLiteralP(parts) = &mut arg.expr else { unreachable!() };
+    parts.if_empty_add_unit();
+    let types = compile.infer_pattern(&mut parts.bindings)?;
+    let arity = parts.bindings.len() as u16;
+    let arg = compile.program.tuple_of(types);
+    let ret: TypeId = compile.immediate_eval_expr_known(ret)?;
+    let f_ty = FnType { arg, ret, arity };
+    Ok(f_ty)
+}
+fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    hope(|| {
+        let f_ty = make_fn_type(compile, &mut arg, ret)?;
+        let ty = compile.program.intern_type(TypeInfo::Fn(f_ty));
+        compile.set_literal(&mut arg, ty)?;
+        Ok(())
+    });
+
+    arg
+}
+
+fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, mut ret): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+    hope(|| {
+        let f_ty = make_fn_type(compile, &mut arg, ret)?;
+        let ty = compile.program.intern_type(TypeInfo::FnPtr {
+            ty: f_ty,
+            cc: CallConv::CCallReg,
+        });
+        compile.set_literal(&mut arg, ty)?;
+        Ok(())
+    });
+
+    arg
+}
+
+fn fn_ptr_type_macro_single<'p>(compile: &mut Compile<'_, 'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
+    let loc = ret.loc;
+    fn_ptr_type_macro(
+        compile,
+        (FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![], loc }), loc), ret),
+    )
+}
+
+fn fn_type_macro_single<'p>(compile: &mut Compile<'_, 'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
+    let loc = ret.loc;
+    fn_type_macro(
+        compile,
+        (FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![], loc }), loc), ret),
+    )
 }

@@ -33,6 +33,7 @@ pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub arg: TypeId,
     pub ret: TypeId,
+    pub arity: u16,
 }
 
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
@@ -807,7 +808,11 @@ impl<'p> Func<'p> {
     pub(crate) fn finished_ty(&self) -> Option<FnType> {
         if let Some(arg) = self.finished_arg {
             if let Some(ret) = self.finished_ret {
-                return Some(FnType { arg, ret });
+                return Some(FnType {
+                    arg,
+                    ret,
+                    arity: (self.arg.bindings.len() as u16).max(1),
+                });
             }
         }
         None
@@ -989,7 +994,11 @@ impl<'p> Program<'p> {
             inner: TypeId::i64(),
             len: 5,
         });
-        let f_ty = FnType { arg, ret: TypeId::unit };
+        let f_ty = FnType {
+            arg,
+            ret: TypeId::unit,
+            arity: 5,
+        };
         program.intern_type(TypeInfo::Fn(f_ty));
         program.flat_call_ty = Some(f_ty);
 

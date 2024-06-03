@@ -2020,7 +2020,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     #[track_caller]
-    fn infer_types_progress(&mut self, ty: &mut LazyType<'p>) -> Res<'p, bool> {
+    pub fn infer_types_progress(&mut self, ty: &mut LazyType<'p>) -> Res<'p, bool> {
         let done = match ty {
             LazyType::EvilUnit => panic!(),
             LazyType::Infer => false,
@@ -2049,12 +2049,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(done)
     }
 
-    fn infer_binding_progress(&mut self, binding: &mut Binding<'p>) -> Res<'p, bool> {
+    pub fn infer_binding_progress(&mut self, binding: &mut Binding<'p>) -> Res<'p, bool> {
         self.infer_types_progress(&mut binding.ty)
     }
 
     #[track_caller]
-    fn infer_pattern(&mut self, bindings: &mut [Binding<'p>]) -> Res<'p, Vec<TypeId>> {
+    pub fn infer_pattern(&mut self, bindings: &mut [Binding<'p>]) -> Res<'p, Vec<TypeId>> {
         let mut types = vec![];
         for arg in bindings {
             if let Some(e) = arg.ty.expr_ref() {
@@ -2097,7 +2097,11 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       so making it work in debug with debug_assert is probably the better outcome.
         assert!(f.get_flag(NotEvilUninit), "{}", self.pool.get(f.name));
         if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
-            return Ok(Some(FnType { arg, ret }));
+            return Ok(Some(FnType {
+                arg,
+                ret,
+                arity: f.arg.bindings.len() as u16,
+            }));
         }
         let before = self.debug_trace.len();
         let state = DebugState::ResolveFnType(func, f.name);

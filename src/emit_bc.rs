@@ -41,11 +41,11 @@ pub enum ResultLoc {
 }
 use ResultLoc::*;
 
-pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -> FnBody<'p> {
+pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
     let mut jump_targets = BitSet::empty();
     jump_targets.set(0); // entry is the first instruction
     let f = &program[func];
-    FnBody {
+    Ok(FnBody {
         is_ssa_var: BitSet::empty(),
         var_names: vec![],
         vars: Default::default(),
@@ -57,8 +57,8 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
         inlined_return_addr: Default::default(),
         want_log: f.has_tag(Flag::Log_Bc),
         clock: 0,
-        signeture: prim_sig(program, f.finished_ty().unwrap(), f.cc.unwrap()),
-    }
+        signeture: prim_sig(program, f.finished_ty().unwrap(), f.cc.unwrap())?,
+    })
 }
 
 impl<'z, 'p: 'z> EmitBc<'z, 'p> {
@@ -80,7 +80,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         self.locals.clear();
         self.locals.push(vec![]);
-        let mut result = empty_fn_body(self.program, f, when);
+        let mut result = empty_fn_body(self.program, f, when)?;
         match self.emit_body(&mut result, f) {
             Ok(_) => Ok(result),
             Err(mut e) => {
@@ -169,6 +169,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             return Ok(false);
         }
 
+        if arity == 1 {
+            let id = result.add_var(arg.ty);
+            result.addr_var(id);
+            self.compile_expr(result, arg, ResAddr, false)?;
+            result.addr_var(id);
+            return Ok(true);
+        }
+
         if let Some(types) = self.program.tuple_types(arg.ty) {
             debug_assert!(types.len() == self.program.arity(arg) as usize);
 
@@ -220,14 +228,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 assert_eq!(pushed as usize, arity);
                 return Ok(true);
             }
-        }
-
-        if arity == 1 {
-            let id = result.add_var(arg.ty);
-            result.addr_var(id);
-            self.compile_expr(result, arg, ResAddr, false)?;
-            result.addr_var(id);
-            return Ok(true);
         }
 
         todo!("{} {arity}", self.program.log_type(arg.ty))
@@ -343,7 +343,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
-        let mut sig = prim_sig(self.program, f_ty, cc);
+        let mut sig = prim_sig(self.program, f_ty, cc)?;
         if force_flat {
             // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
 
@@ -1298,15 +1298,15 @@ impl<'p> FnBody<'p> {
     }
 }
 
-fn prim_sig(program: &Program, f_ty: FnType, cc: CallConv) -> PrimSig {
+fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig> {
     if matches!(cc, CallConv::Flat | CallConv::FlatCt) {
-        return PrimSig {
+        return Ok(PrimSig {
             arg_slots: 5,
             arg_float_mask: 0,
             ret_slots: 0,
             ret_float_mask: 0,
             first_arg_is_indirect_return: true,
-        };
+        });
     }
 
     let has_indirect_ret = program.get_info(f_ty.ret).size_slots > 2;
@@ -1332,7 +1332,10 @@ fn prim_sig(program: &Program, f_ty: FnType, cc: CallConv) -> PrimSig {
 
     // sad copy paste from compile_for_arg
     if arg.pass_by_ref {
-        if let Some(types) = program.tuple_types(f_ty.arg) {
+        if f_ty.arity == 1 {
+            sig.arg_slots -= program.get_info(f_ty.arg).size_slots;
+            sig.arg_slots += 1;
+        } else if let Some(types) = program.tuple_types(f_ty.arg) {
             if !types.iter().all(|t| !program.get_info(*t).pass_by_ref) {
                 for ty in types {
                     let info = program.get_info(ty);
@@ -1352,5 +1355,5 @@ fn prim_sig(program: &Program, f_ty: FnType, cc: CallConv) -> PrimSig {
         }
     }
 
-    sig
+    Ok(sig)
 }

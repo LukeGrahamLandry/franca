@@ -147,7 +147,7 @@ fn emit_cl_inner<'p, M: Module>(
 }
 
 pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &mut JittedCl<M>, f: FuncId) -> Res<'p, ()> {
-    let mut body = empty_fn_body(program, f, ExecStyle::Aot);
+    let mut body = empty_fn_body(program, f, ExecStyle::Aot)?;
     body.func = f;
     let arg = program[f].finished_arg.unwrap();
     let arg = program.get_info(arg);
