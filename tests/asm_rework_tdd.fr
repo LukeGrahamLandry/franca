@@ -238,16 +238,23 @@ fn please_be_the_same() = {
 }
 
 // This happened in @enum and @fmt. 
+// This example had it trying to load from address 64 becuase it reused a stack slot (that the inlined function used for local variable uselessly storing the argument).
+// LoadSsa was just putting the Spill slot on the v-stack and then when it got popped off, it would release the slot. 
+// So having LoadSsa do the load into a register worked. 
+// But also Dup just clones the slot, so the problem would show up again? 
+// Pop needs to not assume the slot is free now which is consistant with pop_to_reg_with_offset not freeing it. 
 #test fn null_ptr_after_flat_arg_change() = {
     this_function_does_nothing :: fn() Unit #noinline = ();
     
-    my_index :: fn(self: Slice(u8), i: i64) *u8 #inline = 
-        self.ptr.offset(0);
+    my_offset :: fn(ptr: *u8, element_count: i64) *u8 = ptr;
     
-    fake_push :: fn(self: *Slice(u8)) Unit #flat_call #noinline #log_asm_bc #log_bc = {
-        this_function_does_nothing();
+    my_index :: fn(self: Slice(u8), i: i64) *u8 #inline = 
+        self.ptr.my_offset(128);
+    
+    fake_push :: fn(self: *Slice(u8)) Unit #flat_call #noinline = {
+        //this_function_does_nothing();
         s := self[];
-        "aaa".my_index(0);
+        s.my_index(64);
         self.len = 0;
     };
     

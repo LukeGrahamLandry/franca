@@ -102,7 +102,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let info = self.program.get_info(ty);
                 offset = align_to(offset, info.align_bytes as usize);
-                result.push(Bc::IncPtrBytes { bytes: offset as u16 });
+                result.inc_ptr_bytes(offset as u16);
                 let id = result.save_ssa_var();
                 offset += info.stride_bytes as usize;
 
@@ -131,7 +131,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     for ty in types {
                         let ty = self.program.prim(ty);
                         result.addr_var(id);
-                        result.push(Bc::IncPtrBytes { bytes: (len - 1) * 8 }); // Note: backwards!
+                        result.inc_ptr_bytes((len - 1) * 8); // Note: backwards!
                         result.push(Bc::StorePost { ty });
                         len -= 1;
                     }
@@ -155,7 +155,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             let ty = self.program.prim(ty);
             result.push(Bc::PeekDup(len));
             // Note: backwards!
-            result.push(Bc::IncPtrBytes { bytes: (len - 1) * 8 }); // TODO!
+            result.inc_ptr_bytes((len - 1) * 8); // TODO!
             result.push(Bc::StorePost { ty });
             len -= 1;
         }
@@ -170,7 +170,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             let ty = self.program.prim(ty);
             offset = align_to(offset, ty.align_bytes()); // TODO: this is subtley wrong because of how c does nested structs. need to respect field offsets!
             result.push(Bc::PeekDup(len));
-            result.push(Bc::IncPtrBytes { bytes: offset as u16 }); // TODO!
+            result.inc_ptr_bytes(offset as u16); // TODO!
             result.push(Bc::Load { ty });
             offset += ty.align_bytes(); // always the same as size.
             len += 1;
@@ -596,7 +596,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 for (value, f) in values.iter().zip(fields.iter()) {
                     if result_location == ResAddr {
                         result.push(Bc::PeekDup(0));
-                        result.push(Bc::IncPtrBytes { bytes: f.byte_offset as u16 });
+                        result.inc_ptr_bytes(f.byte_offset as u16);
                     }
                     self.compile_expr(result, value, result_location, false)?;
                 }
@@ -678,7 +678,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             debug_assert_eq!(parts.len(), offsets.len());
                             for (value, (ty, offset)) in parts.into_iter().zip(offsets.into_iter()) {
                                 result.push(Bc::PeekDup(0));
-                                result.push(Bc::IncPtrBytes { bytes: offset });
+                                result.inc_ptr_bytes(offset);
                                 result.push(Bc::PushConstant { value });
                                 result.push(Bc::StorePre { ty });
                             }
@@ -717,7 +717,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             PushStack => {}
                             ResAddr => {
                                 result.push(Bc::PeekDup(2));
-                                result.push(Bc::IncPtrBytes { bytes: 8 }); // Note: backwards!
+                                result.inc_ptr_bytes(8); // Note: backwards!
                                 result.push(Bc::StorePost { ty: Prim::I64 });
                                 result.push(Bc::PeekDup(1));
                                 result.push(Bc::StorePost { ty: Prim::I64 });
@@ -750,8 +750,25 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             match result_location {
                                 PushStack => self.load(result, value_type),
                                 ResAddr => {
-                                    let bytes = self.program.get_info(expr.ty).stride_bytes;
-                                    result.push(Bc::CopyBytesToFrom { bytes });
+                                    let info = self.program.get_info(expr.ty);
+
+                                    if info.size_slots == 1 {
+                                        let ty = self.program.prim(value_type);
+                                        result.push(Bc::Load { ty });
+                                        result.push(Bc::StorePre { ty });
+                                    } else if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {
+                                        result.push(Bc::PeekDup(1));
+                                        result.inc_ptr_bytes(8);
+                                        result.push(Bc::PeekDup(1));
+                                        result.inc_ptr_bytes(8);
+                                        result.push(Bc::Load { ty: Prim::I64 });
+                                        result.push(Bc::StorePre { ty: Prim::I64 });
+                                        result.push(Bc::Load { ty: Prim::I64 });
+                                        result.push(Bc::StorePre { ty: Prim::I64 });
+                                    } else {
+                                        let bytes = info.stride_bytes;
+                                        result.push(Bc::CopyBytesToFrom { bytes });
+                                    }
                                 }
                                 Discard => result.push(Bc::Snipe(0)),
                             };
@@ -805,7 +822,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 // TODO: compiler has to emit tagchecks for enums now!!
                 self.compile_expr(result, ptr, PushStack, false)?;
 
-                result.push(Bc::IncPtrBytes { bytes: *bytes as u16 });
+                result.inc_ptr_bytes(*bytes as u16);
                 match result_location {
                     PushStack => {}
                     ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
@@ -1001,7 +1018,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::PeekDup(0));
                         result.push(Bc::PushConstant { value: i as i64 });
                         result.push(Bc::StorePre { ty: Prim::I64 });
-                        result.push(Bc::IncPtrBytes { bytes: 8 }); // TODO: differetn sizes of tag
+                        result.inc_ptr_bytes(8); // TODO: differetn sizes of tag
                         self.compile_expr(result, values[0], result_location, false)?;
                     }
                     Discard => {
@@ -1183,6 +1200,12 @@ impl<'p> FnBody<'p> {
         self.is_ssa_var.set(id as usize);
         self.push(Bc::SaveSsa { id, ty: Prim::I64 });
         id
+    }
+
+    fn inc_ptr_bytes(&mut self, bytes: u16) {
+        if bytes != 0 {
+            self.push(Bc::IncPtrBytes { bytes })
+        }
     }
 
     #[track_caller]

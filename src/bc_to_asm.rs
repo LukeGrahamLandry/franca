@@ -100,7 +100,7 @@ struct BcToAsm<'z, 'p> {
     body: &'z FnBody<'p>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct BlockState {
     stack: Vec<Val>,
     free_reg: Vec<i64>,
@@ -306,13 +306,36 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
         match inst {
             Bc::SaveSsa { id, .. } => {
-                self.try_spill(self.state.stack.len() - 1, true);
-                let value = self.state.stack.pop().unwrap();
-                extend_options(&mut self.state.ssa, id as usize);
-                debug_assert!(self.state.ssa[id as usize].is_none());
-                self.state.ssa[id as usize] = Some(value);
+                assert!(self.vars[id as usize].is_none());
+                let slot = self.create_slots(1);
+                let reg = self.pop_to_reg();
+                self.store_u64(reg, sp, slot.0);
+                self.drop_reg(reg);
+                self.vars[id as usize] = Some(slot);
             }
-            Bc::LoadSsa { id } => self.state.stack.push(self.state.ssa[id as usize].unwrap()),
+            Bc::LoadSsa { id } => {
+                debug_assert!(self.body.is_ssa_var.get(id as usize));
+                let slot = self.vars[id as usize].unwrap();
+                self.state.stack.push(Val::Spill(slot));
+            }
+            Bc::AddrVar { id } => {
+                debug_assert!(!self.body.is_ssa_var.get(id as usize));
+                if let Some(slot) = self.vars[id as usize] {
+                    self.state.stack.push(Val::Increment {
+                        reg: sp,
+                        offset_bytes: slot.0,
+                    });
+                } else {
+                    let ty = self.body.vars[id as usize];
+                    let count = self.program.slot_count(ty);
+                    let slot = self.create_slots(count);
+                    self.vars[id as usize] = Some(slot);
+                    self.state.stack.push(Val::Increment {
+                        reg: sp,
+                        offset_bytes: slot.0,
+                    });
+                }
+            }
             Bc::GetCompCtx => self.state.stack.push(Val::Literal(self.compile_ctx_ptr as i64)),
             Bc::NameFlatCallArg { id, offset_bytes } => unreachable!(),
             Bc::AddrFnResult => unreachable!(),
@@ -409,41 +432,26 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::Ret0 => return self.emit_return(0, 0),
             Bc::Ret1(prim) => return self.emit_return(1, prim.float()),
             Bc::Ret2((a, b)) => return self.emit_return(2, a.float() << 1 | b.float()),
-            Bc::AddrVar { id } => {
-                if let Some(slot) = self.vars[id as usize] {
-                    self.state.stack.push(Val::Increment {
-                        reg: sp,
-                        offset_bytes: slot.0,
-                    });
-                } else {
-                    let ty = self.body.vars[id as usize];
-                    let count = self.program.slot_count(ty);
-                    let slot = self.create_slots(count);
-                    self.vars[id as usize] = Some(slot);
-                    self.state.stack.push(Val::Increment {
-                        reg: sp,
-                        offset_bytes: slot.0,
-                    });
+            // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
+            Bc::IncPtrBytes { bytes } => {
+                match self.state.stack.last_mut().unwrap() {
+                    Val::Increment { reg, offset_bytes: prev } => {
+                        *prev += bytes;
+                    }
+                    Val::Literal(v) => {
+                        *v += bytes as i64;
+                    }
+                    Val::Spill(_) => {
+                        // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
+                        let (reg, offset_bytes) = self.pop_to_reg_with_offset();
+                        self.state.stack.push(Val::Increment {
+                            reg,
+                            offset_bytes: offset_bytes + bytes,
+                        })
+                    }
+                    Val::FloatReg(_) => err!("don't try to gep a float",),
                 }
             }
-            // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
-            Bc::IncPtrBytes { bytes } => match self.state.stack.last_mut().unwrap() {
-                Val::Increment { reg, offset_bytes: prev } => {
-                    *prev += bytes;
-                }
-                Val::Literal(v) => {
-                    *v += bytes as i64;
-                }
-                Val::Spill(_) => {
-                    // TODO: should it hold the add statically? rn it does the load but doesn't need to restore because it just unspills it.
-                    let (reg, offset_bytes) = self.pop_to_reg_with_offset();
-                    self.state.stack.push(Val::Increment {
-                        reg,
-                        offset_bytes: offset_bytes + bytes,
-                    })
-                }
-                Val::FloatReg(_) => err!("don't try to gep a float",),
-            },
             Bc::Load { ty } => {
                 let (addr, mut offset_bytes) = self.pop_to_reg_with_offset(); // get the ptr
 
@@ -507,8 +515,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 let index = self.state.stack.len() - skip as usize - 1;
                 match self.state.stack.remove(index) {
                     Val::Increment { reg, .. } => self.drop_reg(reg),
-                    Val::Literal(_) => {}
-                    Val::Spill(slot) => self.drop_slot(slot, 8),
+                    Val::Literal(_) | Val::Spill(_) => {}
                     Val::FloatReg(_) => todo!(),
                 }
             }
