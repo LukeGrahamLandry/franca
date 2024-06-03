@@ -721,6 +721,7 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
 }
 
 fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
+    compile.last_loc = Some(expr.loc);
     let res = compile.compile_expr(&mut expr, None);
     hopec(compile, || res);
     expr
@@ -788,7 +789,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     let ty = compile.program.intern_type(TypeInfo::Fn(FnType {
         arg: TypeId::unit,
         ret: TypeId::unit,
-        arity: 0,
+        arity: 1,
     }));
     let found_ty = compile.compile_expr(&mut block, Some(ty)).unwrap();
     let id = block.as_const().unwrap().unwrap_func_id();

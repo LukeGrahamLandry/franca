@@ -189,7 +189,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             if let Expr::Tuple(parts) = &arg.expr {
                 debug_assert!(types.len() == parts.len());
 
-                for (ty, val) in types.into_iter().zip(parts.iter()) {
+                for (&ty, val) in types.iter().zip(parts.iter()) {
                     let info = self.program.get_info(ty);
                     if !info.pass_by_ref {
                         pushed += info.size_slots;
@@ -225,7 +225,13 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     self.compile_expr(result, val, ResAddr, false)?;
                     result.addr_var(id);
                 }
-                assert_eq!(pushed as usize, arity);
+                // TODO: this isn't always true because of slices (or any 2 slot struct).
+                // assert_eq!(
+                //     pushed as usize,
+                //     arity,
+                //     "arity mismatch. this might be a compiler bug. {:?}",
+                //     types.iter().map(|t| self.program.log_type(*t)).collect::<Vec<_>>()
+                // );
                 return Ok(true);
             }
         }
