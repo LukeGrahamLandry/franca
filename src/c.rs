@@ -26,19 +26,25 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
 
     // TODO: use sig.no_return for _Noreturn or whatever the syntax is
     if use_name {
-        write!(out, "_TY{} {name}(", ty.ret.as_index()).unwrap();
+        write!(out, "{} {name}(", ret_spec(sig)).unwrap();
     } else {
         write!(out, "/* fn {name} */ static \n{} _FN{}(", ret_spec(sig), f.as_index()).unwrap();
     }
     if !ty.arg.is_unit() {
         if use_arg_names {
-            for (_i, b) in comp.program[f].arg.bindings.iter().enumerate() {
+            for b in comp.program[f].arg.bindings.iter() {
                 let ty = b.ty.unwrap();
                 if ty.is_unit() {
                     continue;
                 }
                 let name = comp.program.pool.get(b.name().unwrap());
-                write!(out, "_TY{} {},", ty.as_index(), name).unwrap();
+                if let TypeInfo::Ptr(inner) = comp.program[ty] {
+                    let prim = comp.program.prim(inner);
+                    write!(out, "{} *{},", c_type_spec(prim), name).unwrap();
+                } else {
+                    let prim = comp.program.prim(ty);
+                    write!(out, "{} {},", c_type_spec(prim), name).unwrap();
+                }
             }
         } else {
             for i in 0..sig.arg_slots as usize {
@@ -94,9 +100,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
         let ty = comp.program[f].finished_ty().unwrap();
         // println!("do {}", name);
         if let Some(&body) = comp.program[f].body.c_source() {
-            render_typedef(comp.program, out, ty.arg)?;
-            render_typedef(comp.program, out, ty.ret)?;
-
             declare(comp, &mut out.functions, f, false, true);
             writeln!(out.functions, "{{\n{}", comp.program.pool.get(body)).unwrap();
             writeln!(out.functions, "}}").unwrap();
@@ -152,9 +155,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
                 writeln!(wip.result.functions, "}}").unwrap();
             }
         } else if comp.program[f].body.comptime_addr().is_some() {
-            render_typedef(comp.program, out, ty.arg)?;
-            render_typedef(comp.program, out, ty.ret)?;
-
             // TODO: dont just assume that comptime_addr means its from libc. have a way to specfify who you're expecting to link against.
             declare(comp, &mut out.forward, f, true, true);
             writeln!(out.forward, ";").unwrap();
@@ -589,106 +589,6 @@ fn c_type_spec(ty: Prim) -> &'static str {
         Prim::F64 => "double",
         Prim::P64 => "void*",
     }
-}
-
-// TODO: forward declare for self referential
-fn render_typedef(program: &mut Program, out: &mut CProgram, ty: TypeId) -> Res<'static, ()> {
-    if out.type_forward.get(ty.as_index()) {
-        return Ok(());
-    }
-    out.type_forward.set(ty.as_index());
-    match &program[ty] {
-        TypeInfo::Unknown => err!("unknown",),
-        TypeInfo::Never => {
-            // TODO: put _Noreturn on functions.
-            writeln!(out.types, "typedef void _TY{};", ty.as_index()).unwrap();
-        }
-        TypeInfo::F64 => {
-            writeln!(out.types, "typedef double _TY{};", ty.as_index()).unwrap();
-        }
-        TypeInfo::Int(int) => {
-            write!(out.types, "typedef").unwrap();
-            if int.signed {
-                write!(out.types, " u").unwrap();
-            } else {
-                write!(out.types, " ").unwrap();
-            }
-            // TODO: use the fixed width types.
-            match int.bit_count {
-                8 => write!(out.types, "int8_t").unwrap(),
-                16 => write!(out.types, "int16_t").unwrap(),
-                32 => write!(out.types, "int32_t").unwrap(),
-                _ => write!(out.types, "int64_t").unwrap(),
-            }
-            writeln!(out.types, " _TY{};", ty.as_index()).unwrap();
-        }
-        TypeInfo::Bool => {
-            writeln!(out.types, "typedef uint8_t /*bool*/ _TY{};", ty.as_index()).unwrap();
-        }
-        &TypeInfo::FnPtr { ty: f, cc } => {
-            assert!(cc == CallConv::CCallReg); // TODO: flat call sig
-            render_typedef(program, out, f.arg)?;
-            render_typedef(program, out, f.ret)?;
-
-            write!(out.types, "typedef _TY{} (*_TY{})(", f.ret.as_index(), ty.as_index()).unwrap();
-            if !f.arg.is_unit() {
-                for ty in program.flat_tuple_types(f.arg) {
-                    write!(out.types, "_TY{},", ty.as_index()).unwrap();
-                }
-                out.types.remove(out.types.len() - 1); // comma
-            }
-            writeln!(out.types, ");").unwrap();
-        }
-        &TypeInfo::Ptr(inner) => {
-            render_typedef(program, out, inner)?;
-            writeln!(out.types, "typedef _TY{} *_TY{};", inner.as_index(), ty.as_index()).unwrap();
-        }
-        &TypeInfo::Array { inner, len } => {
-            render_typedef(program, out, inner)?;
-            writeln!(out.types, "typedef _TY{} _TY{}[{len}];", inner.as_index(), ty.as_index()).unwrap();
-        }
-        TypeInfo::Struct { fields, .. } => {
-            let fields = fields.clone();
-            for f in &fields {
-                render_typedef(program, out, f.ty)?;
-            }
-            write!(out.types, "typedef struct {{ ").unwrap();
-            for (i, f) in fields.iter().enumerate() {
-                if !f.ty.is_unit() {
-                    write!(out.types, "_TY{} _{}; ", f.ty.as_index(), i).unwrap();
-                }
-            }
-            writeln!(out.types, "}} _TY{};", ty.as_index()).unwrap();
-        }
-        TypeInfo::Tagged { cases } => {
-            let cases = cases.clone();
-            for c in &cases {
-                render_typedef(program, out, c.1)?;
-            }
-            write!(out.types, "typedef struct {{ long tag; union {{").unwrap();
-            for (i, c) in cases.iter().enumerate() {
-                if !c.1.is_unit() {
-                    write!(out.types, "_TY{} _{}; ", c.1.as_index(), i).unwrap();
-                }
-            }
-            writeln!(out.types, "}}; }} _TY{};", ty.as_index()).unwrap();
-        }
-        &TypeInfo::Enum { raw: inner, .. } | &TypeInfo::Named(inner, _) | &TypeInfo::Unique(inner, _) => {
-            render_typedef(program, out, inner)?;
-            writeln!(out.types, "typedef _TY{} _TY{};", inner.as_index(), ty.as_index()).unwrap();
-        }
-        TypeInfo::Unit => {
-            writeln!(out.types, "typedef void _TY{};", ty.as_index()).unwrap();
-        }
-        TypeInfo::VoidPtr => {
-            writeln!(out.types, "typedef void *_TY{};", ty.as_index()).unwrap();
-        }
-        TypeInfo::Type | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::Label(_) => {
-            writeln!(out.types, "typedef unsigned int _TY{};", ty.as_index()).unwrap();
-        }
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
