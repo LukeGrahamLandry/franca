@@ -666,8 +666,6 @@ pub mod c {
     extern "C" {
         // loads 8 words from args into x0-x7 then calls fnptr
         fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
-        // indirect return address is first arg
-        fn arg8ret_struct(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
         // loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
         fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
     }

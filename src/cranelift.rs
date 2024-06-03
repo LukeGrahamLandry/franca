@@ -24,8 +24,8 @@ use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 use types::I16;
 
 use crate::{
-    ast::{CallConv, Flag, FnType, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{BakedVar, BasicBlock, Bc, FnBody, Prim},
+    ast::{CallConv, Flag, FuncId, FuncImpl, Program},
+    bc::{is_float, BakedVar, BasicBlock, Bc, FnBody, Prim, PrimSig},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     emit_bc::{emit_bc, empty_fn_body},
@@ -138,7 +138,6 @@ fn emit_cl_inner<'p, M: Module>(
         program,
         asm,
         cl,
-        flat_sig,
         is_flat,
     };
     e.emit_func(f, FunctionBuilderContext::new(), ctx)?;
@@ -155,7 +154,7 @@ pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &m
         insts: vec![Bc::CallDirect {
             f,
             tail: true,
-            ty: program[f].unwrap_ty(),
+            sig: body.signeture,
         }],
         arg_slots: arg.size_slots,
         arg_float_mask: arg.float_mask,
@@ -223,21 +222,13 @@ struct Emit<'z, 'p, M: Module> {
 
     vars: Vec<StackSlot>,
     f: FuncId,
-    flat_sig: Signature,
     is_flat: bool,
 }
 
 impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
     fn emit_func(&mut self, f: FuncId, mut builder_ctx: FunctionBuilderContext, mut ctx: codegen::Context) -> Res<'p, ()> {
         self.f = f;
-        let f_ty = self.program[f].unwrap_ty();
-
-        ctx.func.signature = if self.is_flat {
-            self.flat_sig.clone() // TODO: if i have to clone anyway, maybe dont make it upfront?
-        } else {
-            assert!(self.program[f].cc.unwrap() != CallConv::CCallRegCt);
-            self.make_sig(f_ty, true, false)
-        };
+        ctx.func.signature = self.make_sig(self.body.signeture);
 
         let is_dynamic = matches!(self.program[f].body, FuncImpl::ComptimeAddr(_));
         let (name, linkage) = if is_dynamic {
@@ -291,33 +282,17 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         self.blocks.clear();
         self.block_done.clear();
         self.ssa_vars.clear();
-        if self.is_flat {
-            let entry = builder.create_block();
-            builder.switch_to_block(entry);
 
-            builder.append_block_params_for_function_params(entry);
-            debug_assert_eq!(builder.block_params(entry).len(), 5);
-            for block in &self.body.blocks {
-                self.blocks.push(builder.create_block());
+        // println!("{} {:?}", self.program.pool.get(self.program[self.f].name), self.body.signeture);
+        for (i, block) in self.body.blocks.iter().enumerate() {
+            self.blocks.push(builder.create_block());
+            if i != 0 {
                 for _ in 0..block.arg_slots {
                     builder.append_block_param(*self.blocks.last().unwrap(), I64);
                 }
             }
-            let args = builder.block_params(entry).to_vec();
-            builder.ins().jump(self.blocks[0], &args);
-            builder.seal_block(entry);
-        } else {
-            // TODO: copy-paste
-            for (i, block) in self.body.blocks.iter().enumerate() {
-                self.blocks.push(builder.create_block());
-                if i != 0 {
-                    for _ in 0..block.arg_slots {
-                        builder.append_block_param(*self.blocks.last().unwrap(), I64);
-                    }
-                }
-            }
-            builder.append_block_params_for_function_params(self.blocks[0]);
         }
+        builder.append_block_params_for_function_params(self.blocks[0]);
 
         self.emit_block(0, builder)?;
 
@@ -344,9 +319,9 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             self.stack.push(v)
         }
         if b == 0 && !self.is_flat {
-            let arg = self.program.get_info(self.program[self.f].finished_arg.unwrap());
-            // debug_assert_eq!(arg.size_slots, block.arg_slots); // not true anymore because indirect return
-            self.cast_ret_from_float(builder, arg.size_slots, arg.float_mask);
+            let sig = self.body.signeture;
+            debug_assert_eq!(sig.arg_slots, block.arg_slots);
+            self.cast_ret_from_float(builder, sig.arg_slots, sig.arg_float_mask);
         }
 
         for inst in &block.insts {
@@ -360,26 +335,15 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = builder.ins().iconst(I64, self.compile_ctx_ptr as i64);
                     self.stack.push(v);
                 }
-                Bc::NameFlatCallArg { id, offset_bytes } => {
-                    unreachable!()
-                }
-                Bc::CallDirect { f, tail, ty: f_ty } => {
-                    let (mut arg, ret) = self.program.get_infos(f_ty);
-                    if self.program[f].cc.unwrap() == CallConv::CCallRegCt {
-                        // Note: don't have to adjust float mask for comp_ctx because its added on the left where the bit mask is already zeros
-                        arg.size_slots += 1;
-                    }
-                    if ret.size_slots > 2 {
-                        arg.size_slots += 1; // indirect ret
-                    }
-                    self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
+                Bc::CallDirect { f, tail, sig } => {
+                    self.cast_args_to_float(builder, sig.arg_slots, sig.arg_float_mask);
 
-                    let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
+                    let args = &self.stack[self.stack.len() - sig.arg_slots as usize..self.stack.len()];
                     if let Some(&emit) = self.program[f].body.cranelift_emit() {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
                         let v = emit(builder, args);
-                        pops(&mut self.stack, arg.size_slots as usize);
-                        if ret.size_slots == 0 {
+                        pops(&mut self.stack, sig.arg_slots as usize);
+                        if sig.ret_slots == 0 {
                             // Unit is zero sized.
                             if tail {
                                 builder.ins().return_(&[]);
@@ -389,8 +353,8 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                             }
                         } else {
                             self.stack.push(v);
-                            debug_assert_eq!(ret.size_slots, 1);
-                            self.cast_ret_from_float(builder, ret.size_slots, ret.float_mask);
+                            debug_assert_eq!(sig.ret_slots, 1);
+                            self.cast_ret_from_float(builder, sig.ret_slots, sig.ret_float_mask);
                             if tail {
                                 builder.ins().return_(&[v]);
                                 break;
@@ -402,7 +366,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
                     // I want to allow mixing backends so you could ask for better optimisation for specific comptime functions
                     // without slowing compilation for all of them. So when trying to call something, check if my asm backend has it.
-                    let ty = f_ty;
                     // Note: check cl funcs first because ptrs go in the asm dispatch table anyway.
                     // TODO: actually forward declare if none to make mutual recursion work.
                     let call = if let Some(&Some(func_id)) = self.cl.funcs.get(f.as_index()) {
@@ -412,7 +375,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                             // builder.ins().return_call(callee, args);
                             // TODO: cranelift wants to do real tailcalls which changes the abi.
                             let call = builder.ins().call(callee, args);
-                            if ty.ret.is_never() {
+                            if sig.no_return {
                                 builder.ins().trap(TrapCode::UnreachableCodeReached);
                                 break;
                             }
@@ -442,14 +405,13 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                                 }
                             });
 
-                        let comp_ctx = self.program[f].cc.unwrap() == CallConv::CCallRegCt;
-                        let sig = self.make_sig(ty, false, comp_ctx);
-                        let sig = builder.import_signature(sig);
-                        let args = &self.stack[self.stack.len() - arg.size_slots as usize..self.stack.len()];
+                        let cl_sig = self.make_sig(sig);
+                        let sl_sig = builder.import_signature(cl_sig);
+                        let args = &self.stack[self.stack.len() - sig.arg_slots as usize..self.stack.len()];
 
-                        let call = builder.ins().call_indirect(sig, callee, args);
+                        let call = builder.ins().call_indirect(sl_sig, callee, args);
                         if tail {
-                            if ty.ret.is_never() {
+                            if sig.no_return {
                                 builder.ins().trap(TrapCode::UnreachableCodeReached);
                                 break;
                             }
@@ -464,33 +426,29 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     };
 
                     let ret_val = builder.inst_results(call);
-                    pops(&mut self.stack, arg.size_slots as usize);
+                    pops(&mut self.stack, sig.arg_slots as usize);
                     for v in ret_val {
                         self.stack.push(*v);
                     }
-                    self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
+                    self.cast_ret_from_float(builder, ret_val.len() as u16, sig.ret_float_mask);
                 }
-                Bc::CallFnPtr { ty, .. } => {
-                    let sig = builder.import_signature(self.make_sig(ty, false, false));
-                    let (mut arg, ret) = self.program.get_infos(ty);
-                    if ret.size_slots > 2 {
-                        arg.size_slots += 1; // indirect ret
-                    }
-                    self.cast_args_to_float(builder, arg.size_slots, arg.float_mask);
-                    let first_arg = self.stack.len() - arg.size_slots as usize;
+                Bc::CallFnPtr { sig, .. } => {
+                    let cl_sig = builder.import_signature(self.make_sig(sig));
+                    self.cast_args_to_float(builder, sig.arg_slots, sig.arg_float_mask);
+                    let first_arg = self.stack.len() - sig.arg_slots as usize;
                     let callee = self.stack[first_arg - 1];
                     let args = &self.stack[first_arg..self.stack.len()];
-                    let call = builder.ins().call_indirect(sig, callee, args);
-                    pops(&mut self.stack, arg.size_slots as usize + 1);
+                    let call = builder.ins().call_indirect(cl_sig, callee, args);
+                    pops(&mut self.stack, sig.arg_slots as usize + 1);
                     let ret_val = builder.inst_results(call);
-                    if ty.ret.is_never() {
+                    if sig.no_return {
                         builder.ins().trap(TrapCode::UnreachableCodeReached);
                         break;
                     }
                     for v in ret_val {
                         self.stack.push(*v);
                     }
-                    self.cast_ret_from_float(builder, ret_val.len() as u16, ret.float_mask);
+                    self.cast_ret_from_float(builder, ret_val.len() as u16, sig.ret_float_mask);
                 }
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
@@ -589,7 +547,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 }
                 Bc::NoCompile => err!("NoCompile",),
                 Bc::LastUse { .. } => {}
-                Bc::AddrFnResult => unreachable!(),
                 Bc::PeekDup(skip) => {
                     self.stack.push(self.stack[self.stack.len() - skip as usize - 1]);
                 }
@@ -608,110 +565,28 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         Ok(())
     }
 
-    fn make_type(&mut self, ty: TypeId) -> Type {
-        let ty = self.program.raw_type(ty);
-        match &self.program[ty] {
-            TypeInfo::Array { .. } => todo!(),
-            TypeInfo::Unknown => todo!(),
-            TypeInfo::Never => todo!(),
-            TypeInfo::F64 => F64,
-            TypeInfo::FnPtr { .. }
-            | TypeInfo::Label(_)
-            | TypeInfo::Type
-            | TypeInfo::Unit
-            | TypeInfo::OverloadSet
-            | TypeInfo::Int(_)
-            | TypeInfo::Fn(_)
-            | TypeInfo::Scope
-            | TypeInfo::Bool => I64,
-            TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => todo!(),
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr => I64,
-            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
-        }
-    }
-
-    fn make_sig(&mut self, t: FnType, _internal: bool, comp_ctx: bool) -> Signature {
+    fn make_sig(&mut self, sign: PrimSig) -> Signature {
         let mut sig = self.cl.module.make_signature();
-        let ret = self.program.raw_type(t.ret);
-        // if internal {
-        //     sig.call_conv = cranelift::codegen::isa::CallConv::Tail; // i guess you can't say thing for ffi ones?
-        // }
-        if self.program.slot_count(ret) > 2 {
+
+        // TODO: use the right purpose for first arg if its indirect return?
+        //       for now I don't because i don't use the right register in my backend and i want them to match so you can call between.
+        for i in 0..sign.arg_slots as usize {
+            let value_type = if is_float(i, sign.arg_slots, sign.arg_float_mask) { F64 } else { I64 };
+            // TODO: sign extend once I use small int types? but really caller should always do it I think.
             sig.params.push(AbiParam {
-                value_type: I64,
+                value_type,
                 purpose: ArgumentPurpose::Normal,
                 extension: ArgumentExtension::None,
-            }); // indirect return. for now don't tell cranelift that because i don't use the right register in my backend and i want them to match.
+            });
         }
-        if comp_ctx {
-            // TODO: should bring this all the way out into bc eventually
-            sig.params.push(AbiParam {
-                value_type: I64,
+        for i in 0..sign.ret_slots as usize {
+            let value_type = if is_float(i, sign.ret_slots, sign.ret_float_mask) { F64 } else { I64 };
+            // TODO: sign extend once I use small int types? but really caller should always do it I think.
+            sig.returns.push(AbiParam {
+                value_type,
                 purpose: ArgumentPurpose::Normal,
                 extension: ArgumentExtension::None,
-            })
-        }
-
-        // TODO: this is wrong. you can have nested things. i pass (Str, Str) as (*i,i,*i,i).
-        //       but that disagrees with c calling convention so need to have another round of clarifying that.
-        fn push<M: Module>(s: &mut Emit<M>, arg: TypeId, sig: &mut Signature) {
-            let arg = s.program.raw_type(arg);
-            if let TypeInfo::Tagged { .. } = &s.program[arg] {
-                for _ in 0..s.program.slot_count(arg) {
-                    sig.params.push(AbiParam {
-                        value_type: I64,
-                        purpose: ArgumentPurpose::Normal,
-                        extension: ArgumentExtension::None,
-                    })
-                }
-            } else if let TypeInfo::Unit = &s.program[arg] {
-                //redundant
-            } else if matches!(s.program[arg], TypeInfo::Struct { .. } | TypeInfo::Array { .. }) {
-                for t in s.program.flat_tuple_types(arg) {
-                    let t = s.program.raw_type(t);
-                    push(s, t, sig);
-                }
-            } else {
-                let extension = if arg == TypeId::f64() {
-                    ArgumentExtension::None
-                } else {
-                    ArgumentExtension::Sext
-                };
-                sig.params.push(AbiParam {
-                    value_type: s.make_type(arg),
-                    purpose: ArgumentPurpose::Normal,
-                    extension,
-                })
-            }
-        }
-
-        push(self, t.arg, &mut sig);
-
-        // TODO: unit. TODO: multiple returns tuple?
-        if !ret.is_never() && !ret.is_unit() && self.program.slot_count(ret) <= 2 {
-            // TODO: ArgumentPurpose::StructReturn for real c abi. dont just slots==1 because never (and eventually unit) are 0
-            if let TypeInfo::Tagged { .. } = &self.program[ret] {
-                for _ in 0..self.program.slot_count(ret) {
-                    sig.returns.push(AbiParam {
-                        value_type: I64,
-                        purpose: ArgumentPurpose::Normal,
-                        extension: ArgumentExtension::None,
-                    })
-                }
-            } else {
-                for ret in self.program.flat_tuple_types(ret) {
-                    let extension = if ret == TypeId::f64() {
-                        ArgumentExtension::None
-                    } else {
-                        ArgumentExtension::Sext
-                    };
-                    sig.returns.push(AbiParam {
-                        value_type: self.make_type(ret),
-                        purpose: ArgumentPurpose::Normal,
-                        extension,
-                    });
-                }
-            }
+            });
         }
 
         sig
@@ -721,9 +596,8 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
     fn cast_args_to_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
         // TODO: this is super dumb. I should really just track types through the whole thing properly.
         for slot_index in 0..slots as usize {
-            let is_float = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
             let s = self.stack.len() - (slots as usize) + slot_index;
-            if is_float {
+            if is_float(slot_index, slots, float_mask) {
                 self.stack[s] = builder.ins().bitcast(F64, MemFlags::new(), self.stack[s]);
             }
         }
@@ -733,9 +607,8 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         // TODO: this is super dumb. I should really just track types through the whole thing properly.
         debug_assert!(slots <= self.stack.len() as u16);
         for slot_index in 0..slots as usize {
-            let is_float = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
             let s = self.stack.len() - (slots as usize) + slot_index;
-            if is_float {
+            if is_float(slot_index, slots, float_mask) {
                 self.stack[s] = builder.ins().bitcast(I64, MemFlags::new(), self.stack[s]);
             }
         }

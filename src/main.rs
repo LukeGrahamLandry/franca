@@ -24,7 +24,6 @@ use std::{
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::{exit, Command},
-    ptr::addr_of,
     str::pattern::Pattern,
     thread::sleep_until,
     time::{Duration, Instant},
@@ -150,7 +149,7 @@ fn main() {
     if no_fork {
         run_tests_serial(arch);
         if stats {
-            println!("{:#?}", unsafe { &STATS });
+            println!("{:#?}", unsafe { STATS.clone() });
         }
         return;
     }
@@ -215,7 +214,7 @@ fn main() {
                     }
 
                     if stats {
-                        println!("/*{:#?}*/", unsafe { &*addr_of!(STATS) });
+                        println!("/*{:#?}*/", unsafe { STATS.clone() });
                     }
                     exit(0);
                 }
@@ -258,7 +257,7 @@ fn main() {
             }
         }
         if stats {
-            println!("{:#?}", unsafe { &STATS });
+            println!("{:#?}", unsafe { STATS.clone() });
         }
     } else {
         assert!(!stats, "run with --no-fork to show --stats");

@@ -12,7 +12,7 @@ use crate::ffi::InterpSend;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
 use crate::pool::Ident;
-use crate::{assert, assert_eq, err, ice, log_err, signed_truncate};
+use crate::{assert, err, ice, log_err, signed_truncate};
 use std::fmt::Write;
 use std::hint::black_box;
 use std::mem::{self, transmute};
@@ -1000,7 +1000,7 @@ fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr<'p>
     arg
 }
 
-fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, mut ret): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
     hope(|| {
         let f_ty = make_fn_type(compile, &mut arg, ret)?;
         let ty = compile.program.intern_type(TypeInfo::FnPtr {

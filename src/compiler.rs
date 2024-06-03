@@ -23,7 +23,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{do_flat_call_values, RsResolvedSymbol};
+use crate::export_ffi::{do_flat_call_values, FlatCallFn, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
@@ -153,10 +153,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         c
     }
 
-    pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {
-        self.program.slot_count(ty)
-    }
-
     fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
         let value = to_values(self.program, expect)?;
         let f = self.as_literal(self.make_slice_t.unwrap(), loc)?;
@@ -240,26 +236,21 @@ impl<'a, 'p> Compile<'a, 'p> {
             let comp_ctx = self.program[f].has_tag(Flag::Ct);
             self.program.finish_layout(ty.arg)?;
             self.program.finish_layout(ty.ret)?;
-            let args = self.slot_count(ty.arg);
-            let is_big = (args > 8) || (args == 8 && (comp_ctx || self.slot_count(ty.ret) > 2));
-            if self.program[f].has_tag(Flag::Flat_Call) || is_big {
+            let is_big = false;
+            if self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::Macro) || is_big {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
-                // TODO: my c_Call can;t handle agragates
                 if comp_ctx {
                     self.program[f].set_cc(CallConv::FlatCt)?;
                 } else {
                     self.program[f].set_cc(CallConv::Flat)?;
                 }
-            } else if comp_ctx {
-                // currently I redundantly add it to #macro but that's always flat_call anyway
-                // assert!(
-                //     self.program[f].comptime_addr.is_some(),
-                //     "compiler context is implicitly passed as first argument for #ct builtins, dont need to put it on your own functions. TODO: inline asm could allow i guess?"
-                // );
-                self.program[f].set_cc(CallConv::CCallRegCt)?;
             }
             if self.program[f].has_tag(Flag::C_Call) {
                 if comp_ctx {
+                    debug_assert!(
+                        self.program[f].body.comptime_addr().is_some() || self.program[f].has_tag(Flag::Comptime_Addr),
+                        "#ct is only for compiler builtins"
+                    );
                     self.program[f].set_cc(CallConv::CCallRegCt)?;
                 } else {
                     self.program[f].set_cc(CallConv::CCallReg)?;
@@ -453,7 +444,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.flush_cpu_instruction_cache();
         let expected_ret_bytes = self.program.get_or_create_info(ty.ret)?.stride_bytes;
         let result = if flat_call {
-            do_flat_call_values(self, unsafe { transmute(addr) }, arg, ty.ret)
+            do_flat_call_values(self, unsafe { transmute::<*const u8, FlatCallFn>(addr) }, arg, ty.ret)
         } else if c_call {
             assert!(!flat_call);
             let mut ints = vec![];

@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
-use crate::bc::{BbId, Bc, Prim, PrimSig, Value, Values};
+use crate::bc::{is_float, BbId, Bc, Prim, PrimSig, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
@@ -207,7 +207,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let reserve_stack = self.asm.prev();
 
         // The code expects arguments on the virtual stack (the first thing it does might be save them to variables but that's not my problem).
-        let cc = unwrap!(self.program[func.func].cc, "ICE: missing calling convention");
 
         let sig = self.body.signeture;
         debug_assert!(sig.arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
@@ -331,8 +330,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 }
             }
             Bc::GetCompCtx => self.state.stack.push(Val::Literal(self.compile_ctx_ptr as i64)),
-            Bc::NameFlatCallArg { id, offset_bytes } => unreachable!(),
-            Bc::AddrFnResult => unreachable!(),
+
             Bc::LastUse { id } => {
                 if self.body.is_ssa_var.get(id as usize) {
                     return Ok(false);
@@ -552,7 +550,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         for slot_index in 0..(slots as usize) {
             debug_assert_eq!(slot_index, next_int + next_float);
-            let f = (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1;
+            let f = is_float(slot_index, slots, float_mask);
             let stack_index = self.state.stack.len() - (slots as usize) + slot_index;
 
             if f {
@@ -675,7 +673,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let mut next_int = 0;
         for i in 0..slots {
             debug_assert_eq!(i, (next_int + next_float) as u16);
-            let f = (float_mask >> (slots - i - 1)) & 1 == 1;
+            let f = is_float(i as usize, slots, float_mask);
             let v = if f {
                 Val::FloatReg(next_float)
             } else {

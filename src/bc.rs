@@ -3,12 +3,12 @@
 use std::cell::RefCell;
 use std::ptr::slice_from_raw_parts;
 
-use crate::ast::{CallConv, LabelId, Program, TypeInfo, Var};
+use crate::ast::{LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
 use crate::reflect::BitSet;
 use crate::{
-    ast::{FnType, FuncId, TypeId},
+    ast::{FuncId, TypeId},
     compiler::{ExecStyle, Res},
     err,
     ffi::InterpSend,
@@ -35,10 +35,8 @@ pub enum Bc {
     LoadSsa { id: u16 },                                  // _ -> <p:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
     TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
-    AddrFnResult,                                         // _ -> <ptr:1>
     PeekDup(u16),                                         // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
     CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
-    NameFlatCallArg { id: u16, offset_bytes: u16 },       // _ -> _
     LastUse { id: u16 },                                  // _ -> _
     Unreachable,                                          // _ -> !
     GetCompCtx,                                           // _ -> <ptr:1>
@@ -50,13 +48,14 @@ pub enum Bc {
     Ret2((Prim, Prim)),
 }
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
 pub struct PrimSig {
     pub arg_slots: u16,
     pub arg_float_mask: u32,
     pub ret_slots: u16,
     pub ret_float_mask: u32,
     pub first_arg_is_indirect_return: bool,
+    pub no_return: bool,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq)]
@@ -452,4 +451,8 @@ pub fn align_backwards(offset: usize, align: usize) -> usize {
     } else {
         offset - align + offset % align
     }
+}
+
+pub fn is_float(slot_index: usize, slots: u16, float_mask: u32) -> bool {
+    (float_mask >> (slots - slot_index as u16 - 1)) & 1 == 1
 }

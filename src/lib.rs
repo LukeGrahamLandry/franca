@@ -151,7 +151,7 @@ use crate::{
     compiler::{Compile, CompileError},
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Stats {
     pub ast_expr_nodes_all: usize,
     pub fn_body_resolve: usize,

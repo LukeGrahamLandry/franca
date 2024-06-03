@@ -185,21 +185,21 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 return Ok(false);
             }
 
-            let mut pushed = 0;
+            let mut _pushed = 0;
             if let Expr::Tuple(parts) = &arg.expr {
                 debug_assert!(types.len() == parts.len());
 
                 for (&ty, val) in types.iter().zip(parts.iter()) {
                     let info = self.program.get_info(ty);
                     if !info.pass_by_ref {
-                        pushed += info.size_slots;
+                        _pushed += info.size_slots;
                         self.compile_expr(result, val, PushStack, false)?;
                         continue;
                     }
 
                     if let Expr::SuffixMacro(name, macro_arg) = &val.expr {
                         if *name == Flag::Deref.ident() {
-                            pushed += 1;
+                            _pushed += 1;
                             // TODO: this is probably unsound.
                             //       we're assuming that we can defer the load to be done by the callee but that might not be true.
                             self.compile_expr(result, macro_arg, PushStack, false)?;
@@ -211,7 +211,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
                         if result.when == ExecStyle::Jit {
                             // TODO: this gets super bad if the callee isn't properly copying it because they'll be nmodifying something we think is constant
-                            pushed += 1;
+                            _pushed += 1;
                             result.push(Bc::PushConstant {
                                 value: value.bytes().as_ptr() as i64,
                             });
@@ -219,7 +219,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
 
-                    pushed += 1;
+                    _pushed += 1;
                     let id = result.add_var(ty);
                     result.addr_var(id);
                     self.compile_expr(result, val, ResAddr, false)?;
@@ -338,18 +338,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn emit_runtime_call(
         &mut self,
         result: &mut FnBody<'p>,
-        mut f_ty: FnType,
+        f_ty: FnType,
         cc: CallConv,
         arg_expr: &FatExpr<'p>,
         result_location: ResultLoc,
-        mut can_tail: bool,
+        can_tail: bool,
         do_call: impl FnOnce(&mut FnBody, PrimSig, bool),
-        arg_arity: usize,
     ) -> Res<'p, ()> {
         // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
         //       should add test of inferred flatcall mutual recursion.
         let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
-        let mut sig = prim_sig(self.program, f_ty, cc)?;
+        let sig = prim_sig(self.program, f_ty, cc)?;
         if force_flat {
             // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
 
@@ -400,7 +399,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::GetCompCtx);
             }
 
-            let any_by_ref = self.compile_for_arg(result, arg_expr, arg_arity)?;
+            let any_by_ref = self.compile_for_arg(result, arg_expr, f_ty.arity as usize)?;
             // if any args are pointers, they might be to the stack and then you probably can't tail call.
             // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
             // TODO: !tail to force it when you know its fine.
@@ -560,17 +559,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     if func.has_tag(Flag::No_Tail) {
                         can_tail = false;
                     }
-                    let arity = func.arg.bindings.len();
-                    return self.emit_runtime_call(
-                        result,
-                        f_ty,
-                        cc,
-                        arg,
-                        result_location,
-                        can_tail,
-                        |r, sig, tail| r.push(Bc::CallDirect { f: f_id, sig, tail }),
-                        arity,
-                    );
+                    return self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail, |r, sig, tail| {
+                        r.push(Bc::CallDirect { f: f_id, sig, tail })
+                    });
                 }
                 if let TypeInfo::FnPtr { ty: f_ty, cc } = self.program[f.ty] {
                     self.compile_expr(result, f, PushStack, false)?;
@@ -580,18 +571,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         // however, if the function wants to push stack but we want it to a resaddr, we don't do this here because emit_runtime_call handles it which is kinda HACK.
                         result.push(Bc::PeekDup(1));
                     }
-
-                    let arity = self.program.flat_tuple_types(f_ty.arg).len(); // TODO: wrong. it needs to know about the bindings of the function decl somehow.
-                    self.emit_runtime_call(
-                        result,
-                        f_ty,
-                        cc,
-                        arg,
-                        result_location,
-                        can_tail,
-                        |r, sig, _| r.push(Bc::CallFnPtr { sig }),
-                        arity,
-                    )?;
+                    self.emit_runtime_call(result, f_ty, cc, arg, result_location, can_tail, |r, sig, _| {
+                        r.push(Bc::CallFnPtr { sig })
+                    })?;
                     if result_location == ResAddr && will_use_indirect_ret {
                         result.push(Bc::Snipe(0)); // original ret ptr
                     }
@@ -1304,7 +1286,7 @@ impl<'p> FnBody<'p> {
     }
 }
 
-fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig> {
+pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig> {
     if matches!(cc, CallConv::Flat | CallConv::FlatCt) {
         return Ok(PrimSig {
             arg_slots: 5,
@@ -1312,6 +1294,7 @@ fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, Pr
             ret_slots: 0,
             ret_float_mask: 0,
             first_arg_is_indirect_return: true,
+            no_return: f_ty.ret.is_never(),
         });
     }
 
@@ -1324,6 +1307,7 @@ fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, Pr
         ret_slots: ret.size_slots,
         ret_float_mask: ret.float_mask,
         first_arg_is_indirect_return: has_indirect_ret,
+        no_return: f_ty.ret.is_never(),
     };
 
     if has_indirect_ret {
