@@ -1,3 +1,13 @@
+## (Jun 3)
+
+need to fix the crippling corruption when passing (u32, u32).
+need to not assume \*8 but that's a lot of places (3) to write the annoying loop.
+oh but actually, i'm only ever loading/storing 1/2 sized structs because anything else you pass by reference/copybytesttofrom,
+so I don't need a whole compilicated logic for nested structs, I just need those cases to work.
+using correct-ish offset instead of always 8 did quickly fix return_u32_pair but now i have to debug the other 1/4 test it broke :(
+nvm, just an ordering problem, that was easy, and that fixed codemap too.
+and it works on c too, so that's a good start towards using that as small step to selfhosting.
+
 ## (Jun 2)
 
 indirect return address for large structs instead of using flat_call.

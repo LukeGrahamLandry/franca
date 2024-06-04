@@ -133,18 +133,34 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     // TODO: callee make copy if it wants to modify
                     result.save_ssa_var()
                 } else {
-                    debug_assert!(self.program.slot_count(ty) <= 2);
+                    let slots = self.program.slot_count(ty);
                     let id = result.add_var(ty);
-                    let types = self.program.flat_tuple_types(ty);
-                    let mut len = types.len() as u16;
-                    // TODO: make a test that fails if you don't .rev() here.
-                    for ty in types.into_iter().rev() {
-                        let ty = self.program.prim(ty);
-                        result.addr_var(id);
-                        result.inc_ptr_bytes((len - 1) * 8); // Note: backwards!
-                        result.push(Bc::StorePost { ty });
-                        len -= 1;
-                        pushed += 1;
+                    match slots {
+                        0 => {}
+                        1 => {
+                            let ty = self.program.prim(ty);
+                            result.addr_var(id);
+                            result.push(Bc::StorePost { ty });
+                            pushed += 1;
+                        }
+                        2 => {
+                            let types = self.program.flat_tuple_types(ty);
+                            let offset_2 = align_to(
+                                self.program.get_info(types[0]).stride_bytes as usize,
+                                self.program.get_info(types[1]).align_bytes as usize,
+                            );
+                            result.addr_var(id);
+                            result.inc_ptr_bytes(offset_2 as u16);
+                            result.push(Bc::StorePost {
+                                ty: self.program.prim(types[1]),
+                            });
+                            result.addr_var(id);
+                            result.push(Bc::StorePost {
+                                ty: self.program.prim(types[0]),
+                            });
+                            pushed += 2;
+                        }
+                        _ => unreachable!(),
                     }
                     id
                 };
@@ -241,36 +257,59 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn store_pre(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
-        debug_assert!(self.program.slot_count(ty) <= 2);
-        let types = self.program.flat_tuple_types(ty);
-        let mut len = types.len() as u16;
-        for ty in types.into_iter().rev() {
-            // TODO: make a test that fails if you don't have reverse here
-            let ty = self.program.prim(ty);
-            result.push(Bc::PeekDup(len));
-            // Note: backwards!
-            result.inc_ptr_bytes((len - 1) * 8); // TODO!
-            result.push(Bc::StorePost { ty });
-            len -= 1;
+        let slots = self.program.slot_count(ty);
+        match slots {
+            0 => {}
+            1 => {
+                let ty = self.program.prim(ty);
+                result.push(Bc::StorePre { ty });
+            }
+            2 => {
+                let types = self.program.flat_tuple_types(ty);
+                let offset_2 = align_to(
+                    self.program.get_info(types[0]).stride_bytes as usize,
+                    self.program.get_info(types[1]).align_bytes as usize,
+                );
+                result.push(Bc::PeekDup(2)); // grab the pointer
+                result.inc_ptr_bytes(offset_2 as u16);
+                result.push(Bc::StorePost {
+                    ty: self.program.prim(types[1]),
+                });
+                result.push(Bc::StorePre {
+                    ty: self.program.prim(types[0]),
+                });
+            }
+            _ => unreachable!(),
         }
-        result.pop(1)
     }
 
     fn load(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
-        debug_assert!(self.program.slot_count(ty) <= 2);
-        let types = self.program.flat_tuple_types(ty);
-        let mut len = 0;
-        let mut offset = 0;
-        for ty in types {
-            let ty = self.program.prim(ty);
-            offset = align_to(offset, ty.align_bytes()); // TODO: this is subtley wrong because of how c does nested structs. need to respect field offsets!
-            result.push(Bc::PeekDup(len));
-            result.inc_ptr_bytes(offset as u16); // TODO!
-            result.push(Bc::Load { ty });
-            offset += ty.align_bytes(); // always the same as size.
-            len += 1;
+        let slots = self.program.slot_count(ty);
+        match slots {
+            0 => {}
+            1 => {
+                let ty = self.program.prim(ty);
+                result.push(Bc::Load { ty });
+            }
+            2 => {
+                let types = self.program.flat_tuple_types(ty);
+                let offset_2 = align_to(
+                    self.program.get_info(types[0]).stride_bytes as usize,
+                    self.program.get_info(types[1]).align_bytes as usize,
+                );
+                result.push(Bc::PeekDup(0));
+                result.push(Bc::Load {
+                    ty: self.program.prim(types[0]),
+                });
+                result.push(Bc::PeekDup(1));
+                result.inc_ptr_bytes(offset_2 as u16);
+                result.push(Bc::Load {
+                    ty: self.program.prim(types[1]),
+                });
+                result.push(Bc::Snipe(2));
+            }
+            _ => unreachable!(),
         }
-        result.push(Bc::Snipe(len));
     }
 
     fn emit_body(&mut self, result: &mut FnBody<'p>, f: FuncId) -> Res<'p, ()> {

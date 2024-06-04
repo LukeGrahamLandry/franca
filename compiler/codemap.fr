@@ -25,13 +25,11 @@ fn init_ref(gpa: Alloc) *CodeMap = {
 }
 
 // The caller is responsible for ensuring name/src outlive the codemap. 
-fn add_file(self: *CodeMap, name: Str, content: Str) Span2 #log_asm_bc #log_bc = {
+fn add_file(self: *CodeMap, name: Str, content: Str) Span2 = {
     span: Span2 = (low = self.total_len, high = self.total_len.add(content.len.trunc()));
     self.total_len += content.len.trunc();
     self.files&.push((name = name, content = content, start = span.low));
-    assert(span.len().eq(content.len), => 
-        @format("miscompiled??? len=% has span low=%, high=%, len=%.", content.len, span.low, span.high, span.len())
-    );
+    assert(span.len().eq(content.len), "Miscompiled????");
     span
 }
 
@@ -58,33 +56,24 @@ fn find_single_file(self: *CodeMap, span: Span2) *File = {
 fn source_slice(self: *CodeMap, span: Span2) Str = {
     file := self.find_single_file(span);
     start := span.low.sub(file.start);
-    // TODO: this binding changes behaviour!!!!!!!! -- Jun 3
-    a := file.content.subslice(start.zext(), span.len());
-    a
+    file.content.subslice(start.zext(), span.len())
 }
 
 // indexes are relative to the start of self. 
 fn subspan(self: Span2, start: u32, end: u32) Span2 = {
     assert(start.le(self.low).and(end.le(self.high)), "OOB");
     assert(start.le(end), "invalid range");
-    // TODO: you get garbage out if you try to directly return the struct literal. :return_u32_pair
-    res: Span2 = (low = self.low.add(start), high = self.low.add(end));
-    res
+    (low = self.low.add(start), high = self.low.add(end))
 }
 
 // recall: it is an error to call source_slice on one that spans multiple files. 
-fn merge(a: Span2, b: Span2) Span2 = {
-    // TODO: you get garbage out if you try to directly return the struct literal. :return_u32_pair
-    res: Span2 = (
-        low = a.low.min(b.low),
-        high = a.high.max(b.high),
-    );
-    res
-}
+fn merge(a: Span2, b: Span2) Span2 = (
+    low = a.low.min(b.low),
+    high = a.high.max(b.high),
+);
 
-fn len(self: Span2) i64 = {
-    (@as(u32) self.high.sub(self.low)).zext()
-}
+fn len(self: Span2) i64 =
+    (@as(u32) self.high.sub(self.low)).zext();
 
 Diagnostic :: @struct(
     type: @enum(Error, Warning, Ice),
@@ -99,7 +88,7 @@ fn render(self: *Diagnostic, writer: *List(u8)) Unit = {
     };
 }
 
-
+// This failed when I wasn't correctly offseting for saving (u32, u32) arguments (just assuming 8 instead of 4). 
 #test fn codemap_len() = {
     codemap: CodeMap = init(libc_allocator);
     wisdom := "Everything is text.";
