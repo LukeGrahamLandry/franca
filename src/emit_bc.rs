@@ -133,10 +133,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     // TODO: callee make copy if it wants to modify
                     result.save_ssa_var()
                 } else {
+                    debug_assert!(self.program.slot_count(ty) <= 2);
                     let id = result.add_var(ty);
                     let types = self.program.flat_tuple_types(ty);
                     let mut len = types.len() as u16;
-                    for ty in types {
+                    // TODO: make a test that fails if you don't .rev() here.
+                    for ty in types.into_iter().rev() {
                         let ty = self.program.prim(ty);
                         result.addr_var(id);
                         result.inc_ptr_bytes((len - 1) * 8); // Note: backwards!
@@ -144,7 +146,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         len -= 1;
                         pushed += 1;
                     }
-                    // debug_assert_eq!(i * 8, self.program.get_info(ty).stride_bytes); // TODO
                     id
                 };
 
@@ -240,9 +241,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn store_pre(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
+        debug_assert!(self.program.slot_count(ty) <= 2);
         let types = self.program.flat_tuple_types(ty);
         let mut len = types.len() as u16;
-        for ty in types {
+        for ty in types.into_iter().rev() {
+            // TODO: make a test that fails if you don't have reverse here
             let ty = self.program.prim(ty);
             result.push(Bc::PeekDup(len));
             // Note: backwards!
@@ -254,6 +257,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     }
 
     fn load(&mut self, result: &mut FnBody<'p>, ty: TypeId) {
+        debug_assert!(self.program.slot_count(ty) <= 2);
         let types = self.program.flat_tuple_types(ty);
         let mut len = 0;
         let mut offset = 0;

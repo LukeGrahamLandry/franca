@@ -129,7 +129,6 @@ impl<'p> Program<'p> {
                     TypeInfo::Never => "Never".to_owned(),
                     TypeInfo::F64 => "f64".to_owned(),
                     TypeInfo::Bool => "bool".to_owned(),
-                    TypeInfo::OverloadSet => "OverloadSet".to_owned(),
                     // TODO: be careful of recursion
                     TypeInfo::Ptr(e) => format!("*{}", self.log_type(*e)),
                     TypeInfo::Struct { fields, .. } => {
@@ -156,14 +155,12 @@ impl<'p> Program<'p> {
                     }
                     TypeInfo::Label(e) => format!("Label({})", self.log_type(*e)),
 
-                    TypeInfo::Type => "Type".to_owned(),
                     TypeInfo::Unit => "Unit".to_owned(),
                     TypeInfo::VoidPtr => "rawptr".to_owned(),
                     TypeInfo::Int(int) => {
                         format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)
                     }
                     TypeInfo::Array { inner, len } => format!("Array({}, {len})", self.log_type(*inner)),
-                    TypeInfo::Scope => "ScopeId".to_owned(),
                 }
             } else {
                 "INVALID".to_string()
@@ -554,6 +551,17 @@ impl<'p> Program<'p> {
                     );
                 }
 
+                if e.bit_count == f.bit_count {
+                    let warn = if e.signed && !f.signed {
+                        "Large unsigned values become negative signed values."
+                    } else if !e.signed && f.signed {
+                        "Negative signed values become large unsiged values."
+                    } else {
+                        "Internal Compiler Error"
+                    };
+                    return format!("{indent}Trying to convert {fname} to {ename} (same size but different sign).\n{indent}Use `bitcast(<value>)` to preserve the bits.\n{indent}Values within range of the target type (small and positive) will be preserved. \n{indent}{warn}");
+                }
+
                 String::from("TODO: help message")
             }
             // TODO: not this!!!
@@ -600,7 +608,13 @@ impl<'p> Program<'p> {
             (&TypeInfo::FnPtr { .. }, &TypeInfo::FnPtr { .. }) => {
                 format!("{indent} incompatible function types. TODO: correct varience tracking.")
             }
-            (&TypeInfo::OverloadSet, &TypeInfo::Fn(_)) => format!("{indent} use @resolve to convert from a function to an overload set. "),
+            (_, &TypeInfo::Fn(_)) => {
+                if found == TypeId::overload_set {
+                    format!("{indent} use @resolve to convert from a function to an overload set. ")
+                } else {
+                    format!("{indent} bad conversion")
+                }
+            }
             _ => format!("{indent} bad conversion"),
         }
     }
@@ -638,4 +652,27 @@ impl<'p> PoolLog<'p> for FuncImpl<'p> {
 
 fn sane_int_size(bits: i64) -> bool {
     matches!(bits, 8 | 16 | 32 | 64 | 128)
+}
+
+impl Debug for PrimSig {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let render = |f: &mut Formatter, slots: u16, float_mask: u32| -> fmt::Result {
+            write!(f, "(")?;
+            for i in 0..slots as usize {
+                write!(f, "{},", if is_float(i, slots, float_mask) { "f64" } else { "i64" })?
+            }
+            write!(f, ")")
+        };
+
+        render(f, self.arg_slots, self.arg_float_mask)?;
+        write!(f, " -> ")?;
+        render(f, self.ret_slots, self.ret_float_mask)?;
+        if self.first_arg_is_indirect_return {
+            write!(f, "#indirect")?;
+        }
+        if self.no_return {
+            write!(f, "#never")?;
+        }
+        Ok(())
+    }
 }

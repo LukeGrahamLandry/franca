@@ -97,7 +97,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
         }
         let name = comp.program.pool.get(comp.program[f].name);
 
-        let ty = comp.program[f].finished_ty().unwrap();
         // println!("do {}", name);
         if let Some(&body) = comp.program[f].body.c_source() {
             declare(comp, &mut out.functions, f, false, true);
@@ -326,9 +325,8 @@ fn emit_named_redirect_body(comp: &mut Compile, out: &mut String, f: FuncId, cal
 // TODO: this uses a dumb amount of memory
 #[derive(Default)]
 struct CProgram {
-    type_forward: BitSet, // all types need to be typedef-ed to thier typeid
-    fn_forward: BitSet,   // anything called mutually recursivly needs to be forward declared
-    fn_emitted: BitSet,   // has the implementation been emitted?
+    fn_forward: BitSet, // anything called mutually recursivly needs to be forward declared
+    fn_emitted: BitSet, // has the implementation been emitted?
     types: String,
     forward: String,
     functions: String,

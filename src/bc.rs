@@ -48,7 +48,7 @@ pub enum Bc {
     Ret2((Prim, Prim)),
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
+#[derive(Clone, Copy, PartialEq, InterpSend)]
 pub struct PrimSig {
     pub arg_slots: u16,
     pub arg_float_mask: u32,
@@ -321,7 +321,7 @@ pub fn deconstruct_values(
         &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
         TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
         TypeInfo::Unit => {}
-        TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => {
+        TypeInfo::Fn(_) | TypeInfo::Label(_) => {
             let offset = bytes.i;
             out.push(unwrap!(bytes.next_u32(), "") as i64);
             if let Some(offsets) = offsets {

@@ -1163,9 +1163,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // i just like that the debugger shows it's not an interesting frame
-    // what the actual fuck. this makes it segfault
-    // #[cfg_attr(debug_assertions, inline(always))]
     pub fn compile_expr(&mut self, expr: &mut FatExpr<'p>, requested: Option<TypeId>) -> Res<'p, TypeId> {
         let marker = 0;
         unsafe {
@@ -1179,8 +1176,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         assert!(expr.ty.as_index() < self.program.types.len());
 
-        // TODO: it seems like i shouldn't compile something twice
-        // debug_assert!(expr.ty.is_unknown(), "{}", expr.log(self.pool));
         let old = expr.ty;
 
         let res = self.compile_expr_inner(expr, requested)?;
@@ -1974,13 +1969,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = match name {
             "i64" => Some(TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true })),
             "f64" => Some(F64),
-            "Type" => Some(Type),
+            "Type" => return Some(TypeId::ty),
             "bool" => Some(Bool),
             "UnknownType" => Some(TypeInfo::Unknown),
-            "Never" => Some(TypeInfo::Never),
+            "Never" => return Some(TypeId::never),
             "rawptr" => Some(VoidPtr),
-            "OverloadSet" => Some(TypeInfo::OverloadSet),
-            "ScopedBlock" => Some(TypeInfo::Scope),
+            "OverloadSet" => return Some(TypeId::overload_set),
+            "ScopedBlock" => return Some(TypeId::scope),
             _ => None,
         };
         if let Some(ty) = ty {
@@ -2536,6 +2531,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if found == expected {
             Ok(())
         } else {
+            // println!("{} {}", self.program.log_type(found), self.program.log_type(expected));
             match (&self.program[found], &self.program[expected]) {
                 // :Coercion // TODO: only one direction makes sense
                 (TypeInfo::Never, _) | (_, TypeInfo::Never) => return Ok(()),
@@ -2547,9 +2543,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                     // TODO: not this!
                     //
                     if a.bit_count == 64 && b.bit_count != 32 && b.bit_count != 16 && b.bit_count != 8 {
+                        // && b.bit_count != 64 // TODO: adding this mostly works but breaks --no-fork, so some weird stateful thing?? -- Jun 3
                         return Ok(());
                     }
                     if b.bit_count == 64 && a.bit_count != 32 && a.bit_count != 16 && a.bit_count != 8 {
+                        //  && a.bit_count != 64
                         return Ok(());
                     }
                 }
@@ -2558,7 +2556,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let ok = f
                             .iter()
                             .zip(e.iter())
-                            .all(|(f, e)| self.type_check_arg(f.ty, e.ty, msg).is_ok() && f.byte_offset == e.byte_offset && f.name == e.name);
+                            .all(|(f, e)| f.byte_offset == e.byte_offset && f.name == e.name && self.type_check_arg(f.ty, e.ty, msg).is_ok());
                         if ok {
                             return Ok(());
                         }
@@ -2807,7 +2805,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    // the bool return is did_inline which will be banned if its a Split FuncRef. // TODO: remove that cause i dont do it anymore
     fn compile_call(&mut self, expr: &mut FatExpr<'p>, mut fid: FuncId) -> Res<'p, TypeId> {
         let loc = expr.loc;
         let done = expr.done;
@@ -3042,18 +3039,22 @@ impl<'a, 'p> Compile<'a, 'p> {
                 //     !matches!(body.expr, Expr::Block { .. }),
                 //     "Block should be GetParsed because body is not resolved yet. "
                 // );
+
+                let old_scope = &self[new_func.scope.unwrap()];
+                let id = self.new_scope(old_scope.parent, old_scope.name, old_scope.block_in_parent);
+                let old_scope = &self[new_func.scope.unwrap()];
+                let old_constants = old_scope.constants.clone();
                 // TODO: just take the part you need. rn this copys more and more every time! -- May 29
-                let mut scope = self[new_func.scope.unwrap()].clone();
-                // TODO: don't need to copy these. they should be empty the first time,
-                //       but when you call the function multiple times, the results from the old one will be there.
-                scope.rt_types.clear();
-                let old_constants = mem::take(&mut scope.constants); // because need to rehash
+                //       i think this is still true -- Jun 3
+                let old_vars = old_scope.vars.clone();
+                // can't use the copy directly because need to rehash
                 for (k, v) in old_constants {
                     if let Some(new) = mapping.get(&k) {
-                        scope.constants.insert(*new, v);
+                        self[id].constants.insert(*new, v);
                     }
                 }
-                for block in &mut scope.vars {
+
+                for mut block in old_vars {
                     block.vars.retain_mut(|k| {
                         if let Some(new) = mapping.get(k) {
                             *k = *new;
@@ -3062,9 +3063,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                             false
                         }
                     });
+                    self[id].vars.push(block);
                 }
-                self.scopes.push(scope);
-                let id = ScopeId::from_index(self.scopes.len() - 1);
                 new_func.scope = Some(id);
             }
         }

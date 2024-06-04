@@ -1,7 +1,9 @@
 - generic Read/Write instead of hardcoding List(u8).
 - remove flat call from backends, just do it in bc.
 - make sure fn load is always correctly inlined by #one_ret_pic
-- handle @generic in overloading.rs so you don't have to add useless @as casts in nested expressions.
+- handle #generic in overloading.rs so you don't have to add useless @as casts in nested expressions.
+- seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.
+  then need to allow different reprs.
 
 ## regressions
 

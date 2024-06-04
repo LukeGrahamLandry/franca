@@ -80,11 +80,8 @@ pub enum TypeInfo<'p> {
     // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
     Unique(TypeId, usize),
     Named(TypeId, Ident<'p>),
-    Type,
     Unit, // TODO: same as empty tuple but easier to type
     VoidPtr,
-    OverloadSet,
-    Scope,
     Label(TypeId),
 }
 
@@ -959,15 +956,19 @@ impl<'p> Program<'p> {
             types: vec![
                 TypeInfo::Unknown,
                 TypeInfo::Unit,
-                TypeInfo::Type,
+                TypeInfo::Named(TypeId::from_index(10), pool.intern("Type")),
                 TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
                 // TODO: this is flawed now that its a hashmap -- Apr 28 also if you remove it remember to fix later indices!
                 TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
                 TypeInfo::F64,
-                TypeInfo::OverloadSet,
-                TypeInfo::Scope,
+                TypeInfo::Named(TypeId::from_index(10), pool.intern("OverloadSet")),
+                TypeInfo::Named(TypeId::from_index(10), pool.intern("Scope")),
+                TypeInfo::Int(IntTypeInfo {
+                    bit_count: 32,
+                    signed: false,
+                }),
             ],
             funcs: Default::default(),
             next_var: 0,
@@ -1255,10 +1256,10 @@ impl<'p> Program<'p> {
             TypeInfo::Unknown | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
             // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
             TypeInfo::Unit => todo!(),
-            TypeInfo::OverloadSet | TypeInfo::Type | TypeInfo::Int(_) => "i64",
+            TypeInfo::Int(_) => "i64",
             TypeInfo::Bool => "i1",
             TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
-            TypeInfo::Scope | TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => {
+            TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => {
                 todo!()
             }
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
@@ -1294,7 +1295,7 @@ impl<'p> Program<'p> {
             TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) => Prim::P64,
 
             TypeInfo::Unit => todo!(),
-            TypeInfo::Type | TypeInfo::Fn(_) | TypeInfo::OverloadSet | TypeInfo::Scope | TypeInfo::Label(_) => Prim::I32,
+            TypeInfo::Fn(_) | TypeInfo::Label(_) => Prim::I32,
             _ => todo!("{}", self.log_type(ty)),
         }
     }
@@ -1552,8 +1553,8 @@ impl<'p> Program<'p> {
             TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0, false),
             TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1, false), // :SmallTypes
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, false, true, 8, false),
-            TypeInfo::Type => TypeMeta::new(1, 4, 0, true, false, 4, false),
-            TypeInfo::Scope | TypeInfo::Label(_) | TypeInfo::Fn(_) | TypeInfo::OverloadSet => TypeMeta::new(1, 4, 0, true, false, 4, false),
+
+            TypeInfo::Label(_) | TypeInfo::Fn(_) => TypeMeta::new(1, 4, 0, true, false, 4, false),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);

@@ -181,30 +181,40 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
     }
 
-    fn fn_def_signeture(&mut self, loc: Span) -> Res<'p, (Option<Ident<'p>>, Pattern<'p>, LazyType<'p>, Vec<Annotation<'p>>)> {
-        let name = if let Symbol(i) = self.peek() {
+    fn fn_def_signeture(&mut self, loc: Span, allow_name: bool) -> Res<'p, (Option<Ident<'p>>, Pattern<'p>, LazyType<'p>, Vec<Annotation<'p>>)> {
+        let name = if !allow_name {
+            None
+        } else if let Symbol(i) = self.peek() {
             self.pop();
             // return Err(self.error_next("Fn expr must not have name".into()));
             Some(i)
         } else {
             None
         };
-        // Args are optional so you can do `if(a, fn=b, fn=c)`
+        let cant_start_return_expression = |t: TokenType| matches!(t, Equals | Semicolon | Pipe | FatRightArrow | Hash);
         let mut no_paren = false;
+        let mut disallow_return = false;
         let mut arg = if self.maybe(LeftParen) {
             let a = self.parse_args()?;
             self.eat(RightParen)?;
             a
         } else {
             no_paren = true;
-            Pattern::empty(loc)
+            if allow_name || cant_start_return_expression(self.peek()) {
+                Pattern::empty(loc)
+            } else {
+                disallow_return = true;
+                self.parse_args()?
+            }
         };
         arg.if_empty_add_unit();
 
-        let ret = if Equals != self.peek() && Semicolon != self.peek() && Pipe != self.peek() && FatRightArrow != self.peek() && Hash != self.peek() {
-            if name.is_none() && no_paren {
-                return Err(self.error_next(String::from("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args.")));
-            }
+        if no_paren && !cant_start_return_expression(self.peek()) {
+            return Err(self.error_next(String::from("'fn <Expr> =' can't treat Expr as ret type. pls specify name or args.")));
+        }
+
+        let ret = if !cant_start_return_expression(self.peek()) {
+            debug_assert!(!disallow_return);
             LazyType::PendingEval(self.parse_expr()?)
         } else {
             LazyType::Infer
@@ -231,7 +241,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             Fn => {
                 self.start_subexpr();
                 let loc = self.eat(Fn)?;
-                let (name, arg, ret, ann) = self.fn_def_signeture(loc)?;
+                let (name, arg, ret, ann) = self.fn_def_signeture(loc, true)?;
 
                 let capturing = if self.maybe(Equals) {
                     false
@@ -241,8 +251,15 @@ impl<'a, 'p> Parser<'a, 'p> {
                     return Err(self.expected("'=' or '=>' to indicate function body"));
                 };
 
-                // TODO: if '=', should suspend parsing like fn_stmt does.
-                let body = self.parse_expr()?;
+                let body = if !capturing && self.peek() == LeftSquiggle {
+                    self.start_subexpr();
+                    let span = self.lexer.skip_to_closing_squigle();
+                    let i = self.ctx.add_task(true, self.lexer.src.clone(), span);
+                    let e = Expr::GetParsed(i);
+                    self.expr(e)
+                } else {
+                    self.parse_expr()?
+                };
 
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
                 let name = name.unwrap_or_else(|| self.anon_fn_name(&body));
@@ -433,7 +450,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.start_subexpr();
                     self.pop(); // {
                     let loc = self.next_span();
-                    let (name, arg, ret, ann) = self.fn_def_signeture(loc)?;
+                    let (name, arg, ret, ann) = self.fn_def_signeture(loc, false)?;
                     self.eat(Pipe)?;
 
                     self.start_subexpr();
@@ -591,7 +608,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             _ => return Err(self.expected("fn or fun")),
         }
 
-        let (name, arg, ret, ann) = self.fn_def_signeture(loc)?;
+        let (name, arg, ret, ann) = self.fn_def_signeture(loc, true)?;
         if name.is_none() {
             // TODO: msg in wrong place
             return Err(self.expected("fn expr to have name"));
@@ -833,7 +850,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             match self.peek() {
                 RightParen | RightSquiggle => break,
                 Comma => return Err(self.expected("Expr")),
-                _ => {
+                Symbol(_) | Qualifier(_) => {
                     args.bindings.push(self.parse_type_binding(true)?);
                     if Comma == self.peek() {
                         // inner and optional trailing
@@ -843,6 +860,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         break;
                     }
                 }
+                _ => return Err(self.expected(") or } or <name> or let/var/const")),
             }
         }
 
