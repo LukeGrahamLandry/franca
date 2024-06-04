@@ -67,6 +67,7 @@ pub enum TypeInfo<'p> {
         // You probably always have few enough that this is faster than a hash map. // TODO: check that
         fields: Vec<Field<'p>>,
         layout_done: bool,
+        is_tuple: bool,
     },
     // What rust calls an enum
     Tagged {
@@ -77,8 +78,7 @@ pub enum TypeInfo<'p> {
         raw: TypeId,
         fields: Vec<(Ident<'p>, Values)>,
     },
-    // Let you ask for type checking on things that have same repr but don't make the backend deal with it.
-    Unique(TypeId, usize),
+    Placeholder,
     Named(TypeId, Ident<'p>),
     Unit, // TODO: same as empty tuple but easier to type
     VoidPtr,
@@ -1001,10 +1001,11 @@ impl<'p> Program<'p> {
             let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Unknown);
+            self.types.push(TypeInfo::Placeholder);
             self.ffi_types.insert(id, ty_final);
             let ty = T::create_type(self); // Note: Not get_type!
-            self.types[placeholder] = TypeInfo::Unique(ty, (id & usize::MAX as u128) as usize);
+            let name = self.pool.intern(&T::name());
+            self.types[placeholder] = TypeInfo::Named(ty, name);
             self.types_extra.borrow_mut().truncate(placeholder);
             ty_final
         })
@@ -1026,10 +1027,7 @@ impl<'p> Program<'p> {
             let ty_final = TypeId::from_index(placeholder);
             // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
             // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Struct {
-                fields: vec![],
-                layout_done: false,
-            });
+            self.types.push(TypeInfo::Placeholder);
             self.ffi_types.insert(id, ty_final);
             let ty = match type_info.data {
                 RsData::Struct(data) => {
@@ -1045,7 +1043,11 @@ impl<'p> Program<'p> {
                             default: None,
                         })
                     }
-                    self.intern_type(TypeInfo::Struct { fields, layout_done: true })
+                    self.intern_type(TypeInfo::Struct {
+                        fields,
+                        layout_done: true,
+                        is_tuple: false,
+                    })
                 }
                 RsData::Enum { .. } => todo!(),
                 RsData::Ptr { inner, .. } => {
@@ -1055,8 +1057,7 @@ impl<'p> Program<'p> {
                 RsData::Opaque => unreachable!(),
             };
 
-            let named = self.intern_type(TypeInfo::Named(ty, self.pool.intern(type_info.name)));
-            self.types[placeholder] = TypeInfo::Unique(named, (id & usize::MAX as u128) as usize);
+            self.types[placeholder] = TypeInfo::Named(ty, self.pool.intern(type_info.name));
             ty_final
         })
     }
@@ -1065,7 +1066,7 @@ impl<'p> Program<'p> {
     pub(crate) fn raw_type(&self, mut ty: TypeId) -> TypeId {
         debug_assert!(ty.is_valid(), "invalid type: {}", ty.0);
 
-        while let &TypeInfo::Unique(inner, _) | &TypeInfo::Named(inner, _) | &TypeInfo::Enum { raw: inner, .. } = &self[ty] {
+        while let &TypeInfo::Named(inner, _) | &TypeInfo::Enum { raw: inner, .. } = &self[ty] {
             ty = inner
         }
         ty
@@ -1092,6 +1093,7 @@ impl<'p> Program<'p> {
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| Ok((*ty, self.pool.intern(&format!("_{i}")), None))),
+                        true,
                     )
                     .unwrap();
                 self.intern_type(info)
@@ -1099,7 +1101,11 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub(crate) fn make_struct(&self, parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>)>>) -> Res<'p, TypeInfo<'p>> {
+    pub(crate) fn make_struct(
+        &self,
+        parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>)>>,
+        is_tuple: bool,
+    ) -> Res<'p, TypeInfo<'p>> {
         let mut fields = vec![];
         for p in parts {
             let (ty, name, default) = p?;
@@ -1111,7 +1117,11 @@ impl<'p> Program<'p> {
             });
         }
 
-        Ok(TypeInfo::Struct { fields, layout_done: false })
+        Ok(TypeInfo::Struct {
+            fields,
+            layout_done: false,
+            is_tuple,
+        })
     }
 
     pub(crate) fn finish_layout_deep(&mut self, ty: TypeId) -> Res<'p, ()> {
@@ -1157,12 +1167,18 @@ impl<'p> Program<'p> {
             return Ok(());
         }
 
-        let TypeInfo::Struct { fields, layout_done } = &self[ty] else {
+        let TypeInfo::Struct {
+            fields,
+            layout_done,
+            is_tuple,
+        } = &self[ty]
+        else {
             return Ok(());
         };
         if *layout_done {
             return Ok(());
         }
+        let is_tuple = *is_tuple;
 
         let mut fields = fields.clone();
         for f in &fields {
@@ -1183,63 +1199,20 @@ impl<'p> Program<'p> {
             bytes += info.stride_bytes as usize;
         }
 
-        let info = TypeInfo::Struct { fields, layout_done: true };
+        let info = TypeInfo::Struct {
+            fields,
+            layout_done: true,
+            is_tuple,
+        };
         self.types[ty.as_index()] = info.clone();
-        self.type_lookup.insert(info, ty);
+        self.type_lookup.insert(info, ty); // TODO: don't always intern_type
 
         Ok(())
-    }
-
-    pub extern "C" fn unique_ty(&mut self, ty: TypeId) -> TypeId {
-        self.intern_type(TypeInfo::Unique(ty, self.types.len()))
     }
 
     pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {
         let ty = TypeInfo::Named(ty, self.pool.intern(name));
         self.intern_type(ty)
-    }
-
-    pub fn emit_inline_llvm_ir(&mut self) -> String {
-        let mut out = String::new();
-
-        for f in self.inline_llvm_ir.clone() {
-            let arg = self.funcs[f.as_index()].arg.clone();
-            let ret = self.funcs[f.as_index()].finished_ret.unwrap();
-            let FuncImpl::LlvmIr(n) = self.funcs[f.as_index()].body else {
-                unreachable!()
-            };
-            let body = self.pool.get(n).to_string();
-            let args = arg
-                .flatten()
-                .into_iter()
-                .map(|(name, ty, _)| format!("{} %{}", self.for_llvm_ir(ty), self.pool.get(name.unwrap().name)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out += &format!(
-                "define {} @FN{}({args}) alwaysinline {{ {body} }}\n\n",
-                self.for_llvm_ir(ret),
-                f.as_index()
-            );
-        }
-
-        out
-    }
-
-    pub fn for_llvm_ir(&self, ty: TypeId) -> &str {
-        match &self[ty] {
-            TypeInfo::Array { .. } => todo!(),
-            TypeInfo::F64 => "double",
-            TypeInfo::Unknown | TypeInfo::Never | TypeInfo::Label(_) => todo!(),
-            // TODO: special case Unit but need different type for enum padding. for returns unit should be LLVMVoidTypeInContext(self.context)
-            TypeInfo::Unit => todo!(),
-            TypeInfo::Int(_) => "i64",
-            TypeInfo::Bool => "i1",
-            TypeInfo::VoidPtr | TypeInfo::Ptr(_) => "ptr",
-            TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Struct { .. } | TypeInfo::Tagged { .. } => {
-                todo!()
-            }
-            &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Unique(ty, _) | &TypeInfo::Named(ty, _) => self.for_llvm_ir(ty),
-        }
     }
 
     pub fn find_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
@@ -1272,6 +1245,12 @@ impl<'p> Program<'p> {
 
             TypeInfo::Unit => todo!(),
             TypeInfo::Fn(_) | TypeInfo::Label(_) => Prim::I32,
+            TypeInfo::Struct { ref fields, .. } => {
+                if fields.len() == 1 && self.slot_count(fields[0].ty) == 1 {
+                    return self.prim(fields[0].ty);
+                }
+                todo!("{}", self.log_type(ty));
+            }
             _ => todo!("{}", self.log_type(ty)),
         }
     }
@@ -1303,13 +1282,37 @@ impl<'p> Program<'p> {
 
 impl<'p> Program<'p> {
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
-        self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
+        let deduplicate = match &ty {
+            TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",),
+            TypeInfo::Unknown
+            | TypeInfo::Never
+            | TypeInfo::F64
+            | TypeInfo::Int(_)
+            | TypeInfo::Bool
+            | TypeInfo::Fn(_)
+            | TypeInfo::FnPtr { .. }
+            | TypeInfo::Ptr(_)
+            | TypeInfo::Array { .. }
+            | TypeInfo::Unit
+            | TypeInfo::VoidPtr
+            | TypeInfo::Label(_) => true,
+            &TypeInfo::Struct { is_tuple, .. } => is_tuple,
+            TypeInfo::Tagged { .. } | TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => false,
+        };
+
+        if deduplicate {
+            self.type_lookup.get(&ty).copied().unwrap_or_else(|| {
+                let id = self.types.len();
+                self.types.push(ty.clone());
+                let id = TypeId::from_index(id);
+                self.type_lookup.insert(ty, id);
+                id
+            })
+        } else {
             let id = self.types.len();
             self.types.push(ty.clone());
-            let id = TypeId::from_index(id);
-            self.type_lookup.insert(ty, id);
-            id
-        })
+            TypeId::from_index(id)
+        }
     }
 
     #[track_caller]
@@ -1357,14 +1360,14 @@ impl<'p> Program<'p> {
     pub fn tuple_types(&self, ty: TypeId) -> Option<Vec<TypeId>> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => Some(fields.iter().map(|f| f.ty).collect()),
-            &TypeInfo::Named(ty, _) | &TypeInfo::Unique(ty, _) => self.tuple_types(ty),
+            &TypeInfo::Named(ty, _) => self.tuple_types(ty),
             _ => None,
         }
     }
     pub fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
-            &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) | &TypeInfo::Unique(ty, _) => self.flat_tuple_types(ty),
+            &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) => self.flat_tuple_types(ty),
             // TODO: this is sketchy
             TypeInfo::Tagged { .. } => vec![TypeId::i64(); self.slot_count(ty) as usize],
             &TypeInfo::Array { inner, len } => {
@@ -1392,7 +1395,7 @@ impl<'p> Program<'p> {
     pub fn struct_type(&mut self, name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
         let pool = self.pool;
         let info = self
-            .make_struct(fields_in.iter().map(|(name, ty)| Ok((*ty, pool.intern(name), None))))
+            .make_struct(fields_in.iter().map(|(name, ty)| Ok((*ty, pool.intern(name), None))), false)
             .unwrap();
         let name = pool.intern(name);
         let ty = self.intern_type(info);
@@ -1410,7 +1413,7 @@ impl<'p> Program<'p> {
     pub fn synth_name(&self, ty: TypeId, hint: usize) -> Ident<'p> {
         match self[ty] {
             TypeInfo::Named(_, name) => name,
-            TypeInfo::Unique(ty, _) => self.synth_name(ty, hint),
+
             _ => self.pool.intern(&format!("_{hint}")),
         }
     }
@@ -1466,8 +1469,9 @@ impl<'p> Program<'p> {
         }
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
-            TypeInfo::Unknown => todo!(), //TypeMeta::new(0, 1, 0, false, false, 0),
-            TypeInfo::Struct { fields, layout_done } => {
+            TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",), // TODO: err!
+            TypeInfo::Unknown => todo!(),
+            TypeInfo::Struct { fields, layout_done, .. } => {
                 debug_assert!(*layout_done);
                 let mut size = 0;
                 debug_assert_eq!(fields[0].byte_offset, 0);
@@ -1531,7 +1535,7 @@ impl<'p> Program<'p> {
             TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, true, 8, false),
 
             TypeInfo::Label(_) | TypeInfo::Fn(_) => TypeMeta::new(1, 4, 0, false, 4, false),
-            TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+            TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);
                 let slots = info.size_slots * len as u16;

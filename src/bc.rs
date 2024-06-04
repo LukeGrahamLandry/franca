@@ -270,6 +270,7 @@ pub fn deconstruct_values(
     );
     let ty = program.raw_type(ty);
     match &program[ty] {
+        TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
         TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
         TypeInfo::F64 | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
             let offset = bytes.i;
@@ -306,7 +307,7 @@ pub fn deconstruct_values(
                 deconstruct_values(program, inner, bytes, out, offsets)?;
             }
         }
-        TypeInfo::Struct { fields, layout_done } => {
+        TypeInfo::Struct { fields, layout_done, .. } => {
             assert!(*layout_done);
             let mut prev = 0;
             for t in fields {
@@ -319,7 +320,7 @@ pub fn deconstruct_values(
         }
         TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
         &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
-        TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
+        TypeInfo::Named(_, _) => unreachable!(),
         TypeInfo::Unit => {}
         TypeInfo::Fn(_) | TypeInfo::Label(_) => {
             let offset = bytes.i;

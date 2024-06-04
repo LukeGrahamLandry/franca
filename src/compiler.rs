@@ -2577,7 +2577,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 Ok((ty, unwrap!(binding.name.ident(), "field name"), default))
             })
             .collect();
-        self.program.make_struct(parts.into_iter())
+        self.program.make_struct(parts.into_iter(), false)
     }
 
     fn set_deref(&mut self, full_stmt: &mut FatStmt<'p>) -> Res<'p, ()> {
@@ -2745,7 +2745,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let raw_container_ty = self.program.raw_type(container_ty);
         self.program.finish_layout(raw_container_ty)?;
         match &self.program[raw_container_ty] {
-            TypeInfo::Struct { fields, layout_done } => {
+            TypeInfo::Struct { fields, layout_done, .. } => {
                 debug_assert!(*layout_done);
                 for f in fields {
                     if f.name == name {

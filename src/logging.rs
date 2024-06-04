@@ -125,6 +125,7 @@ impl<'p> Program<'p> {
         safe_rec!(self, t, format!("{t:?}"), {
             if t.is_valid() && t.as_index() < self.types.len() {
                 match &self[t] {
+                    TypeInfo::Placeholder => "UnfinishedPlaceHolder".to_owned(),
                     TypeInfo::Unknown => "Unknown".to_owned(),
                     TypeInfo::Never => "Never".to_owned(),
                     TypeInfo::F64 => "f64".to_owned(),
@@ -147,7 +148,7 @@ impl<'p> Program<'p> {
                             .collect();
                         format!("@tagged({})", v.join(", "))
                     }
-                    TypeInfo::Enum { raw: inner, .. } | TypeInfo::Unique(inner, _) => self.log_type(*inner),
+                    TypeInfo::Enum { raw: inner, .. } => self.log_type(*inner),
                     TypeInfo::Named(_, n) => self.pool.get(*n).to_string(),
                     TypeInfo::Fn(f) => format!("(fn({}) {} #arity({}))", self.log_type(f.arg), self.log_type(f.ret), f.arity),
                     TypeInfo::FnPtr { ty: f, cc } => {
@@ -173,27 +174,32 @@ impl<'p> Program<'p> {
     pub fn find_ffi_type(&self, name: Ident<'p>) -> Option<TypeId> {
         let mut found = None;
         for ty in self.ffi_types.values() {
-            if let TypeInfo::Unique(ty, _) = &self[*ty] {
-                if let &TypeInfo::Named(ty, check) = &self[*ty] {
-                    if name == check {
+            if let &TypeInfo::Named(ty, check) = &self[*ty] {
+                if name == check {
+                    if found.is_some() {
+                        println!("err: duplicate ffi name {}", self.pool.get(name));
+                        return None;
+                    }
+                    found = Some(ty);
+                } else if let TypeInfo::Tagged { cases, .. } = &self[ty] {
+                    for (check, ty) in cases {
+                        if *check == name {
+                            if found.is_some() {
+                                println!("err: duplicate ffi name {}", self.pool.get(name));
+                                return None;
+                            }
+                            found = Some(*ty);
+                        }
+                    }
+                }
+            } else if let TypeInfo::Tagged { cases, .. } = &self[*ty] {
+                for (check, ty) in cases {
+                    if *check == name {
                         if found.is_some() {
                             println!("err: duplicate ffi name {}", self.pool.get(name));
                             return None;
                         }
-                        found = Some(ty);
-                    } else if let TypeInfo::Tagged { cases, .. } = &self[ty] {
-                        for (_, ty) in cases {
-                            if let &TypeInfo::Named(inner, case_name) = &self[*ty] {
-                                // TODO: ffi cases that are akreayd named types
-                                if case_name == name {
-                                    if found.is_some() {
-                                        println!("err: duplicate ffi name {}", self.pool.get(name));
-                                        return None;
-                                    }
-                                    found = Some(inner);
-                                }
-                            }
-                        }
+                        found = Some(*ty);
                     }
                 }
             }
@@ -205,21 +211,19 @@ impl<'p> Program<'p> {
         let mut out = String::new();
 
         for info in &self.types {
-            if let TypeInfo::Unique(ty, _) = info {
-                if let &TypeInfo::Named(ty, name) = &self[*ty] {
-                    if let TypeInfo::Tagged { cases, .. } = &self[ty] {
-                        writeln!(out, "const {} = Unique$ @tagged(", self.pool.get(name),).unwrap();
-                        for (name, mut ty) in cases {
-                            if let &TypeInfo::Named(inner, _) = &self[ty] {
-                                // Not unique, name is probably just name of the case.
-                                ty = inner;
-                            }
-                            writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty)).unwrap();
+            if let &TypeInfo::Named(ty, name) = info {
+                if let TypeInfo::Tagged { cases, .. } = &self[ty] {
+                    writeln!(out, "const {} = Unique$ @tagged(", self.pool.get(name),).unwrap();
+                    for (name, mut ty) in cases {
+                        if let &TypeInfo::Named(inner, _) = &self[ty] {
+                            // Not unique, name is probably just name of the case.
+                            ty = inner;
                         }
-                        out += ");\n"
-                    } else {
-                        writeln!(out, "const {} = Unique({});", self.pool.get(name), self.log_type(ty)).unwrap();
+                        writeln!(out, "    {}: {},", self.pool.get(*name), self.log_type(ty)).unwrap();
                     }
+                    out += ");\n"
+                } else {
+                    writeln!(out, "const {} = Unique({});", self.pool.get(name), self.log_type(ty)).unwrap();
                 }
             }
         }

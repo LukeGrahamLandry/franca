@@ -163,7 +163,6 @@ extern "C" {
 pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn Ptr(Inner: Type) Type #fold", do_ptr_type as *const u8),
     ("fn operator_star_prefix(Inner: Type) Type #fold", do_ptr_type as *const u8),
-    ("#no_memo fn Unique(Backing: Type) Type", do_unique_type as *const u8),
     ("#fold fn tag_value(E: Type, case_name: Symbol) i64", tag_value as *const u8),
     ("#fold fn tag_symbol(E: Type, tag_value: i64) Symbol", tag_symbol as *const u8),
     ("fn number_of_functions() i64", number_of_functions as *const u8),
@@ -256,7 +255,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "const DlHandle = rawptr; const CStr = Unique(Ptr(u8));").unwrap();
+            writeln!(out, "const DlHandle = @struct(lib: rawptr); const CStr = @struct(ptr: *u8);").unwrap();
             writeln!(out, "TimeSpec :: @struct(seconds: i64, nanoseconds: i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
@@ -495,10 +494,6 @@ extern "C-unwind" fn do_ptr_type(program: &mut &mut Program<'_>, ty: TypeId) -> 
 
 extern "C-unwind" fn do_label_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
     program.intern_type(TypeInfo::Label(ty))
-}
-
-extern "C-unwind" fn do_unique_type(program: &mut &mut Program<'_>, ty: TypeId) -> TypeId {
-    program.unique_ty(ty)
 }
 
 extern "C-unwind" fn debug_log_int(_: &mut &mut Program<'_>, i: i64) {

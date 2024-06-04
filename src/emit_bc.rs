@@ -702,7 +702,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
-                let TypeInfo::Struct { fields, layout_done } = &self.program[self.program.raw_type(expr.ty)] else {
+                let TypeInfo::Struct { fields, layout_done, .. } = &self.program[self.program.raw_type(expr.ty)] else {
                     err!("Expr::Tuple should have struct type",)
                 };
                 assert!(*layout_done);
