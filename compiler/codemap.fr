@@ -10,7 +10,7 @@ CodeMap :: @struct(
     files: List(File),
     total_len: u32,
 );
-Span2 :: @struct(low: u32, high: u32);
+Span :: @struct(low: u32, high: u32);
 File :: @struct(name: Str, content: Str, start: u32);
 
 // TODO: if you name a field gpa, it shadows the argument so you can't use it in later field initializers. -- May 31
@@ -18,15 +18,15 @@ fn init(gpa: Alloc) CodeMap =
     (files = list(gpa), total_len = 0.trunc());
 
 // The caller is responsible for ensuring name/src outlive the codemap. 
-fn add_file(self: *CodeMap, name: Str, content: Str) Span2 = {
-    span: Span2 = (low = self.total_len, high = self.total_len.add(content.len.trunc()));
+fn add_file(self: *CodeMap, name: Str, content: Str) Span = {
+    span: Span = (low = self.total_len, high = self.total_len.add(content.len.trunc()));
     self.total_len += content.len.trunc();
     self.files&.push((name = name, content = content, start = span.low));
     assert(span.len().eq(content.len), "Miscompiled????");
     span
 }
 
-fn find_single_file(self: *CodeMap, span: Span2) *File = {
+fn find_single_file(self: *CodeMap, span: Span) *File = {
     done :: @return;
     assert(span.high.ge(span.low), "invalid span");
     assert(span.high.le(self.total_len), "span is not in codemap");
@@ -46,32 +46,32 @@ fn find_single_file(self: *CodeMap, span: Span2) *File = {
     unreachable_hack(*File)
 };
 
-fn source_slice(self: *CodeMap, span: Span2) Str = {
+fn source_slice(self: *CodeMap, span: Span) Str = {
     file := self.find_single_file(span);
     start := span.low.sub(file.start);
     file.content.subslice(start.zext(), span.len())
 }
 
 // indexes are relative to the start of self. 
-fn subspan(self: Span2, start: u32, end: u32) Span2 = {
+fn subspan(self: Span, start: u32, end: u32) Span = {
     assert(start.le(self.low).and(end.le(self.high)), "OOB");
     assert(start.le(end), "invalid range");
     (low = self.low.add(start), high = self.low.add(end))
 }
 
 // recall: it is an error to call source_slice on one that spans multiple files. 
-fn merge(a: Span2, b: Span2) Span2 = (
+fn merge(a: Span, b: Span) Span = (
     low = a.low.min(b.low),
     high = a.high.max(b.high),
 );
 
-fn len(self: Span2) i64 =
+fn len(self: Span) i64 =
     (@as(u32) self.high.sub(self.low)).zext();
 
 Diagnostic :: @struct(
     type: @enum(Error, Warning, Ice),
     message: List(u8),
-    spans: List(Ty(Span2, List(u8))),
+    spans: List(Ty(Span, List(u8))),
 );
 
 fn render(self: *Diagnostic, writer: *List(u8)) Unit = {

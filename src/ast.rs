@@ -48,7 +48,6 @@ pub enum VarType {
 #[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub enum TypeInfo<'p> {
     #[default]
-    Unknown,
     Never,
     F64,
     Int(IntTypeInfo),
@@ -862,6 +861,7 @@ pub struct Program<'p> {
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
     pub baked: Baked,
+    pub inferred_type_names: Vec<Option<Ident<'p>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -943,7 +943,7 @@ impl<'p> Program<'p> {
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
             types: vec![
-                TypeInfo::Unknown,
+                TypeInfo::Placeholder, // Unknown
                 TypeInfo::Unit,
                 TypeInfo::Named(TypeId::from_index(10), pool.intern("Type")),
                 TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
@@ -958,6 +958,7 @@ impl<'p> Program<'p> {
                     bit_count: 32,
                     signed: false,
                 }),
+                TypeInfo::VoidPtr,
             ],
             funcs: Default::default(),
             next_var: 0,
@@ -973,6 +974,7 @@ impl<'p> Program<'p> {
             ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
+            inferred_type_names: vec![],
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1284,18 +1286,10 @@ impl<'p> Program<'p> {
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
         let deduplicate = match &ty {
             TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",),
-            TypeInfo::Unknown
-            | TypeInfo::Never
-            | TypeInfo::F64
-            | TypeInfo::Int(_)
-            | TypeInfo::Bool
-            | TypeInfo::Fn(_)
-            | TypeInfo::FnPtr { .. }
-            | TypeInfo::Ptr(_)
-            | TypeInfo::Array { .. }
-            | TypeInfo::Unit
-            | TypeInfo::VoidPtr
-            | TypeInfo::Label(_) => true,
+            TypeInfo::Never | TypeInfo::F64 | TypeInfo::Bool | TypeInfo::Unit | TypeInfo::VoidPtr => {
+                unreachable!("ICE: Called intern_type on {ty:?}, this is fine I guess, but probably shouldn't happen.")
+            }
+            TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::Array { .. } | TypeInfo::Label(_) => true,
             &TypeInfo::Struct { is_tuple, .. } => is_tuple,
             TypeInfo::Tagged { .. } | TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => false,
         };
@@ -1470,7 +1464,7 @@ impl<'p> Program<'p> {
         extend_options(self.types_extra.borrow_mut().deref_mut(), ty.as_index());
         let info = match &self[ty] {
             TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",), // TODO: err!
-            TypeInfo::Unknown => todo!(),
+
             TypeInfo::Struct { fields, layout_done, .. } => {
                 debug_assert!(*layout_done);
                 let mut size = 0;
@@ -1741,6 +1735,8 @@ impl TypeId {
 
     pub const overload_set: Self = Self::from_index(8);
     pub const scope: Self = Self::from_index(9);
+    // u32 = (10)
+    pub const voidptr: Self = Self::from_index(11);
 }
 
 /// It's important that these are consecutive in flags for safety of TryFrom

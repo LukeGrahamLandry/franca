@@ -729,7 +729,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     return Ok(());
                 }
 
-                let want_emit_by_memcpy = value.bytes().len() > 64;
+                let want_emit_by_memcpy = value.bytes().len() > 16;
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     // TODO: this is dumb because a slice becomes a pointer to a slice.
                     let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;

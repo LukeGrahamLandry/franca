@@ -4,7 +4,7 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{
-    garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, OverloadSetId, Pattern, Program, TypeId, TypeInfo, WalkAst,
+    garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program, TypeId, TypeInfo, WalkAst,
 };
 use crate::bc::{to_values, ReadBytes, Values};
 use crate::compiler::{Compile, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
@@ -798,6 +798,12 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
 fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
+            for b in &mut pattern.bindings {
+                if b.default.is_none() && matches!(b.ty, LazyType::Infer) {
+                    // @tagged(s: i64, n) is valid and infers n as Unit.
+                    b.ty = LazyType::Finished(TypeId::unit);
+                }
+            }
             let ty = compile.struct_type(pattern)?;
             let ty = compile.program.to_enum(ty);
             compile.set_literal(&mut cases, ty)?;

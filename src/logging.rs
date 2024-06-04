@@ -122,11 +122,18 @@ use crate::compiler::EXPECT_ERR_DEPTH;
 
 impl<'p> Program<'p> {
     pub fn log_type(&self, t: TypeId) -> String {
+        if let Some(&Some(name)) = self.inferred_type_names.get(t.as_index()) {
+            let name = self.pool.get(name);
+            // HACK: need to be smarter about when to infer an assignment as a type name.
+            if name != "Self" {
+                return name.to_string();
+            }
+        }
+
         safe_rec!(self, t, format!("{t:?}"), {
             if t.is_valid() && t.as_index() < self.types.len() {
                 match &self[t] {
                     TypeInfo::Placeholder => "UnfinishedPlaceHolder".to_owned(),
-                    TypeInfo::Unknown => "Unknown".to_owned(),
                     TypeInfo::Never => "Never".to_owned(),
                     TypeInfo::F64 => "f64".to_owned(),
                     TypeInfo::Bool => "bool".to_owned(),

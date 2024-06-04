@@ -569,7 +569,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.eat(RightParen)?;
                         return Ok(self.expr(Expr::StructLiteralP(named)));
                     } else {
-                        return Err(self.expected("TODO: some named some positional"));
+                        return Err(self.expected("TODO: some named some positional (if this is in @tagged, first case must have a payload, sorry)"));
                     }
                 }
                 _ => {

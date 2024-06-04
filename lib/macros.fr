@@ -150,26 +150,35 @@ fn switch(var arg: FatExpr, var handlers: FatExpr) FatExpr = {
                     action := branch.target[];
                     
                     // Sadly this can't use @switch (unless I do a weird bootstrapping thing on a much more granular level). 
-                    if(name.eq(@symbol(case)), => {
+                    if(name.eq(@symbol case)) {|
                         // TODO: probably want to require arg to be constant so it could eventually become a jump table. 
                         // TODO: improve error message if you try to pass the ast of a type instead of the type. alas I chose the same name as the as macro so it still tpyechecks. -- Apr 21
                         cond := 'eq(arg_var, @[as(inspected_ty, arg[])])';
                         body = '(@[cond], =>@[action](), =>@[body])!if';
-                    }, =>if(name.eq(@symbol(default)), => {
-                        if(first) {|
-                            // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
-                            body = '@[action](arg_var)';
+                    } {|
+                        if(name.eq(@symbol default)) {|
+                            if(first) {|
+                                // If expansion err here: forgot argument for default branch handler?  // TODO: give error message
+                                body = '@[action](arg_var)';
+                            }{|
+                                panic("@default must be the last handler in @switch");
+                            };
                         }{|
-                            panic("@default must be the last handler in @switch");
+                            if(name.eq(@symbol inclusive)) {|
+                                cond := '{
+                                    min_max := @[as(Ty(inspected_ty, inspected_ty), arg[])];
+                                    arg_var.ge(min_max._0).and(arg_var.le(min_max._1))
+                                }';
+                                body = '(@[cond], =>@[action](), =>@[body])!if';
+                            }{|
+                                // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
+                                //let n: Str = name.str(); // TODO: this broke when I started renumbering in bind_const_arg -- Apr 23. 
+                                // TODO: make concat less painful. 
+                                //println(n);
+                                panic("unhandled prefix in @switch");
+                            };
                         };
-                    }, =>{
-                        // TODO: try expanding the macro, maybe its a user added one and would create valid branches. 
-                        //let n: Str = name.str(); // TODO: this broke when I started renumbering in bind_const_arg -- Apr 23. 
-                        // TODO: make concat less painful. 
-                        //println(n);
-                        panic("unhandled prefix in @switch");
-                    }));
-                    
+                    };
                     first = false;
                 };
                 i = i.sub(1);

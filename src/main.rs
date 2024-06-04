@@ -377,6 +377,8 @@ fn run_tests_serial(arch: TargetArch) {
     );
     unset_colour();
 
+    let map = comp.aarch64.map_exec.as_ref().unwrap();
+
     mem::forget(comp);
     mem::forget(program);
 

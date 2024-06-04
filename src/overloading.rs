@@ -233,13 +233,34 @@ impl<'a, 'p> Compile<'a, 'p> {
                     ),
                 }
             }
+
             if overloads.ready.len() > 1 {
-                self.do_merges(&mut overloads.ready, i)?;
+                // TODO: same extra logic in other branch
+                if let Some(first_ret) = overloads.ready[0].ret {
+                    // if not all the ret types are the same, we must not have a requested_ret so even if some of them were
+                    // target dependent and thus mergeable, it wouldn't help, because we still wouldn't know which return type to choose.
+                    if overloads.ready.iter().all(|o| o.ret == Some(first_ret)) {
+                        self.do_merges(&mut overloads.ready, i)?;
+                    }
+                }
             }
+
             if overloads.ready.len() == 1 {
                 let id = overloads.ready[0].func;
                 self.adjust_call(arg, id)?;
                 return Ok(id);
+            }
+
+            if overloads.ready.len() > 1 && requested_ret.is_none() {
+                err!(
+                    "ambigous overload. no inferred result type. try adding a hint. \n{:?}...",
+                    overloads
+                        .ready
+                        .iter()
+                        .filter_map(|o| o.ret.map(|t| self.program.log_type(t)))
+                        .take(3)
+                        .collect::<Vec<_>>()
+                )
             }
 
             err!("ambigous overload",)
@@ -308,7 +329,13 @@ impl<'a, 'p> Compile<'a, 'p> {
         for opt in overloads.drain(1..) {
             debug_assert!(merged.len() < 10); // wtf
             assert!(opt.arg == output.arg, "overload missmatch. unreachable?");
-            assert!(opt.ret == output.ret, "overload missmatch. unreachable? {:?} {:?}", opt.ret, output.ret);
+            assert!(
+                opt.ret == output.ret,
+                "overload missmatch for {}. unreachable? {:?} {:?}",
+                self.pool.get(self.program[i].name),
+                opt.ret,
+                output.ret
+            );
 
             let f = opt.func;
             // to do the merge, we want jitted_code/llvm_ir to be in thier slots, so have to do that now since it might not be done yet.

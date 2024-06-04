@@ -33,7 +33,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, ffi, impl_index, Map, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 
@@ -165,6 +165,56 @@ impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
     fn as_values<T: InterpSend<'p>>(&mut self, ret: T) -> Res<'p, Values> {
         to_values(self.program, ret)
+    }
+
+    fn contextual_field(&mut self, name: Ident<'p>, expr: &mut FatExpr<'p>, ty: TypeId) -> Res<'p, TypeId> {
+        match &self.program[ty] {
+            TypeInfo::Enum { fields, .. } => {
+                let field = fields.iter().find(|f| f.0 == name);
+                let (_, value) = unwrap!(
+                    field,
+                    "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
+                    self.pool.get(name),
+                    self.program.log_type(ty),
+                    fields.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
+                );
+                expr.set(value.clone(), ty);
+                Ok(ty)
+            }
+            TypeInfo::Tagged { cases } => {
+                let field = cases.iter().find(|f| f.0 == name);
+                // TODO: sad copy paste.
+                let (_, field) = unwrap!(
+                    field,
+                    "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
+                    self.pool.get(name),
+                    self.program.log_type(ty),
+                    cases.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
+                );
+                let field = self.program.raw_type(*field); // just incase its a named ffi thing.
+                assert!(
+                    field.is_unit(),
+                    "contextual field {} of tagged union must be unit found {}",
+                    self.pool.get(name),
+                    self.program.log_type(field)
+                );
+
+                let unit = self.as_literal((), expr.loc)?;
+
+                expr.expr = Expr::StructLiteralP(Pattern {
+                    bindings: vec![Binding {
+                        name: Name::Ident(name),
+                        ty: LazyType::Infer,
+                        default: Some(unit),
+                        kind: VarType::Let,
+                    }],
+                    loc: expr.loc,
+                });
+                expr.ty = ty;
+                self.compile_expr(expr, Some(ty))
+            }
+            _ => err!("no contextual fields for type {ty:?} {}", self.program.log_type(ty)),
+        }
     }
 }
 impl<'a, 'p> Compile<'a, 'p> {
@@ -1489,19 +1539,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let Some(name) = arg.as_ident() else {
                             err!("!contextual_field (leading dot) requires name",)
                         };
-                        let TypeInfo::Enum { fields, .. } = &self.program[ty] else {
-                            err!("no contextual fields for type {ty:?}",)
-                        };
-                        let field = fields.iter().find(|f| f.0 == name);
-                        let (_, value) = unwrap!(
-                            field,
-                            "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
-                            self.pool.get(name),
-                            self.program.log_type(ty),
-                            fields.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
-                        );
-                        expr.set(value.clone(), ty);
-                        return Ok(ty);
+
+                        return self.contextual_field(name, expr, ty);
                     }
                     Flag::As => {
                         // TODO: constants?
@@ -1526,20 +1565,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 if let Some(val) = e.as_const() {
                     if container == TypeId::ty {
                         let ty: TypeId = from_values(self.program, val.clone())?;
-
-                        if let TypeInfo::Enum { fields, .. } = &self.program[ty] {
-                            let field = fields.iter().find(|f| f.0 == *name);
-                            // TODO: copy-paste from the !contextual_field version.
-                            let (_, value) = unwrap!(
-                                field,
-                                "contextual field not found {} for {ty:?}: {}\nexpected: {:?}",
-                                self.pool.get(*name),
-                                self.program.log_type(ty),
-                                fields.iter().map(|f| self.pool.get(f.0)).collect::<Vec<_>>()
-                            );
-                            expr.set(value.clone(), ty);
-                            return Ok(ty);
-                        }
+                        return self.contextual_field(*name, expr, ty);
                     }
                     if container == TypeId::scope {
                         let s: ScopeId = from_values(self.program, val.clone())?;
@@ -1951,15 +1977,14 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn builtin_type(&mut self, name: &str) -> Option<TypeId> {
-        use TypeInfo::*;
         let ty = match name {
-            "i64" => Some(TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true })),
-            "f64" => Some(F64),
+            "i64" => return Some(TypeId::i64()),
+            "f64" => return Some(TypeId::f64()),
             "Type" => return Some(TypeId::ty),
-            "bool" => Some(Bool),
-            "UnknownType" => Some(TypeInfo::Unknown),
+            "bool" => return Some(TypeId::bool()),
+            "UnknownType" => return Some(TypeId::unknown),
             "Never" => return Some(TypeId::never),
-            "rawptr" => Some(VoidPtr),
+            "rawptr" => return Some(TypeId::voidptr),
             "OverloadSet" => return Some(TypeId::overload_set),
             "ScopedBlock" => return Some(TypeId::scope),
             _ => None,
@@ -2259,6 +2284,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: @enum field access
             _ => {} // fallthrough
         }
+
         Ok(None)
     }
 
@@ -2721,17 +2747,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(())
     }
 
-    fn underef_one(&mut self, ptr: &mut FatExpr<'p>) -> Res<'p, ()> {
-        assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
-        if let Some(arg) = ptr.as_suffix_macro_mut(Flag::Deref) {
-            *ptr = mem::take(arg);
-        } else {
-            err!("underef_one wanted []",)
-        }
-        assert!(!ptr.ty.is_unknown(), "unknown type for deref_one");
-        Ok(())
-    }
-
     // :PlaceExpr
     fn field_access_expr(&mut self, container_ptr: &mut FatExpr<'p>, name: Ident<'p>) -> Res<'p, (usize, TypeId)> {
         let container_ptr_ty = self.program.raw_type(container_ptr.ty);
@@ -3061,11 +3076,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.program[new_fid].set_flag(Generic, false);
                 self.infer_types(new_fid)?;
             }
-
             let ty = self.program.func_type(new_fid);
+
             f_expr.set(new_fid.as_raw().into(), ty);
             self.program.const_bound_memo.insert(key, new_fid);
             self.pop_state(state);
+
             Ok(new_fid)
         } else {
             let loc = arg_expr.loc;
@@ -3368,6 +3384,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             found
         };
         self.program.finish_layout_deep(final_ty)?;
+
+        if final_ty == TypeId::ty {
+            let value: TypeId = from_values(self.program, val.clone())?;
+            extend_options(&mut self.program.inferred_type_names, value.as_index());
+            let n = &mut self.program.inferred_type_names[value.as_index()];
+            // TODO: often it will just be self.
+            //       need to be smarter about only counting public names? and just show generic returns like that as nested.
+            if n.is_none() {
+                *n = Some(name.name);
+            }
+        }
 
         self.save_const_values(name, val, final_ty, value.loc)?;
         Ok(())

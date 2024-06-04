@@ -69,15 +69,6 @@ pub enum Prim {
 }
 
 impl Prim {
-    pub(crate) fn align_bytes(self) -> usize {
-        match self {
-            Prim::I8 => 1,
-            Prim::I16 => 2,
-            Prim::I32 => 4,
-            Prim::P64 | Prim::I64 | Prim::F64 => 8,
-        }
-    }
-
     pub(crate) fn float(self) -> u32 {
         if self == Prim::F64 {
             1
@@ -271,7 +262,7 @@ pub fn deconstruct_values(
     let ty = program.raw_type(ty);
     match &program[ty] {
         TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
-        TypeInfo::Unknown | TypeInfo::Never => err!("invalid type",),
+        TypeInfo::Never => err!("invalid type",),
         TypeInfo::F64 | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
             let offset = bytes.i;
             out.push(unwrap!(bytes.next_i64(), ""));
