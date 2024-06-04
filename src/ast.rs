@@ -91,29 +91,19 @@ pub struct TypeMeta {
     pub stride_bytes: u16,
     pub align_bytes: u16,
     pub float_mask: u32,
-    pub has_special_pointer_fns: bool,
     pub contains_pointers: bool,
     pub pass_by_ref: bool,
 }
 
 impl TypeMeta {
     #[track_caller]
-    fn new(
-        size_slots: u16,
-        align_bytes: u16,
-        float_mask: u32,
-        has_special_pointer_fns: bool,
-        contains_pointers: bool,
-        stride_bytes: u16,
-        pass_by_ref: bool,
-    ) -> Self {
+    fn new(size_slots: u16, align_bytes: u16, float_mask: u32, contains_pointers: bool, stride_bytes: u16, pass_by_ref: bool) -> Self {
         debug_assert_eq!(stride_bytes % align_bytes, 0);
         Self {
             size_slots,
             align_bytes,
             stride_bytes,
             float_mask,
-            has_special_pointer_fns,
             contains_pointers,
             pass_by_ref,
         }
@@ -872,7 +862,6 @@ pub struct Program<'p> {
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
     pub baked: Baked,
-    pub flat_call_ty: Option<FnType>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -984,24 +973,11 @@ impl<'p> Program<'p> {
             ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
-            flat_call_ty: None,
         };
 
         for (i, ty) in program.types.iter().enumerate() {
             program.type_lookup.insert(ty.clone(), TypeId::from_index(i));
         }
-
-        let arg = program.intern_type(TypeInfo::Array {
-            inner: TypeId::i64(),
-            len: 5,
-        });
-        let f_ty = FnType {
-            arg,
-            ret: TypeId::unit,
-            arity: 5,
-        };
-        program.intern_type(TypeInfo::Fn(f_ty));
-        program.flat_call_ty = Some(f_ty);
 
         program
     }
@@ -1523,7 +1499,7 @@ impl<'p> Program<'p> {
                 }
 
                 // TODO: two u8s should have special load like a u16 (eventually).
-                TypeMeta::new(size, align, mask, false, pointers, bytes, size > 2)
+                TypeMeta::new(size, align, mask, pointers, bytes, size > 2)
             }
             TypeInfo::Tagged { cases, .. } => {
                 let size = 1 + cases.iter().map(|(_, ty)| self.get_info(*ty).size_slots).max().expect("no empty enum");
@@ -1536,25 +1512,25 @@ impl<'p> Program<'p> {
                 }
                 // TODO: currently tag is always i64 so align 8 but should use byte since almost always enough. but you just have to pad it out anyway.
                 //       even without that, if i add 16 byte align, need to check the fields too.
-                TypeMeta::new(size, 8, 0, false, pointers, bytes, size > 2)
+                TypeMeta::new(size, 8, 0, pointers, bytes, size > 2)
             }
-            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, false, 0, false),
+            TypeInfo::Never => TypeMeta::new(0, 1, 0, false, 0, false),
             TypeInfo::Int(int) => {
                 // TODO: u16
                 // :SmallTypes
                 match int.bit_count {
-                    8 => TypeMeta::new(1, 1, 0, true, false, 1, false),
-                    16 => TypeMeta::new(1, 2, 0, true, false, 2, false),
-                    32 => TypeMeta::new(1, 4, 0, true, false, 4, false),
-                    _ => TypeMeta::new(1, 8, 0, false, false, 8, false),
+                    8 => TypeMeta::new(1, 1, 0, false, 1, false),
+                    16 => TypeMeta::new(1, 2, 0, false, 2, false),
+                    32 => TypeMeta::new(1, 4, 0, false, 4, false),
+                    _ => TypeMeta::new(1, 8, 0, false, 8, false),
                 }
             }
-            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, false, 8, false),
-            TypeInfo::Unit => TypeMeta::new(0, 1, 0, true, false, 0, false),
-            TypeInfo::Bool => TypeMeta::new(1, 1, 0, true, false, 1, false), // :SmallTypes
-            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, false, true, 8, false),
+            TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, 8, false),
+            TypeInfo::Unit => TypeMeta::new(0, 1, 0, false, 0, false),
+            TypeInfo::Bool => TypeMeta::new(1, 1, 0, false, 1, false), // :SmallTypes
+            TypeInfo::Ptr(_) | TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } => TypeMeta::new(1, 8, 0, true, 8, false),
 
-            TypeInfo::Label(_) | TypeInfo::Fn(_) => TypeMeta::new(1, 4, 0, true, false, 4, false),
+            TypeInfo::Label(_) | TypeInfo::Fn(_) => TypeMeta::new(1, 4, 0, false, 4, false),
             TypeInfo::Enum { .. } | TypeInfo::Unique(_, _) | TypeInfo::Named(_, _) => unreachable!(),
             &TypeInfo::Array { inner, len } => {
                 let info = self.get_info(inner);
@@ -1563,7 +1539,6 @@ impl<'p> Program<'p> {
                     slots,
                     info.align_bytes,
                     0,
-                    false,
                     info.contains_pointers,
                     info.stride_bytes * len as u16,
                     len > 1 || info.pass_by_ref,

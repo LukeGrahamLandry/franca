@@ -1404,22 +1404,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let requested = requested.map(|t| self.program.ptr_type(t));
                         let ptr = self.compile_expr(arg, requested)?;
                         let ty = unwrap!(self.program.unptr_ty(ptr), "deref not ptr: {}", self.program.log_type(ptr));
-                        if self.program.get_or_create_info(ty)?.has_special_pointer_fns {
-                            // :SmallTypes
-                            // Replace with a call to fn load to handle types smaller than a word.
-                            // TODO: this is really stupid
-                            let loc = arg.loc;
-                            // TODO: save the overload set somewhere. should probably have an init_blessed that fills in a vtable or something. that the compiler calls.
-                            let os = self.program.overload_sets.iter().position(|o| o.name == Flag::Load.ident()).unwrap();
-                            let os = OverloadSetId::from_index(os);
-                            let f = Box::new(self.as_literal(os, loc)?);
-                            expr.expr = Expr::Call(f, mem::take(arg));
-                            self.compile_expr(expr, Some(ty))?;
-                        } else {
-                            expr.done = arg.done;
-                            expr.ty = ty;
-                        }
-
+                        expr.done = arg.done;
+                        expr.ty = ty;
                         ty
                     }
                     Flag::Const_Eval => {
@@ -2604,21 +2590,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let oldty = place.ty;
                 let value_ty = self.compile_expr(value, Some(oldty))?;
                 self.type_check_arg(value_ty, oldty, "reassign var")?;
-                if self.program.get_or_create_info(oldty)?.has_special_pointer_fns {
-                    // :SmallTypes
-                    // Replace with a call to fn store to handle types smaller than a word.
-                    self.underef_one(place)?;
-                    debug_assert!(self.program.raw_type(place.ty) != TypeId::i64());
-
-                    let loc = place.loc;
-                    let os = self.program.overload_sets.iter().position(|o| o.name == Flag::Store.ident()).unwrap();
-                    let os = OverloadSetId::from_index(os);
-                    let f = Box::new(self.as_literal(os, loc)?);
-                    value.expr = Expr::Tuple(vec![mem::take(place), mem::take(value)]);
-                    place.expr = Expr::Call(f, Box::new(mem::take(value)));
-                    self.compile_expr(place, Some(TypeId::unit))?;
-                    full_stmt.stmt = Stmt::Eval(mem::take(place));
-                }
                 Ok(())
             }
             Expr::PtrOffset { .. } => unreachable!("compiled twice?"),
@@ -2732,8 +2703,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if let Some(arg) = ptr.as_suffix_macro_mut(Flag::Addr) {
             // this allows auto deref to work on let ptr vars.
             if matches!(arg.expr, Expr::GetVar(_)) {
-                // :SmallTypes
-                // raw var expr is no longer allowed because we want to intercept and override the dereference operator.
+                // raw var expr is not allowed, we always refer to variables through thier address.
                 let loc = ptr.loc;
                 *ptr = FatExpr::synthetic_ty(Expr::SuffixMacro(Flag::Deref.ident(), Box::new(mem::take(ptr))), loc, inner);
             } else {
@@ -3371,6 +3341,12 @@ impl<'a, 'p> Compile<'a, 'p> {
             let name = self.pool.get(name.name);
             err!("const bindings cannot be reassigned so '{name}' cannot be '()!uninitialized'",)
         }
+
+        // TODO: declare placeholder so you can do linked lists.
+        // if let Some(ty) = ty.ty() {
+        //     if ty == TypeId::ty {}
+        //     println!("{}: {}", name.log(self.pool), self.program.log_type(ty));
+        // }
         // You don't need to precompile, immediate_eval_expr will do it for you.
         // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
         // This makes addr_of const for @enum work

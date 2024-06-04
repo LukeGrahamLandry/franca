@@ -842,15 +842,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     Flag::Deref => {
                         self.compile_expr(result, arg, PushStack, false)?; // get the pointer
-                        debug_assert!(self.program.get_info(expr.ty).stride_bytes % 8 == 0);
                         let slots = self.slot_count(expr.ty);
                         // we care about the type of the pointer, not the value because there might be a cast. (// TODO: that shouldn't be true anymore because of ::Cast)
                         let value_type = self.program.unptr_ty(arg.ty).unwrap();
-                        assert!(
-                            !self.program.get_info(value_type).has_special_pointer_fns,
-                            "{}",
-                            expr.log(self.program.pool)
-                        );
                         if slots == 0 {
                             match result_location {
                                 ResAddr => {
@@ -1046,14 +1040,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     // :PlaceExpr
     fn set_deref(&mut self, result: &mut FnBody<'p>, place: &FatExpr<'p>, value: &FatExpr<'p>) -> Res<'p, ()> {
         // we care about the type of the pointer, not the value because there might be a cast.
-        debug_assert!(!self.program.get_info(place.ty).has_special_pointer_fns,);
         match place.deref() {
             Expr::GetVar(_) => unreachable!("var set should be converted to place expr"),
             Expr::SuffixMacro(macro_name, arg) => {
                 // TODO: write a test for pooiinter eval oreder. left hsould come first. -- MAy 7
                 if let Ok(Flag::Deref) = Flag::try_from(*macro_name) {
                     self.compile_expr(result, arg, PushStack, false)?;
-                    debug_assert!(self.program.get_info(value.ty).stride_bytes % 8 == 0);
                     self.compile_expr(result, value, ResAddr, false)?;
                     return Ok(());
                 }

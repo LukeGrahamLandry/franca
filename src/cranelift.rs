@@ -700,26 +700,12 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn bit_not(_: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bnot(v[0])
     }),
-    ("fn load(_: *u8) u8;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        builder.ins().uload8(I64, MemFlags::new(), v[0], 0)
-    }),
-    ("fn store(_: *u8, val: u8) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        let val = builder.ins().ireduce(I8, v[1]);
-        builder.ins().store(MemFlags::new(), val, v[0], 0);
-        builder.ins().iconst(I64, 0)
-    }),
     // it seems this matches what i do.
     // https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/aarch64/inst/emit.rs#L2183
     ("fn int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_to_sint_sat(I64, v[0])
     }),
     ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
-    ("fn load(_: *Unit) Unit;", |builder: &mut FunctionBuilder, _: &[Value]| {
-        builder.ins().iconst(I64, 0)
-    }),
-    ("fn store(_: *Unit, val: Unit) Unit;", |builder: &mut FunctionBuilder, _: &[Value]| {
-        builder.ins().iconst(I64, 0)
-    }),
     ("fn float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_from_sint(F64, v[0])
     }),
@@ -728,21 +714,5 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     }),
     ("fn bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(I64, MemFlags::new(), v[0])
-    }),
-    ("fn load(_: *u32) u32;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        builder.ins().uload32(MemFlags::new(), v[0], 0)
-    }),
-    ("fn store(_: *u32, val: u32) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        let val = builder.ins().ireduce(I32, v[1]);
-        builder.ins().store(MemFlags::new(), val, v[0], 0);
-        builder.ins().iconst(I64, 0)
-    }),
-    ("fn load(_: *u16) u16;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        builder.ins().uload16(I64, MemFlags::new(), v[0], 0)
-    }),
-    ("fn store(_: *u16, val: u16) Unit;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        let val = builder.ins().ireduce(I16, v[1]);
-        builder.ins().store(MemFlags::new(), val, v[0], 0);
-        builder.ins().iconst(I64, 0)
     }),
 ];
