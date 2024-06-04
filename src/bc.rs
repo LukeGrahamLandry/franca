@@ -90,9 +90,9 @@ impl Prim {
 #[derive(Clone)]
 pub struct BasicBlock {
     pub insts: Vec<Bc>,
-    pub arg_slots: u16,
     pub arg_float_mask: u32,
-    pub incoming_jumps: usize,
+    pub incoming_jumps: u16,
+    pub arg_slots: u16,
     pub clock: u16,
     pub height: u16,
 }
@@ -104,11 +104,11 @@ pub struct FnBody<'p> {
     pub when: ExecStyle,
     pub func: FuncId,
     pub current_block: BbId,
-    pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>,
+    pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>, // only used during emit_bc.
     pub clock: u16,
     pub name: Ident<'p>,
     pub want_log: bool,
-    pub is_ssa_var: BitSet,
+    pub is_ssa_var: BitSet, // only used for debugging. bc has enough info for this.
     pub signeture: PrimSig,
 }
 

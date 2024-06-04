@@ -898,28 +898,31 @@ fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
         let shift_or_slice = compile.program.find_unique_func(Flag::__Shift_Or_Slice.ident()).unwrap();
         compile.compile(shift_or_slice, ExecStyle::Jit)?;
 
-        let mut new_args = Vec::with_capacity(parts.len() * 2);
+        let mut new_args = Vec::with_capacity(parts.len() * 3);
         let loc = arg.loc;
         let mut shift = 32;
         for mut int in parts {
-            let ty = get_type_int(compile, int.clone()); // TODO: redundant work cause of clone
+            let mut ty = get_type_int(compile, int.clone()); // TODO: redundant work cause of clone
 
             shift -= ty.bit_count;
             assert!(shift >= 0, "expected 32 bits. TODO: other sizes.");
-            if let Some((_, mut v)) = compile.bit_literal(&int) {
-                if ty.signed {
-                    v = signed_truncate(v, ty.bit_count);
-                }
+            if let Some((_, v)) = compile.bit_literal(&int) {
+                // Not signed_truncate-ing here because shift_or_slice does it.
                 assert!(v < 1 << ty.bit_count);
                 int = compile.as_literal(v, loc)?;
-            } else {
-                assert!(!ty.signed);
             }
             int = FatExpr::synthetic_ty(Expr::Cast(Box::new(mem::take(&mut int))), loc, TypeId::i64());
             new_args.push(int);
             let mut sh = compile.as_literal(shift, loc)?;
             sh.ty = TypeId::i64();
             new_args.push(sh);
+            // HACK
+            if ty.signed {
+                ty.bit_count *= -1;
+            }
+            let mut size = compile.as_literal(ty.bit_count, loc)?;
+            size.ty = TypeId::i64();
+            new_args.push(size);
         }
 
         if shift != 0 {
@@ -940,12 +943,18 @@ extern "C-unwind" fn shift_or_slice(compiler: &mut Compile, ptr: *const i64, len
         assert!(len < 32, "{} {}", ptr as usize, len);
         let ints = unsafe { &*slice_from_raw_parts(ptr, len) };
         let mut acc = 0;
-        for i in 0..ints.len() / 2 {
-            let x = ints[i * 2];
-            let sh = ints[i * 2 + 1];
+        for i in 0..ints.len() / 3 {
+            let mut x = ints[i * 3];
+            let sh = ints[i * 3 + 1];
+            let size_info = ints[i * 3 + 2]; // HACK. masking fixed maual_mmap. u16 has garabge memory where read as u64.
+            let bit_count = size_info.abs();
+            let is_signed = size_info < 0;
+            if is_signed {
+                x = signed_truncate(x, bit_count);
+            }
             assert!(sh < 32, "{} {}", ptr as usize, len);
             // assert!(x << sh <= 1 << 32, "{x:#x} << {sh}");
-            acc |= x << sh;
+            acc |= (x & ((1 << bit_count) - 1)) << sh;
         }
         assert!(acc <= u32::MAX as i64, "{acc:x} is not a valid u32: {ints:?}");
         Ok(acc)

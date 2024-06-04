@@ -1,4 +1,10 @@
 //! Converts simple ASTs into my bytecode-ish format.
+//! All comptime execution for a function is finished before it reaches this phase.
+//! - Flatten nested expressions to stack operations.
+//! - Convert control flow to explicit basic blocks.
+//! - Bind non-local return labels.
+//! - Reduce variable useage to register sized loads/stores.
+//! - Convert large arguments/returns to references and remap signatures to use only register sized types.
 
 #![allow(clippy::wrong_self_convention)]
 
@@ -42,8 +48,6 @@ pub enum ResultLoc {
 use ResultLoc::*;
 
 pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
-    let mut jump_targets = BitSet::empty();
-    jump_targets.set(0); // entry is the first instruction
     let f = &program[func];
     Ok(FnBody {
         is_ssa_var: BitSet::empty(),

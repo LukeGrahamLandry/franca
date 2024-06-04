@@ -1,5 +1,13 @@
 ## (Jun 3)
 
+my painful bug was about dropping a stack slot after dup-ing it so it got reused for another variable.
+
+> pass by ref, arity, sig
+
+- (parser) let you do loop captures without the extra brackets so its a bit less painful to look at.
+- removed TypeInfo::(Scope, OverloadSet, Type), because they're really just unique u32.
+
+:return_u32_pair
 need to fix the crippling corruption when passing (u32, u32).
 need to not assume \*8 but that's a lot of places (3) to write the annoying loop.
 oh but actually, i'm only ever loading/storing 1/2 sized structs because anything else you pass by reference/copybytesttofrom,
