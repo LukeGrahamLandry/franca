@@ -2,6 +2,7 @@
 //! - tail calls
 //! - backtrace needs to deal with pointer authentication
 //! - soemthing makes it jump into garbage when you run too many tests
+//! - signed math on smaller int types needs work because i always zero extend everything.
 
 use std::{collections::HashMap, mem};
 
@@ -511,15 +512,28 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 Bc::Load { ty } => {
                     let addr = self.stack.pop().unwrap();
                     let v = builder.ins().load(primitive(ty), MemFlags::new(), addr, 0);
+                    let v = match ty {
+                        Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().uextend(I64, v),
+                        Prim::P64 | Prim::I64 => v,
+                        Prim::F64 => builder.ins().bitcast(I64, MemFlags::new(), v),
+                    };
                     self.stack.push(v);
                 }
-                Bc::StorePost { .. } => {
+                Bc::StorePost { ty } => {
                     let addr = self.stack.pop().unwrap();
                     let v = self.stack.pop().unwrap();
+                    let v = match ty {
+                        Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
+                        Prim::P64 | Prim::I64 | Prim::F64 => v,
+                    };
                     builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
-                Bc::StorePre { .. } => {
+                Bc::StorePre { ty } => {
                     let v = self.stack.pop().unwrap();
+                    let v = match ty {
+                        Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
+                        Prim::P64 | Prim::I64 | Prim::F64 => v,
+                    };
                     let addr = self.stack.pop().unwrap();
                     builder.ins().store(MemFlags::new(), v, addr, 0);
                 }

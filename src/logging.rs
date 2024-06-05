@@ -510,7 +510,7 @@ impl<'p> Program<'p> {
     fn conversion_help(&self, found: TypeId, expected: TypeId, depth: usize) -> String {
         let indent = "  ".repeat(depth);
         if found == expected {
-            return format!("{indent} these are the same type");
+            return format!("{indent} ICE: these are the same type");
         }
         let found = self.raw_type(found);
         let expected = self.raw_type(expected);

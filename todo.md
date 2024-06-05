@@ -153,14 +153,10 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 
 ## Testing
 
-- clean up the way I do tests.
 - be able to write a thing in my language that says which backend combinations to test on each snippet
 - so need to expose apis for compiling source to my language. does that mean I should allow runtime @ct and have you opt into bundling the compiler?
 - output assert_eq counts to stdout and check them from another language so it can't cheat?
 - replace shell scripts with my language?
-- should really make the canary thing optional.
-- define assert_eq in my language so I can use freestanding. maybe have expect_eq that calls record_passed_assertion for currect sanity counting.
-  but maybe its too weird to say you can't use that in loops because it counts lexically. its so comforting tho.
 
 ## QBE
 
@@ -172,35 +168,6 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 - setup benchmarking system so I can make sure its dramatically faster than my own shitty asm
 - does it make sense to put all thier statics in a thread local and hope that makes it thread safe?
 - figure out how to make a memory backed \*FILE
-
-## Sema
-
-- remove the need for forward declarations
-- module system: want to be able to seperate things to help lsp.
-  - hard to think about how that should interact with wanting to use global overloads as traits.
-- nominal type-checking
-- clean up tracking backend specific function bodies
-- transitive function annotations (@env, @ct, eventually @async) where you get one if you call someone that has one.
-
-## Replacing Interp
-
-- give executors access to the compiler so dont need the hacky message passing with errors
-- convert bytes + type back to Values
-- asm needs to impl Executor. seperate storing bytecode from interp.
-- fix any_reg. asm backend needs access to an executor
-
-## Backend
-
-- get llvm backend to parity with aarch64
-  - convert struct arg/ret to pointers
-- llvm output an executable
-- using mir for compiling c dependencies would be cool
-- figure out if llvm-sys statically links itself and if it can cross compile
-- reference counting and deduplication of heap constants
-- be able to serialize asm for any function so can cache macro handlers. is it faster to hash source than recompile?
-- explicit uninit vars to make asm allocate slots
-- trying to call print on asm tries to call builtin alloc somehow
-  I think the problem is that you need two versions of things that are called at both comptime and runtime when not for the same architecture.
 
 ## Ui
 

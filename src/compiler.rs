@@ -2563,17 +2563,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(());
                     }
                 }
-                (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
-                    if f.len() == e.len() {
-                        let ok = f
-                            .iter()
-                            .zip(e.iter())
-                            .all(|(f, e)| f.byte_offset == e.byte_offset && f.name == e.name && self.type_check_arg(f.ty, e.ty, msg).is_ok());
-                        if ok {
-                            return Ok(());
-                        }
-                    }
-                }
                 (&TypeInfo::Ptr(f), &TypeInfo::Ptr(e)) => {
                     if self.type_check_arg(f, e, msg).is_ok() {
                         return Ok(());

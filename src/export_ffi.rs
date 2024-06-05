@@ -74,8 +74,6 @@ macro_rules! bounce_flat_call {
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
     ("fn write(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::write as *const u8),
-    ("fn getchar() i64", libc::getchar as *const u8),
-    ("fn putchar(c: i64) i64", libc::putchar as *const u8),  // TODO: c: i32
     ("fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
     ("fn malloc(size: usize) rawptr", libc::malloc as *const u8),
     ("fn free(ptr: rawptr) Unit", libc::free as *const u8),
