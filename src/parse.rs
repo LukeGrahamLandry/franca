@@ -37,11 +37,6 @@ pub enum ParseFile<'p> {
     Wip,
 }
 
-/// # Safety
-/// The main thread only reads before 'tasks[next]' and the parse thread only writes to 'tasks[next]' or push to end.
-/// Because of resizing the vec, the lock allows only one of A) main thread reading B) parse thread pushing.
-/// 'fn handle' doesn't worry about resize because there's only one parser thread.
-/// (i know its not faster than std locks, i just find it entertaining)
 pub struct ParseTasks<'p> {
     pub pool: &'p StringPool<'p>,
     pub codemap: CodeMap,

@@ -584,6 +584,7 @@ impl<'p> Program<'p> {
                         f.len()
                     );
                 }
+                // TODO: check if they are structuraly the same but don't typecheck because structs are nominal.
                 // if f.len() == e.len() {
                 //     let ok = f
                 //         .iter()

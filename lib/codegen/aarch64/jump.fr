@@ -1,0 +1,36 @@
+// x19-x28, fp, lr, sp, 
+// i think i only need 13 but my libc wants 24 and life is easier if they match. 
+JumpBuf :: @struct(registers: Array(i64, 24));
+WhichJump :: @enum(i64) (Try = 0, Catch = 1);
+
+#aarch64 #c_call
+fn try(buf: *JumpBuf) WhichJump = (
+    stp_so(.X64, x19, x20, x0, @as(i7) 0),
+    stp_so(.X64, x21, x22, x0, @as(i7) 2),
+    stp_so(.X64, x23, x24, x0, @as(i7) 4),
+    stp_so(.X64, x25, x26, x0, @as(i7) 6),
+    stp_so(.X64, x27, x28, x0, @as(i7) 8),
+    stp_so(.X64, fp, lr, x0, @as(i7) 10),
+    add_im(.X64, x1, sp, @as(u12) 0, 0b0), 
+    str_uo(.X64, x1, x0, @as(u12) 12), // idk if st___ can encode sp
+    movz(.X64, x0, 0x0000, .Left0), // set return value to WhichJump.Try
+    ret(), 
+)!asm;
+:: assert_eq(@as(i64) WhichJump.Try, 0);
+
+#aarch64 #c_call
+fn throw(buf: *JumpBuf) Never = (
+    ldp_so(.X64, x19, x20, x0, @as(i7) 0),
+    ldp_so(.X64, x21, x22, x0, @as(i7) 2),
+    ldp_so(.X64, x23, x24, x0, @as(i7) 4),
+    ldp_so(.X64, x25, x26, x0, @as(i7) 6),
+    ldp_so(.X64, x27, x28, x0, @as(i7) 8),
+    ldp_so(.X64, fp, lr, x0, @as(i7) 10),
+    ldr_uo(.X64, x1, x0, @as(u12) 12), // idk if l___ can encode sp
+    add_im(.X64, sp, x1, @as(u12) 0, 0b0), 
+    movz(.X64, x0, 0x0001, .Left0), // set return value to WhichJump.Catch
+    ret(), // we set lr from the jumpbuf so we'll go back to the caller of catch. 
+)!asm;
+:: assert_eq(@as(i64) WhichJump.Catch, 1);
+
+#redirect(Ty(i64, i64), bool) fn eq(lhs: WhichJump, rhs: WhichJump) bool;

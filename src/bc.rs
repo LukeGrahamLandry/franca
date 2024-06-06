@@ -34,7 +34,6 @@ pub enum Bc {
     SaveSsa { id: u16, ty: Prim },                        // <p:1> -> _
     LoadSsa { id: u16 },                                  // _ -> <p:1>
     IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
-    TagCheck { expected: u16 },                           // <enum_ptr:1> -> <enum_ptr:1>  // TODO: replace with a normal function.
     PeekDup(u16),                                         // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
     CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
     LastUse { id: u16 },                                  // _ -> _

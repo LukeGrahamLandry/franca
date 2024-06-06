@@ -339,10 +339,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 //       so the var can be done after they rejoin and then the other branch thinks that slot is free
                 //       and puts something else in it. -- May 6
                 let slot = self.vars[id as usize]; // .take();
-                let slot = slot.unwrap();
-                let ty = self.body.vars[id as usize];
-                let count = self.program.slot_count(ty);
-                self.drop_slot(slot, count * 8);
+                                                   // TODO: .unwrap_or_else(|| panic!("ICE: missing var id {id}?? {}", self.body.log(self.program)));
+                if let Some(slot) = slot {
+                    let ty = self.body.vars[id as usize];
+                    let count = self.program.slot_count(ty);
+                    self.drop_slot(slot, count * 8);
+                }
             }
             Bc::NoCompile => unreachable!("{}", self.program[self.f].log(self.program.pool)),
 
@@ -467,20 +469,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 let value = self.state.stack.pop().unwrap();
                 let addr = self.state.stack.pop().unwrap();
                 self.emit_store(addr, value, ty);
-            }
-            Bc::TagCheck { expected } => {
-                // TODO: this leaks a register if it was literal but it probably never will be -- May 1
-                let (reg, offset_bytes) = self.peek_to_reg_with_offset(); // enum_ptr. can't stomp!
-                let working = self.get_free_reg();
-                debug_assert_eq!(offset_bytes % 8, 0);
-                debug_assert!(offset_bytes / 8 < (1 << 12));
-                self.load_u64(working, reg, offset_bytes); // working = *ptr
-
-                self.asm.push(cmp_im(X64, working, expected as i64, 0));
-                self.asm.push(b_cond(2, CMP_EQ)); // TODO: do better
-                self.asm.push(brk(0xbeef));
-                self.drop_reg(working);
-                // don't drop <reg>, we just peeked it
             }
             Bc::CallFnPtr { sig } => {
                 // TODO: tail call

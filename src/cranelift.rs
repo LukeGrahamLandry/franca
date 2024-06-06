@@ -554,7 +554,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     self.stack.push(res);
                 }
 
-                Bc::TagCheck { expected: _ } => {} // TODO: !!!
                 Bc::Unreachable => {
                     builder.ins().trap(TrapCode::UnreachableCodeReached);
                     break;

@@ -1,29 +1,30 @@
+//! TODO: utf8
+//! TODO: skip_to_closing_squiggle. 
+
 Token :: @struct(type: TokenType, span: Span);
 TokenType :: @tagged(
-    Symbol: Str,
     Number: i64,
-    Float: f64,
+    Symbol,
     Quoted: @struct(s: Str, escapes: bool),
     Qualifier: VarType,
-    Op: Operator,
-    EqOp: Operator,
-    Error: LexErr,
+    Op: Operator, EqOp: Operator,
+    Error: LexErr, Eof,
     // Bit count means leading zeros are observable.
     BinaryNum: @struct(bit_count: u8, value: u64),
-    LeftSquiggle, RightSquiggle, LeftParen, RightParen, LeftSquare, RightSquare, LeftAngle, RightAngle,
-    Bang, Dot, At, Comma, Colon, Semicolon, DoubleSquare, Hash, FatRightArrow, LeftArrow, DoubleColon, 
-    Star, Amp, Question, Pipe,
-    Fn, Equals, Eof,
+    LeftSquiggle, RightSquiggle, LeftParen, RightParen, LeftSquare, RightSquare,
+    Dot, At, Comma, Colon, Semicolon, DoubleSquare, Hash, FatRightArrow, LeftArrow, DoubleColon, SingleQuote,
+    Star, Amp, Question, Pipe, Equals, 
+    Fn, Const,
 );
-Operator :: @enum(Plus, Minus, Star, Slash);
+Operator :: @enum(Plus, Minus, Star, Slash, Less, Greater, Bang);
 LexErr :: @tagged(
     Unexpected: i64,
     UnterminatedStr,
-    NumParseErr,
     /// C has it mean octal which I don't really like but I don't want to accept the same syntax and mean something different.
     DenyLeadingZero,
-    ThatsNotANormalQuoteDidYouCopyPasteFromAPdf,
     TooManyBits,
+    UnterminatedComment,
+    // TODO: ThatsNotANormalQuoteDidYouCopyPasteFromAPdf,
 );
 VarType :: @enum(Let, Var, Const);
 
@@ -32,32 +33,312 @@ Lexer :: @struct(
     src: Str,
     start := 0,
     current := 0,
-    token: Token = ()!uninitialized,
+    // TODO: can't put `()!uninitialized` here as default value because c backend sees its an enum and thinks it might have a pointer in there and can't deal with it. 
+    //       need to be smarter about how constants get emitted. 
+    token: Token,
 );
 
 // TODO: need be be able to find the ResAddr cause it might not be on top of the stack. (early return from flat_call: big ret/arg value )
 fn peek(self: *Lexer) *Token = self.token&;
 
 fn pop(self: *Lexer) *Token = {
+    return :: @return;
+    if(self.eat_white_space_hit_end(), => return(self.token&));
+    self.start = self.current;
     
-    
+    // TODO: fancier switch statements. 
+    @switch(self.peek_c()) {
+        @inclusive("a".ascii(), "z".ascii()) => self.lex_ident();
+        @inclusive("A".ascii(), "Z".ascii()) => self.lex_ident();
+        @case("_".ascii()) => self.lex_ident();
+        @case(";".ascii()) => self.one(.Semicolon);
+        @case(":".ascii()) => self.one(.Colon);
+        @case(".".ascii()) => self.one(.Dot);
+        @case("(".ascii()) => self.one(.LeftParen);
+        @case(")".ascii()) => self.one(.RightParen);
+        @case("{".ascii()) => self.one(.LeftSquiggle);
+        @case("}".ascii()) => self.one(.RightSquiggle);
+        @case(",".ascii()) => self.one(.Comma);
+        @case("+".ascii()) => self.pair("=".ascii(), (Op = .Plus), (EqOp = .Plus));
+        @case("-".ascii()) => self.pair("=".ascii(), (Op = .Minus), (EqOp = .Minus));
+        @case("*".ascii()) => self.pair("=".ascii(), (Op = .Star), (EqOp = .Star));
+        @case("/".ascii()) => self.pair("=".ascii(), (Op = .Slash), (EqOp = .Slash));
+        @case("<".ascii()) => self.pair("=".ascii(), (Op = .Less), (EqOp = .Less));
+        @case(">".ascii()) => self.pair("=".ascii(), (Op = .Greater), (EqOp = .Greater));
+        @case("!".ascii()) => self.pair("=".ascii(), (Op = .Bang), (EqOp = .Bang));
+        @case("@".ascii()) => self.one(.At);
+        @case("&".ascii()) => self.one(.Amp);
+        @case("#".ascii()) => self.one(.Hash);
+        @case("?".ascii()) => self.one(.Question);
+        @case("'".ascii()) => self.one(.SingleQuote);
+        @case("|".ascii()) => self.one(.Pipe);
+        @case("[".ascii()) => self.one(.LeftSquare);
+        @case("]".ascii()) => self.one(.RightSquare);
+        @case("\"".ascii()) => self.lex_string();
+        @case("0".ascii()) => {
+            @switch(self.peek_c(1)) {
+                @case("x".ascii()) => self.lex_hex();
+                @case("b".ascii()) => self.lex_bin();
+                @inclusive("0".ascii(), "9".ascii()) => self.error(.DenyLeadingZero);
+                @default fn(c: u8) => self.one((Number = 0));
+            };
+        };
+        @inclusive("1".ascii(), "9".ascii()) => self.lex_num();
+        @case(0.trunc()) => self.put_token(.Eof);
+        @default fn(c: u8) => self.error((Unexpected = c.zext()));
+    };
     self.token&
 }
 
-fn init(root: Span, src: Str) Lexer = {
-    self: Lexer = (root = root, src = src);
-    self&.pop(); // get the first token ready. 
-    self
-
+fn lex_string(self: *Lexer) Unit = {
+    err :: @return;
+    is_multiline := self.peek_c(1).eq("\"".ascii()).and(=> self.peek_c(2).eq("\"".ascii()));
+    escapes := false;
+    text := if(is_multiline){|
+        self.current += 2;
+        dowhile {|
+            self.current += 1;
+            @switch(self.peek_c()) {
+                @case("\"".ascii()) => {
+                    self.peek_c(1).eq("\"".ascii()).and(=> self.peek_c(2).eq("\"".ascii())).not()
+                };
+                @case(0.trunc()) => {
+                    self.error(.UnterminatedStr);
+                    err();
+                    false
+                };
+                @default() fn(_: u8) => true;
+            }
+        };
+        self.current += 3;
+        self.src.slice(self.start.add(3), self.current.sub(3))
+    } {|
+        dowhile {|
+            self.current += 1;
+            @switch(self.peek_c()) {
+                @case("\"".ascii()) => false;
+                @case("\\".ascii()) => {
+                    self.current += 1; // extra for "\""
+                    escapes = true;
+                    true
+                };
+                @case(0.trunc()) => {
+                    self.error(.UnterminatedStr);
+                    err();
+                    false
+                };
+                @default() fn(_: u8) => true;
+            }
+        };
+        self.current += 1;
+        self.src.slice(self.start.add(1), self.current.sub(1))
+    };
+    
+    self.put_token((Quoted = (s = text, escapes = escapes)));
 }
 
+fn lex_num(self: *Lexer) Unit = {
+    total := 0;
+    dowhile {|
+        total *= 10;
+        total += self.peek_c().dec_digit();
+        self.current += 1;
+        self.peek_c().is_ascii_digit()
+    };
+    self.put_token((Number = total));
+}
+
+fn lex_hex(self: *Lexer) Unit = {
+    self.current += 2;
+    total := 0;
+    
+    ret :: @return;
+    if(not(self.peek_c().is_hex_digit())) {|
+        self.error((Unexpected = self.peek_c().zext()));
+        ret();
+    };
+    
+    bits := 0;
+    dowhile {|
+        total *= 16;
+        bits += 4;
+        if(bits.gt(64)) {|
+            self.error(.TooManyBits);
+            ret();
+        };
+        total += self.peek_c().hex_digit(); // TODO: dumb that i do an extra switch here when i just did one at the end of the loop, but nothing matters. 
+        self.current += 1;
+        self.peek_c().is_hex_digit()
+    };
+    self.put_token((BinaryNum = (bit_count = bits.trunc(), value = total)));
+}
+
+fn is_hex_digit(c: u8) bool = {
+     @switch(c) {
+        @inclusive("0".ascii(), "9".ascii()) => true;
+        @inclusive("a".ascii(), "f".ascii()) => true;
+        @inclusive("A".ascii(), "F".ascii()) => true;
+        @default fn(_: u8) => false;
+    }
+}
+
+fn lex_bin(self: *Lexer) Unit = {
+    self.current += 2;
+    total := 0;
+    
+    ret :: @return;
+    c := self.peek_c();
+    if(c.ne("0".ascii()).and(c.ne("1".ascii()))) {|
+        self.error((Unexpected = self.peek_c().zext()));
+        ret();
+    };
+    
+    bits := 0;
+    dowhile {|
+        total *= 2;
+        bits += 1;
+        if(bits.gt(64)) {|
+            self.error(.TooManyBits);
+            ret();
+        };
+        @switch(self.peek_c()){
+            @case("0".ascii()) => {
+                self.current += 1;
+                true
+            };
+            @case("1".ascii()) => {
+                self.current += 1;
+                total += 1;
+                true
+            };
+            @default() fn(_: u8) => false;
+        }
+    };
+    self.put_token((BinaryNum = (bit_count = bits.trunc(), value = total)));
+}
+
+fn lex_ident(self: *Lexer) Unit = {
+    dowhile {|
+        self.current += 1;
+        c := self.peek_c();
+        c.is_ascii_alpha().or(=> c.is_ascii_digit()).or(=> c.eq("_".ascii()))
+    };
+    name := self.src.slice(self.start, self.current);
+    // TODO: slow! 
+    // TODO: I'm tempted to replace `const name` with `$name`, cause its weird now that I don't use let for normal vars. 
+    @switch(name) {
+        @case("fn") => self.put_token(.Fn);
+        @case("const") => self.put_token(.Const);
+        @default fn(s: Str) => self.put_token(.Symbol);
+    };
+}
+
+::if(TokenType);
+fn pair(self: *Lexer, maybe: u8, single: TokenType, double: TokenType) Unit = {
+    t := if(self.peek_c(1).eq(maybe), => {
+        self.current += 1;
+        double
+    }, => single);
+    self.one(t);
+}
+
+fn one(self: *Lexer, type: TokenType) Unit = {
+    self.current += 1;
+    self.put_token(type);
+}
+
+fn eat_white_space_hit_end(self: *Lexer) bool = {
+    break :: @return;
+    if(self.current.ge(self.src.len)) {|
+        self.start = self.current;
+        self.put_token(.Eof);
+        break(true);
+    };
+    loop {|
+        continue :: @return;
+        if(self.peek_c().is_whitespace()) {|
+            self.current += 1;
+            continue();
+        };
+        
+        if(self.peek_c().eq("/".ascii())){|
+            @switch(self.peek_c(1)) {
+                @case("/".ascii()) => { // single line
+                    dowhile {|
+                        self.current += 1;
+                        self.peek_c().ne("\n".ascii()).and(=> self.peek_c().ne(0.trunc()))
+                    };
+                    continue();
+                };
+                @case("*".ascii()) => { // multiline
+                    self.start = self.current; // give right error location if unterminated. 
+                    self.current += 2; 
+                    depth := 1; 
+                    while(=> depth.gt(0)) {|
+                        @switch(self.peek_c()){
+                            @case("/".ascii()) => {
+                                if(self.peek_c(1).eq("*".ascii())) {|
+                                    self.current += 1;
+                                    depth += 1;
+                                };
+                            };
+                            @case("*".ascii()) => {
+                                if(self.peek_c(1).eq("/".ascii())) {|
+                                    self.current += 1;
+                                    depth -= 1;
+                                };
+                            };
+                            @case(0.trunc()) => {
+                                self.error(.UnterminatedComment);
+                                break(true);
+                            };
+                            @default fn(_: u8) => ();
+                        };
+                        self.current += 1;
+                    };
+                    continue();
+                };
+                // TODO: this should infer the arg type like @match does. -- Jun 5
+                @default fn(_: u8) => {}; 
+            };
+        };
+        
+        break(false);
+    };
+    unreachable_hack(bool)
+}
+
+fn error(self: *Lexer, reason: LexErr) Unit = self.one((Error = reason));
+fn put_token(self: *Lexer, type: TokenType) Unit = {
+    self.current = self.current.min(self.src.len);
+    self.token = (type = type, span = self.root.subspan(self.start.trunc(), self.current.trunc()));
+}
+
+fn is_whitespace(c: u8) bool = c.eq(" ".ascii()).or(=> c.eq("\n".ascii())).or(=> c.eq("\t".ascii()));
+
+fn peek_c(self: *Lexer) u8 = self.peek_c(0);
+fn peek_c(self: *Lexer, n: i64) u8 = 
+    if(self.current.add(n).lt(self.src.len), => self.src[self.current.add(n)], => 0.trunc());
+
+fn init(root: Span, src: Str) Lexer = {
+    self: Lexer = (root = root, src = src, token = ()!uninitialized);
+    self&.pop(); // get the first token ready. 
+    self
+}
 
 #test fn lexer_doesnt_crash() = {
     codemap: CodeMap = init(libc_allocator);
-    src := "println(\"hello world\"";
+    src := " /*}|*/   println(\"hello world\"); const t = fn hello(); + +=; 123; 0xFF; 0b101010; \"\"\" big string \" ending now\"\"\"";
     span := codemap&.add_file("test", src);
     self: Lexer = init(root = span, src = src);
-    self&.peek();
-    self&.pop();
+    count := 0;
+    dowhile {|
+        t := self&.peek();
+        @println("%, %-%: %", t.type&!tag[], t.span.low, t.span.high, codemap&.source_slice(t.span));
+        again := t.type&!tag[].ne(tag_value(TokenType, @symbol Eof));
+        self&.pop();
+        count += 1;
+        again
+    };
+    @println("Lexed % tokens.", count);
 }
-

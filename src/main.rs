@@ -56,7 +56,7 @@ fn main() {
     // TODO: its a problem that someone could add one at a higher prio place maybe?
     if find_std_lib() {
         // TODO: option to silence
-        eprintln!("Found installed lib at {:?}", STDLIB_PATH.lock().unwrap().as_ref().unwrap());
+        // eprintln!("Found installed lib at {:?}", STDLIB_PATH.lock().unwrap().as_ref().unwrap());
     } else {
         // TODO: show search locations
         eprintln!("Standard library not found.");
@@ -73,6 +73,7 @@ fn main() {
     let mut run_with_clang = false;
     let mut sanitize = false;
     let mut test_c = false;
+    let mut clang_o2 = false;
     args.next().unwrap(); // exe path
 
     #[cfg(target_arch = "aarch64")]
@@ -130,6 +131,9 @@ fn main() {
                 "test-c" => {
                     test_c = true;
                     assert!(cfg!(feature = "c-backend"));
+                }
+                "optimize=fast" => {
+                    clang_o2 = true;
                 }
                 _ => panic!("unknown argument --{name}"),
             }
@@ -208,7 +212,7 @@ fn main() {
                     log_time();
                     if run_with_clang {
                         fs::write("./target/temp.c", s).unwrap();
-                        run_clang_on_temp_c(sanitize);
+                        run_clang_on_temp_c(sanitize, clang_o2);
                     } else {
                         println!("*/{}", s);
                     }
@@ -270,7 +274,7 @@ fn main() {
     }
 }
 
-fn run_clang_on_temp_c(sanitize: bool) {
+fn run_clang_on_temp_c(sanitize: bool, o2: bool) {
     let start = timestamp();
     let mut cmd = Command::new("clang");
     let mut cmd = cmd.args([
@@ -281,8 +285,14 @@ fn run_clang_on_temp_c(sanitize: bool) {
         "target/a.out",
         "-Wno-incompatible-library-redeclaration",
         "-Wno-int-conversion",
+        "-Wno-pointer-sign",
+        "-Wno-return-type", // TODO: this one would be helpful! but need to emit _Noreturn for functions returning Never
         "-Wno-incompatible-function-pointer-types", // TODO: this ones probably often helpful, should fix it in the generated code. also UB san complains.
     ]);
+
+    if o2 {
+        cmd = cmd.args(["-O2"]);
+    }
     if sanitize {
         cmd = cmd.args(["-fsanitize=undefined", "-fsanitize=address", "-g"]);
     }
@@ -377,8 +387,6 @@ fn run_tests_serial(arch: TargetArch) {
     );
     unset_colour();
 
-    let map = comp.aarch64.map_exec.as_ref().unwrap();
-
     mem::forget(comp);
     mem::forget(program);
 
@@ -410,7 +418,7 @@ fn run_c_tests(arch: TargetArch, sanitize: bool) {
                 exit(1);
             });
             fs::write("target/temp.c", src).unwrap();
-            run_clang_on_temp_c(sanitize);
+            run_clang_on_temp_c(sanitize, false);
         });
         if pass {
             set_colour(0, 255, 0);

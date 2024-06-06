@@ -1,3 +1,7 @@
+## (Jun 6)
+
+- just had to remove is_unit check on arg in c::declare because now there's the indirect return address sometimes.
+
 ## (Jun 3)
 
 my painful bug was about dropping a stack slot after dup-ing it so it got reused for another variable.

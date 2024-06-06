@@ -28,33 +28,42 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
     if use_name {
         write!(out, "{} {name}(", ret_spec(sig)).unwrap();
     } else {
-        write!(out, "/* fn {name} */ static \n{} _FN{}(", ret_spec(sig), f.as_index()).unwrap();
+        write!(
+            out,
+            "/* fn {name} -> {} */ static \n{} _FN{}(",
+            comp.program.log_type(comp.program[f].finished_ret.unwrap()),
+            ret_spec(sig),
+            f.as_index()
+        )
+        .unwrap();
     }
-    if !ty.arg.is_unit() {
-        if use_arg_names {
-            for b in comp.program[f].arg.bindings.iter() {
-                let ty = b.ty.unwrap();
-                if ty.is_unit() {
-                    continue;
-                }
-                let name = comp.program.pool.get(b.name().unwrap());
-                if let TypeInfo::Ptr(inner) = comp.program[ty] {
-                    let prim = comp.program.prim(inner);
-                    write!(out, "{} *{},", c_type_spec(prim), name).unwrap();
-                } else {
-                    let prim = comp.program.prim(ty);
-                    write!(out, "{} {},", c_type_spec(prim), name).unwrap();
-                }
+    if use_arg_names {
+        if sig.first_arg_is_indirect_return {
+            write!(out, "void *_ret_ptr,").unwrap();
+        }
+        for b in comp.program[f].arg.bindings.iter() {
+            let ty = b.ty.unwrap();
+            if ty.is_unit() {
+                continue;
             }
-        } else {
-            for i in 0..sig.arg_slots as usize {
-                write!(out, "{} _arg_{i},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
+            let name = comp.program.pool.get(b.name().unwrap());
+            if let TypeInfo::Ptr(inner) = comp.program[ty] {
+                let prim = comp.program.prim(inner);
+                write!(out, "{} *{},", c_type_spec(prim), name).unwrap();
+            } else {
+                let prim = comp.program.prim(ty);
+                write!(out, "{} {},", c_type_spec(prim), name).unwrap();
             }
         }
-        if out.ends_with(',') {
-            out.remove(out.len() - 1); // comma
+    } else {
+        for i in 0..sig.arg_slots as usize {
+            write!(out, "{} _arg_{i},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
         }
     }
+    if out.ends_with(',') {
+        out.remove(out.len() - 1); // comma
+    }
+
     write!(out, ")").unwrap();
 }
 
@@ -309,12 +318,15 @@ fn emit_named_redirect_body(comp: &mut Compile, out: &mut String, f: FuncId, cal
             let name = comp.program.pool.get(b.name().unwrap());
             let raw = comp.program.raw_type(b.ty.unwrap());
             if let TypeInfo::Struct { fields, .. } = &comp.program[raw] {
-                for i in 0..fields.len() {
-                    write!(out, "{name}._{i},").unwrap();
+                // HACK: because i use single field structs for unique types but flaten them to ints for args. really c should get the real struct definitions.
+                if fields.len() > 1 {
+                    for i in 0..fields.len() {
+                        write!(out, "{name}._{i},").unwrap();
+                    }
+                    continue;
                 }
-            } else {
-                write!(out, "{name},").unwrap();
             }
+            write!(out, "{name},").unwrap();
         }
         out.remove(out.len() - 1); // comma
     }
@@ -499,7 +511,6 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::IncPtrBytes { bytes } => {
                     self.stack.last_mut().unwrap().offset += bytes;
                 }
-                Bc::TagCheck { expected: _ } => {} // TODO: !!!
                 Bc::Unreachable => {
                     writeln!(self.code, "    abort();").unwrap();
                     break;

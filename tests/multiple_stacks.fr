@@ -1,0 +1,51 @@
+#aarch64 #c_call
+fn call_in_stack(new_sp: *i64, callback: @FnPtr(ctx: rawptr) Unit, ctx: rawptr) Unit = (
+    // setup new stack
+    add_im(.X64, x16, sp, @as(u12) 0, 0b0),  // mov can't encode sp!
+    sub_im(.X64, sp, x0, @as(u12) 32, 0b0),
+    // save the old stack and our return info on the new stack.
+    str_uo(.X64, x16, sp, @as(u12) 0),
+    str_uo(.X64, lr, sp, @as(u12) 1), // units are i64s, not bytes!
+    str_uo(.X64, fp, sp, @as(u12) 2),
+    // call a user function
+    mov(.X64, x0, x2),
+    br(x1, 0b1),
+    // restore return info
+    ldr_uo(.X64, x16, sp, @as(u12) 0),
+    ldr_uo(.X64, lr, sp, @as(u12) 1), // units are i64s, not bytes!
+    ldr_uo(.X64, fp, sp, @as(u12) 2),
+    // restore original stack
+    add_im(.X64, sp, x16, @as(u12) 0, 0b0),  // mov can't encode sp!
+    ret(),
+)!asm;
+
+SECRET   :: 31415926535897;
+write_secret :: fn(ctx: rawptr) Unit = {
+    my_secret_value := (SECRET, 2, 3, 4, 5, 6, 7, 8, 9, 10)!slice;
+    // Note: if you do anything with the value here (like assert_eq(my_secret_value[0], SECRET)), 
+    //       it might end up with it on the stack multiple times, which still proves the point,
+    //       but breaks the test below. 
+};
+
+#test #aarch64
+fn entry() = {
+    stack_size := 30;
+    new_stack  := libc_allocator.alloc(i64, stack_size);
+    new_sp := new_stack.ptr.offset(stack_size);     // the stack grows downword, so this has to point to the *end* of the memory.
+    assert_eq(i64.int_from_ptr(new_sp).mod(16), 0); // arm wants sp to be 16 byte aligned. malloc should give us that. 
+   
+    assert_eq(count_secrets(), 0);
+    call_in_stack(new_sp, write_secret!fn_ptr, 0.rawptr_from_int());
+    // now we should be able to read the callee's leftover variables. 
+    assert_eq(count_secrets(), 1);
+    
+    count_secrets :: fn() i64 => {
+        found := 0;
+        for(new_stack) { v |
+            if (v.eq(SECRET)) {|
+                found += 1;
+            };
+        };
+        found
+    };
+}
