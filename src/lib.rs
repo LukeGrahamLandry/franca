@@ -112,6 +112,7 @@ use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::CErr;
 use export_ffi::STDLIB_PATH;
+use interp_derive::InterpSend;
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -152,7 +153,7 @@ use crate::{
     compiler::{Compile, CompileError},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub struct Stats {
     pub ast_expr_nodes_all: usize,
     pub fn_body_resolve: usize,

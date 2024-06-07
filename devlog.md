@@ -1,3 +1,10 @@
+## Build script goes brrr (Jun 7)
+
+- when returning something larger than two registers,
+  excplitly make the first arg the out pointer because i don't correctly use x8 yet.
+  and need to use ManuallyDrop because you can't have the rust side trying to drop uninitialized memory when it sets the result in there.
+- forgot to make it exec!
+
 ## (Jun 6)
 
 - just had to remove is_unit check on arg in c::declare because now there's the indirect return address sometimes.

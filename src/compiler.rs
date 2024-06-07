@@ -33,7 +33,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, Map, Stats, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
@@ -46,6 +46,7 @@ pub struct CompileError<'p> {
     pub trace: String,
 }
 
+#[repr(C, i64)]
 #[derive(Clone, Debug)]
 pub enum CErr<'p> {
     UndeclaredIdent(Ident<'p>),
@@ -2016,6 +2017,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             "TypeInfo" => ffi_type!(TypeInfo),
             "IntTypeInfo" => ffi_type!(IntTypeInfo),
             "RsResolvedSymbol" => self.program.get_rs_type(RsResolvedSymbol::get_ty()),
+            "Stats" => ffi_type!(Stats),
+            "TargetArch" => ffi_type!(TargetArch),
+            "ExecStyle" => ffi_type!(ExecStyle),
             _ => {
                 let name = self.pool.intern(name);
                 self.program.find_ffi_type(name)?
@@ -3474,10 +3478,11 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 }
 
+#[repr(i64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, InterpSend)]
 pub enum ExecStyle {
-    Jit,
-    Aot,
+    Jit = 0,
+    Aot = 1,
 }
 
 pub fn add_unique<T: PartialEq>(vec: &mut Vec<T>, new: T) -> bool {

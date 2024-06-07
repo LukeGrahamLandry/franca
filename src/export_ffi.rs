@@ -21,7 +21,7 @@ use crate::scope::ResolveScope;
 use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
 use std::fmt::{Debug, Write};
 use std::hint::black_box;
-use std::mem::{self, transmute};
+use std::mem::{self, transmute, ManuallyDrop, MaybeUninit};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
 use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
@@ -32,6 +32,7 @@ use std::{fs, io};
 use crate::export_ffi::BigResult::*;
 
 #[repr(C, i64)]
+#[derive(Clone, Debug)]
 pub enum BigOption<T> {
     Some(T),
     None,
@@ -124,14 +125,20 @@ pub struct ImportVTable {
     get_tests: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
     get_tests_broken: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
     // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
-    emit_c: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str>,
+    emit_c: for<'p> unsafe extern "C" fn(
+        out: *mut ManuallyDrop<Res<'p, *const str>>,
+        c: &mut Compile<'_, 'p>,
+        fns: *const [FuncId],
+        add_test_runner: bool,
+    ),
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
     lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: Span) -> *const str,
     add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Arc<File>,
-    parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]>,
+    parse_stmts: for<'p> unsafe extern "C" fn(out: *mut ManuallyDrop<BigCErr<'p, *const [FatStmt<'p>]>>, c: &mut Compile<'_, 'p>, f: Arc<File>),
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
+    make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
 }
 
 pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
@@ -151,6 +158,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     add_file,
     parse_stmts,
     make_and_resolve_and_compile_top_level,
+    make_jitted_exec,
 };
 
 unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
@@ -183,8 +191,13 @@ unsafe extern "C" fn franca_get_tests(c: &mut Compile) -> *const [FuncId] {
 unsafe extern "C" fn franca_get_tests_broken(c: &mut Compile) -> *const [FuncId] {
     c.tests_broken.as_slice() as *const [FuncId]
 }
-unsafe extern "C" fn franca_emit_c<'p>(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str> {
-    emit_c(c, (&*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str)
+unsafe extern "C" fn franca_emit_c<'p>(
+    out: *mut ManuallyDrop<Res<'p, *const str>>,
+    c: &mut Compile<'_, 'p>,
+    fns: *const [FuncId],
+    add_test_runner: bool,
+) {
+    *out = ManuallyDrop::new(emit_c(c, (&*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str));
 }
 
 unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()> {
@@ -207,10 +220,23 @@ unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Arc
     c.parsing.codemap.add_file(name.to_string(), content.to_string())
 }
 
-unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]> {
+unsafe extern "C" fn parse_stmts<'p>(out: *mut ManuallyDrop<BigCErr<'p, *const [FatStmt<'p>]>>, comp: &mut Compile<'_, 'p>, file: Arc<File>) {
+    assert_eq!(mem::size_of::<BigCErr<'p, *const [FatStmt<'p>]>>(), 24);
+    println!("called parse {}", mem::size_of::<Arc<File>>());
     let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    let stmts = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool)?;
-    Ok(stmts.leak())
+    println!("{}", comp.parsing.codemap.look_up_span(file.span));
+    let stmts = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
+        Ok(s) => s,
+        Err(e) => {
+            *out = ManuallyDrop::new(Err(e));
+            return;
+        }
+    };
+    println!("parsed");
+    mem::forget(file);
+    println!("setting result");
+    *out = ManuallyDrop::new(Ok(stmts.leak()));
+    println!("returning");
 }
 
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
@@ -219,6 +245,11 @@ unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<
     ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
     c.compile_top_level(global)?;
     Ok(())
+}
+
+unsafe extern "C" fn make_jitted_exec(c: &mut Compile) {
+    c.aarch64.make_exec();
+    c.flush_cpu_instruction_cache();
 }
 
 // This lets rust _declare_ a flat_call like its normal

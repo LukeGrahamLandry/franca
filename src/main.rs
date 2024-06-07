@@ -4,9 +4,9 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
-    bc::Values,
+    bc::{from_values, to_values, Values},
     compiler::{Compile, ExecStyle, Res},
-    export_ffi::{end_raw, get_include_std, start_raw},
+    export_ffi::{end_raw, get_include_std, start_raw, ImportVTable, IMPORT_VTABLE},
     find_std_lib,
     lex::Lexer,
     log_err, make_toplevel,
@@ -229,6 +229,15 @@ fn main() {
                     exit(1);
                 }
             }
+        }
+
+        if let Some(f) = comp.program.find_unique_func(comp.pool.intern("driver")) {
+            let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as usize).unwrap();
+            if let franca::export_ffi::BigResult::Err(e) = comp.run(f, val) {
+                log_err(&comp, *e);
+                exit(1);
+            }
+            return;
         }
 
         for f in comp.tests.clone() {
