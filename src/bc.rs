@@ -19,7 +19,7 @@ use interp_derive::InterpSend;
 #[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
 pub enum Bc {
     CallDirect { sig: PrimSig, f: FuncId, tail: bool },   // <args:m> -> <ret:n>
     CallFnPtr { sig: PrimSig },                           // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
@@ -57,7 +57,7 @@ pub struct PrimSig {
     pub no_return: bool,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
 pub enum Prim {
     I8,
     I16,
@@ -77,7 +77,7 @@ impl Prim {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, InterpSend)]
 pub struct BasicBlock {
     pub insts: Vec<Bc>,
     pub arg_float_mask: u32,
@@ -87,6 +87,7 @@ pub struct BasicBlock {
     pub height: u16,
 }
 
+#[derive(Clone, InterpSend)]
 pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
@@ -221,6 +222,7 @@ impl Values {
     }
 }
 
+use crate::export_ffi::BigResult::*;
 #[track_caller]
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
     T::get_or_create_type(program); // sigh

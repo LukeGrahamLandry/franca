@@ -310,6 +310,43 @@ impl<'p> InterpSend<'p> for TypeId {
     }
 }
 
+macro_rules! fixed_array {
+    ($ty:ty, $len:expr) => {
+        impl<'p> InterpSend<'p> for [$ty; $len] {
+            fn get_type_key() -> u128 {
+                unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
+            }
+            fn create_type(p: &mut Program) -> TypeId {
+                let info = TypeInfo::Array {
+                    inner: <$ty>::create_type(p),
+                    len: $len,
+                };
+                p.intern_type(info)
+            }
+
+            fn serialize_to_ints(self, p: &Program, values: &mut WriteBytes) {
+                for i in 0..$len {
+                    self[i].serialize_to_ints(p, values);
+                }
+            }
+
+            fn deserialize_from_ints(p: &Program, values: &mut ReadBytes) -> Option<Self> {
+                let mut t: Self = unsafe { mem::zeroed() };
+                for i in 0..$len {
+                    t[i] = <$ty>::deserialize_from_ints(p, values)?;
+                }
+                Some(t)
+            }
+
+            fn name() -> String {
+                format!("Array({}, {})", <$ty>::name(), $len)
+            }
+        }
+    };
+}
+
+fixed_array!(usize, 2);
+
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     fn get_type_key() -> u128 {
         mix::<A, B>(6749973390999)
@@ -604,6 +641,7 @@ pub mod c {
     use crate::compiler::Compile;
     use crate::compiler::Res;
     use crate::err;
+    use crate::export_ffi::BigResult::*;
     use std::arch::global_asm;
     use std::mem::transmute;
 

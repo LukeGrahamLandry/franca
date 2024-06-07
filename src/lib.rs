@@ -6,6 +6,7 @@
 #![feature(sync_unsafe_cell)]
 #![feature(naked_functions)]
 #![feature(const_trait_impl)]
+#![feature(try_trait_v2)]
 // bro if you can tell you could compile it more efficiently why don't you just compile it more efficiently
 #![allow(clippy::format_collect)]
 extern crate core;
@@ -117,7 +118,7 @@ macro_rules! mut_replace {
     ($value:expr, $f:expr) => {{
         let temp = mem::take(&mut $value);
         #[allow(clippy::redundant_closure_call)]
-        let res: Result<_, Box<CompileError>> = $f(temp);
+        let res: Res<_> = $f(temp);
         if res.is_err() {
             println!("WARNING: mut_replace hit err. something will be lost!! {}. {res:?}", Location::caller());
         }

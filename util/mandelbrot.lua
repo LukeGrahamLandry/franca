@@ -65,7 +65,7 @@ function main()
     print(out)
     local e = timestamp()
     local s = (e - start)
-    print("Finished running main() in " .. s .. " seconds.")
+    -- print("Finished running main() in " .. s .. " seconds.")
 end
 
 main()

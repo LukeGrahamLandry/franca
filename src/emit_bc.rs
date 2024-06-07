@@ -9,6 +9,7 @@
 #![allow(clippy::wrong_self_convention)]
 
 use codemap::Span;
+use interp_derive::InterpSend;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 
@@ -16,11 +17,11 @@ use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, Labe
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
+use crate::export_ffi::BigResult::*;
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
-use crate::{bc::*, extend_options, Map, STATS};
-
 use crate::{assert, assert_eq, err, ice, unwrap};
+use crate::{bc::*, extend_options, Map, STATS};
 
 struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,
@@ -39,7 +40,7 @@ pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res
     Ok(body)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, InterpSend)]
 pub enum ResultLoc {
     PushStack,
     ResAddr,

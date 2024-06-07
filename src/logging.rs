@@ -29,7 +29,7 @@ macro_rules! err {
         let e = $payload;
         $crate::logging::break_here(&e);
 
-        return Err($crate::logging::make_err(e))
+        return $crate::export_ffi::BigResult::Err($crate::logging::make_err(e))
     }};
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);

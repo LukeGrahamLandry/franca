@@ -6,7 +6,7 @@ use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
     bc::Values,
     compiler::{Compile, ExecStyle, Res},
-    export_ffi::{end_raw, get_include_std, start_raw, STDLIB_PATH},
+    export_ffi::{end_raw, get_include_std, start_raw},
     find_std_lib,
     lex::Lexer,
     log_err, make_toplevel,
@@ -110,7 +110,7 @@ fn main() {
                     println!("{}", get_include_std("libc").unwrap());
 
                     let pool = Box::leak(Box::<StringPool>::default());
-                    let program = Program::new(pool, arch, arch);
+                    let program = Program::new(pool, arch);
                     println!("{}", program.ffi_definitions);
                 }
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats, --c, --run-clang"),
@@ -135,6 +135,7 @@ fn main() {
                 "optimize=fast" => {
                     clang_o2 = true;
                 }
+
                 _ => panic!("unknown argument --{name}"),
             }
         } else {
@@ -181,7 +182,7 @@ fn main() {
         // }
 
         let start = timestamp();
-        let mut program = Program::new(pool, arch, arch);
+        let mut program = Program::new(pool, arch);
         let mut comp = Compile::new(pool, &mut program);
 
         load_all_toplevel(&mut comp, &[(name, src)]).unwrap_or_else(|e| {
@@ -208,7 +209,7 @@ fn main() {
                 (comp.export.clone(), false)
             };
             match franca::c::emit_c(&mut comp, fns, test_runner) {
-                Ok(s) => {
+                franca::export_ffi::BigResult::Ok(s) => {
                     log_time();
                     if run_with_clang {
                         fs::write("./target/temp.c", s).unwrap();
@@ -222,7 +223,7 @@ fn main() {
                     }
                     exit(0);
                 }
-                Err(e) => {
+                franca::export_ffi::BigResult::Err(e) => {
                     log_err(&comp, *e);
                     eprintln!("failed");
                     exit(1);
@@ -238,7 +239,7 @@ fn main() {
         if comp.tests.is_empty() {
             let f = comp.program.find_unique_func(comp.pool.intern("main")).expect("fn main");
             let result = comp.compile(f, ExecStyle::Jit);
-            if let Err(e) = result {
+            if let franca::export_ffi::BigResult::Err(e) = result {
                 log_err(&comp, *e);
                 exit(1);
             }
@@ -332,7 +333,7 @@ fn run_tests_serial(arch: TargetArch) {
     let beg = MEM.get();
     let pool = Box::leak(Box::<StringPool>::default());
     let start = timestamp();
-    let mut program = Program::new(pool, arch, arch);
+    let mut program = Program::new(pool, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -396,7 +397,7 @@ fn run_tests_serial(arch: TargetArch) {
 #[cfg(feature = "c-backend")]
 fn run_c_tests(arch: TargetArch, sanitize: bool) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, arch, arch);
+    let mut program = Program::new(pool, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -443,7 +444,7 @@ fn run_c_tests(arch: TargetArch, sanitize: bool) {
 
 fn forked_swallow_passes(arch: TargetArch) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, arch, arch);
+    let mut program = Program::new(pool, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -490,7 +491,7 @@ fn forked_swallow_passes(arch: TargetArch) {
 
 fn check_broken(arch: TargetArch) {
     let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, arch, arch);
+    let mut program = Program::new(pool, arch);
     let mut comp = Compile::new(pool, &mut program);
 
     let files = collect_test_files();
@@ -555,12 +556,12 @@ fn load_all_toplevel<'p>(comp: &mut Compile<'_, 'p>, files: &[(String, String)])
     let mut global = make_toplevel(comp.pool, garbage_loc(), parsed);
     ResolveScope::run(&mut global, comp, ScopeId::from_index(0))?;
     comp.compile_top_level(global)?;
-    Ok(())
+    franca::export_ffi::BigResult::Ok(())
 }
 
 fn run_one(comp: &mut Compile, f: FuncId) {
     let result = comp.compile(f, ExecStyle::Jit);
-    if let Err(e) = comp.tag_err(result) {
+    if let franca::export_ffi::BigResult::Err(e) = comp.tag_err(result) {
         log_err(comp, *e);
         exit(1);
     }
@@ -657,7 +658,7 @@ fn do_60fps(arch: TargetArch) {
         src.push_str(&src2);
 
         let pool = Box::leak(Box::<StringPool>::default());
-        let mut program = Program::new(pool, arch, arch);
+        let mut program = Program::new(pool, arch);
         let mut comp = Compile::new(pool, &mut program);
 
         let file = comp

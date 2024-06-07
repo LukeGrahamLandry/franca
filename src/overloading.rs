@@ -13,6 +13,8 @@ use crate::{assert, assert_eq, err, unwrap};
 use std::mem;
 use std::ops::DerefMut;
 
+use crate::export_ffi::BigResult::*;
+
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
         let f_ty = f.ty;
@@ -162,7 +164,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     writeln!(msg, "not found {}", log_goal(self)).unwrap();
                     for f in original.ready {
                         let yes = f.arg == arg_ty;
-                        let prefix = if yes { "[YES]" } else { "[ NO]" };
+                        let prefix = if yes { "[arg: YES]" } else { "[arg:  NO]" };
                         writeln!(
                             msg,
                             "- {prefix} found {:?} fn({:?}={}) {}={}; {:?}",

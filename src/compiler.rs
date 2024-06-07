@@ -23,7 +23,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{do_flat_call_values, FlatCallFn, RsResolvedSymbol};
+use crate::export_ffi::{do_flat_call_values, BigResult, FlatCallFn, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
@@ -36,6 +36,7 @@ use crate::{
 use crate::{bc::*, extend_options, ffi, impl_index, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
+use BigResult::*;
 
 #[derive(Clone)]
 pub struct CompileError<'p> {
@@ -56,7 +57,7 @@ pub enum CErr<'p> {
     Fatal(String),
 }
 
-pub type Res<'p, T> = Result<T, Box<CompileError<'p>>>;
+pub type Res<'p, T> = BigResult<T, Box<CompileError<'p>>>;
 
 #[repr(C)]
 pub struct Compile<'a, 'p> {
@@ -1360,13 +1361,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let types = requested
                     .and_then(|t| self.program.tuple_types(t))
                     .and_then(|t| if t.len() == values.len() { Some(t) } else { None });
-                let values: Res<'p, Vec<_>> = values
-                    .iter_mut()
-                    .enumerate()
-                    .map(|(i, v)| self.compile_expr(v, types.as_ref().and_then(|t| t.get(i).copied())))
-                    .collect();
-                let types = values?;
-                let ty = self.program.tuple_of(types);
+                let mut out = vec![];
+                for (i, v) in values.iter_mut().enumerate() {
+                    let ty = types.as_ref().and_then(|t| t.get(i).copied());
+                    out.push(self.compile_expr(v, ty)?)
+                }
+                let ty = self.program.tuple_of(out);
                 expr.ty = ty;
                 ty
             }
@@ -1798,8 +1798,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Block { result: e, .. } => return self.type_of(e),
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1);
-                let types: Res<'p, Vec<_>> = values.iter_mut().map(|v| self.type_of(v)).collect();
-                let types = types?;
+                let mut types = vec![];
+                for v in values {
+                    types.push(self.type_of(v)?);
+                }
                 let before = types.len();
                 let types: Vec<_> = types.into_iter().flatten().collect();
                 self.last_loc = Some(expr.loc);
@@ -2202,12 +2204,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 //      because of the special casing on types? (Type, Type) === Type
                 //      I think actually its because you get here when compiling inline asm at the very beginning.
                 //      so you need to be able to do it without all basic ops being ready yet. -- May 27
-                let values: Res<'p, Vec<Values>> = elements
-                    .iter()
-                    .zip(types)
-                    .map(|(e, ty)| self.immediate_eval_expr(e.clone(), ty))
-                    .collect();
-                let values = values?;
+                let mut values = vec![];
+                for (e, ty) in elements.iter().zip(types) {
+                    values.push(self.immediate_eval_expr(e.clone(), ty)?)
+                }
                 if values.len() == 1 {
                     return Ok(Some(values.into_iter().next().unwrap()));
                 }
@@ -3207,7 +3207,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
             let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
             let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
-            let Ok(ir) = std::str::from_utf8(ir) else { err!("wanted utf8 llvmir",) };
+            let std::result::Result::Ok(ir) = std::str::from_utf8(ir) else {
+                err!("wanted utf8 llvmir",)
+            };
             self.program.inline_llvm_ir.push(f);
             Ok(FuncImpl::LlvmIr(self.pool.intern(ir)))
         } else if self.program[f].has_tag(Flag::C) {
@@ -3216,7 +3218,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(asm.clone())), asm.loc, ty);
             let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
             let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
-            let Ok(ir) = std::str::from_utf8(ir) else {
+            let std::result::Result::Ok(ir) = std::str::from_utf8(ir) else {
                 err!("wanted utf8 csource ",)
             };
             Ok(FuncImpl::CSource(self.pool.intern(ir)))
@@ -3285,6 +3287,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         "{} is an enum, value should have one active varient not {values:?}",
                         self.program.log_type(requested)
                     );
+                    // TODO: this needs to be a real err! but we're in a mut_replace
                     let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
                     let type_hint = cases[i].1;
                     let value = self.compile_expr(values[0], Some(type_hint))?;

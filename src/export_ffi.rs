@@ -1,26 +1,225 @@
 #![allow(improper_ctypes_definitions)]
 
+use codemap::{File, Span};
 use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{
-    garbage_loc, CallConv, Expr, FatExpr, Flag, FnType, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program, TypeId, TypeInfo, WalkAst,
+    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program, ScopeId,
+    TargetArch, TypeId, TypeInfo, WalkAst,
 };
 use crate::bc::{to_values, ReadBytes, Values};
-use crate::compiler::{Compile, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
+use crate::c::emit_c;
+use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
+use crate::lex::Lexer;
 use crate::logging::{unwrap, PoolLog};
 use crate::overloading::where_the_fuck_am_i;
-use crate::pool::Ident;
-use crate::{assert, err, ice, log_err, signed_truncate};
-use std::fmt::Write;
+use crate::parse::Parser;
+use crate::pool::{Ident, StringPool};
+use crate::scope::ResolveScope;
+use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
+use std::fmt::{Debug, Write};
 use std::hint::black_box;
 use std::mem::{self, transmute};
+use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
-use std::ptr::{null, slice_from_raw_parts, slice_from_raw_parts_mut};
+use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::{fs, io};
+
+use crate::export_ffi::BigResult::*;
+
+#[repr(C, i64)]
+pub enum BigOption<T> {
+    Some(T),
+    None,
+}
+
+#[derive(Clone, Debug)]
+#[repr(C, i64)]
+pub enum BigResult<T, E> {
+    Ok(T),
+    Err(E),
+}
+impl<T, E: Debug> BigResult<T, E> {
+    pub fn unwrap(self) -> T {
+        match self {
+            Ok(t) => t,
+            Err(e) => panic!("Unwrapped error value: {e:?}"),
+        }
+    }
+
+    pub fn is_err(&self) -> bool {
+        matches!(self, Err(_))
+    }
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Ok(_))
+    }
+
+    pub fn unwrap_or_else(self, f: impl FnOnce(E) -> T) -> T {
+        match self {
+            Ok(t) => t,
+            Err(e) => f(e),
+        }
+    }
+    pub fn map_err(self, f: impl FnOnce(E) -> E) -> Self {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(f(e)),
+        }
+    }
+    pub fn map_ok<TT>(self, f: impl FnOnce(T) -> TT) -> BigResult<TT, E> {
+        match self {
+            Ok(t) => Ok(f(t)),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl<T, E> From<Result<T, E>> for BigResult<T, E> {
+    fn from(value: Result<T, E>) -> Self {
+        match value {
+            Result::Ok(e) => Ok(e),
+            Result::Err(e) => Err(e),
+        }
+    }
+}
+
+pub type BigCErr<'p, T> = BigResult<T, Box<CompileError<'p>>>;
+
+impl<T, E> Try for BigResult<T, E> {
+    type Output = T;
+    type Residual = E;
+
+    fn from_output(output: Self::Output) -> Self {
+        BigResult::Ok(output)
+    }
+
+    fn branch(self) -> std::ops::ControlFlow<Self::Residual, Self::Output> {
+        match self {
+            BigResult::Ok(v) => std::ops::ControlFlow::Continue(v),
+            BigResult::Err(v) => std::ops::ControlFlow::Break(v),
+        }
+    }
+}
+
+impl<T, E> FromResidual for BigResult<T, E> {
+    fn from_residual(residual: <Self as Try>::Residual) -> Self {
+        BigResult::Err(residual)
+    }
+}
+
+#[repr(C)]
+pub struct ImportVTable {
+    intern_string: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p>,
+    get_string: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str,
+    get_stats: unsafe extern "C" fn() -> *const Stats,
+    init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
+    find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
+    // TODO: i want the meta program to be tracking these instead.
+    get_exports: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
+    get_tests: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
+    get_tests_broken: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
+    // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
+    emit_c: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str>,
+    compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
+    get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
+    get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
+    lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: Span) -> *const str,
+    add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Arc<File>,
+    parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]>,
+    make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
+}
+
+pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
+    intern_string: franca_intern_string,
+    get_string: franca_get_string,
+    get_stats: franca_get_stats,
+    init_compiler: franca_init_compiler,
+    find_unqiue_func: franca_find_unique_fn,
+    get_exports: franca_get_exports,
+    get_tests: franca_get_tests,
+    get_tests_broken: franca_get_tests_broken,
+    emit_c: franca_emit_c,
+    compile_func: franca_compile_func,
+    get_jitted_ptr,
+    get_function: franca_get_function,
+    lookup_filename,
+    add_file,
+    parse_stmts,
+    make_and_resolve_and_compile_top_level,
+};
+
+unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
+    c.pool.intern(&*s)
+}
+unsafe extern "C" fn franca_get_string<'p>(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str {
+    c.pool.get(s) as *const str
+}
+unsafe extern "C" fn franca_get_stats<'p>() -> *const Stats {
+    addr_of!(STATS)
+}
+unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
+    let pool = Box::leak(Box::new(StringPool::default()));
+    let program = Box::leak(Box::new(Program::new(pool, comptime_arch)));
+    let compiler = Box::leak(Box::new(Compile::new(pool, program)));
+    compiler as *const Compile
+}
+unsafe extern "C" fn franca_find_unique_fn<'p>(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId> {
+    match c.program.find_unique_func(name) {
+        Some(f) => BigOption::Some(f),
+        None => BigOption::None,
+    }
+}
+unsafe extern "C" fn franca_get_exports(c: &mut Compile) -> *const [FuncId] {
+    c.export.as_slice() as *const [FuncId]
+}
+unsafe extern "C" fn franca_get_tests(c: &mut Compile) -> *const [FuncId] {
+    c.tests.as_slice() as *const [FuncId]
+}
+unsafe extern "C" fn franca_get_tests_broken(c: &mut Compile) -> *const [FuncId] {
+    c.tests_broken.as_slice() as *const [FuncId]
+}
+unsafe extern "C" fn franca_emit_c<'p>(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str> {
+    emit_c(c, (&*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str)
+}
+
+unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()> {
+    c.compile(f, when)
+}
+
+unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8> {
+    Ok(unwrap!(c.aarch64.get_fn(f), "not compiled {f:?}"))
+}
+
+unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p> {
+    &c.program[f] as *const Func
+}
+
+unsafe extern "C" fn lookup_filename(c: &mut Compile, span: Span) -> *const str {
+    c.parsing.codemap.look_up_span(span).file.name().to_string().leak() as *const str
+}
+
+unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Arc<File> {
+    c.parsing.codemap.add_file(name.to_string(), content.to_string())
+}
+
+unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]> {
+    let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
+    let stmts = Parser::parse_stmts(&mut comp.parsing, lex, comp.pool)?;
+    Ok(stmts.leak())
+}
+
+unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
+    let body = (&*body).to_vec();
+    let mut global = make_toplevel(c.pool, garbage_loc(), body);
+    ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
+    c.compile_top_level(global)?;
+    Ok(())
+}
 
 // This lets rust _declare_ a flat_call like its normal
 // Ideally you could do this with a generic but you can't be generic over a function value whose type depends on other generic parameters.
@@ -298,19 +497,19 @@ pub fn get_include_std(name: &str) -> Option<String> {
             let path = path.as_ref().unwrap().as_ref();
             if let Some(path) = path {
                 let path = path.join(name);
-                if let Ok(src) = fs::read_to_string(&path) {
+                if let std::result::Result::Ok(src) = fs::read_to_string(&path) {
                     return Some(src);
                 }
 
                 // TODO: have a different macro for this (cwd)
-                if let Ok(src) = fs::read_to_string(name) {
+                if let std::result::Result::Ok(src) = fs::read_to_string(name) {
                     return Some(src);
                 }
 
                 println!("Missing path {path:?}");
             } else {
                 // TODO: have a different macro for this (cwd)
-                if let Ok(src) = fs::read_to_string(name) {
+                if let std::result::Result::Ok(src) = fs::read_to_string(name) {
                     return Some(src);
                 }
                 println!("STDLIB_PATH not set.");

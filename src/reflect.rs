@@ -2,7 +2,7 @@ use std::cell::{Cell, UnsafeCell};
 use std::mem::{self, align_of, size_of, ManuallyDrop, MaybeUninit};
 use std::ptr::{self, NonNull};
 
-use interp_derive::Reflect;
+use interp_derive::{InterpSend, Reflect};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct RsType<'t> {
@@ -486,9 +486,11 @@ mod test {
     }
 }
 
+use crate::ast::TypeId;
+
 // Feels like this might be useful for representing padding?
 // But maybe it makes more sense to do it in chunks since its generally all at the end (when not repr(C)?).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, InterpSend)]
 pub enum BitSet {
     // Note: not u128 which means they can be split which means it can use the Vec's niche.
     Small([usize; 2]),

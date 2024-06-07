@@ -18,6 +18,7 @@ use crate::{
 };
 use std::{collections::HashMap, fmt::Write};
 
+use crate::export_ffi::BigResult::*;
 // try put 'static' on everything that's not exported beacuse that makes clang -O2 not leave them in the exe if it decides to inline.
 fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_names: bool) {
     let name = comp.program.pool.get(comp.program[f].name);
@@ -48,7 +49,7 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
             }
             let name = comp.program.pool.get(b.name().unwrap());
             if let TypeInfo::Ptr(inner) = comp.program[ty] {
-                let prim = comp.program.prim(inner).map(|prim| c_type_spec(prim)).unwrap_or("void");
+                let prim = comp.program.prim(inner).map(c_type_spec).unwrap_or("void");
                 write!(out, "{} *{},", prim, name).unwrap();
             } else {
                 let prim = comp.program.prim(ty).unwrap();

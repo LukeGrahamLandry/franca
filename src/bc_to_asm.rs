@@ -7,6 +7,7 @@
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
 use crate::bc::{is_float, BbId, Bc, Prim, PrimSig, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
+use crate::export_ffi::BigResult::*;
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};

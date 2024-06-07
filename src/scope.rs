@@ -12,6 +12,7 @@ use crate::{
     STATS,
 };
 
+use crate::export_ffi::BigResult::*;
 pub struct ResolveScope<'z, 'a, 'p> {
     captures: Vec<Var<'p>>,
     compiler: &'z mut Compile<'a, 'p>,

@@ -9,6 +9,7 @@ use crate::ast::{Binding, Flag, Name, TypeId, VarType};
 use crate::bc::Values;
 use crate::compiler::{CErr, CompileError, Res};
 use crate::export_ffi::get_include_std;
+use crate::export_ffi::BigResult::*;
 use crate::STATS;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},

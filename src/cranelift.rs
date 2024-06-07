@@ -6,6 +6,7 @@
 
 use std::{collections::HashMap, mem};
 
+use crate::export_ffi::BigResult::*;
 use cranelift::{
     codegen::{
         control::ControlPlane,
@@ -20,7 +21,7 @@ use cranelift::{
     prelude::*,
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, Linkage, Module, ModuleError};
+use cranelift_module::{DataDescription, DataId, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 use types::I16;
 
@@ -242,7 +243,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         } else {
             (format!("FN{}", f.as_index()), Linkage::Export)
         };
-        let id = self.cl.module.declare_function(&name, linkage, &ctx.func.signature).map_err(wrap)?;
+        let id = Into::<Res<_>>::into(self.cl.module.declare_function(&name, linkage, &ctx.func.signature).map_err(wrap))?;
         extend_options(&mut self.cl.funcs, f.as_index());
         self.cl.funcs[f.as_index()] = Some(id);
 
@@ -257,11 +258,11 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             println!("===");
         }
         builder.finalize();
-        self.cl.module.define_function(id, &mut ctx).map_err(wrap)?;
+        Into::<Res<_>>::into(self.cl.module.define_function(id, &mut ctx).map_err(wrap))?;
 
         if self.program[f].has_tag(Flag::Log_Asm) {
             ctx.want_disasm = true;
-            let code = ctx.compile_stencil(self.cl.module.isa(), &mut ControlPlane::default()).map_err(wrapg)?;
+            let code = Into::<Res<_>>::into(ctx.compile_stencil(self.cl.module.isa(), &mut ControlPlane::default()).map_err(wrapg))?;
             println!("=== asm for {f:?} {} ===", self.program.pool.get(self.program[f].name));
             println!("{}", code.vcode.unwrap());
         }
@@ -454,10 +455,10 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
                     BakedVar::Bytes(bytes) => {
-                        let id = self.cl.module.declare_anonymous_data(false, false).map_err(wrap)?;
+                        let id: DataId = Into::<Res<_>>::into(self.cl.module.declare_anonymous_data(false, false).map_err(wrap))?;
                         let mut data = DataDescription::new();
                         data.define(bytes.to_owned().into_boxed_slice());
-                        self.cl.module.define_data(id, &data).map_err(wrap)?;
+                        Into::<Res<_>>::into(self.cl.module.define_data(id, &data).map_err(wrap))?;
                         let local = self.cl.module.declare_data_in_func(id, builder.func);
                         self.stack.push(builder.ins().global_value(I64, local));
                     }

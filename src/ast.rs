@@ -1,7 +1,7 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
     bc::{Baked, Prim, Values},
-    compiler::{CErr, Compile, CompileError, Res},
+    compiler::{CErr, Compile, Res},
     err, extend_options,
     ffi::InterpSend,
     impl_index, impl_index_imm,
@@ -18,6 +18,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use crate::export_ffi::BigResult::*;
 impl std::fmt::Debug for TypeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_valid() {
@@ -852,7 +853,6 @@ pub struct Program<'p> {
     pub ffi_types: Map<u128, TypeId>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
     pub assertion_count: usize,
-    pub runtime_arch: TargetArch,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
     pub ffi_definitions: String,
@@ -937,7 +937,7 @@ pub struct IntTypeInfo {
 }
 
 impl<'p> Program<'p> {
-    pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch, runtime_arch: TargetArch) -> Self {
+    pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch) -> Self {
         let mut program = Self {
             baked: Default::default(),
             finished_layout_deep: BitSet::empty(),
@@ -967,7 +967,6 @@ impl<'p> Program<'p> {
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
             assertion_count: 0,
-            runtime_arch,
             comptime_arch,
             inline_llvm_ir: vec![],
             type_lookup: Default::default(),
@@ -1846,11 +1845,9 @@ pub enum Flag {
 
 macro_rules! flag_subset {
     ($ty:ty, $before:expr, $after:expr) => {
-        impl<'p> TryFrom<Ident<'p>> for $ty {
-            type Error = Box<CompileError<'p>>;
-
+        impl $ty {
             #[track_caller]
-            fn try_from(value: Ident<'p>) -> Result<Self, Self::Error> {
+            pub fn try_from(value: Ident) -> Res<$ty> {
                 // # Safety
                 // https://rust-lang.github.io/unsafe-code-guidelines/layout/enums.html
                 // "As in C, discriminant values that are not specified are defined as either 0 (for the first variant) or as one more than the prior variant."
