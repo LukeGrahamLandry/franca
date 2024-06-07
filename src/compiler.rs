@@ -655,6 +655,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             special = true;
         }
+        if self.program[f].has_tag(Flag::Libc) {
+            assert!(matches!(self.program[f].body, FuncImpl::Empty));
+            self.program[f].body = FuncImpl::DynamicImport(self.program[f].name);
+            special = true;
+        }
 
         #[cfg(feature = "cranelift")]
         if let Some(addr) = self.program[f].get_tag(Flag::Cranelift_Emit) {

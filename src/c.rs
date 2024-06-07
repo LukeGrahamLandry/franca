@@ -48,10 +48,10 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
             }
             let name = comp.program.pool.get(b.name().unwrap());
             if let TypeInfo::Ptr(inner) = comp.program[ty] {
-                let prim = comp.program.prim(inner);
-                write!(out, "{} *{},", c_type_spec(prim), name).unwrap();
+                let prim = comp.program.prim(inner).map(|prim| c_type_spec(prim)).unwrap_or("void");
+                write!(out, "{} *{},", prim, name).unwrap();
             } else {
-                let prim = comp.program.prim(ty);
+                let prim = comp.program.prim(ty).unwrap();
                 write!(out, "{} {},", c_type_spec(prim), name).unwrap();
             }
         }
@@ -173,8 +173,24 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
             // TODO: the frontend should just add the target as a callee instead.
             // this works because emit_bc redirects calls to the target.
             emit(comp, out, target)?
+        } else if let Some(asm) = comp.program[f].body.jitted_aarch64() {
+            writeln!(out.forward, "#if defined(__aarch64__)").unwrap();
+            // This doesn't do anything.
+            // My test doesn't work with locals either way and it works with an allocated pointer either way.
+            // If you decide in your heart that it probably does to something, should be smarter and only apply it with #returns_twice or something.
+            // writeln!(out.forward, "__attribute__((returns_twice))").unwrap();
+
+            declare(comp, &mut out.forward, f, false, false);
+
+            writeln!(out.forward, ";\n__asm__(").unwrap();
+            writeln!(out.forward, "\"__FN{}:\\n\\t\"", f.as_index()).unwrap();
+            for op in asm {
+                writeln!(out.forward, "\".word {op} \\n\\t\"").unwrap();
+            }
+            writeln!(out.forward, ");").unwrap();
+            writeln!(out.forward, "#endif").unwrap();
         } else {
-            println!("/* ERROR: No c compatible body for \n{}*/", comp.program[f].log(comp.pool))
+            err!("/* ERROR: No c compatible body for \n{}*/", comp.program[f].log(comp.pool))
         }
 
         Ok(())
@@ -182,6 +198,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
 
     // *int*_t because we have a little self respect remaining...
     out.types.push_str("#include <stdint.h>\n");
+    // TODO: have a way to say forward declarations in the language.
 
     out.types.push_str("typedef struct { void *_0; void *_1; } Reti64i64;\n");
     out.types.push_str("typedef struct { void *_0; double _1; } Reti64f64;\n");

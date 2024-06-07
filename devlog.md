@@ -2,6 +2,28 @@
 
 - just had to remove is_unit check on arg in c::declare because now there's the indirect return address sometimes.
 
+my own setjmp/longjmp was easy... for my asm backend anyway.
+
+for c,  
+i can't just write it how i did other functions where it becomes
+a `_FnXXX` that calls the libc setjmp because you can't setjmp and then return,
+because now you're in a different place on the stack. maybe it would get inlined by luck on higher opt but that seems sketchy.
+
+but i can't make clang on -O2 make it behave in a sane way (works on -O0).
+i tried attribute returns_twice and i tried making all the local variables the compiler generates volatile.
+also tried modifying the generated code to use libc setjump/longjmp and do it in an if() like `https://en.cppreference.com/w/cpp/utility/program/setjmp` says you have to.
+but it still doesn't pass my test.
+allocating the counter makes it work tho, with or without returns_twice.
+so i guess that does nothing and its just more conservative about aliasing the random pointer
+it got from an indirect call into the allocator, than a stack address, which fair enough i guess.
+but it kinda makes using that less appealing.
+
+I wanted to use it for the parser where there's only one way at the top to handle an error.
+A question mark operator like rust's seems like more effort, since I have a weird concept of returns
+so you have to like walk up the stack of blocks to find something of the right type to shortcircuit from and that seems a bit unpredictable, idk.
+Could also try the `x <- try(whatever)` thing again, but I feel like that's meh.
+cause you don't just want it to eat the rest of the block, it needs to work in nested expressions, and that gets hard to think about in the same way.
+
 ## (Jun 3)
 
 my painful bug was about dropping a stack slot after dup-ing it so it got reused for another variable.

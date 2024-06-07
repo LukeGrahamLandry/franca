@@ -707,7 +707,7 @@ pub enum CallConv {
 pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
     /// An external symbol to be resolved by the dynamic loader at runtime.
-    /// Libc functions (prefixed with '_') are a safe bet.
+    /// Libc functions are a safe bet.
     DynamicImport(Ident<'p>),
     /// An address to call this function in the compiler's process.
     ComptimeAddr(usize),
@@ -1232,9 +1232,9 @@ impl<'p> Program<'p> {
         None
     }
 
-    pub(crate) fn prim(&self, ty: TypeId) -> Prim {
+    pub(crate) fn prim(&self, ty: TypeId) -> Option<Prim> {
         let ty = self.raw_type(ty);
-        match self[ty] {
+        Some(match self[ty] {
             TypeInfo::F64 => Prim::F64,
             TypeInfo::Int(int) => match int.bit_count {
                 8 => Prim::I8,
@@ -1245,22 +1245,22 @@ impl<'p> Program<'p> {
             TypeInfo::Bool => Prim::I8,
             TypeInfo::VoidPtr | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) => Prim::P64,
 
-            TypeInfo::Unit => todo!(),
+            TypeInfo::Unit => return None,
             TypeInfo::Fn(_) | TypeInfo::Label(_) => Prim::I32,
             TypeInfo::Struct { ref fields, .. } => {
                 if fields.len() == 1 && self.slot_count(fields[0].ty) == 1 {
                     return self.prim(fields[0].ty);
                 }
-                todo!("{}", self.log_type(ty));
+                return None;
             }
-            _ => todo!("{}", self.log_type(ty)),
-        }
+            _ => return None,
+        })
     }
 
     pub(crate) fn prim_pair(&self, ty: TypeId) -> Res<'p, (Prim, Prim)> {
         let types = self.flat_tuple_types(ty); // TODO: don't allocate
         assert_eq!(types.len(), 2);
-        Ok((self.prim(types[0]), self.prim(types[1])))
+        Ok((unwrap!(self.prim(types[0]), ""), unwrap!(self.prim(types[1]), "")))
     }
 
     pub fn arity(&self, expr: &FatExpr<'p>) -> u16 {
@@ -1825,6 +1825,7 @@ pub enum Flag {
     Force_Aarch64,
     Tail,
     Redirect,
+    Libc,
     __Shift_Or_Slice,
     No_Tail, // TOOD: HACK. stack ptr/slice arg is UB so have to manually use this! not acceptable!
     __Return,

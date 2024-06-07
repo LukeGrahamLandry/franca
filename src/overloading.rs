@@ -368,7 +368,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         // i dare you to make this not an ass copy-paste.
         match &self.program[output.func].body {
-            FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => err!("ambigous overload",),
+            FuncImpl::Redirect(_) | FuncImpl::Empty | FuncImpl::Normal(_) => err!("ambigous overload {}", self.program[output.func].log(self.pool)),
             FuncImpl::Merged(parts) => {
                 merged.extend(parts.iter().cloned());
             }

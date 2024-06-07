@@ -142,7 +142,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     match slots {
                         0 => {}
                         1 => {
-                            let ty = self.program.prim(ty);
+                            let ty = self.program.prim(ty).unwrap();
                             result.addr_var(id);
                             result.push(Bc::StorePost { ty });
                             pushed += 1;
@@ -156,11 +156,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             result.addr_var(id);
                             result.inc_ptr_bytes(offset_2 as u16);
                             result.push(Bc::StorePost {
-                                ty: self.program.prim(types[1]),
+                                ty: self.program.prim(types[1]).unwrap(),
                             });
                             result.addr_var(id);
                             result.push(Bc::StorePost {
-                                ty: self.program.prim(types[0]),
+                                ty: self.program.prim(types[0]).unwrap(),
                             });
                             pushed += 2;
                         }
@@ -265,7 +265,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         match slots {
             0 => {}
             1 => {
-                let ty = self.program.prim(ty);
+                let ty = self.program.prim(ty).unwrap();
                 result.push(Bc::StorePre { ty });
             }
             2 => {
@@ -277,10 +277,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.push(Bc::PeekDup(2)); // grab the pointer
                 result.inc_ptr_bytes(offset_2 as u16);
                 result.push(Bc::StorePost {
-                    ty: self.program.prim(types[1]),
+                    ty: self.program.prim(types[1]).unwrap(),
                 });
                 result.push(Bc::StorePre {
-                    ty: self.program.prim(types[0]),
+                    ty: self.program.prim(types[0]).unwrap(),
                 });
             }
             _ => unreachable!(),
@@ -292,7 +292,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         match slots {
             0 => {}
             1 => {
-                let ty = self.program.prim(ty);
+                let ty = self.program.prim(ty).unwrap();
                 result.push(Bc::Load { ty });
             }
             2 => {
@@ -303,12 +303,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 );
                 result.push(Bc::PeekDup(0));
                 result.push(Bc::Load {
-                    ty: self.program.prim(types[0]),
+                    ty: self.program.prim(types[0]).unwrap(),
                 });
                 result.push(Bc::PeekDup(1));
                 result.inc_ptr_bytes(offset_2 as u16);
                 result.push(Bc::Load {
-                    ty: self.program.prim(types[1]),
+                    ty: self.program.prim(types[1]).unwrap(),
                 });
                 result.push(Bc::Snipe(2));
             }
@@ -367,7 +367,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 Bc::Ret0
             } else {
                 match slots {
-                    1 => Bc::Ret1(self.program.prim(ret)),
+                    1 => Bc::Ret1(self.program.prim(ret).unwrap()),
                     2 => Bc::Ret2(self.program.prim_pair(ret)?),
                     _ => Bc::Ret0, // void or indirect return
                 }
@@ -860,7 +860,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                     let info = self.program.get_info(expr.ty);
 
                                     if info.size_slots == 1 {
-                                        let ty = self.program.prim(value_type);
+                                        let ty = self.program.prim(value_type).unwrap();
                                         result.push(Bc::Load { ty });
                                         result.push(Bc::StorePre { ty });
                                     } else if info.size_slots == 2 && info.stride_bytes == 16 && info.align_bytes == 8 {
