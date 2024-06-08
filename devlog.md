@@ -4,6 +4,13 @@
   excplitly make the first arg the out pointer because i don't correctly use x8 yet.
   and need to use ManuallyDrop because you can't have the rust side trying to drop uninitialized memory when it sets the result in there.
 - forgot to make it exec!
+- compiling driver to c and then dylib works if i hardcode the source but not if i try to read a file.
+  - though it might be because i was treating Fd as i64 instead of i32 but that wasn't the problem.
+  - confusion with read returning giant number that must be -1 but im not seeing it as `lt` 0,
+    because my comparison functions had thier arguments emitted as unsigned ints, for now hack jsut cast them back
+    because that's just why the error message was confusing, not the actual problem.
+  - oh im stupid. my emitting constants doesn't know that a cstr is a special type of thing,
+    so it thinks its just a pointer to one byte so I was trying to open a file called "m" instead of "main.fr",
 
 ## (Jun 6)
 

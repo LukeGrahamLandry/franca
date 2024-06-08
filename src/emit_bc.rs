@@ -10,6 +10,7 @@
 
 use codemap::Span;
 use interp_derive::InterpSend;
+use std::ffi::CStr;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 
@@ -1242,6 +1243,22 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
                 let addr = program.baked.make(BakedVar::AddrOf(value), null());
                 let len = program.baked.make(BakedVar::Num(len as i64), null());
                 Ok(program.baked.make(BakedVar::VoidPtrArray(vec![addr, len]), jit_ptr))
+            } else if ty == program.save_cstr_t.unwrap() {
+                assert_eq!(value.bytes().len(), 8);
+                let ptr: i64 = from_values(program, value.clone())?;
+                let mut ptr = ptr as *const u8;
+                let mut bytes = vec![];
+                unsafe {
+                    while *ptr != 0 {
+                        bytes.push(*ptr);
+                        ptr = ptr.offset(1);
+                    }
+                }
+                bytes.push(0);
+
+                let value = program.baked.make(BakedVar::Bytes(bytes), null());
+                let addr = program.baked.make(BakedVar::AddrOf(value), jit_ptr);
+                Ok(addr)
             } else {
                 if fields.iter().all(|f| program.get_info(f.ty).stride_bytes == 8) {
                     let mut ptrs = vec![];

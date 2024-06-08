@@ -17,9 +17,10 @@ use franca::{
 };
 use std::{
     env,
+    ffi::CString,
     fs::{self, File},
     io::Read,
-    mem,
+    mem::{self, transmute},
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
@@ -39,6 +40,13 @@ use std::{
 const SHOW_MEM_REGIONS: bool = false;
 
 fn main() {
+    let start = timestamp();
+    let log_time = || {
+        let end = timestamp();
+        let seconds = end - start;
+        println!("Compilation (parse/bytecode/jit) finished in {seconds:.3} seconds;",);
+    };
+
     let marker = 0;
     unsafe { STACK_START = &marker as *const i32 as usize };
     unsafe { MMAP_ARENA_START = MEM.get() as usize };
@@ -74,6 +82,7 @@ fn main() {
     let mut sanitize = false;
     let mut test_c = false;
     let mut clang_o2 = false;
+    let mut driver_path = None;
     args.next().unwrap(); // exe path
 
     #[cfg(target_arch = "aarch64")]
@@ -135,12 +144,36 @@ fn main() {
                 "optimize=fast" => {
                     clang_o2 = true;
                 }
+                "driver-dylib" => {
+                    let path = args.next().expect("path to driver dylib");
+                    assert!(!path.starts_with("--"), "you probably didn't mean to start a filepath with '--'?");
+                    driver_path = Some(path)
+                }
 
                 _ => panic!("unknown argument --{name}"),
             }
         } else {
             assert!(path.is_none(), "please specify only one input file");
             path = Some(name);
+        }
+    }
+
+    if let Some(path) = driver_path {
+        unsafe {
+            let mut s = path.as_bytes().to_vec();
+            s.push(0);
+            let s = CString::from_vec_with_nul(s).unwrap();
+            let lib = libc::dlopen(s.as_ptr(), libc::RTLD_LAZY);
+            assert_ne!(lib as usize, 0);
+
+            let mut s = "driver".as_bytes().to_vec();
+            s.push(0);
+            let s = CString::from_vec_with_nul(s).unwrap();
+            let f = libc::dlsym(lib, s.as_ptr());
+            assert_ne!(f as usize, 0);
+            let f: extern "C" fn(*const ImportVTable) = transmute(f);
+            f(&IMPORT_VTABLE as *const ImportVTable);
+            return;
         }
     }
 
@@ -181,7 +214,6 @@ fn main() {
         //     src += &a;
         // }
 
-        let start = timestamp();
         let mut program = Program::new(pool, arch);
         let mut comp = Compile::new(pool, &mut program);
 
@@ -189,12 +221,6 @@ fn main() {
             log_err(&comp, *e);
             exit(1);
         });
-
-        let log_time = || {
-            let end = timestamp();
-            let seconds = end - start;
-            println!("Compilation (parse/bytecode/jit) finished in {seconds:.3} seconds;",);
-        };
 
         #[cfg(feature = "c-backend")]
         if c || run_with_clang {
@@ -233,6 +259,10 @@ fn main() {
 
         if let Some(f) = comp.program.find_unique_func(comp.pool.intern("driver")) {
             let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as usize).unwrap();
+            if let franca::export_ffi::BigResult::Err(e) = comp.compile(f, ExecStyle::Jit) {
+                log_err(&comp, *e);
+                exit(1);
+            }
             if let franca::export_ffi::BigResult::Err(e) = comp.run(f, val) {
                 log_err(&comp, *e);
                 exit(1);

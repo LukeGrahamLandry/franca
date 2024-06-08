@@ -862,6 +862,8 @@ pub struct Program<'p> {
     finished_layout_deep: BitSet,
     pub baked: Baked,
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
+    // TODO: this could just be a !builtin, is that better?
+    pub save_cstr_t: Option<TypeId>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -974,6 +976,7 @@ impl<'p> Program<'p> {
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
             inferred_type_names: vec![],
+            save_cstr_t: None,
         };
 
         for (i, ty) in program.types.iter().enumerate() {

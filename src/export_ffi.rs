@@ -9,7 +9,6 @@ use crate::ast::{
     TargetArch, TypeId, TypeInfo, WalkAst,
 };
 use crate::bc::{to_values, ReadBytes, Values};
-use crate::c::emit_c;
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
@@ -197,7 +196,16 @@ unsafe extern "C" fn franca_emit_c<'p>(
     fns: *const [FuncId],
     add_test_runner: bool,
 ) {
-    *out = ManuallyDrop::new(emit_c(c, (&*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str));
+    #[cfg(feature = "c-backend")]
+    {
+        *out = ManuallyDrop::new(crate::c::emit_c(c, (&*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str));
+    }
+
+    #[cfg(not(feature = "c-backend"))]
+    {
+        // TODO: this should be an error but its annoying to make them with indirect return cause can't use the macro
+        panic!("not compiled with c backend")
+    }
 }
 
 unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()> {
@@ -435,11 +443,15 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
     ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
+    ("fn __save_cstr_t(T: Type) Unit", save_cstr_t as *const u8),
     ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
 ];
 
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
     compiler.make_slice_t = Some(f);
+}
+extern "C-unwind" fn save_cstr_t(compiler: &mut Compile, t: TypeId) {
+    compiler.program.save_cstr_t = Some(t);
 }
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {
@@ -483,7 +495,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "const DlHandle = @struct(lib: rawptr); const CStr = @struct(ptr: *u8);").unwrap();
+            writeln!(out, "const DlHandle = @struct(lib: rawptr);").unwrap();
             writeln!(out, "TimeSpec :: @struct(seconds: i64, nanoseconds: i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();

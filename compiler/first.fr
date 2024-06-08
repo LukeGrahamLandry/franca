@@ -2,27 +2,23 @@
 
 // TODO: less ass field lookup and call syntax
 // TODO: compiler needs to check type / find right overload of this function. 
-fn driver(vtable: *ImportVTable) Unit = {
+fn driver(vtable: *ImportVTable) Unit #export = {
     println("Hello World");
-    
     comp := {vtable.init_compiler}(.Aarch64);
-    src := libc_allocator.read_to_string(@symbol("main.fr").c_str());
+    // TODO
+    src := libc_allocator.read_to_string(:: @symbol("main.fr").c_str());
     file := {vtable.add_file}(comp, "main.fr", src&.items());
-    println("will parse");
+    // file := {vtable.add_file}(comp, "main.fr", src);
     stmts := {vtable.parse_stmts}(comp, file);
-    println("will unwrap");
     stmts := stmts&.unwrap()[];
     res := {vtable.make_and_resolve_and_compile_top_level}(comp, stmts);
     res&.unwrap();
     tests := {vtable.get_tests}(comp);
     for(tests) {fid|
-        println("comp");
         res := {vtable.compile_func}(comp, fid, .Jit);
         res&.unwrap();
-        println("get");
         ptr := {vtable.get_jitted_ptr}(comp, fid);
         ptr := ptr&.unwrap()[];
-        println("call");
         {vtable.make_jitted_exec}(comp);
         f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
         f();
@@ -32,17 +28,24 @@ fn driver(vtable: *ImportVTable) Unit = {
 
 // TODO: HACK HACK HACK. use fseek 
 fn read_to_string(alloc: Alloc, path: CStr) List(u8) = {
-    bytes: List(u8) = list(999999, alloc);
+    HACK_MAX :: 999999;
+    bytes: List(u8) = list(HACK_MAX, alloc);
     flag := (@as(i64) OpenFlag.Read);
     f := open(path, flag);
-    if(f.fd.lt(0)) {|
-        panic("failed open!");
-    };
-    real_len := read(f, bytes.maybe_uninit.ptr, bytes.maybe_uninit.len);
+    // TODO: i32 overloads
+    // TODO: print filepath if failed to open
+    //if(f.fd.lt(0)) {|
+    //    panic("failed open!");
+    //};
+    real_len: i64 = read(f, bytes.maybe_uninit.ptr, bytes.maybe_uninit.len);
     if(real_len.lt(0)) {|
+        
         panic("failed read!");
     };
     @println("read % bytes", real_len);
+    if(real_len.gt(HACK_MAX)) {|
+        panic("miscompiled?? read more than max!!!");
+    };
     bytes.len = real_len;
     bytes
 }
