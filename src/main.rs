@@ -4,7 +4,7 @@
 
 use franca::{
     ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
-    bc::{from_values, to_values, Values},
+    bc::{to_values, Values},
     compiler::{Compile, ExecStyle, Res},
     export_ffi::{end_raw, get_include_std, start_raw, ImportVTable, IMPORT_VTABLE},
     find_std_lib,

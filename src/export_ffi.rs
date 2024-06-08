@@ -5,8 +5,8 @@ use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{
-    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program, ScopeId,
-    TargetArch, TypeId, TypeInfo, WalkAst,
+    garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
+    ScopeId, TargetArch, TypeId, TypeInfo, WalkAst,
 };
 use crate::bc::{to_values, ReadBytes, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
@@ -20,7 +20,7 @@ use crate::scope::ResolveScope;
 use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
 use std::fmt::{Debug, Write};
 use std::hint::black_box;
-use std::mem::{self, transmute, ManuallyDrop, MaybeUninit};
+use std::mem::{self, transmute, ManuallyDrop};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
 use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
@@ -120,9 +120,7 @@ pub struct ImportVTable {
     init_compiler: unsafe extern "C" fn(comptime_arch: TargetArch) -> *const Compile<'static, 'static>,
     find_unqiue_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, name: Ident<'p>) -> BigOption<FuncId>,
     // TODO: i want the meta program to be tracking these instead.
-    get_exports: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
-    get_tests: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
-    get_tests_broken: unsafe extern "C" fn(c: &mut Compile) -> *const [FuncId],
+    get_fns_with_tag: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, tag: Ident<'p>) -> *const [FuncId],
     // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
     emit_c: for<'p> unsafe extern "C" fn(
         out: *mut ManuallyDrop<Res<'p, *const str>>,
@@ -146,9 +144,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_stats: franca_get_stats,
     init_compiler: franca_init_compiler,
     find_unqiue_func: franca_find_unique_fn,
-    get_exports: franca_get_exports,
-    get_tests: franca_get_tests,
-    get_tests_broken: franca_get_tests_broken,
+    get_fns_with_tag,
     emit_c: franca_emit_c,
     compile_func: franca_compile_func,
     get_jitted_ptr,
@@ -166,7 +162,7 @@ unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const
 unsafe extern "C" fn franca_get_string<'p>(c: &mut Compile<'_, 'p>, s: Ident<'p>) -> *const str {
     c.pool.get(s) as *const str
 }
-unsafe extern "C" fn franca_get_stats<'p>() -> *const Stats {
+unsafe extern "C" fn franca_get_stats() -> *const Stats {
     addr_of!(STATS)
 }
 unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
@@ -181,14 +177,16 @@ unsafe extern "C" fn franca_find_unique_fn<'p>(c: &mut Compile<'_, 'p>, name: Id
         None => BigOption::None,
     }
 }
-unsafe extern "C" fn franca_get_exports(c: &mut Compile) -> *const [FuncId] {
-    c.export.as_slice() as *const [FuncId]
-}
-unsafe extern "C" fn franca_get_tests(c: &mut Compile) -> *const [FuncId] {
-    c.tests.as_slice() as *const [FuncId]
-}
-unsafe extern "C" fn franca_get_tests_broken(c: &mut Compile) -> *const [FuncId] {
-    c.tests_broken.as_slice() as *const [FuncId]
+unsafe extern "C" fn get_fns_with_tag(c: &mut Compile, tag: Ident) -> *const [FuncId] {
+    let mut found = vec![];
+    for (fid, func) in c.program.funcs.iter().enumerate() {
+        if func.get_flag(FnFlag::NotEvilUninit) && func.annotations.iter().any(|a| a.name == tag) {
+            found.push(FuncId::from_index(fid));
+        }
+    }
+    println!("scanned {} fns", c.program.funcs.len());
+
+    found.leak() as *const [FuncId]
 }
 unsafe extern "C" fn franca_emit_c<'p>(
     out: *mut ManuallyDrop<Res<'p, *const str>>,
@@ -198,7 +196,7 @@ unsafe extern "C" fn franca_emit_c<'p>(
 ) {
     #[cfg(feature = "c-backend")]
     {
-        *out = ManuallyDrop::new(crate::c::emit_c(c, (&*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str));
+        *out = ManuallyDrop::new(crate::c::emit_c(c, (*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str));
     }
 
     #[cfg(not(feature = "c-backend"))]
@@ -230,9 +228,7 @@ unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Arc
 
 unsafe extern "C" fn parse_stmts<'p>(out: *mut ManuallyDrop<BigCErr<'p, *const [FatStmt<'p>]>>, comp: &mut Compile<'_, 'p>, file: Arc<File>) {
     assert_eq!(mem::size_of::<BigCErr<'p, *const [FatStmt<'p>]>>(), 24);
-    println!("called parse {}", mem::size_of::<Arc<File>>());
     let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
-    println!("{}", comp.parsing.codemap.look_up_span(file.span));
     let stmts = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
         Ok(s) => s,
         Err(e) => {
@@ -240,15 +236,12 @@ unsafe extern "C" fn parse_stmts<'p>(out: *mut ManuallyDrop<BigCErr<'p, *const [
             return;
         }
     };
-    println!("parsed");
-    mem::forget(file);
-    println!("setting result");
+    mem::forget(file); // the franca code that called us doesn't know it has to clone the Arc.
     *out = ManuallyDrop::new(Ok(stmts.leak()));
-    println!("returning");
 }
 
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
-    let body = (&*body).to_vec();
+    let body = (*body).to_vec();
     let mut global = make_toplevel(c.pool, garbage_loc(), body);
     ResolveScope::run(&mut global, c, ScopeId::from_index(0))?;
     c.compile_top_level(global)?;
@@ -311,45 +304,15 @@ macro_rules! bounce_flat_call {
 // TODO: use the right int types
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
-    ("fn write(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::write as *const u8),
-    ("fn exit(status: i64) Never", libc::exit as *const u8), // TODO: status: i32
-    ("fn malloc(size: usize) rawptr", libc::malloc as *const u8),
-    ("fn free(ptr: rawptr) Unit", libc::free as *const u8),
-    ("fn system(null_terminated_cmd: CStr) i64", libc::system as *const u8),
-    ("fn open(null_terminated_path: CStr, flags: i64) Fd", libc::open as *const u8),
-    ("fn close(fd: Fd) i64", libc::close as *const u8),
-    ("fn rand() i64", libc::rand as *const u8),
-    ("fn get_errno() i64", get_errno as *const u8),
-    ("fn dlopen(name: CStr, flag: i64) DlHandle", libc::dlopen as *const u8),
-    ("fn dlsym(lib: DlHandle, name: CStr) rawptr", libc::dlsym as *const u8),
-    ("fn dlclose(lib: DlHandle) i64", libc::dlclose as *const u8),
-    (
-        "fn mmap(addr: rawptr, len: i64, prot: i64, flags: i64, fd: Fd, offset: i64) rawptr",
-        libc::mmap as *const u8,
-    ),
-    ("fn munmap(addr: rawptr, len: i64) i64", libc::munmap as *const u8),
-    ("fn mprotect(addr: rawptr, len: i64, prot: i64) i64", libc::mprotect as *const u8),
-    #[cfg(target_arch = "aarch64")]
-    ("fn __clear_cache(beg: rawptr, beg: rawptr) Unit", __clear_cache as *const u8),
-    (
-        "fn clock_gettime(clock_id: i64, time_spec: *TimeSpec) Unit",
-        libc::clock_gettime as *const u8,
-    ),
-    #[cfg(target_os = "macos")]
-    ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
-    #[cfg(target_os = "macos")]
-    ("fn _NSGetArgv() ***u8", _NSGetArgv as *const u8),
-    ("fn read(fd: Fd, buf: Ptr(u8), size: i64) i64", libc::read as *const u8),
-    ("fn memcpy(dest: rawptr, src: rawptr, n: i64) i64", libc::memcpy as *const u8),
-    ("fn tcgetattr(fd: Fd, out: *Terminos) Unit", libc::tcgetattr as *const u8),
-    (
-        "fn tcsetattr(fd: Fd, optional_actions: i64, in: *Terminos) Unit",
-        libc::tcsetattr as *const u8,
-    ),
+    // #[cfg(target_arch = "aarch64")]
+    // ("fn __clear_cache(beg: rawptr, beg: rawptr) Unit", __clear_cache as *const u8),
+
+    // #[cfg(target_os = "macos")]
+    // ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
+    // #[cfg(target_os = "macos")]
+    // ("fn _NSGetArgv() **CStr", _NSGetArgv as *const u8),
     ("fn temp_start_raw_terminal(fd: Fd) Unit", start_raw as *const u8),
     ("fn temp_end_raw_terminal(fd: Fd) Unit", end_raw as *const u8),
-    ("fn usleep(micro_seconds: u32) Unit", libc::usleep as *const u8),
-    ("fn abort() Never", libc::abort as *const u8),
 ];
 
 // Based on man termios and
@@ -495,8 +458,6 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 libc::MAP_ANONYMOUS,
             )
             .unwrap();
-            writeln!(out, "const DlHandle = @struct(lib: rawptr);").unwrap();
-            writeln!(out, "TimeSpec :: @struct(seconds: i64, nanoseconds: i64);").unwrap();
             for (sig, ptr) in LIBC {
                 writeln!(out, "#comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }
@@ -1209,7 +1170,7 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
     let loc = os.loc;
     let ty: TypeId = hope(|| comp.immediate_eval_expr_known(f_ty));
     let os: OverloadSetId = hope(|| comp.immediate_eval_expr_known(os));
-    let f_ty = comp.program.fn_ty(ty).expect("@resolve arg should be function type. TODO: allow FnPtr");
+    let f_ty = comp.program.fn_ty(ty).expect("@resolve arg should be function type.");
 
     hope(|| comp.compute_new_overloads(os, None));
     // TODO: just filter the iterator.

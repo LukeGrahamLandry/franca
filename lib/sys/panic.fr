@@ -1,0 +1,116 @@
+PANIC_HOOK :: @static(@FnPtr(msg: Str) Never);
+IS_PANICKING :: @static(bool);
+::{ IS_PANICKING[] = false; };
+
+fn panic(msg: Str) Never = {
+    is_panicking := IS_PANICKING;
+    if(is_panicking[], => { abort(); });
+    is_panicking[] = true;
+    
+    hook := PANIC_HOOK;
+    hook[](msg);
+    unreachable()  // TODO: bc_to_asm handle fnptr returning never correctly -- May 23
+}
+
+fn unreachable() Never = panic("Entered unreachable code.");
+fn unreachable(msg: Str) Never = {
+    msg := concat("Entered unreachable code.", msg, libc_allocator);
+    panic(msg.items())
+}
+
+fn unreachable_hack(const T: Type) T #generic = {
+    unreachable();
+    ()!uninitialized
+}
+
+fn print_and_abort(msg: Str) Never = {
+    println(msg);
+    abort()
+}
+
+fn print_trace_and_abort(msg: Str) Never = {
+    @println("Panicked: %", msg);
+    walk_backtrace{f|
+        print("- ");
+        @match(f) {
+            (fn Rust(rs) => { 
+                // TODO: why is *const u8 turning into *i8
+                name: Str = (ptr = ptr_cast_unchecked(i8, u8, rs.owned_name), len = rs.name_len);
+                if(rs.line.ne(1.neg())){|
+                    @println("[line %] %", rs.line, name); 
+                }{|
+                    @println("[] %", name); 
+                };
+            });
+            (fn Franca(f) => { @println("%", f.name); });
+            (fn Unknown(ip) => { @println("[ip=%] ???", AsmInst.int_from_ptr(ip)); });
+        };
+    };
+    abort()
+}
+
+fn print_stacktrace_on_panic() Unit = {
+    PANIC_HOOK[] = (@resolve(@Fn(msg: Str) Never) print_trace_and_abort)!fn_ptr;
+}
+
+:: {
+    PANIC_HOOK[] = (@resolve(@Fn(msg: Str) Never) print_and_abort)!fn_ptr;
+};
+
+fn todo() Never = panic("Not Yet Implemented");
+
+// TODO: can't do this because of circular dependency. 
+//       in List it needs to call the other assert which means it needs the types of the whole overload set so it needs to compile List$i64
+fn assert(cond: bool, const msg: Fn(Unit, List(u8))) Unit = {
+    if(cond.not()){|
+        var msg = msg();
+        let msg: Str = msg&.items();
+        panic(msg);
+    }
+}
+
+fn assert(cond: bool, msg: Str) Unit = {
+    if(cond.not()) {|
+        panic(msg); // TODO: fix overload resolution so this doesn't need the semi colon to turn Never to Unit
+    }
+}
+
+
+ASSERTIONS_PASSED :: @static(i64);
+
+// TODO: why can't I #c_call
+// Note: this is a magic name the rust code looks for. 
+#when(COUNT_ASSERT)
+fn __get_assertions_passed() i64 = ASSERTIONS_PASSED[];
+
+// This gets propagated so it doesn't have to compile all the formatting stuff if its false which makes the tiny tests compile faster. 
+VERBOSE_ASSERT :: false; 
+COUNT_ASSERT   :: true; 
+
+// TODO: maybe call this expect_eq to distinguish from a normal assert_eq that isn;t limmited to one call per lexical occurance in a test. 
+fn assert_eq(const T: Type) Unit = {
+    // TODO: unhelpful error message when there's no fn eq for T. -- Apr 27
+    fn assert_eq(lhs: T, rhs: T) Unit = {
+        (::VERBOSE_ASSERT, => assert(lhs.eq(rhs)) { ()List(u8) |
+            var out: List(u8) = list(40, libc_allocator);
+            @fmt(out&, "Assertion Failed. Expected (% == %)", lhs, rhs);  // TODO: version of @fmt that makes the list for you and returns it. 
+            out
+        }, => {
+            assert(lhs.eq(rhs), "assertion failed");
+        })!if;
+        
+        (::COUNT_ASSERT, => {
+            ASSERTIONS_PASSED[] = ASSERTIONS_PASSED[].add(1);
+        }, =>())!if;
+    }
+}
+
+::assert_eq(i64);
+::assert_eq(bool);
+::assert_eq(Type);
+::assert_eq(Symbol);
+::assert_eq(f64);
+
+// TODO: this cant just be a no-op because I count that my tests trigger all their assertions.
+/// Stupid question, but I guess it's wierd if I don't let you ask.
+fn assert_eq(_: Unit, __: Unit) Unit = assert_eq(0, 0);

@@ -8,6 +8,7 @@ use codemap::Span;
 use codemap_diagnostic::Diagnostic;
 use core::slice;
 use interp_derive::InterpSend;
+use std::ffi::CString;
 use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
@@ -657,9 +658,25 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             special = true;
         }
+        // TODO: put this in the driver program? put all the special fns in the driver program?
         if self.program[f].has_tag(Flag::Libc) {
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
-            self.program[f].body = FuncImpl::DynamicImport(self.program[f].name);
+            // TODO: figure out the right path for different oses.
+            // TODO: don't re-dlopen every time. tho i think its cached.
+            let mut s = "/usr/lib/libc.dylib".as_bytes().to_vec();
+            s.push(0);
+            let s = CString::from_vec_with_nul(s).unwrap();
+
+            let libc = unsafe { libc::dlopen(s.as_ptr(), libc::RTLD_LAZY) };
+            let s = self.pool.get_c_str(self.program[f].name);
+            let addr = unsafe { libc::dlsym(libc, s as *const i8) };
+            if addr.is_null() {
+                // TODO: warn? have different #import that means we expect not at comptime?
+                self.program[f].body = FuncImpl::DynamicImport(self.program[f].name);
+            } else {
+                self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(self.program[f].name)]);
+                self.aarch64.dispatch[f.as_index()] = addr as *const u8;
+            }
             special = true;
         }
 

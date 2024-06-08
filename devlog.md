@@ -1,3 +1,8 @@
+## (Jun 8)
+
+- let type_of see through fn ptrs so can do inline .unwrap on vtable calls.
+  I think nothing relied on Program::fn_ty denying FnPtrs.
+
 ## Build script goes brrr (Jun 7)
 
 - when returning something larger than two registers,

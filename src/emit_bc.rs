@@ -10,7 +10,6 @@
 
 use codemap::Span;
 use interp_derive::InterpSend;
-use std::ffi::CStr;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 

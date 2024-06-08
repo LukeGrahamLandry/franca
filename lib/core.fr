@@ -15,159 +15,37 @@ OverloadSet :: OverloadSet!builtin;
 // An interned string blessed by the compiler.
 // This is the type of identifiers in source files.
 // There's nothing special about it unless you're interacting with the asts in macros.
-const Symbol = Symbol!builtin;
+Symbol :: Symbol!builtin;
 
 // TODO: this is the forward declaration for struct initilizers to bind to. hate it. 
-fn init(_: Unit) Unit = ();
+fn init(_: Unit) Unit;
 
-fn UInt(bits: i64) Type #fold = IntType(bits, false);
-fn SInt(bits: i64) Type #fold = IntType(bits, true);
-
-fn Tag(E: Type) Type = i64;  // Currently enum tags are untyped but that will likely change.
-
-// TODO: this sucks. dynamically make these for uxx & ixx.
-const u1 = UInt(1);
-const u2 = UInt(2);
-const u4 = UInt(4);
-const u5 = UInt(5);
-const u6 = UInt(6);
-const u8 = UInt(8);
-const u12 = UInt(12);
-const u16 = UInt(16);
-const u19 = UInt(19);
-const u32 = UInt(32);
-const u64 = UInt(64);
-const i7 = SInt(7);
-const i8 = SInt(8);
-const i16 = SInt(16);
-const i19 = SInt(19);
-const i26 = SInt(26);
-const i32 = SInt(32);
-const i33 = SInt(33);
-
-// Needs to be builtin because Type has a special load function which needs to evaluate *Type to typecheck. 
-// fn operator_star_prefix(T: Type) Type = Ptr(T);
-
-const Fd = @struct(fd: u32);
-
-fn if(const T: Type) Unit = {
-    fn if(cond: bool, const then: @Fn() T, const else: @Fn() T) T =
-        (cond, then, else)!if;
-}
-
-// TODO: auto impl generics
-if(i64); if(Unit); if(bool); if(u8);
-
-fn if(cond: bool, const then: @Fn() Unit) Unit =
-    (cond, then, =>())!if;
-
-fn mod(big: i64, divisor: i64) i64 = sub(big, mul(div(big, divisor), divisor));
-fn max(a: i64, b: i64) i64 = (lt(a, b), =>b, =>a)!if;
-fn min(a: i64, b: i64) i64 = (gt(a, b), =>b, =>a)!if;
-fn not(b: bool) bool = (b, => false, => true)!if;
-fn neg(a: i64) i64 = sub(0, a);
-fn abs(val: i64) i64 = (val.ge(0), => val, => val.neg())!if;
-fn int(val: bool) i64 = (val, => 1, => 0)!if;
-fn eq(a: bool, b: bool) bool = a.int().eq(b.int());
-fn eq(lhs: Symbol, rhs: Symbol) bool = lhs.int().eq(rhs.int());
-fn to_bool(b: i64) bool = (eq(b, 0), => false, => true)!if;
-
-#redirect(Ty(i64, i64), i64) fn add(a: u8, b: u8) u8;
-#redirect(Ty(i64, i64), i64) fn sub(a: u8, b: u8) u8;
-
-#redirect(Ty(i64, i64), bool) fn ne(a: u8, b: u8) bool;
-#redirect(Ty(i64, i64), bool) fn eq(a: u8, b: u8) bool;
-#redirect(Ty(i64, i64), bool) fn lt(a: u8, b: u8) bool;
-#redirect(Ty(i64, i64), bool) fn gt(a: u8, b: u8) bool;
-#redirect(Ty(i64, i64), bool) fn le(a: u8, b: u8) bool;
-#redirect(Ty(i64, i64), bool) fn ge(a: u8, b: u8) bool;
-
-#redirect(Ty(i64, i64), i64) fn add(a: u32, b: u32) u32;
-#redirect(Ty(i64, i64), i64) fn sub(a: u32, b: u32) u32;
-
-#redirect(Ty(i64, i64), bool) fn eq(a: u32, b: u32) bool;
-#redirect(Ty(i64, i64), bool) fn ne(a: u32, b: u32) bool;
-#redirect(Ty(i64, i64), bool) fn ge(a: u32, b: u32) bool;
-#redirect(Ty(i64, i64), bool) fn le(a: u32, b: u32) bool;
-#redirect(Ty(i64, i64), bool) fn lt(a: u32, b: u32) bool;
-#redirect(Ty(i64, i64), bool) fn gt(a: u32, b: u32) bool;
-
-#redirect(Ty(i64, i64), i64) fn min(a: u32, b: u32) u32;
-#redirect(Ty(i64, i64), i64) fn max(a: u32, b: u32) u32;
-
-// TODO: this gets a bit silly if I have to define this stuff all again but with different types. 
-//       it would be cool if it could be done with traits. like anything with an ordering could have a fn max (bad example for floats i guess)
-fn neg(a: f64) f64 = sub(0.0, a); // TODO: there's an instruction for this. which would be better because there's no zero register for floats. 
-
-/// Yes, really...
-fn is_nan(a: f64) bool = a.eq(a).not();  // TODO: this could be fewer instructions but this is more fun. 
-
-// There must be a not insane way to do this but i gave up and read the two's complement wikipedia page.
-/// Convert an i64 to an i<bit_count> with the (64-<bit_count>) leading bits 0.
-fn signed_truncate(x: i64, bit_count: i64) u32 = {
-    let mask = 1.shift_left(bit_count).sub(1);
-    (le(x, 0), => bit_and(add(bit_not(mul(x, neg(1))), 1), mask).trunc(), => x.trunc())!if
-}
-
-// Note: these are not short circuiting because arguments are always evaluated. 
-fn and(a: bool, b: bool) bool = a.if(=> b, => false);
-fn or(a: bool, b: bool) bool = a.if(=> true, => b);
-
-// Note: these are short circuiting. The closure will only be called if necessary. 
-fn and(a: bool, const b: @Fn() bool) bool = a.if(b, => false);
-fn or(a: bool, const b: @Fn() bool) bool = a.if(=> true, b);
-
-fn assert(cond: bool, msg: Str) Unit = if(cond, =>(), fn() Unit=>{
-    panic(msg); // TODO: fix overload resolution so this doesn't need the semi colon to turn Never to Unit
-});
-
+// TODO: these are still somewhat order dependent because of `:: expr;`.
 #include_std("compiler");
 #include_std("libc");
+#include_std("math.fr");
+#include_std("sys/libc.fr");
 #include_std("codegen/llvm/basic.fr");
 #include_std("pointers.fr");
 #include_std("casts.fr");
-#include_std("slice.fr");
-#include_std("mem.fr");
-#include_std("list.fr");
-#include_std("map.fr");
+#include_std("collections/slice.fr");
+#include_std("alloc.fr");
+#include_std("collections/list.fr");
+#include_std("collections/map.fr");
 #include_std("option.fr");
-#include_std("system.fr");
+#include_std("sys/process.fr");
 #include_std("ast.fr");
 #include_std("macros.fr");
 #include_std("fmt.fr");
-#include_std("bucket_array.fr");
+#include_std("sys/panic.fr");
+#include_std("collections/bucket_array.fr");
 #include_std("codegen/aarch64/instructions.fr");
 #include_std("codegen/aarch64/basic.fr");
 #include_std("codegen/wasm/instructions.fr");
 #include_std("codegen/bf/instructions.fr");
 #include_std("codegen_cranelift_basic");
-#include_std("testing.fr");
 #include_std("codegen/aarch64/unwind.fr");
 #include_std("codegen/aarch64/jump.fr");
 #include_std("codegen/c/emit.fr");
 #include_std("codegen/c/basic.fr");
 #include_std("loop.fr");
-
-#redirect(Ty(i64, i64), i64)  fn shift_left(value: u64, shift_amount: i64) u64;
-#redirect(Ty(i64, i64), i64)  fn bit_or(lhs: u64, rhs: u64) u64;
-#redirect(Ty(i64, i64), i64)  fn bit_and(lhs: u64, rhs: u64) u64;
-#redirect(i64, i64)           fn bit_not(value: u64) u64;
-#redirect(Ty(i64, i64), bool) fn eq(lhs: u64, rhs: u64) bool;
-// TODO: need to make totally sure its always zero extended. 
-#redirect(Ty(i64, i64), i64)  fn bit_or(lhs: u32, rhs: u32) u32;
-#redirect(Ty(i64, i64), i64)  fn bit_and(lhs: u32, rhs: u32) u32;
-// TODO: bit_not can't just redirect because that would flip the leading zeros too. 
-#redirect(Ty(i64, i64), i64)  fn shift_left(value: u32, shift_amount: i64) u32;
-
-#redirect(i64, Unit) fn println(a: u64) Unit; // TODO: WRONG. sign
-#redirect(i64, Unit) fn println(a: u32) Unit; 
-#redirect(Ty(i64, *List(u8)), Unit) fn display(a: u64, out: *List(u8)) Unit; // TODO: WRONG. sign
-#redirect(Ty(i64, *List(u8)), Unit) fn display(a: u32, out: *List(u8)) Unit; 
-
-// TODO
-fn __tag_check(const E: Type, tag: *i64, expected: i64) Unit = {
-    
-}
-
-// TODO: this breaks bf_interp, scary. 
-// :: print_stacktrace_on_panic();

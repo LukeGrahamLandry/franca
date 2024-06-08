@@ -132,6 +132,9 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 - I like multi-argument functions just taking tuples so you can refer to function types generically.
   but that means if tuple type is written as tuple of types, you can't have a function that takes multiple types as arguments in a row
   because it doesn't know where to split them if you flatten too soon. when fn f(X: Type, Y: Type) then f((a, b), c) vs f(a, (b, c))
+- decide if operator overloading should call functions named `operator_plus` or just the normal name directly like `add`
+  // Needs to be builtin because Type has a special load function which needs to evaluate \*Type to typecheck.
+  // fn operator_star_prefix(T: Type) Type = Ptr(T);
 
 ## UB
 

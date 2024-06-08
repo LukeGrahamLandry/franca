@@ -129,6 +129,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 .retain(|check| check.ret.is_none() || (req == check.ret.unwrap() || check.ret.unwrap().is_never()));
         }
 
+        if overloads.ready.len() == 1 {
+            let id = overloads.ready[0].func;
+            self.adjust_call(arg, id)?;
+            return Ok(id);
+        }
+
         if arity == 1 {
             match self.type_of(arg) {
                 Ok(Some(arg_ty)) => {

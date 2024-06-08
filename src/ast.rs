@@ -1320,10 +1320,9 @@ impl<'p> Program<'p> {
     }
 
     pub fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
-        if let TypeInfo::Fn(ty) = self[id] {
-            Some(ty)
-        } else {
-            None
+        match self[id] {
+            TypeInfo::Fn(ty) | TypeInfo::FnPtr { ty, .. } => Some(ty),
+            _ => None,
         }
     }
 
