@@ -311,6 +311,7 @@ pub const LIBC: &[(&str, *const u8)] = &[
     // ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
     // #[cfg(target_os = "macos")]
     // ("fn _NSGetArgv() **CStr", _NSGetArgv as *const u8),
+    ("fn get_errno() i64", get_errno as *const u8),
     ("fn temp_start_raw_terminal(fd: Fd) Unit", start_raw as *const u8),
     ("fn temp_end_raw_terminal(fd: Fd) Unit", end_raw as *const u8),
 ];
@@ -430,34 +431,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
         "libc" => {
             let mut out = String::new();
             writeln!(out, "{}", msg).unwrap();
-            writeln!(
-                out,
-                "const OpenFlag = @enum(i64) (Read = {}, Write = {}, ReadWrite = {}, Create = {}, Truncate = {});",
-                libc::O_RDONLY,
-                libc::O_WRONLY,
-                libc::O_RDWR,
-                libc::O_CREAT,
-                libc::O_TRUNC,
-            )
-            .unwrap();
-            // TODO: this should be a bitflag. presumably PROT_NONE is always 0.
-            //       distinguish between flags whose value is shifting (i.e. 0/1/2 vs 1/2/4)
-            writeln!(
-                out,
-                "const MapProt = @enum(i64) (Exec = {}, Read = {}, Write = {}, None = {});",
-                libc::PROT_EXEC,
-                libc::PROT_READ,
-                libc::PROT_WRITE,
-                libc::PROT_NONE
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "const MapFlag = @enum(i64) (Private = {}, Anonymous = {});",
-                libc::MAP_PRIVATE,
-                libc::MAP_ANONYMOUS,
-            )
-            .unwrap();
+
             for (sig, ptr) in LIBC {
                 writeln!(out, "#comptime_addr({}) #dyn_link #c_call {sig};", *ptr as usize).unwrap();
             }
@@ -465,6 +439,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
         }
         "compiler" => {
             let mut out = String::new();
+            writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
             writeln!(
                 out,
                 "const CallConv = @enum(i64) (C = {}, Flat = {});",

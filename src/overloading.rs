@@ -271,7 +271,12 @@ impl<'a, 'p> Compile<'a, 'p> {
                 )
             }
 
-            err!("ambigous overload",)
+            err!(
+                "ambigous overload for fn {}({}) -> {}",
+                self.program.pool.get(name),
+                self.program.log_type(arg.ty),
+                requested_ret.map(|t| self.program.log_type(t)).unwrap_or_else(|| String::from("???"))
+            )
         }
     }
 

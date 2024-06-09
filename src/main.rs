@@ -309,8 +309,11 @@ fn main() {
             eprint!("Directory 'tests' does not exist in cwd");
             exit(1);
         }
-        run_tests_find_failures(arch);
+        let passed = run_tests_find_failures(arch);
         check_broken(arch);
+        if !passed {
+            exit(1);
+        }
     }
 }
 
@@ -352,18 +355,19 @@ fn run_clang_on_temp_c(sanitize: bool, o2: bool) {
 /// (unless they're like trying to use the write files or something, which like... don't do that then I guess).
 /// My way has higher overhead per test but it feels worth it.
 
-fn run_tests_find_failures(arch: TargetArch) {
+fn run_tests_find_failures(arch: TargetArch) -> bool {
     // If we can run all the tests without crashing, cool, we're done.
     let (success, out, err) = fork_and_catch(|| run_tests_serial(arch));
     if success {
         println!("{out}");
         println!("{err}");
-        return;
+        return true;
     }
 
     println!("TESTS FAILED. Running separately...");
     println!("=================================");
     forked_swallow_passes(arch);
+    return false;
 }
 
 // forking a bunch confuses the profiler.

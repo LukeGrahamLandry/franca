@@ -384,7 +384,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 };
 
                 let target = match self.peek() {
-                    Semicolon | Comma | RightParen | RightSquiggle | Dot | RightSquare => {
+                    Semicolon | Comma | RightParen | RightSquiggle | Dot | RightSquare | Equals => {
                         // target is optional.
                         self.start_subexpr();
                         Box::new(self.raw_unit())

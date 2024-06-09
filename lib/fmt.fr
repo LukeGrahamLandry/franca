@@ -11,15 +11,16 @@ fn println(var msg: Str) Unit = {
 }
 
 fn print(var msg: Str) Unit = {
-    STD_OUT: Fd : (fd = 1.trunc());
-    written: i64 = write(STD_OUT, msg.ptr, @as(usize) msg.len);
+    STD_OUT: Fd : (fd = 1.intcast());
+    written := write(STD_OUT, msg.ptr, @as(usize) msg.len);
+    // TODO: confusing dependency
+    //assert_eq(msg.len, written.unwrap());
     // TODO: check errno. loop if not all written. 
 }
 
 fn write(fd: *Fd, bytes: Slice(u8)) Unit = {
-    let len = bytes.len().mul(8); // TODO: packed strings
-    let written: isize = write(fd[], bytes&.ptr[], len);
-    assert(written.eq(len), "Failed Write");
+    written := write(fd[], bytes.ptr, bytes.len).unwrap();
+    // TOOD: loop if not all written
 }
 
 fn write(self: *List(u8), bytes: Str) Unit = self.push_all(bytes);
@@ -209,6 +210,20 @@ fn str(self: CStr) Str = {
     (ptr = self.ptr, len = len)
 }
 
+// Wildly unsafe, assumes whatever memory happens to be past the end of the string will stay the same as long as you need the returned cstr. 
+// TODO: this is a garbage api because you can't tell if it made a copy so you can't free it. 
+//       i guess you can compare the pointers but... yuck. 
+// TODO: debug_assert no internal zeros.
+fn maybe_borrow_cstr(self: Str, alloc: Alloc) CStr = {
+    ::if(CStr);
+    past_last := self.ptr.offset(self.len); // awkward because normal index functions are bounds checked. 
+    if(past_last[].eq(0.trunc()), => (ptr = self.ptr)) {|
+        s := self.clone(alloc);
+        s&.push(@as(u8) 0.trunc());
+        (ptr = s.maybe_uninit.ptr) // LEAK
+    }
+}
+
 /// Like rust, not c. hex escapes eat exactly two chars. no octal escapes except \0. 
 // Note: you can't use the string escapes in the body of this function, or any it calls, because there's no bootstrapping step. 
 fn __string_escapes(raw: Str) Str #fold = {
@@ -353,3 +368,4 @@ fn is_ascii_alpha(c: u8) bool =
 #redirect(i64, Unit) fn println(a: u32) Unit; 
 #redirect(Ty(i64, *List(u8)), Unit) fn display(a: u64, out: *List(u8)) Unit; // TODO: WRONG. sign
 #redirect(Ty(i64, *List(u8)), Unit) fn display(a: u32, out: *List(u8)) Unit; 
+#redirect(Ty(i64, *List(u8)), Unit) fn display(a: i32, out: *List(u8)) Unit; 
