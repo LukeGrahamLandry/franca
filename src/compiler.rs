@@ -13,6 +13,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::DerefMut;
+use std::ptr;
 use std::sync::atomic::AtomicIsize;
 use std::{ops::Deref, panic::Location};
 
@@ -24,9 +25,10 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{do_flat_call_values, BigResult, FlatCallFn, RsResolvedSymbol};
+use crate::export_ffi::{do_flat_call_values, BigOption, BigResult, ExportVTable, FlatCallFn, RsResolvedSymbol};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
@@ -83,6 +85,7 @@ pub struct Compile<'a, 'p> {
     pub make_slice_t: Option<FuncId>,
     pending_redirects: Vec<(FuncId, FuncId)>,
     pub export: Vec<FuncId>,
+    pub driver_vtable: (Box<ExportVTable>, *mut ()),
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +130,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn new(pool: &'p StringPool<'p>, program: &'a mut Program<'p>) -> Self {
         let parsing = ParseTasks::new(pool);
         let mut c = Self {
+            driver_vtable: (Default::default(), ptr::null_mut()),
             export: vec![],
             pending_redirects: vec![],
             make_slice_t: None,
@@ -678,6 +682,25 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             }
             special = true;
+        }
+
+        // TODO: use this for libc as well.
+        if let Some(lib_name) = self.program[f].get_tag(Flag::Import) {
+            let lib_name = if let Some(lib_name) = lib_name.args.as_ref() {
+                self.eval_str(&mut lib_name.clone())?
+            } else {
+                self.pool.intern("")
+            };
+
+            let name = self.program[f].name;
+            let (vtable, data) = &self.driver_vtable;
+            if let BigOption::Some(callback) = vtable.resolve_comptime_import {
+                if let BigOption::Some(addr) = unsafe { callback(*data, self, f, lib_name, name) } {
+                    self.program[f].body = FuncImpl::Merged(vec![FuncImpl::ComptimeAddr(addr as usize), FuncImpl::DynamicImport(name)]);
+                    self.aarch64.dispatch[f.as_index()] = addr;
+                    special = true;
+                }
+            }
         }
 
         #[cfg(feature = "cranelift")]
@@ -1272,7 +1295,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             //       so maybe its better to have more consistant use of the context stack so you always know what you're doing and forwarding typecheck responsibility doesnt mean poor error messages.
             //       but then you have to make sure not to mess up the stack when you hit recoverable errors. and that context has to not be formatted strings since thats slow.
             //       -- Apr 19
-            // let msg = format!("sanity ICE {} {}", expr.log(self.pool), self.program.log_type(res)).leak();
+            // let msg = format!(
+            //     "sanity ICE {} {} vs {}",
+            //     expr.log(self.pool),
+            //     self.program.log_type(res),
+            //     self.program.log_type(requested)
+            // )
+            // .leak();
+            // where_the_fuck_am_i(self, expr.loc);
             let msg = "sanity ICE req_expr";
             self.type_check_arg(res, requested, msg)?;
         }
@@ -1708,18 +1738,27 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn enum_constant_macro(&mut self, arg: FatExpr<'p>, mut target: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
         let loc = arg.loc;
         let ty: TypeId = self.immediate_eval_expr_known(arg.clone())?;
-        let Expr::StructLiteralP(pattern) = &mut target.expr else {
-            err!("Expected struct literal found {target:?}",)
-        };
-        let mut fields = vec![];
-        for b in &mut pattern.bindings {
-            assert!(b.default.is_some());
-            assert!(matches!(b.lazy(), LazyType::Infer));
 
-            let expr = unwrap!(b.default.take(), "");
-            let val = self.immediate_eval_expr(expr, ty)?;
-            let name = unwrap!(b.name(), "@enum field missing name??");
-            fields.push((name, val));
+        let mut fields = vec![];
+        match &mut target.expr {
+            Expr::StructLiteralP(pattern) => {
+                for b in &mut pattern.bindings {
+                    assert!(b.default.is_some());
+                    assert!(matches!(b.lazy(), LazyType::Infer));
+
+                    let expr = unwrap!(b.default.take(), "");
+                    let val = self.immediate_eval_expr(expr, ty)?;
+                    let name = unwrap!(b.name(), "@enum field missing name??");
+                    fields.push((name, val));
+                }
+            }
+            Expr::Tuple(names) => {
+                for (i, name) in names.iter().enumerate() {
+                    let name = unwrap!(name.as_ident(), "@enum expected ident");
+                    fields.push((name, to_values(self.program, i)?)); // TODO: check that expected type is int
+                }
+            }
+            _ => err!("Expected struct literal found {target:?}",),
         }
         let info = TypeInfo::Enum { raw: ty, fields };
         let unique_ty = self.program.intern_type(info);
@@ -3222,30 +3261,27 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: if its a string literal just take it
             // TODO: check if they tried to give you something from the stack
 
-            // this is really annoying cause i can only refer to the (_, _) version of Str but it already has a cast to Str
-            let ty = <(*mut u8, i64) as InterpSend>::get_or_create_type(self.program);
-            let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(asm.clone())), asm.loc, ty);
-
-            let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
-            let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
-            let std::result::Result::Ok(ir) = std::str::from_utf8(ir) else {
-                err!("wanted utf8 llvmir",)
-            };
+            let ir = self.eval_str(asm)?;
             self.program.inline_llvm_ir.push(f);
-            Ok(FuncImpl::LlvmIr(self.pool.intern(ir)))
+            Ok(FuncImpl::LlvmIr(ir))
         } else if self.program[f].has_tag(Flag::C) {
-            // TODO: copy paste.
-            let ty = <(*mut u8, i64) as InterpSend>::get_or_create_type(self.program);
-            let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(asm.clone())), asm.loc, ty);
-            let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
-            let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
-            let std::result::Result::Ok(ir) = std::str::from_utf8(ir) else {
-                err!("wanted utf8 csource ",)
-            };
-            Ok(FuncImpl::CSource(self.pool.intern(ir)))
+            let ir = self.eval_str(asm)?;
+            Ok(FuncImpl::CSource(ir))
         } else {
             err!("!asm require arch tag",)
         }
+    }
+
+    fn eval_str(&mut self, e: &mut FatExpr<'p>) -> Res<'p, Ident<'p>> {
+        // this is really annoying cause i can only refer to the (_, _) version of Str but it already has a cast to Str
+        let ty = <(*mut u8, i64) as InterpSend>::get_or_create_type(self.program);
+        let a = FatExpr::synthetic_ty(Expr::Cast(Box::new(e.clone())), e.loc, ty);
+        let ir: (*mut u8, i64) = self.immediate_eval_expr_known(a)?;
+        let ir = unsafe { &*slice::from_raw_parts_mut(ir.0, ir.1 as usize) };
+        let std::result::Result::Ok(s) = std::str::from_utf8(ir) else {
+            err!("wanted utf8 ",)
+        };
+        Ok(self.pool.intern(s))
     }
 
     fn construct_struct(&mut self, requested: Option<TypeId>, pattern: &mut Pattern<'p>) -> Res<'p, TypeId> {

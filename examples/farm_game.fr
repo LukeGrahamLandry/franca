@@ -1,0 +1,111 @@
+#include_std("core.fr"); // TODO: handle adding these here. 
+
+do_init :: fn(userdata: rawptr) Unit = {
+
+};
+
+do_render :: fn(userdata: rawptr) Unit = {
+
+};
+
+// TODO: dependency problem so can't go in the eq overload set :(
+fn eqq(a: EventType, b: EventType) bool = (@as(i32) a).eq(@as(i32) b);
+fn eqq(a: Keycode, b: Keycode) bool = (@as(i32) a).eq(@as(i32) b);
+
+do_event :: fn(event: *SappEvent, userdata: rawptr) Unit = {
+    if(event.type.eqq(.KEY_DOWN).and(=> event.key_code.eqq(.Q))) {|
+        exit(0);
+    };
+};
+
+fn main() Unit = {
+    println("Hello World");
+    desc := SappDesc.zeroed();
+    //desc.userdata = 
+    desc.init_userdata_cb = do_init!fn_ptr;
+    desc.frame_userdata_cb = do_render!fn_ptr;
+    desc.event_userdata_cb = do_event!fn_ptr;
+    sapp_run(desc&);
+}
+
+::print_stacktrace_on_panic();
+fn driver(vtable: *ImportVTable) Unit #export = {
+    // TODO: this whole thing where you have to write your program inside out is really annoying. 
+    //       I want the user program to be in charge and call into the compiler as a library. 
+    UserData :: @struct(
+        vtable: *ImportVTable,
+        sokol: DlHandle,
+    );
+    
+    resolve_comptime_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
+        userdata := UserData.ptr_from_raw(userdata);
+        // TODO: can't call @println here?? oh it doesnt like when no %s?
+        sokol_sym := {userdata.vtable.intern_string}(comp, "sokol");
+        fn_name := {userdata.vtable.get_string}(comp, fn_name);
+        ret :: @return;
+        @println("Asked for a function %", fn_name);
+        if(sokol_sym.eq(lib_name)){|
+            fn_name := fn_name.maybe_borrow_cstr(libc_allocator);
+            f := dlsym(userdata.sokol, fn_name);
+            assert(f.is_null().not(), "bad sokol function name");
+            ret((Some = f));
+        };
+        .None
+    };
+
+    dylib_path := "target/sokol.dylib";
+    dylib_path_c := dylib_path.maybe_borrow_cstr(libc_allocator);
+    
+    sokol := dlopen(dylib_path_c, DlFlag.Lazy);
+    if(sokol.lib.is_null()){|
+        // TODO: don't hardcode platform. and -DSOKOL_DLL
+        // build it!
+        args := (
+            "-DSOKOL_IMPL",
+            "-DSOKOL_METAL",
+            "-DSOKOL_NO_ENTRY",
+            "-framework",
+            "Metal",
+            "-framework",
+            "MetalKit",
+            "-framework",
+            "Cocoa",
+            "-framework",
+            "QuartzCore",
+            "-dynamiclib",
+            "-O2",
+            "-o",
+            dylib_path,
+            "-x",
+            "objective-c",
+            "vendor/sokol.c",
+        )!slice;
+        ::display_slice(Str);
+        @println("will run clang: %", args);
+        run_cmd_blocking(CLANG_PATH, args);
+        sokol = dlopen(dylib_path_c, DlFlag.Lazy);
+        assert(sokol.lib.is_null().not(), "failed to open sokol for comptime");
+    };
+    
+    my_vtable: ExportVTable = (
+        resolve_comptime_import = (Some = resolve_comptime_import!fn_ptr),
+    );
+    data: UserData = (vtable = vtable, sokol = sokol);
+    
+    src := libc_allocator.read_to_string("examples/farm_game.fr");
+    sokol_bindings := libc_allocator.read_to_string("vendor/sokol.fr");
+    src&.push_all(sokol_bindings.items());
+    comp := vtable.new_with_src(src.items());
+    {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
+    
+    jit_and_run_main(vtable, comp);
+    fn jit_and_run_main(vtable: *ImportVTable, comp: Compiler) Unit = {
+        main_sym := {vtable.intern_string}(comp, "main");
+        main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+        {vtable.compile_func}(comp, main_f, .Jit).unwrap();
+        ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+        {vtable.make_jitted_exec}(comp);
+        f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
+        f();
+    }
+}

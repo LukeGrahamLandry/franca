@@ -1,7 +1,17 @@
 #include_std("core.fr"); // TODO: handle adding these here. 
 
-// TODO: hack
-CLANG_PATH :: "/opt/homebrew/opt/llvm/bin/clang";
+// TODO: this whole thing where you have to write your program inside out is really annoying. 
+//       I want the user program to be in charge and call into the compiler as a library. 
+UserData :: @struct(
+    vtable: *ImportVTable,
+);
+
+resolve_comptime_import :: fn(userdata: rawptr, c: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
+    userdata := UserData.ptr_from_raw(userdata);
+    // TODO: can't call @println here??
+    println("Asked for a function");
+    .None
+};
 
 // TODO: less ass field lookup and call syntax
 // TODO: compiler needs to check type / find right overload of this function. 
@@ -14,6 +24,11 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     
     src := libc_allocator.read_to_string("main.fr");
     comp := vtable.new_with_src(src.items());
+    my_vtable: ExportVTable = (
+        resolve_comptime_import = (Some = resolve_comptime_import!fn_ptr),
+    );
+    data: UserData = (vtable = vtable);
+    {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
     
     sym_test := {vtable.intern_string}(comp, "test");
     tests := {vtable.get_fns_with_tag}(comp, sym_test);
@@ -65,73 +80,3 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     c_file.remove();
 }
 
-fn new_with_src(vtable: *ImportVTable, src: Str) Compiler = {
-    comp := {vtable.init_compiler}(.Aarch64);
-    file := {vtable.add_file}(comp, "main", src);
-    stmts := {vtable.parse_stmts}(comp, file).unwrap();
-    {vtable.make_and_resolve_and_compile_top_level}(comp, stmts).unwrap();
-    comp
-}
-
-TmpFile :: @struct(name: Array(u8, 16), fd: Fd);
-fn remove(self: TmpFile) voidResult = remove(self&.c_name());
-fn c_name(self: *TmpFile) CStr = (ptr = self.name&.as_ptr());
-fn s_name(self: *TmpFile) Str = self.c_name().str();
-
-fn open_temp_file() TmpFile = {
-    template := "/tmp/fXXXXXX\0";
-    name: Array(u8, 16) = init(@as(u8) 0.trunc());
-    name&.slice().subslice(0, template.len).copy_from(template);
-    filename: CStr = (ptr = name&.as_ptr());
-    fd := mkstemp(filename).unwrap();
-    (name = name, fd = fd)
-}
-
-// TODO: better error handling. 
-// TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
-// TODO: it doesn't look up the command like a shell does.
-fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
-    pid := fork();
-    if(pid.eq(0.intcast())) {|
-        println("forked");
-        path := path.maybe_borrow_cstr(libc_allocator); // LEAK, but who cares, we just forked. 
-        cargs: List(CStr) = list(args.len.add(2), libc_allocator);
-        cargs&.push(path);
-        for(args) {s|
-            cargs&.push(s.maybe_borrow_cstr(libc_allocator));
-        };
-        cargs&.push((ptr = u8.ptr_from_int(0))); // libc wants a null terminated array.
-        println("will exec");
-        execv(path, cargs.maybe_uninit.ptr);
-        
-        // ERROR
-        @println("Failed to exec path=%", path);
-        cargs.len -= 1; // don't try to print the null terminator
-        for(cargs) {s|
-            @println("- %", s);
-        };
-        panic("failed to exec!");
-    };
-    
-    status: i32 = 0.intcast();
-    res := waitpid(pid, status&, 0.intcast()); 
-    :: assert_eq(i32);
-    assert_eq(res, pid); // TODO: error handling, check errno
-    status.eq(0.intcast())
-}
-
-// TODO: return error if this becomes a lib thing which it probably should. 
-fn read_to_string(alloc: Alloc, path: Str) List(u8) = {
-    path := path.maybe_borrow_cstr(alloc);
-    flag := (@as(i64) OpenFlag.Read);
-    f := open(path, flag).unwrap();
-    len := f.lseek(0, .End).unwrap();
-    f.lseek(0, .Set);
-    bytes: List(u8) = list(len, alloc);
-    read_len := read(f, bytes.maybe_uninit.ptr, bytes.maybe_uninit.len).unwrap();
-    assert_eq(read_len, len); // sanity
-    @println("read % bytes", read_len);
-    bytes.len = len;
-    close(f); // TODO: defer
-    bytes
-}

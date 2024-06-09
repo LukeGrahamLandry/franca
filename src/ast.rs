@@ -1842,6 +1842,7 @@ pub enum Flag {
     __Tag_Check,
     C,
     Unsafe_Noop_Cast,
+    Import,
     _Reserved_Count_,
 }
 

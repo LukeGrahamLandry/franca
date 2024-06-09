@@ -31,10 +31,11 @@ use std::{fs, io};
 use crate::export_ffi::BigResult::*;
 
 #[repr(C, i64)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum BigOption<T> {
     Some(T),
-    None,
+    #[default]
+    None = 1,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +137,14 @@ pub struct ImportVTable {
     parse_stmts: for<'p> unsafe extern "C" fn(out: *mut ManuallyDrop<BigCErr<'p, *const [FatStmt<'p>]>>, c: &mut Compile<'_, 'p>, f: Arc<File>),
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
+    give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
+}
+
+#[repr(C)]
+#[derive(Clone, Default)]
+pub struct ExportVTable {
+    pub resolve_comptime_import:
+        BigOption<unsafe extern "C" fn(userdata: *mut (), c: &mut Compile, f: FuncId, lib_name: Ident, fn_name: Ident) -> BigOption<*const u8>>,
 }
 
 pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
@@ -154,6 +163,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     parse_stmts,
     make_and_resolve_and_compile_top_level,
     make_jitted_exec,
+    give_vtable,
 };
 
 unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
@@ -251,6 +261,10 @@ unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<
 unsafe extern "C" fn make_jitted_exec(c: &mut Compile) {
     c.aarch64.make_exec();
     c.flush_cpu_instruction_cache();
+}
+
+unsafe extern "C" fn give_vtable(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()) {
+    c.driver_vtable = (Box::new((*vtable).clone()), userdata)
 }
 
 // This lets rust _declare_ a flat_call like its normal
@@ -1165,11 +1179,26 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
 }
 
 fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {
-    assert!(matches!(arg.expr, Expr::StructLiteralP(_)), "expected @fn(name: type, name: type) type");
-    let Expr::StructLiteralP(parts) = &mut arg.expr else { unreachable!() };
-    parts.if_empty_add_unit();
-    let types = compile.infer_pattern(&mut parts.bindings)?;
-    let arity = parts.bindings.len() as u16;
+    let types = match &mut arg.expr {
+        Expr::StructLiteralP(parts) => {
+            parts.if_empty_add_unit();
+            compile.infer_pattern(&mut parts.bindings)?
+        }
+        Expr::Tuple(parts) => {
+            let mut types = vec![];
+            for e in parts {
+                let t: TypeId = compile.immediate_eval_expr_known(e.clone())?;
+                types.push(t);
+            }
+            types
+        }
+        _ => {
+            // err!("expected @fn(name: type, name: type) type not {}", arg.log(compile.pool)),
+            let t: TypeId = compile.immediate_eval_expr_known(arg.clone())?;
+            vec![t]
+        }
+    };
+    let arity = types.len() as u16;
     let arg = compile.program.tuple_of(types);
     let ret: TypeId = compile.immediate_eval_expr_known(ret)?;
     let f_ty = FnType { arg, ret, arity };

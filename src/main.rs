@@ -367,7 +367,7 @@ fn run_tests_find_failures(arch: TargetArch) -> bool {
     println!("TESTS FAILED. Running separately...");
     println!("=================================");
     forked_swallow_passes(arch);
-    return false;
+    false
 }
 
 // forking a bunch confuses the profiler.
