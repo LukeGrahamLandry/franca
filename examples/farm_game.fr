@@ -1,22 +1,63 @@
 #include_std("core.fr"); // TODO: handle adding these here. 
 
+State :: @struct(
+    pipe: SglPipeline,
+    pass_action: SgPassAction,
+);
+
 do_init :: fn(userdata: rawptr) Unit = {
+    state := State.ptr_from_raw(userdata);
+    
     desc := SgDesc.zeroed();
-    // TODO: can't do this because I don't follow the right calling convention for return values.
     desc.environment = sglue_environment();
     desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
     sg_setup(desc&);
+    
+    desc := SglDesc.zeroed();
+    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    sgl_setup(desc&);
+    
+    desc := SdtxDesc.zeroed();
+    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    desc.fonts&.as_ptr()[] = sdtx_font_kc854();
+    sdtx_setup(desc&);
+    
+    desc := SgPipelineDesc.zeroed();
+    state.pipe = sgl_make_pipeline(desc&);
+    
 };
 
 do_render :: fn(userdata: rawptr) Unit = {
-
+    state := State.ptr_from_raw(userdata);
+    
+    sgl_defaults();
+    sgl_viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
+    sgl_load_pipeline(state.pipe);
+    sgl_begin_quads();
+    sdtx_puts("hello world".maybe_borrow_cstr(libc_allocator));
+    sgl_end();
+    
+    desc := SgPass.zeroed();
+    desc.action = state.pass_action;
+    desc.swapchain = sglue_swapchain();
+    desc.swapchain.width = sapp_width();
+    desc.swapchain.height = sapp_height();
+    sg_begin_pass(desc&);
+    
+    sgl_draw();
+    sdtx_draw();
+    
+    sg_end_pass();
+    sg_commit();
 };
 
 // TODO: dependency problem so can't go in the eq overload set :(
-fn eqq(a: EventType, b: EventType) bool = (@as(i32) a).eq(@as(i32) b);
-fn eqq(a: Keycode, b: Keycode) bool = (@as(i32) a).eq(@as(i32) b);
+fn eqq(a: SappEventType, b: SappEventType) bool = (@as(i32) a).eq(@as(i32) b);
+fn eqq(a: SappKeycode, b: SappKeycode) bool = (@as(i32) a).eq(@as(i32) b);
 
 do_event :: fn(event: *SappEvent, userdata: rawptr) Unit = {
+    state := State.ptr_from_raw(userdata);
+    
     if(event.type.eqq(.KEY_DOWN).and(=> event.key_code.eqq(.Q))) {|
         exit(0);
     };
@@ -24,11 +65,13 @@ do_event :: fn(event: *SappEvent, userdata: rawptr) Unit = {
 
 fn main() Unit = {
     println("Hello World");
+    state := State.zeroed();
     desc := SappDesc.zeroed();
     //desc.userdata = 
     desc.init_userdata_cb = do_init!fn_ptr;
     desc.frame_userdata_cb = do_render!fn_ptr;
     desc.event_userdata_cb = do_event!fn_ptr;
+    desc.user_data = State.raw_from_ptr(state&);
     // TODO: I can't decide if this would be creepy as an auto cast.
     desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
     sapp_run(desc&);

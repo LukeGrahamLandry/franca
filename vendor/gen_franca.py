@@ -96,7 +96,7 @@ def l(s):
 def as_prim_type(s):
     return prim_types[s]
 
-# prefix_bla_blub(_t) => (dep.)BlaBlub
+# prefix_bla_blub(_t) => PrefixBlaBlub
 def as_struct_type(s, prefix):
     parts = s.lower().split('_')
     outp = '' # if s.startswith(prefix) else f'{parts[0]}.'
@@ -107,16 +107,15 @@ def as_struct_type(s, prefix):
             outp += part.capitalize()
     return outp
 
-# prefix_bla_blub(_t) => (dep.)BlaBlub
+# prefix_bla_blub(_t) => PrefixBlaBlub
 def as_enum_type(s, prefix):
     parts = s.lower().split('_')
-    outp = '' if s.startswith(prefix) else f'{parts[0]}.'
-    for part in parts[1:]:
+    outp = '' # if s.startswith(prefix) else f'{parts[0]}.'
+    # for part in parts[1:]:
+    for part in parts:
         if (part != 't'):
             outp += part.capitalize()
     
-    if outp == "LogItem": 
-        outp = prefix + outp
     return outp
 
 def check_override(name, default=None):
