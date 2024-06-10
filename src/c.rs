@@ -16,14 +16,17 @@ use crate::{
     pops,
     reflect::BitSet,
 };
-use std::{collections::HashMap, fmt::Write};
+use std::{borrow::Cow, collections::HashMap, fmt::Write};
 
 use crate::export_ffi::BigResult::*;
 // try put 'static' on everything that's not exported beacuse that makes clang -O2 not leave them in the exe if it decides to inline.
-fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_names: bool) {
+fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_names: bool, ret_sizes: &mut BitSet) {
     let name = comp.program.pool.get(comp.program[f].name);
     let ty = comp.program[f].finished_ty().unwrap();
     let sig = prim_sig(comp.program, ty, comp.program[f].cc.unwrap()).unwrap();
+    if sig.use_special_register_for_indirect_return {
+        ret_sizes.set(sig.return_value_bytes as usize);
+    }
 
     // TODO: use sig.no_return for _Noreturn or whatever the syntax is
     if use_name {
@@ -39,7 +42,7 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
         .unwrap();
     }
     if use_arg_names {
-        if sig.first_arg_is_indirect_return {
+        if sig.first_arg_is_indirect_return && !sig.use_special_register_for_indirect_return {
             write!(out, "void *_ret_ptr,").unwrap();
         }
         for b in comp.program[f].arg.bindings.iter() {
@@ -57,7 +60,8 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
             }
         }
     } else {
-        for i in 0..sig.arg_slots as usize {
+        let first = if sig.use_special_register_for_indirect_return { 1 } else { 0 };
+        for i in first..sig.arg_slots as usize {
             write!(out, "{} _arg_{i},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
         }
     }
@@ -79,12 +83,12 @@ fn forward_declare(comp: &mut Compile, out: &mut CProgram, callee: FuncId) {
         let name = comp.program.pool.get(comp.program[callee].name);
         writeln!(out.forward, " /* fn {name} */ static \nvoid _FN{}{FLAT_ARGS_SIGN}", callee.as_index()).unwrap();
     } else {
-        declare(comp, &mut out.forward, callee, false, false);
+        declare(comp, &mut out.forward, callee, false, false, &mut out.ret_sizes);
     }
     writeln!(out.forward, ";").unwrap();
 }
 
-const FLAT_ARGS_SIGN: &str = "( void* _flat_ret_ptr, int _a, void* _flat_arg_ptr, int _b, int _c)";
+const FLAT_ARGS_SIGN: &str = "(void* _flat_ret_ptr, int _a, void* _flat_arg_ptr, int _b, int _c)";
 pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runner_main: bool) -> Res<'p, String> {
     let mut out = CProgram::default();
 
@@ -109,7 +113,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
 
         // println!("do {}", name);
         if let Some(&body) = comp.program[f].body.c_source() {
-            declare(comp, &mut out.functions, f, false, true);
+            declare(comp, &mut out.functions, f, false, true, &mut out.ret_sizes);
             writeln!(out.functions, "{{\n{}", comp.program.pool.get(body)).unwrap();
             writeln!(out.functions, "}}").unwrap();
         } else if let FuncImpl::Normal(_) = comp.program[f].body {
@@ -118,7 +122,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
                 if is_flat {
                     writeln!(out.functions, "/* fn {name} */ static \nvoid _FN{}{FLAT_ARGS_SIGN}", f.as_index()).unwrap();
                 } else {
-                    declare(comp, &mut out.functions, f, false, false);
+                    declare(comp, &mut out.functions, f, false, false, &mut out.ret_sizes);
                 }
 
                 let body = emit_bc(comp, f, ExecStyle::Aot)?;
@@ -165,10 +169,10 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
             }
         } else if comp.program[f].body.comptime_addr().is_some() {
             // TODO: dont just assume that comptime_addr means its from libc. have a way to specfify who you're expecting to link against.
-            declare(comp, &mut out.forward, f, true, true);
+            declare(comp, &mut out.forward, f, true, true, &mut out.ret_sizes);
             writeln!(out.forward, ";").unwrap();
 
-            declare(comp, &mut out.forward, f, false, true);
+            declare(comp, &mut out.forward, f, false, true, &mut out.ret_sizes);
             emit_named_redirect_body(comp, &mut out.forward, f, true);
         } else if let FuncImpl::Redirect(target) = comp.program[f].body {
             // TODO: the frontend should just add the target as a callee instead.
@@ -181,7 +185,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
             // If you decide in your heart that it probably does to something, should be smarter and only apply it with #returns_twice or something.
             // writeln!(out.forward, "__attribute__((returns_twice))").unwrap();
 
-            declare(comp, &mut out.forward, f, false, false);
+            declare(comp, &mut out.forward, f, false, false, &mut out.ret_sizes);
 
             writeln!(out.forward, ";\n__asm__(").unwrap();
             writeln!(out.forward, "\"__FN{}:\\n\\t\"", f.as_index()).unwrap();
@@ -216,7 +220,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
         emit(comp, &mut out, f)?;
 
         if comp.program[f].cc.unwrap() != CallConv::Flat && !test_runner_main {
-            declare(comp, &mut out.functions, f, true, true);
+            declare(comp, &mut out.functions, f, true, true, &mut out.ret_sizes);
             emit_named_redirect_body(comp, &mut out.functions, f, false);
         } else {
             writeln!(out.functions, "// Skip exporting flat call: fn {}", comp.pool.get(comp.program[f].name)).unwrap();
@@ -316,6 +320,12 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
         i += 1;
     }
 
+    for i in 0..out.ret_sizes.capacity() {
+        if out.ret_sizes.get(i) {
+            writeln!(out.types, "typedef struct {{ char bytes[{i}]; }} Ret{i};").unwrap();
+        }
+    }
+
     out.types.push_str(&out.forward);
     out.types.push_str(&constants);
     out.types.push_str(&out.functions);
@@ -360,6 +370,7 @@ struct CProgram {
     types: String,
     forward: String,
     functions: String,
+    ret_sizes: BitSet,
 }
 
 struct Emit<'z, 'p> {
@@ -387,8 +398,13 @@ impl<'z, 'p> Emit<'z, 'p> {
         let block = &self.body.blocks[b];
 
         if b == 0 && !self.is_flat {
+            if self.body.signeture.use_special_register_for_indirect_return {
+                writeln!(self.code, "    Ret{} _temp_return;", self.body.signeture.return_value_bytes).unwrap();
+                writeln!(self.code, "    void *_arg_0 = &_temp_return;").unwrap();
+            }
             // debug_assert_eq!(arg.size_slots, block.arg_slots); // not true because of indirect returns
             write!(self.code, "    ").unwrap();
+
             for i in 0..block.arg_slots {
                 write!(self.code, "_{i} = (void*) _arg_{i}; ").unwrap();
             }
@@ -431,8 +447,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.do_c_call(sig, |s| {
                         let callee = s.stack.pop().unwrap();
                         write!(s.code, "(({}(*)(", ret_spec(sig)).unwrap();
-                        for i in 0..sig.arg_slots as usize {
-                            write!(s.code, "{} _arg_{i},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
+                        let start = if sig.use_special_register_for_indirect_return { 1 } else { 0 };
+
+                        for i in start..sig.arg_slots as usize {
+                            write!(s.code, "{},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
                         }
                         if s.code.ends_with(',') {
                             s.code.remove(s.code.len() - 1); // comma
@@ -474,7 +492,11 @@ impl<'z, 'p> Emit<'z, 'p> {
                     break;
                 }
                 Bc::Ret0 => {
-                    writeln!(self.code, "    return;").unwrap();
+                    if self.body.signeture.use_special_register_for_indirect_return {
+                        writeln!(self.code, "    return _temp_return;").unwrap();
+                    } else {
+                        writeln!(self.code, "    return;").unwrap();
+                    }
                     break;
                 }
                 Bc::Ret1(_) => {
@@ -564,7 +586,14 @@ impl<'z, 'p> Emit<'z, 'p> {
             // TODO: bit cast float??
             1 => write!(self.code, "    _{ret_var} = (void*)").unwrap(),
             2 => write!(self.code, "    {{ {} tmp = ", ret_spec(sig)).unwrap(),
-            _ => write!(self.code, "    ").unwrap(),
+            _ => {
+                if sig.use_special_register_for_indirect_return {
+                    self.result.ret_sizes.set(sig.return_value_bytes as usize);
+                    write!(self.code, "    {{ {} tmp = ", ret_spec(sig)).unwrap();
+                } else {
+                    write!(self.code, "    ").unwrap();
+                }
+            }
         }
         // TODO: dumb to allocate but its easier if the fn ptr version can pop from the stack.
         let args = &self.stack[self.stack.len() - sig.arg_slots as usize..self.stack.len()].to_vec();
@@ -572,19 +601,32 @@ impl<'z, 'p> Emit<'z, 'p> {
         write_fn_ref(self);
         write!(self.code, "(").unwrap();
 
+        let mut retptr = None;
+
         if !args.is_empty() {
-            for (i, arg) in args.iter().enumerate() {
+            let mut aaa = args.iter().enumerate();
+            if sig.use_special_register_for_indirect_return {
+                retptr = Some(aaa.next().unwrap().1.clone());
+            }
+
+            for (i, arg) in aaa {
                 // TODO: float bit cast
                 let _ = is_float(i, sig.arg_slots, sig.arg_float_mask);
                 write!(self.code, "{arg},").unwrap();
             }
-            self.code.remove(self.code.len() - 1); // comma
+            if self.code.ends_with(',') {
+                self.code.remove(self.code.len() - 1); // comma
+            }
         }
 
         writeln!(self.code, ");").unwrap();
 
         match sig.ret_slots {
-            0 => {}
+            0 => {
+                if let Some(r) = retptr {
+                    write!(self.code, "    memcpy({r}, &tmp, {}); }}", sig.return_value_bytes).unwrap();
+                }
+            }
             // TODO: bit cast float??
             1 => self.stack.push(Val::of_var(ret_var)),
             2 => {
@@ -652,18 +694,21 @@ impl std::fmt::Display for Val {
     }
 }
 
-fn ret_spec(sig: PrimSig) -> &'static str {
+fn ret_spec(sig: PrimSig) -> Cow<'static, str> {
+    if sig.use_special_register_for_indirect_return {
+        return format!("Ret{}", sig.return_value_bytes).into();
+    }
     match sig.ret_slots {
-        0 => "void",
-        1 => ty_spec(is_float(0, sig.ret_slots, sig.ret_float_mask)),
+        0 => "void".into(),
+        1 => ty_spec(is_float(0, sig.ret_slots, sig.ret_float_mask)).into(),
         2 => {
             let fst = is_float(0, sig.ret_slots, sig.ret_float_mask);
             let snd = is_float(1, sig.ret_slots, sig.ret_float_mask);
             match (fst, snd) {
-                (true, true) => "Retf64f64",
-                (true, false) => "Retf64i64",
-                (false, true) => "Reti64f64",
-                (false, false) => "Reti64i64",
+                (true, true) => "Retf64f64".into(),
+                (true, false) => "Retf64i64".into(),
+                (false, true) => "Reti64f64".into(),
+                (false, false) => "Reti64i64".into(),
             }
         }
         _ => unreachable!(),

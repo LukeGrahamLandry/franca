@@ -1344,6 +1344,7 @@ impl<'p> FnBody<'p> {
 }
 
 pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig> {
+    let (arg, ret) = program.get_infos(f_ty);
     if matches!(cc, CallConv::Flat | CallConv::FlatCt) {
         return Ok(PrimSig {
             arg_slots: 5,
@@ -1353,12 +1354,12 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
             first_arg_is_indirect_return: true, // really it does have indirect ret but we don't want to pass the first arg in x8
             use_special_register_for_indirect_return: false,
             no_return: f_ty.ret.is_never(),
+            return_value_bytes: ret.stride_bytes,
         });
     }
 
-    let has_indirect_ret = program.get_info(f_ty.ret).size_slots > 2;
+    let has_indirect_ret = ret.size_slots > 2;
 
-    let (arg, ret) = program.get_infos(f_ty);
     let mut sig = PrimSig {
         arg_slots: arg.size_slots,
         arg_float_mask: arg.float_mask,
@@ -1367,6 +1368,7 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         first_arg_is_indirect_return: has_indirect_ret,
         use_special_register_for_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
+        return_value_bytes: ret.stride_bytes,
     };
 
     if has_indirect_ret {

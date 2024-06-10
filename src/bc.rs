@@ -49,10 +49,11 @@ pub enum Bc {
 
 #[derive(Clone, Copy, PartialEq, InterpSend)]
 pub struct PrimSig {
-    pub arg_slots: u16,
     pub arg_float_mask: u32,
-    pub ret_slots: u16,
     pub ret_float_mask: u32,
+    pub arg_slots: u16,
+    pub ret_slots: u16,
+    pub return_value_bytes: u16,
     pub first_arg_is_indirect_return: bool,
     pub use_special_register_for_indirect_return: bool,
     pub no_return: bool,

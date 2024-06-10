@@ -572,6 +572,13 @@ impl BitSet {
             }
         }
     }
+
+    pub(crate) fn capacity(&self) -> usize {
+        match self {
+            BitSet::Small(_) => 2 * BITS,
+            BitSet::Big(v) => v.len() * BITS,
+        }
+    }
 }
 
 impl Default for BitSet {
