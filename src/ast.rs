@@ -51,6 +51,7 @@ pub enum TypeInfo<'p> {
     #[default]
     Never,
     F64,
+    F32,
     Int(IntTypeInfo),
     Bool,
     Fn(FnType),
@@ -961,6 +962,7 @@ impl<'p> Program<'p> {
                     signed: false,
                 }),
                 TypeInfo::VoidPtr,
+                TypeInfo::F32,
             ],
             funcs: Default::default(),
             next_var: 0,
@@ -1238,6 +1240,7 @@ impl<'p> Program<'p> {
         let ty = self.raw_type(ty);
         Some(match self[ty] {
             TypeInfo::F64 => Prim::F64,
+            TypeInfo::F32 => Prim::F32,
             TypeInfo::Int(int) => match int.bit_count {
                 8 => Prim::I8,
                 16 => Prim::I16,
@@ -1288,7 +1291,7 @@ impl<'p> Program<'p> {
     pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
         let deduplicate = match &ty {
             TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",),
-            TypeInfo::Never | TypeInfo::F64 | TypeInfo::Bool | TypeInfo::Unit | TypeInfo::VoidPtr => {
+            TypeInfo::Never | TypeInfo::F32 | TypeInfo::F64 | TypeInfo::Bool | TypeInfo::Unit | TypeInfo::VoidPtr => {
                 unreachable!("ICE: Called intern_type on {ty:?}, this is fine I guess, but probably shouldn't happen.")
             }
             TypeInfo::Int(_) | TypeInfo::Fn(_) | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::Array { .. } | TypeInfo::Label(_) => true,
@@ -1515,7 +1518,6 @@ impl<'p> Program<'p> {
             }
             TypeInfo::Never => TypeMeta::new(0, 1, 0, false, 0, false),
             TypeInfo::Int(int) => {
-                // TODO: u16
                 // :SmallTypes
                 match int.bit_count {
                     8 => TypeMeta::new(1, 1, 0, false, 1, false),
@@ -1524,6 +1526,9 @@ impl<'p> Program<'p> {
                     _ => TypeMeta::new(1, 8, 0, false, 8, false),
                 }
             }
+            // TODO: the float_mask thing is no longer enough information!
+            //       you can't tell if its the whole register or just half. tho maybe you never need to know so its fine...
+            TypeInfo::F32 => TypeMeta::new(1, 4, 1, false, 4, false),
             TypeInfo::F64 => TypeMeta::new(1, 8, 1, false, 8, false),
             TypeInfo::Unit => TypeMeta::new(0, 1, 0, false, 0, false),
             TypeInfo::Bool => TypeMeta::new(1, 1, 0, false, 1, false), // :SmallTypes
@@ -1738,6 +1743,9 @@ impl TypeId {
     pub const scope: Self = Self::from_index(9);
     // u32 = (10)
     pub const voidptr: Self = Self::from_index(11);
+    pub fn f32() -> TypeId {
+        TypeId::from_index(12)
+    }
 }
 
 /// It's important that these are consecutive in flags for safety of TryFrom

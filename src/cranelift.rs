@@ -23,7 +23,7 @@ use cranelift::{
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
-use types::I16;
+use types::{F32, I16};
 
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program},
@@ -517,6 +517,11 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().uextend(I64, v),
                         Prim::P64 | Prim::I64 => v,
                         Prim::F64 => builder.ins().bitcast(I64, MemFlags::new(), v),
+                        Prim::F32 => {
+                            // note: cast->extend, NOT promote->cast
+                            let v = builder.ins().bitcast(I32, MemFlags::new(), v);
+                            builder.ins().uextend(I64, v)
+                        }
                     };
                     self.stack.push(v);
                 }
@@ -525,6 +530,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = self.stack.pop().unwrap();
                     let v = match ty {
                         Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
+                        Prim::F32 => builder.ins().ireduce(I32, v), // everything is stored as i64 on the v-stack, so just store the low bits
                         Prim::P64 | Prim::I64 | Prim::F64 => v,
                     };
                     builder.ins().store(MemFlags::new(), v, addr, 0);
@@ -533,6 +539,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = self.stack.pop().unwrap();
                     let v = match ty {
                         Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
+                        Prim::F32 => builder.ins().ireduce(I32, v),
                         Prim::P64 | Prim::I64 | Prim::F64 => v,
                     };
                     let addr = self.stack.pop().unwrap();
@@ -643,6 +650,7 @@ fn primitive(prim: Prim) -> Type {
         Prim::I32 => I32,
         Prim::P64 | Prim::I64 => I64,
         Prim::F64 => F64,
+        Prim::F32 => F32,
     }
 }
 
@@ -728,5 +736,21 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     }),
     ("fn bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(I64, MemFlags::new(), v[0])
+    }),
+    ("fn cast(_: f32) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        // TODO: HACK because I always store ints and tell cranelift im bit casting up to f64 before a call.
+        //       so it thinks the arg is an f64 but we know the high bits are 0 and the low is the f32 we want.
+        let v = builder.ins().bitcast(I64, MemFlags::new(), v[0]);
+        let v = builder.ins().ireduce(I32, v);
+        let v = builder.ins().bitcast(F32, MemFlags::new(), v);
+        builder.ins().fpromote(F64, v)
+    }),
+    ("fn cast(_: f64) f32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        let v = builder.ins().fdemote(F32, v[0]);
+        // TODO: HACK because I always store ints and tell cranelift im bit casting up from f64 after a call.
+        //       so it needs to think this is returning an f64.
+        let v = builder.ins().bitcast(I32, MemFlags::new(), v);
+        let v = builder.ins().uextend(I64, v);
+        builder.ins().bitcast(F64, MemFlags::new(), v)
     }),
 ];

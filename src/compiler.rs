@@ -2043,6 +2043,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = match name {
             "i64" => return Some(TypeId::i64()),
             "f64" => return Some(TypeId::f64()),
+            "f32" => return Some(TypeId::f32()),
             "Type" => return Some(TypeId::ty),
             "bool" => return Some(TypeId::bool()),
             "UnknownType" => return Some(TypeId::unknown),

@@ -460,7 +460,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 match ty {
                     // TODO: track open float registers so this can just switch over MEM type.
                     Prim::P64 | Prim::F64 | Prim::I64 => self.load_u64(dest, addr, offset_bytes),
-                    Prim::I32 => self.load_one(MEM_32, dest, addr, offset_bytes),
+                    Prim::I32 | Prim::F32 => self.load_one(MEM_32, dest, addr, offset_bytes),
                     Prim::I16 => self.load_one(MEM_16, dest, addr, offset_bytes),
                     Prim::I8 => self.load_one(MEM_08, dest, addr, offset_bytes),
                 };
@@ -702,6 +702,16 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     self.drop_reg(val);
                 }
             }
+            Prim::F32 => {
+                if let Val::FloatReg(r) = value {
+                    assert_eq!(offset_bytes % 4, 0, "TODO: align");
+                    self.asm.push(f_str_uo(W32, r, reg, offset_bytes as i64 / 4))
+                } else {
+                    let val = self.in_reg(value);
+                    self.store_one(MEM_32, val, reg, offset_bytes);
+                    self.drop_reg(val);
+                }
+            }
             Prim::I32 => {
                 let val = self.in_reg(value);
                 self.store_one(MEM_32, val, reg, offset_bytes);
@@ -717,7 +727,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 self.store_one(MEM_08, val, reg, offset_bytes);
                 self.drop_reg(val);
             }
-            _ => todo!(),
         }
         self.drop_reg(reg);
     }

@@ -66,6 +66,7 @@ pub enum Prim {
     I32,
     I64,
     F64,
+    F32,
     P64,
 }
 
@@ -271,6 +272,13 @@ pub fn deconstruct_values(
             out.push(unwrap!(bytes.next_i64(), ""));
             if let Some(offsets) = offsets {
                 offsets.push((Prim::I64, offset as u16));
+            }
+        }
+        TypeInfo::F32 => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_u32(), "") as i64);
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::F32, offset as u16));
             }
         }
         TypeInfo::Int(_) => {

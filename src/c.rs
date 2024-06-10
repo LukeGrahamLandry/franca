@@ -655,6 +655,7 @@ fn c_type_spec(ty: Prim) -> &'static str {
         Prim::I16 => "uint16_t",
         Prim::I32 => "uint32_t",
         Prim::I64 => "uint64_t",
+        Prim::F32 => "float",
         Prim::F64 => "double",
         Prim::P64 => "void*",
     }

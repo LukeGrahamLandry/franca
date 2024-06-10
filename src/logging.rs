@@ -136,6 +136,7 @@ impl<'p> Program<'p> {
                     TypeInfo::Placeholder => "UnfinishedPlaceHolder".to_owned(),
                     TypeInfo::Never => "Never".to_owned(),
                     TypeInfo::F64 => "f64".to_owned(),
+                    TypeInfo::F32 => "f32".to_owned(),
                     TypeInfo::Bool => "bool".to_owned(),
                     // TODO: be careful of recursion
                     TypeInfo::Ptr(e) => format!("*{}", self.log_type(*e)),
