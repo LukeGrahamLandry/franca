@@ -558,8 +558,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         debug_assert!(
             self.slot_count(expr.ty) <= 8 || result_location != PushStack,
-            "{}",
-            expr.log(self.program.pool)
+            "{} {}",
+            expr.log(self.program.pool),
+            self.program.log_type(expr.ty)
         );
 
         // let info = self.program.get_info(expr.ty);
@@ -1349,7 +1350,8 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
             arg_float_mask: 0,
             ret_slots: 0,
             ret_float_mask: 0,
-            first_arg_is_indirect_return: true,
+            first_arg_is_indirect_return: true, // really it does have indirect ret but we don't want to pass the first arg in x8
+            use_special_register_for_indirect_return: false,
             no_return: f_ty.ret.is_never(),
         });
     }
@@ -1363,6 +1365,7 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         ret_slots: ret.size_slots,
         ret_float_mask: ret.float_mask,
         first_arg_is_indirect_return: has_indirect_ret,
+        use_special_register_for_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
     };
 

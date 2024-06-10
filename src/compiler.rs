@@ -1544,9 +1544,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // TODO: this should be immediate_eval_expr (which should be updated do the constant check at the beginning anyway).
                         //       currently !fn_ptr can't be an atrbitrary comptime expr which is silly.
                         let ty = self.compile_expr(arg, None)?;
-                        let fn_val = arg.expect_const()?;
                         if let TypeInfo::Fn(_) = self.program[ty] {
-                            let id = fn_val.unwrap_func_id();
+                            let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             assert!(!self.program[id].any_const_args());
                             // TODO: for now you just need to not make a mistake lol
                             //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
@@ -1561,7 +1560,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             expr.ty = ty;
                             ty
                         } else {
-                            err!("!fn_ptr expected const fn not {fn_val:?}",);
+                            err!("!fn_ptr expected const fn not {}", self.program.log_type(ty));
                         }
                     }
                     Flag::From_Bit_Literal => {

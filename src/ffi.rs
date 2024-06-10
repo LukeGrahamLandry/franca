@@ -647,7 +647,7 @@ pub mod c {
 
     pub fn call<'p>(program: &mut Compile<'_, 'p>, ptr: usize, f_ty: crate::ast::FnType, mut args: Vec<i64>, comp_ctx: bool) -> Res<'p, Values> {
         let (arg, ret) = program.program.get_infos(f_ty);
-        let bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
+        let mut bounce = if arg.float_mask == 0 && ret.float_mask == 0 {
             arg8ret1
         } else if arg.float_mask.count_ones() == arg.size_slots as u32 && ret.float_mask.count_ones() == ret.size_slots as u32 {
             assert!(ret.size_slots <= 1, "TODO: float call with multiple returns at comptime");
@@ -662,6 +662,8 @@ pub mod c {
         let indirect_ret = if ret.size_slots > 2 {
             let mem = vec![0u8; ret.stride_bytes as usize];
             args.insert(0, mem.as_ptr() as i64);
+            assert_eq!(arg.float_mask, 0);
+            bounce = arg8ret_struct;
             Some(mem)
         } else {
             None
@@ -706,6 +708,7 @@ pub mod c {
         fn arg8ret1(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
         // loads 8 words from args into d0-d7 then calls fnptr. the return value in d0 is bit cast to an int in x0 for you.
         fn arg8ret1_all_floats(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
+        fn arg8ret_struct(fnptr: usize, first_of_eight_args: *mut i64) -> i64;
     }
 
     #[repr(C)]

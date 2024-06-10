@@ -54,6 +54,7 @@ pub struct PrimSig {
     pub ret_slots: u16,
     pub ret_float_mask: u32,
     pub first_arg_is_indirect_return: bool,
+    pub use_special_register_for_indirect_return: bool,
     pub no_return: bool,
 }
 

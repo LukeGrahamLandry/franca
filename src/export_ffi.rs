@@ -123,18 +123,13 @@ pub struct ImportVTable {
     // TODO: i want the meta program to be tracking these instead.
     get_fns_with_tag: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, tag: Ident<'p>) -> *const [FuncId],
     // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
-    emit_c: for<'p> unsafe extern "C" fn(
-        out: *mut ManuallyDrop<Res<'p, *const str>>,
-        c: &mut Compile<'_, 'p>,
-        fns: *const [FuncId],
-        add_test_runner: bool,
-    ),
+    emit_c: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str>,
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
     lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: Span) -> *const str,
     add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Arc<File>,
-    parse_stmts: for<'p> unsafe extern "C" fn(out: *mut ManuallyDrop<BigCErr<'p, *const [FatStmt<'p>]>>, c: &mut Compile<'_, 'p>, f: Arc<File>),
+    parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]>,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
@@ -198,15 +193,10 @@ unsafe extern "C" fn get_fns_with_tag(c: &mut Compile, tag: Ident) -> *const [Fu
 
     found.leak() as *const [FuncId]
 }
-unsafe extern "C" fn franca_emit_c<'p>(
-    out: *mut ManuallyDrop<Res<'p, *const str>>,
-    c: &mut Compile<'_, 'p>,
-    fns: *const [FuncId],
-    add_test_runner: bool,
-) {
+unsafe extern "C" fn franca_emit_c<'p>(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str> {
     #[cfg(feature = "c-backend")]
     {
-        *out = ManuallyDrop::new(crate::c::emit_c(c, (*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str));
+        return crate::c::emit_c(c, (*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str);
     }
 
     #[cfg(not(feature = "c-backend"))]
@@ -236,18 +226,17 @@ unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Arc
     c.parsing.codemap.add_file(name.to_string(), content.to_string())
 }
 
-unsafe extern "C" fn parse_stmts<'p>(out: *mut ManuallyDrop<BigCErr<'p, *const [FatStmt<'p>]>>, comp: &mut Compile<'_, 'p>, file: Arc<File>) {
+unsafe extern "C" fn parse_stmts<'p>(comp: &mut Compile<'_, 'p>, file: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]> {
     assert_eq!(mem::size_of::<BigCErr<'p, *const [FatStmt<'p>]>>(), 24);
     let lex = Lexer::new(file.clone(), comp.program.pool, file.span);
+    mem::forget(file); // the franca code that called us doesn't know it has to clone the Arc.
     let stmts = match Parser::parse_stmts(&mut comp.parsing, lex, comp.pool) {
         Ok(s) => s,
         Err(e) => {
-            *out = ManuallyDrop::new(Err(e));
-            return;
+            return Err(e);
         }
     };
-    mem::forget(file); // the franca code that called us doesn't know it has to clone the Arc.
-    *out = ManuallyDrop::new(Ok(stmts.leak()));
+    return Ok(stmts.leak());
 }
 
 unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()> {
@@ -1175,6 +1164,8 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
         _ => panic!("Ambigous overload \n{:?}", overloads.ready),
     };
     let val = to_values(comp.program, found).unwrap();
+    // It might have been a function pointer type. this lets you do `thing.field = (@resolve(@type thing.field) overloadset)!fnptr`
+    let ty = comp.program.intern_type(TypeInfo::Fn(f_ty));
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }
 

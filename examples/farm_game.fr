@@ -1,7 +1,11 @@
 #include_std("core.fr"); // TODO: handle adding these here. 
 
 do_init :: fn(userdata: rawptr) Unit = {
-
+    desc := SgDesc.zeroed();
+    // TODO: can't do this because I don't follow the right calling convention for return values.
+    desc.environment = sglue_environment();
+    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    sg_setup(desc&);
 };
 
 do_render :: fn(userdata: rawptr) Unit = {
@@ -25,11 +29,22 @@ fn main() Unit = {
     desc.init_userdata_cb = do_init!fn_ptr;
     desc.frame_userdata_cb = do_render!fn_ptr;
     desc.event_userdata_cb = do_event!fn_ptr;
+    // TODO: I can't decide if this would be creepy as an auto cast.
+    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
     sapp_run(desc&);
 }
 
 ::print_stacktrace_on_panic();
 fn driver(vtable: *ImportVTable) Unit #export = {
+    SOKOL_C :: """
+        #include "sokol_app.h"
+        #include "sokol_gfx.h"
+        #include "sokol_glue.h"
+        #include "sokol_log.h"
+        #include "util/sokol_debugtext.h"
+        #include "util/sokol_gl.h"
+        #include "util/sokol_shape.h"
+    """;
     // TODO: this whole thing where you have to write your program inside out is really annoying. 
     //       I want the user program to be in charge and call into the compiler as a library. 
     UserData :: @struct(
@@ -55,36 +70,24 @@ fn driver(vtable: *ImportVTable) Unit #export = {
 
     dylib_path := "target/sokol.dylib";
     dylib_path_c := dylib_path.maybe_borrow_cstr(libc_allocator);
-    
     sokol := dlopen(dylib_path_c, DlFlag.Lazy);
     if(sokol.lib.is_null()){|
+        c_file := open_temp_file();
+        c_file.fd&.write(SOKOL_C);
+        
         // TODO: don't hardcode platform. and -DSOKOL_DLL
         // build it!
-        args := (
-            "-DSOKOL_IMPL",
-            "-DSOKOL_METAL",
-            "-DSOKOL_NO_ENTRY",
-            "-framework",
-            "Metal",
-            "-framework",
-            "MetalKit",
-            "-framework",
-            "Cocoa",
-            "-framework",
-            "QuartzCore",
-            "-dynamiclib",
-            "-O2",
-            "-o",
-            dylib_path,
-            "-x",
-            "objective-c",
-            "vendor/sokol.c",
-        )!slice;
+        // macos_args must go first to treat source as objective c!
+        macos_args := ("-DSOKOL_METAL", "-x", "objective-c", "-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore")!slice;
+        common_args := ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY", "-dynamiclib", "-O2", "-o", dylib_path, c_file&.s_name())!slice;
+        args := macos_args.clone(libc_allocator);
+        args&.push_all(common_args);
         ::display_slice(Str);
-        @println("will run clang: %", args);
-        run_cmd_blocking(CLANG_PATH, args);
+        @println("building sokol dylib for comptime: %", args.items());
+        run_cmd_blocking(CLANG_PATH, args.items());
         sokol = dlopen(dylib_path_c, DlFlag.Lazy);
         assert(sokol.lib.is_null().not(), "failed to open sokol for comptime");
+        c_file.remove();
     };
     
     my_vtable: ExportVTable = (

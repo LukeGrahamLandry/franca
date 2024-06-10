@@ -211,13 +211,21 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
         let sig = self.body.signeture;
         debug_assert!(sig.arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
-        self.ccall_reg_to_stack(sig.arg_slots, sig.arg_float_mask);
-        let int_count = sig.arg_slots as u32 - sig.arg_float_mask.count_ones();
+        let mut int_count = sig.arg_slots as u32 - sig.arg_float_mask.count_ones();
+        let slots = if sig.use_special_register_for_indirect_return {
+            self.state.stack.push(Val::Increment { reg: 8, offset_bytes: 0 });
+            int_count -= 1;
+            sig.arg_slots - 1
+        } else {
+            sig.arg_slots
+        };
+        self.ccall_reg_to_stack(slots, sig.arg_float_mask);
+
         // Any registers not containing args can be used.
         for i in int_count..8 {
             self.state.free_reg.push(i as i64);
         }
-        debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
+        // debug_assert_eq!(self.state.stack.len() as u16, sig.arg_slots);
 
         debugln!("entry: ({:?})", self.state.stack);
         self.emit_block(0, false)?;
@@ -823,7 +831,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     fn drop_reg(&mut self, reg: i64) {
-        if reg != sp {
+        if reg != sp && reg != x8 {
             debug_assert!(!self.state.free_reg.contains(&reg), "drop r{reg} -> {:?}", self.state.free_reg);
             self.state.free_reg.push(reg);
             if ZERO_DROPPED_REG {
@@ -933,8 +941,25 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // TODO: this isn't the normal c abi
         // assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
 
-        self.stack_to_ccall_reg(sig.arg_slots, sig.arg_float_mask);
+        let slots = if sig.use_special_register_for_indirect_return {
+            sig.arg_slots - 1
+        } else {
+            sig.arg_slots
+        };
+        self.stack_to_ccall_reg(slots, sig.arg_float_mask);
         self.spill_abi_stompable();
+        // TODO: don't spill!
+        if sig.use_special_register_for_indirect_return {
+            match self.state.stack.pop().unwrap() {
+                Val::Increment { reg, offset_bytes } => {
+                    assert!(reg == sp);
+                    self.asm.push(add_im(X64, x8, reg, offset_bytes as i64, 0))
+                }
+                Val::Literal(v) => self.load_imm(x8, v as u64),
+                Val::Spill(slot) => self.load_u64(x8, sp, slot.0),
+                Val::FloatReg(_) => unreachable!(),
+            }
+        }
         do_call(self);
         self.ccall_reg_to_stack(sig.ret_slots, sig.ret_float_mask);
 
