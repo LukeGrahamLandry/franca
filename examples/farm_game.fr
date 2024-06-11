@@ -1,8 +1,10 @@
-#include_std("core.fr"); // TODO: handle adding these here. 
-
 State :: @struct(
     pipe: SglPipeline,
     pass_action: SgPassAction,
+    x: f64,
+    y: f64,
+    dx: f64,
+    dy: f64
 );
 
 do_init :: fn(userdata: rawptr) Unit = {
@@ -10,15 +12,17 @@ do_init :: fn(userdata: rawptr) Unit = {
     
     desc := SgDesc.zeroed();
     desc.environment = sglue_environment();
-    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    // TODO: single argument version of @resolve that uses inferred result type. 
+    logger := (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    desc.logger.func = logger;
     sg_setup(desc&);
     
     desc := SglDesc.zeroed();
-    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    desc.logger.func = logger;
     sgl_setup(desc&);
     
     desc := SdtxDesc.zeroed();
-    desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    desc.logger.func = logger;
     desc.fonts&.as_ptr()[] = sdtx_font_kc854();
     sdtx_setup(desc&);
     
@@ -27,18 +31,59 @@ do_init :: fn(userdata: rawptr) Unit = {
     state.pass_action.colors&[0].load_action = .CLEAR;
     state.pass_action.colors&[0].clear_value.r = 1.0.cast();
     
+    state.x = 0.0;
+    state.y = 0.0;
+    state.dx = 0.2;
+    state.dy = 0.2;
 };
 
 do_render :: fn(userdata: rawptr) Unit = {
     state := State.ptr_from_raw(userdata);
+    state.x += state.dx;
+    state.y += state.dy;
     
     sgl_defaults();
     sgl_viewport(0.intcast(), 0.intcast(), sapp_width(), sapp_height(), true);
     sgl_load_pipeline(state.pipe);
-    sgl_begin_quads();
     sdtx_color3f(0.0.cast(), 0.0.cast(), 1.0.cast());
+    sdtx_canvas(sapp_width().intcast().float().div(2.0).cast(), sapp_height().intcast().float().div(2.0).cast());
+    sdtx_pos(state.x.cast(), state.y.cast());
     sdtx_puts("hello world".maybe_borrow_cstr(libc_allocator));
+    
+    
+    sgl_begin_quads();
+    
+    fn draw_square(x: f64, y: f64, size: f64) Unit = {
+        w := sapp_width().intcast().float();
+        h := sapp_height().intcast().float();
+        half_size := size.div(2.0);
+        
+        x1 := x.sub(half_size).div(w).sub(1.0).cast();
+        x2 := x.add(half_size).div(w).sub(1.0).cast();
+        y1 := y.sub(half_size).div(h.neg()).add(1.0).cast();
+        y2 := y.add(half_size).div(h.neg()).add(1.0).cast();
+        
+        sgl_v2f(x1, y1);
+        sgl_v2f(x2, y1);
+        sgl_v2f(x2, y2);
+        sgl_v2f(x1, y2);
+    }
+    
+    sgl_load_identity();
+    draw_square(100.0, 100.0, 20.0);
+    draw_square(200.0, 200.0, 20.0);
+    draw_square(0.0, 0.0, 20.0);
+    
     sgl_end();
+    
+    width := sapp_width().intcast().float().div(16.0);
+    if(state.x.gt(width.sub(11.0)).or(=> state.x.lt(0.0))){|
+        state.dx *= 1.0.neg();
+    };
+    height := sapp_height().intcast().float().div(16.0);
+    if(state.y.gt(height.sub(1.0)).or(=> state.y.lt(0.0))){|
+        state.dy *= 1.0.neg();
+    };
     
     desc := SgPass.zeroed();
     desc.action = state.pass_action;
@@ -70,7 +115,6 @@ fn main() Unit = {
     println("Hello World");
     state := State.zeroed();
     desc := SappDesc.zeroed();
-    //desc.userdata = 
     desc.init_userdata_cb = do_init!fn_ptr;
     desc.frame_userdata_cb = do_render!fn_ptr;
     desc.event_userdata_cb = do_event!fn_ptr;
@@ -104,7 +148,7 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         sokol_sym := {userdata.vtable.intern_string}(comp, "sokol");
         fn_name := {userdata.vtable.get_string}(comp, fn_name);
         ret :: @return;
-        @println("Asked for a function %", fn_name);
+        //@println("Asked for a function %", fn_name);
         if(sokol_sym.eq(lib_name)){|
             fn_name := fn_name.maybe_borrow_cstr(libc_allocator);
             f := dlsym(userdata.sokol, fn_name);
@@ -121,13 +165,15 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         c_file := open_temp_file();
         c_file.fd&.write(SOKOL_C);
         
-        // TODO: don't hardcode platform. and -DSOKOL_DLL
+        // TODO: don't hardcode platform. 
         // build it!
         // macos_args must go first to treat source as objective c!
         macos_args := ("-DSOKOL_METAL", "-x", "objective-c", "-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore")!slice;
-        common_args := ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY", "-dynamiclib", "-O2", "-o", dylib_path, c_file&.s_name())!slice;
+        common_args := ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY",  "-O2", c_file&.s_name())!slice;
+        dyn_args := ("-DSOKOL_DLL", "-dynamiclib", "-o", dylib_path)!slice;
         args := macos_args.clone(libc_allocator);
         args&.push_all(common_args);
+        args&.push_all(dyn_args);
         ::display_slice(Str);
         @println("building sokol dylib for comptime: %", args.items());
         run_cmd_blocking(CLANG_PATH, args.items());
@@ -141,9 +187,12 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     );
     data: UserData = (vtable = vtable, sokol = sokol);
     
-    src := libc_allocator.read_to_string("examples/farm_game.fr");
+    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    the_code := libc_allocator.read_to_string("examples/farm_game.fr");  // TODO: don't depend on cwd.
+    src&.push_all(the_code.items());
     sokol_bindings := libc_allocator.read_to_string("vendor/sokol.fr");
     src&.push_all(sokol_bindings.items());
+    
     comp := vtable.new_with_src(src.items(), .Aarch64);
     {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
     

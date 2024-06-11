@@ -1028,11 +1028,19 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // The normal solution would be punt and let the linker deal with it or go back later and patch it ourselves.
         // But for now, I just spend a register on having a dispatch table and do an indirect call through that.
         // TODO: have a mapping. funcs take up slots even if never indirect called.
-        assert!(f.as_index() < 4096);
+        // assert!(f.as_index() < 4096, "{f:?}");
         self.asm.pending_indirect.push(f);
         // you don't really need to do this but i dont trust it cause im not following the calling convention
         self.load_imm(x16, self.asm.dispatch.as_ptr() as u64); // NOTE: this means you can't ever resize
-        self.asm.push(ldr_uo(MEM_64, x16, x16, f.as_index() as i64));
+        if f.as_index() < 4096 {
+            self.asm.push(ldr_uo(MEM_64, x16, x16, f.as_index() as i64));
+        } else {
+            let full = f.as_index() * 8;
+            let bottom = full & ((1 << 12) - 1);
+            let top = (full - bottom) >> 12;
+            self.asm.push(add_im(X64, x16, x16, top as i64, 1));
+            self.asm.push(ldr_uo(MEM_64, x16, x16, bottom as i64 / 8));
+        }
 
         self.asm.push(br(x16, with_link as i64))
     }

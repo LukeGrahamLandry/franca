@@ -5,6 +5,8 @@ problem is probably that there are f32s before these fields in the struct,
 and im treating those like 8 bytes so the offsets are wrong!
 yup, making it pretend to be i32 instead of f64 makes that error go away and it draws text!
 
+TODO: use for bindgen: `cargo +nightly rustdoc -Z unstable-options --output-format json`
+
 ## (Jun 8)
 
 - let type_of see through fn ptrs so can do inline .unwrap on vtable calls.

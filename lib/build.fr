@@ -23,28 +23,33 @@ fn open_temp_file() TmpFile = {
     (name = name, fd = fd)
 }
 
+fn exec_cmd(path: Str, args: Slice(Str)) Never = {
+    path := path.maybe_borrow_cstr(libc_allocator); // LEAK, but who cares, we just forked. 
+    cargs: List(CStr) = list(args.len.add(2), libc_allocator);
+    cargs&.push(path);
+    for(args) {s|
+        cargs&.push(s.maybe_borrow_cstr(libc_allocator));
+    };
+    cargs&.push((ptr = u8.ptr_from_int(0))); // libc wants a null terminated array.
+    execv(path, cargs.maybe_uninit.ptr);
+    
+    // ERROR
+    @println("Failed to exec path=%", path);
+    cargs.len -= 1; // don't try to print the null terminator
+    for(cargs) {s|
+        @println("- %", s);
+    };
+    panic("failed to exec!")
+}
+
 // TODO: better error handling. 
 // TODO: use posix_spawnp instead? that makes it easier to return an error to the caller. using fork is a pain. 
 // TODO: it doesn't look up the command like a shell does.
 fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
     pid := fork();
     if(pid.eq(0.intcast())) {|
-        path := path.maybe_borrow_cstr(libc_allocator); // LEAK, but who cares, we just forked. 
-        cargs: List(CStr) = list(args.len.add(2), libc_allocator);
-        cargs&.push(path);
-        for(args) {s|
-            cargs&.push(s.maybe_borrow_cstr(libc_allocator));
-        };
-        cargs&.push((ptr = u8.ptr_from_int(0))); // libc wants a null terminated array.
-        execv(path, cargs.maybe_uninit.ptr);
-        
-        // ERROR
-        @println("Failed to exec path=%", path);
-        cargs.len -= 1; // don't try to print the null terminator
-        for(cargs) {s|
-            @println("- %", s);
-        };
-        panic("failed to exec!");
+       exec_cmd(path, args);
+       unreachable();
     };
     
     status: i32 = 0.intcast();
@@ -56,16 +61,62 @@ fn run_cmd_blocking(path: Str, args: Slice(Str)) bool = {
 
 // TODO: return error if this becomes a lib thing which it probably should. 
 fn read_to_string(alloc: Alloc, path: Str) List(u8) = {
-    path := path.maybe_borrow_cstr(alloc);
+    bytes: List(u8) = list(alloc);
+    bytes&.read_and_push(path);
+    bytes
+}
+
+// TODO: return error
+fn read_and_push(out: *List(u8), path: Str) Unit = {
+    path := path.maybe_borrow_cstr(out.gpa); // TODO: LEAK
     flag := (@as(i64) OpenFlag.Read);
     f := open(path, flag).unwrap();
     len := f.lseek(0, .End).unwrap();
     f.lseek(0, .Set);
-    bytes: List(u8) = list(len, alloc);
-    read_len := read(f, bytes.maybe_uninit.ptr, bytes.maybe_uninit.len).unwrap();
+    out.reserve(len);
+    ptr := out.maybe_uninit.ptr.offset(out.len);
+    read_len := read(f, ptr, out.maybe_uninit.len).unwrap();
     assert_eq(read_len, len); // sanity
-    @println("read % bytes", read_len);
-    bytes.len = len;
+    out.len += len;
     close(f); // TODO: defer
-    bytes
+}
+
+fn fork_and_catch(alloc: Alloc, const f: @Fn() Unit) Ty(bool, List(u8), List(u8)) = {
+    out := Array(Fd, 2).zeroed();
+    err := Array(Fd, 2).zeroed();
+    pipe(out&);
+    pipe(err&);
+    
+    pid := fork();
+    if(pid.eq(0.intcast())){|
+        // Child
+        dup2(out&[1], STD_OUT);
+        dup2(err&[1], STD_ERR);
+        
+        // need to make sure there's something on both pipes or it blocks?
+        println(" ");
+        err := STD_ERR;
+        err&.write(" ");
+        
+        f();
+        exit(0);
+    };
+    
+    read_all :: fn(fd: Fd) List(u8) => {
+        buf: List(u8) = list(99999, alloc);
+        len := read(fd, buf.maybe_uninit.ptr, buf.maybe_uninit.len).unwrap();
+        buf.len = len;
+        buf
+    };
+
+    status := 0.intcast();
+    waitpid(pid, status&, 0.intcast());
+
+    // TODO: how big is the pipe's buffer?
+    outs := read_all(out&[0]);
+    errs := read_all(err&[0]);
+    close(out&[0]);
+    close(err&[0]);
+
+    (status.eq(0.intcast()), outs, errs)
 }

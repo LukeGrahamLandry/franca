@@ -1,0 +1,113 @@
+TARGET: TargetArch : .Aarch64;
+
+fn driver(vtable: *ImportVTable) Unit #export = {
+    run_sequential(vtable);
+    
+    fork_run_main(vtable, "examples/bf.fr");
+    fork_run_main(vtable, "examples/emit_c.fr");
+    fork_run_main(vtable, "examples/hello.fr");
+    
+    // These ones I don't run because they're interactive but just make sure it compiles so it doesn't rot
+    check_main_compiles(vtable, "examples/raw_terminal.fr");
+    check_driver_compiles(vtable, "examples/farm_game.fr");  // the game runs in the driver 
+    
+    // TODO: #import_std uses relative paths. 
+    chdir("examples/lox".maybe_borrow_cstr(libc_allocator));
+    fork_run_main(vtable, "main.fr");
+    chdir("../../".maybe_borrow_cstr(libc_allocator));
+    
+    mandelbrot(vtable);
+}
+
+fn run_sequential(vtable: *ImportVTable) Unit = {
+    path := "tests".maybe_borrow_cstr(libc_allocator);
+    found: List(List(u8)) = list(20, libc_allocator); // LEAK
+    walk_directory(path) {entry|
+        // TODO: recurse with another list if .Directory
+        if(eq(@as(u8) entry.d_type, @as(u8) DirEntType.File)) {|
+            found&.push(@format("%/%", path, entry.name()));
+        };
+    };
+    
+    all_source := "#include_std(\"core.fr\");".clone(libc_allocator);
+    each(found){name|
+        continue :: @return;
+        if(not(name.items().ends_with(".fr")), => continue());
+        all_source&.read_and_push(name.items());
+    };
+    
+    comp := vtable.new_with_src(all_source.items(), .Aarch64);
+    sym_test := {vtable.intern_string}(comp, "test");
+    tests := {vtable.get_fns_with_tag}(comp, sym_test);
+    @println("running % tests.", tests.len);
+    for(tests) {fid|
+        name := {vtable.get_string}(comp, {vtable.get_function_name}(comp, fid));
+        @print("%, ", name);
+        res := {vtable.compile_func}(comp, fid, .Jit).unwrap();
+        ptr := {vtable.get_jitted_ptr}(comp, fid).unwrap();
+        {vtable.make_jitted_exec}(comp);
+        f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
+        f();
+    };
+    println("");
+}
+
+fn mandelbrot(vtable: *ImportVTable) Unit = {
+    // Note: can't import core at the end because you need slice type to be shared with the compiler 
+    //       before '::' blocks in the program try to run because they might use !slice. 
+    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    src&.read_and_push("examples/mandelbrot.fr");
+    f := jit_from_source(vtable, src&.items(), "render");
+    f := assume_types_fn(Arg = Unit, Ret = List(u8), ptr = f);
+    mandelbrot := f();
+    
+    pass_out_err := fork_and_catch(libc_allocator) {|
+        arg := "util/mandelbrot.lua";
+        HACK_LUA_PATH :: "/usr/local/bin/luajit";
+        exec_cmd(HACK_LUA_PATH, (ptr = arg&, len = 1));
+    };
+    assert(pass_out_err._0, "lua failed");
+    assert_eq(mandelbrot.items(), pass_out_err._1.items());
+    println("- mandelbrot.fr == mandelbrot.lua");
+}
+
+fn fork_run_main(vtable: *ImportVTable, filepath: Str) Unit = {
+    s__ := fork_and_catch(libc_allocator) {|
+        src := "#include_std(\"core.fr\");".clone(libc_allocator);
+        src&.read_and_push(filepath);
+        f := jit_from_source(vtable, src&.items(), "main");
+        f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = f);
+        f();
+    };
+    // TODO: @assert
+    assert(s__._0) {() List(u8)|
+        s: List(u8) = list(0, libc_allocator);
+        @fmt(s&, "failed to compile %", filepath);
+        s
+    };
+    @println("- ran %:main", filepath);
+}
+
+fn check_main_compiles(vtable: *ImportVTable, filepath: Str) Unit = {
+    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    src&.read_and_push(filepath);
+    f := jit_from_source(vtable, src&.items(), "main");
+    @println("- compiled %:main", filepath);
+}
+
+fn check_driver_compiles(vtable: *ImportVTable, filepath: Str) Unit = {
+    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    src&.read_and_push(filepath);
+    f := jit_from_source(vtable, src&.items(), "driver");
+    @println("- compiled %:driver", filepath);
+}
+
+fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #leak = {
+    comp := vtable.new_with_src(src, TARGET);
+    name := {vtable.intern_string}(comp, function_name);
+    fid := {vtable.find_unique_func}(comp, name).unwrap();
+    {vtable.compile_func}(comp, fid, .Jit).unwrap();
+    ptr := {vtable.get_jitted_ptr}(comp, fid).unwrap();
+    {vtable.make_jitted_exec}(comp);
+    ptr
+}

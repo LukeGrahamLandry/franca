@@ -46,8 +46,8 @@ function main()
 
     local out = ""
     local pos = init_pos(x_start, y_start)
-    for h = 0, height do
-        for w = 0, width do
+    for h = 1, height do
+        for w = 1, width do
             local steps = mandelbrot(pos, init_pos(0.0, 0.0), max_steps)
             if steps == max_steps then
                 out = out .. "@"

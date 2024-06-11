@@ -162,7 +162,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn create_slice_type(&mut self, expect: TypeId, loc: Span) -> Res<'p, TypeId> {
         let value = to_values(self.program, expect)?;
-        let f = self.as_literal(self.make_slice_t.unwrap(), loc)?;
+        let f = self.as_literal(unwrap!(self.make_slice_t, "slice type not ready!"), loc)?;
         // f.ty = ty; // TODO: it doesn't compile the function if the type here is FuncId?
         let a = FatExpr::synthetic_ty(Expr::Value { value }, loc, TypeId::ty);
         let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);

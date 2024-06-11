@@ -133,6 +133,7 @@ pub struct ImportVTable {
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
+    get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
 }
 
 #[repr(C)]
@@ -159,6 +160,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     make_and_resolve_and_compile_top_level,
     make_jitted_exec,
     give_vtable,
+    get_function_name,
 };
 
 unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
@@ -254,6 +256,10 @@ unsafe extern "C" fn make_jitted_exec(c: &mut Compile) {
 
 unsafe extern "C" fn give_vtable(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()) {
     c.driver_vtable = (Box::new((*vtable).clone()), userdata)
+}
+
+unsafe extern "C" fn get_function_name<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p> {
+    c.program[f].name
 }
 
 // This lets rust _declare_ a flat_call like its normal
