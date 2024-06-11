@@ -588,15 +588,18 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
     fn make_sig(&mut self, sign: PrimSig) -> Signature {
         let mut sig = self.cl.module.make_signature();
-
-        // TODO: use the right purpose for first arg if its indirect return?
-        //       for now I don't because i don't use the right register in my backend and i want them to match so you can call between.
         for i in 0..sign.arg_slots as usize {
             let value_type = if is_float(i, sign.arg_slots, sign.arg_float_mask) { F64 } else { I64 };
             // TODO: sign extend once I use small int types? but really caller should always do it I think.
+            let purpose = if sign.use_special_register_for_indirect_return && i == 0 {
+                // TODO: a test that fails if you don't do this
+                ArgumentPurpose::StructReturn
+            } else {
+                ArgumentPurpose::Normal
+            };
             sig.params.push(AbiParam {
                 value_type,
-                purpose: ArgumentPurpose::Normal,
+                purpose,
                 extension: ArgumentExtension::None,
             });
         }

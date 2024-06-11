@@ -124,8 +124,9 @@ fn main() Unit = {
     sapp_run(desc&);
 }
 
-::print_stacktrace_on_panic();
+//::print_stacktrace_on_panic();
 fn driver(vtable: *ImportVTable) Unit #export = {
+    arch_os := {vtable.comptime_arch}(); // TODO: pattern match multiple returns. 
     SOKOL_C :: """
         #include "sokol_app.h"
         #include "sokol_gfx.h"
@@ -141,6 +142,8 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         vtable: *ImportVTable,
         sokol: DlHandle,
     );
+    
+    is_x86 := (@as(i64)arch_os._0).eq(@as(i64) Arch.X86_64);
     
     resolve_comptime_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
         userdata := UserData.ptr_from_raw(userdata);
@@ -158,7 +161,7 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         .None
     };
 
-    dylib_path := "target/sokol.dylib";
+    dylib_path := if(is_x86, => "target/sokol_x86_64.dylib", => "target/sokol_aarch64.dylib");
     dylib_path_c := dylib_path.maybe_borrow_cstr(libc_allocator);
     sokol := dlopen(dylib_path_c, DlFlag.Lazy);
     if(sokol.lib.is_null()){|
@@ -174,6 +177,10 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         args := macos_args.clone(libc_allocator);
         args&.push_all(common_args);
         args&.push_all(dyn_args);
+        if(is_x86) {|
+            // cross compile for rosetta. 
+            args&.push_all(("-target", "x86_64-apple-darwin")!slice);
+        };
         ::display_slice(Str);
         @println("building sokol dylib for comptime: %", args.items());
         run_cmd_blocking(CLANG_PATH, args.items());
@@ -193,7 +200,7 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     sokol_bindings := libc_allocator.read_to_string("vendor/sokol.fr");
     src&.push_all(sokol_bindings.items());
     
-    comp := vtable.new_with_src(src.items(), .Aarch64);
+    comp := vtable.new_with_src(src.items(), .Cranelift);
     {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
     
     jit_and_run_main(vtable, comp);

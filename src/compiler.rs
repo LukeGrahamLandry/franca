@@ -425,18 +425,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         callees_done
     }
 
-    pub fn run(&mut self, f: FuncId, arg: Values) -> Res<'p, Values> {
-        let loc = self.last_loc;
-        unsafe { STATS.jit_call += 1 };
-        let state2 = DebugState::RunInstLoop(f, self.program[f].name);
-        self.push_state(&state2);
-        self.compile(f, ExecStyle::Jit)?;
-        assert!(!matches!(self.program[f].body, FuncImpl::Empty));
-
-        let ty = self.program[f].unwrap_ty();
-        self.program.finish_layout_deep(ty.arg)?;
-        self.program.finish_layout_deep(ty.ret)?;
-
+    pub fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
         #[cfg(target_arch = "aarch64")]
         self.aarch64.make_exec();
         #[cfg(feature = "cranelift")]
@@ -452,10 +441,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             debug_assert!(self.aarch64.get_fn(from).is_none());
             self.aarch64.dispatch[from.as_index()] = ptr;
         }
-
-        self.last_loc = loc;
-        // cranelift puts stuff here too and so does comptime_addr
-        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
 
         // TODO: need to recurse on the mutual_callees somewhere. this is just a hack.
         //       need ensure_compiled, compile, and like really_super_compile.
@@ -485,6 +470,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.pool.get(self.program[*c].name)
             )
         }
+
+        Ok(())
+    }
+
+    pub fn run(&mut self, f: FuncId, arg: Values) -> Res<'p, Values> {
+        let loc = self.last_loc;
+        unsafe { STATS.jit_call += 1 };
+        let state2 = DebugState::RunInstLoop(f, self.program[f].name);
+        self.push_state(&state2);
+        self.compile(f, ExecStyle::Jit)?;
+        assert!(!matches!(self.program[f].body, FuncImpl::Empty));
+
+        let ty = self.program[f].unwrap_ty();
+        self.program.finish_layout_deep(ty.arg)?;
+        self.program.finish_layout_deep(ty.ret)?;
+
+        self.flush_callees(f)?;
+        self.last_loc = loc;
+        // cranelift puts stuff here too and so does comptime_addr
+        let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
+
         let cc = self.program[f].cc.unwrap();
         let c_call = matches!(cc, CallConv::CCallReg | CallConv::CCallRegCt | CallConv::OneRetPic);
         let flat_call = matches!(cc, CallConv::Flat | CallConv::FlatCt);

@@ -134,6 +134,7 @@ pub struct ImportVTable {
     make_jitted_exec: unsafe extern "C" fn(c: &mut Compile),
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
     get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
+    comptime_arch: unsafe extern "C" fn() -> (i64, i64),
 }
 
 #[repr(C)]
@@ -161,8 +162,28 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     make_jitted_exec,
     give_vtable,
     get_function_name,
+    comptime_arch,
 };
 
+unsafe extern "C" fn comptime_arch<'p>() -> (i64, i64) {
+    let arch = if cfg!(target_arch = "aarch64") {
+        1
+    } else if cfg!(target_arch = "x86_64") {
+        2
+    } else {
+        -1
+    };
+    let os = if cfg!(target_os = "macos") {
+        0
+    } else if cfg!(target_os = "linux") {
+        1
+    } else if cfg!(target_os = "windows") {
+        2
+    } else {
+        -1
+    };
+    (arch, os)
+}
 unsafe extern "C" fn franca_intern_string<'p>(c: &mut Compile<'_, 'p>, s: *const str) -> Ident<'p> {
     c.pool.intern(&*s)
 }
@@ -173,6 +194,10 @@ unsafe extern "C" fn franca_get_stats() -> *const Stats {
     addr_of!(STATS)
 }
 unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const Compile<'static, 'static> {
+    if cfg!(not(target_arch = "aarch64")) && comptime_arch == TargetArch::Aarch64 {
+        panic!("aarch64 jit is not supported on this architecture"); // TODO: return error instead.
+    }
+
     let pool = Box::leak(Box::new(StringPool::default()));
     let program = Box::leak(Box::new(Program::new(pool, comptime_arch)));
     let compiler = Box::leak(Box::new(Compile::new(pool, program)));
@@ -213,6 +238,7 @@ unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId,
 }
 
 unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8> {
+    c.flush_callees(f)?;
     Ok(unwrap!(c.aarch64.get_fn(f), "not compiled {f:?}"))
 }
 
