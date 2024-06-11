@@ -100,10 +100,21 @@ macro_rules! unwrap {
         }
     }};
 }
+#[macro_export]
+macro_rules! unwrap2 {
+    ($maybe:expr, $($arg:tt)*) => {{
+        if let BigOption::Some(value) = $maybe {
+            value
+        } else {
+            $crate::ice!("Missing value {}.\n{}", stringify!($maybe), format!($($arg)*))
+        }
+    }};
+}
 
 pub use unwrap;
 
 use crate::ast::{FatStmt, FnFlag, FuncImpl, Pattern};
+use crate::export_ffi::BigOption;
 use crate::pool::Ident;
 use crate::{
     ast::{Expr, FatExpr, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo, Var},
@@ -449,7 +460,7 @@ impl<'p> FnBody<'p> {
                         // program.log_type(program[id].finished_ret.unwrap())
                     ),
                     Bc::AddrVar { id } => {
-                        if let Some(&Some(name)) = self.var_names.get(id as usize) {
+                        if let Some(&BigOption::Some(name)) = self.var_names.get(id as usize) {
                             write!(f, "; {}", program.pool.get(name.name));
                         }
                         writeln!(f, "; {}", program.log_type(self.vars[id as usize]))

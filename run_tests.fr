@@ -17,9 +17,13 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     chdir("../../".maybe_borrow_cstr(libc_allocator));
     
     mandelbrot(vtable);
+    set_colour(250, 150, 200);
+    println("ALL EXAMPLES PASSED!");
+    unset_colour();
 }
 
 fn run_sequential(vtable: *ImportVTable) Unit = {
+    start := timestamp();
     path := "tests".maybe_borrow_cstr(libc_allocator);
     found: List(List(u8)) = list(20, libc_allocator); // LEAK
     walk_directory(path) {entry|
@@ -29,18 +33,39 @@ fn run_sequential(vtable: *ImportVTable) Unit = {
         };
     };
     
-    all_source := "#include_std(\"core.fr\");".clone(libc_allocator);
+    comp := {vtable.init_compiler}(.Aarch64);
+    file := {vtable.add_file}(comp, "lib", "#include_std(\"core.fr\");");
+    all_stmts := {vtable.parse_stmts}(comp, file).unwrap();
+    ::List(FatStmtHack);
+    all_stmts := all_stmts.clone(libc_allocator);
+    
     each(found){name|
         continue :: @return;
         if(not(name.items().ends_with(".fr")), => continue());
-        all_source&.read_and_push(name.items());
+        
+        src := libc_allocator.read_to_string(name.items());
+        file := {vtable.add_file}(comp, name.items(), src.items());
+        stmts := {vtable.parse_stmts}(comp, file).unwrap();
+        all_stmts&.push_all(stmts);
     };
+    {vtable.make_and_resolve_and_compile_top_level}(comp, all_stmts.items()).unwrap();
     
-    comp := vtable.new_with_src(all_source.items(), .Aarch64);
     sym_test := {vtable.intern_string}(comp, "test");
     tests := {vtable.get_fns_with_tag}(comp, sym_test);
-    @println("running % tests.", tests.len);
+    
+    prev_filename := "";
     for(tests) {fid|
+        func := {vtable.get_function}(comp, fid);
+        loc := @as(Span!builtin) func.loc; // TODO: lookup_filename takes a pointer because the calling convention doesn't match otherwise. 
+        filename := {vtable.lookup_filename}(comp, loc&);
+        if(filename.eq(prev_filename).not()) {|
+            println("");
+            set_colour(0, 255, 0);
+            @print("[%] ", filename);
+            unset_colour();
+            prev_filename = filename;  // we know it comes from StringPool so will live ~forever. 
+        };
+        
         name := {vtable.get_string}(comp, {vtable.get_function_name}(comp, fid));
         @print("%, ", name);
         res := {vtable.compile_func}(comp, fid, .Jit).unwrap();
@@ -50,6 +75,17 @@ fn run_sequential(vtable: *ImportVTable) Unit = {
         f();
     };
     println("");
+    
+    end := timestamp();
+    
+    set_colour(250, 150, 200);
+    @println(
+        "ALL TESTS PASSED! % files. % tests. % ms.",
+        found.len(),
+        tests.len(),
+        end.sub(start),
+    );
+    unset_colour();
 }
 
 fn mandelbrot(vtable: *ImportVTable) Unit = {
@@ -110,4 +146,12 @@ fn jit_from_source(vtable: *ImportVTable, src: Str, function_name: Str) rawptr #
     ptr := {vtable.get_jitted_ptr}(comp, fid).unwrap();
     {vtable.make_jitted_exec}(comp);
     ptr
+}
+
+fn set_colour(r: i64, g: i64, b: i64) Unit = {
+    @print("\x1B[38;2;%;%;%m", r, g, b);
+}
+
+fn unset_colour() Unit = {
+    print("\x1B[0m");
 }

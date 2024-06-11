@@ -20,7 +20,7 @@ use crate::scope::ResolveScope;
 use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
 use std::fmt::{Debug, Write};
 use std::hint::black_box;
-use std::mem::{self, transmute, ManuallyDrop};
+use std::mem::{self, transmute};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
 use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
@@ -31,11 +31,82 @@ use std::{fs, io};
 use crate::export_ffi::BigResult::*;
 
 #[repr(C, i64)]
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub enum BigOption<T> {
     Some(T),
     #[default]
     None = 1,
+}
+
+impl<T> BigOption<T> {
+    pub(crate) fn as_mut(&mut self) -> Option<&mut T> {
+        match self {
+            BigOption::Some(t) => Some(t),
+            BigOption::None => None,
+        }
+    }
+
+    pub(crate) fn as_ref(&self) -> Option<&T> {
+        match self {
+            BigOption::Some(t) => Some(t),
+            BigOption::None => None,
+        }
+    }
+    pub(crate) fn unwrap(self) -> T {
+        match self {
+            BigOption::Some(t) => t,
+            BigOption::None => panic!("Unwrapped missing Option."),
+        }
+    }
+
+    pub(crate) fn is_none(&self) -> bool {
+        match self {
+            BigOption::Some(_) => false,
+            BigOption::None => true,
+        }
+    }
+
+    pub(crate) fn is_some(&self) -> bool {
+        !self.is_none()
+    }
+
+    pub(crate) fn unwrap_or(self, other: T) -> T {
+        match self {
+            BigOption::Some(t) => t,
+            BigOption::None => other,
+        }
+    }
+    pub(crate) fn take(&mut self) -> Option<T>
+    where
+        T: Default,
+    {
+        match self {
+            BigOption::Some(t) => {
+                let t = mem::take(t);
+                *self = BigOption::None;
+                Some(t)
+            }
+            BigOption::None => None,
+        }
+    }
+}
+
+impl<T> From<BigOption<T>> for Option<T> {
+    fn from(value: BigOption<T>) -> Self {
+        match value {
+            BigOption::Some(t) => Some(t),
+            BigOption::None => None,
+        }
+    }
+}
+
+impl<T> From<Option<T>> for BigOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(t) => BigOption::Some(t),
+            None => BigOption::None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +198,7 @@ pub struct ImportVTable {
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
-    lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: Span) -> *const str,
+    lookup_filename: unsafe extern "C" fn(c: &mut Compile, span: *const Span) -> *const str,
     add_file: unsafe extern "C" fn(c: &mut Compile, name: &str, content: &str) -> Arc<File>,
     parse_stmts: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: Arc<File>) -> BigCErr<'p, *const [FatStmt<'p>]>,
     make_and_resolve_and_compile_top_level: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, body: *const [FatStmt<'p>]) -> BigCErr<'p, ()>,
@@ -246,8 +317,8 @@ unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId)
     &c.program[f] as *const Func
 }
 
-unsafe extern "C" fn lookup_filename(c: &mut Compile, span: Span) -> *const str {
-    c.parsing.codemap.look_up_span(span).file.name().to_string().leak() as *const str
+unsafe extern "C" fn lookup_filename(c: &mut Compile, span: *const Span) -> *const str {
+    c.parsing.codemap.look_up_span(*span).file.name().to_string().leak() as *const str
 }
 
 unsafe extern "C" fn add_file(c: &mut Compile, name: &str, content: &str) -> Arc<File> {
@@ -806,7 +877,7 @@ pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
     ("fn debug_log_ast(expr: FatExpr) Unit;", bounce_flat_call!(FatExpr, Unit, log_ast)),
     (
         "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
-        bounce_flat_call!(Vec<FatExpr>, FatExpr, unquote_macro_apply_placeholders),
+        bounce_flat_call!(*mut [FatExpr], FatExpr, unquote_macro_apply_placeholders),
     ),
     (
         "fn get_type_int(e: FatExpr) IntTypeInfo;",
@@ -934,7 +1005,8 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
 }
 
 // :UnquotePlaceholders
-fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, mut args: Vec<FatExpr<'p>>) -> FatExpr<'p> {
+fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mut [FatExpr<'p>]) -> FatExpr<'p> {
+    let mut args = unsafe { &*args }.to_vec();
     let doo = || {
         let mut template = unwrap!(args.pop(), "template arg");
         let mut walk = Unquote {

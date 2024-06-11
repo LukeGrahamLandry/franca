@@ -36,7 +36,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, Map, Stats, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, Stats, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
@@ -212,7 +212,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     bindings: vec![Binding {
                         name: Name::Ident(name),
                         ty: LazyType::Infer,
-                        default: Some(unit),
+                        default: BigOption::Some(unit),
                         kind: VarType::Let,
                     }],
                     loc: expr.loc,
@@ -283,7 +283,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if self.program[f].has_tag(Flag::One_Ret_Pic) {
             self.program[f].set_cc(CallConv::OneRetPic)?;
         }
-        if self.program[f].cc == Some(CallConv::Inline) {
+        if self.program[f].cc == BigOption::Some(CallConv::Inline) {
             // TODO: err on other cc tags
             // skip cause we dont care about big arg checks.
             return Ok(());
@@ -661,7 +661,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
-            let addr: usize = self.immediate_eval_expr_known(unwrap!(tag.args.clone(), ""))?;
+            let addr: usize = self.immediate_eval_expr_known(unwrap2!(tag.args.clone(), ""))?;
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
             self.program[f].body = FuncImpl::ComptimeAddr(addr);
             self.aarch64.extend_blanks(f);
@@ -711,7 +711,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         #[cfg(feature = "cranelift")]
         if let Some(addr) = self.program[f].get_tag(Flag::Cranelift_Emit) {
-            let arg = unwrap!(addr.args.clone(), "Cranelift_Emit needs arg");
+            let arg = unwrap2!(addr.args.clone(), "Cranelift_Emit needs arg");
             let addr: usize = self.immediate_eval_expr_known(arg)?;
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
             self.program[f].body = FuncImpl::EmitCranelift(addr);
@@ -759,8 +759,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         let hint = self.program[f].finished_ret;
-        if let Some(return_var) = self.program[f].return_var {
-            if let Some(ret_ty) = hint {
+        if let BigOption::Some(return_var) = self.program[f].return_var {
+            if let BigOption::Some(ret_ty) = hint {
                 if let Expr::Block { ret_label, .. } = &mut body_expr.expr {
                     let ret = LabelId::from_index(self.next_label);
                     self.next_label += 1;
@@ -768,12 +768,12 @@ impl<'a, 'p> Compile<'a, 'p> {
 
                     let val = self.as_values(ret)?;
                     self.save_const_values(return_var, val, label_ty, self.program[f].loc)?;
-                    *ret_label = Some(ret);
+                    *ret_label = BigOption::Some(ret);
                 }
             }
         }
 
-        let ret_ty = self.compile_expr(&mut body_expr, hint)?;
+        let ret_ty = self.compile_expr(&mut body_expr, hint.into())?;
         if self.program[f].finished_ret.is_none() {
             // If you got to the point of emitting the body, the only situation where you don't know the return type yet is if they didn't put a type anotation there.
             // This isn't true if you have an @generic function that isn't @comptime trying to use its args in its return type.
@@ -783,7 +783,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             //  -- Apr 6, 2024
             assert!(matches!(self.program[f].ret, LazyType::Infer));
 
-            self.program[f].finished_ret = Some(ret_ty);
+            self.program[f].finished_ret = BigOption::Some(ret_ty);
             self.program[f].ret = LazyType::Finished(ret_ty);
         }
         self.program[f].body = FuncImpl::Normal(body_expr);
@@ -797,20 +797,20 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     // This is a normal function call. No comptime args, no runtime captures.
     fn emit_runtime_call(&mut self, f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, TypeId> {
-        let arg_ty = unwrap!(self.program[f].finished_arg, "fn arg");
+        let arg_ty = unwrap2!(self.program[f].finished_arg, "fn arg");
         self.compile_expr(arg_expr, Some(arg_ty))?;
 
         // self.last_loc = Some(expr.loc); // TODO: have a stack so i dont have to keep doing this.
         let func = &self.program[f];
         // TODO: some huristic based on how many times called and how big the body is.
         // TODO: pre-intern all these constants so its not a hash lookup everytime
-        let force_inline = func.cc == Some(CallConv::Inline);
+        let force_inline = func.cc == BigOption::Some(CallConv::Inline);
         assert!(func.capture_vars.is_empty());
         assert!(!force_inline);
         assert!(!func.any_const_args());
         self.add_callee(f);
         self.compile(f, self.exec_style())?;
-        let ret_ty = unwrap!(self.program[f].finished_ret, "fn ret");
+        let ret_ty = unwrap2!(self.program[f].finished_ret, "fn ret");
         Ok(ret_ty)
     }
 
@@ -854,7 +854,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let func = &self.program.funcs[f.as_index()];
         // TODO: if let this? its for return_var
-        let Some(ret_ty) = func.finished_ret else {
+        let BigOption::Some(ret_ty) = func.finished_ret else {
             err!("Unknown ret type for {f:?} {}", self.pool.get(self.program[f].name))
         };
         let hint = func.finished_ret;
@@ -899,7 +899,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 loc,
             }],
             result: Box::new(body.clone()),
-            ret_label: Some(ret_label),
+            ret_label: BigOption::Some(ret_label),
             hoisted_constants: false, // TODO
         };
         let mut mapping = Map::<Var, Var>::default();
@@ -912,9 +912,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         let value = to_values(self.program, ret_label)?;
         self.save_const(new_ret_var, Expr::Value { value }, label_ty, loc)?;
 
-        let res = self.compile_expr(expr_out, hint)?;
+        let res = self.compile_expr(expr_out, hint.into())?;
         if hint.is_none() {
-            self.program[f].finished_ret = Some(res);
+            self.program[f].finished_ret = BigOption::Some(res);
         }
         self.pop_state(state);
         Ok(res)
@@ -965,7 +965,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.program[o_f].arg.remove_named(arg_name);
 
         let known_type = self.program[o_f].finished_arg.is_some();
-        self.program[o_f].finished_arg = None;
+        self.program[o_f].finished_arg = BigOption::None;
         // If it was fully resolved before, we can't leave the wrong answer there.
         // But you might want to call bind_const_arg as part of a resolving a generic signeture so its fine if the type isn't fully known yet.
         if known_type {
@@ -1123,7 +1123,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut out = (None, None);
         // I thought i dont have to add to constants here because we'll find it on the first call when resolving overloads.
         // But it does need to have an empty entry in the overload pool because that allows it to be closed over so later stuff can find it and share if they compile it.
-        if let Some(var) = var {
+        if let BigOption::Some(var) = var {
             // TODO: allow function name to be any expression that resolves to an OverloadSet so you can overload something in a module with dot syntax.
             // TODO: distinguish between overload sets that you add to and those that you re-export
             debug_assert!(!self.program[id].get_flag(ResolvedSign));
@@ -1560,7 +1560,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             // The backend still needs to do something with this, so just leave it
                             let fn_ty = self.program.func_type(id);
                             let ty = self.program.fn_ty(fn_ty).unwrap();
-                            let cc = unwrap!(self.program[id].cc, "unknown calling convention");
+                            let cc = unwrap2!(self.program[id].cc, "unknown calling convention");
                             let ty = self.program.intern_type(TypeInfo::FnPtr { ty, cc }); // TODO: callconv as part of type
                             arg.set((id.as_raw()).into(), fn_ty);
                             expr.ty = ty;
@@ -1734,7 +1734,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let Some(outputs) = &self.program[macro_f].annotations.iter().find(|a| a.name == Flag::Outputs.ident()) else {
             return Ok(());
         };
-        let ty = unwrap!(outputs.args.clone(), "annotation #outputs(T) requires arg T");
+        let ty = unwrap2!(outputs.args.clone(), "annotation #outputs(T) requires arg T");
         let ty: TypeId = self.immediate_eval_expr_known(ty)?;
         self.type_check_arg(requested, ty, "macro #outputs")?;
         Ok(())
@@ -2131,7 +2131,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.last_loc = Some(e.loc);
             }
             if matches!(arg.ty, LazyType::Infer) {
-                if let Some(value) = &mut arg.default {
+                if let BigOption::Some(value) = &mut arg.default {
                     arg.ty = LazyType::Finished(self.type_of(value)?.unwrap())
                 } else {
                     err!("Cannot infer_pattern without type hint",);
@@ -2146,12 +2146,12 @@ impl<'a, 'p> Compile<'a, 'p> {
     fn infer_arg(&mut self, func: FuncId) -> Res<'p, TypeId> {
         self.ensure_resolved_sign(func)?;
         // TODO: this looks redundant but if you just check the arg multiple times you don't want to bother attempting the return type multiple times.
-        if let Some(ty) = self.program[func].finished_arg {
+        if let BigOption::Some(ty) = self.program[func].finished_arg {
             Ok(ty)
         } else if let Some(ty) = self.infer_types(func)? {
             Ok(ty.arg)
         } else {
-            Ok(unwrap!(self.program[func].finished_arg, "arg not inferred"))
+            Ok(unwrap2!(self.program[func].finished_arg, "arg not inferred"))
         }
     }
 
@@ -2166,7 +2166,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         //       oh fuck its because of the type_of where you can backtrack if you couldn't infer.
         //       so making it work in debug with debug_assert is probably the better outcome.
         assert!(f.get_flag(NotEvilUninit), "{}", self.pool.get(f.name));
-        if let (Some(arg), Some(ret)) = (f.finished_arg, f.finished_ret) {
+        if let (BigOption::Some(arg), BigOption::Some(ret)) = (f.finished_arg, f.finished_ret) {
             return Ok(Some(FnType {
                 arg,
                 ret,
@@ -2182,7 +2182,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let types = self.infer_pattern(&mut arg)?;
             self.program[func].arg.bindings = arg;
             let arg = self.program.tuple_of(types);
-            self.program[func].finished_arg = Some(arg);
+            self.program[func].finished_arg = BigOption::Some(arg);
         }
         let ty = if self.program[func].finished_ret.is_none() {
             let mut ret = self.program[func].ret.clone();
@@ -2190,7 +2190,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             if !self.program[func].get_flag(Generic) && self.infer_types_progress(&mut ret)? {
                 self.program[func].ret = ret;
                 let ret = self.program[func].ret.unwrap();
-                self.program[func].finished_ret = Some(ret);
+                self.program[func].finished_ret = BigOption::Some(ret);
 
                 Some(self.program[func].unwrap_ty())
             } else {
@@ -2374,9 +2374,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         let mut fake_func = Func::new(name, arg, ret, Some(e.clone()), e.loc, false);
         fake_func.set_flag(ResolvedBody, true);
         fake_func.set_flag(ResolvedSign, true);
-        fake_func.finished_arg = Some(TypeId::unit);
-        fake_func.finished_ret = Some(ret_ty);
-        fake_func.scope = Some(ScopeId::from_index(0));
+        fake_func.finished_arg = BigOption::Some(TypeId::unit);
+        fake_func.finished_ret = BigOption::Some(ret_ty);
+        fake_func.scope = BigOption::Some(ScopeId::from_index(0));
         self.anon_fn_counter += 1;
         let func_id = self.program.add_func(fake_func);
         self.update_cc(func_id)?;
@@ -2465,7 +2465,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let res = self.type_of(body);
                 debug_assert!(res.is_ok(), "{res:?}"); // clearly its fine tho...
                 if let Some(ret_ty) = res? {
-                    self.program[f].finished_ret = Some(ret_ty);
+                    self.program[f].finished_ret = BigOption::Some(ret_ty);
                 }
             }
         }
@@ -2654,7 +2654,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             .map(|binding| {
                 assert_ne!(binding.kind, VarType::Const, "todo");
                 let ty = unwrap!(binding.ty.ty(), "field type not inferred");
-                let default = if let Some(expr) = binding.default.clone() {
+                let default = if let BigOption::Some(expr) = binding.default.clone() {
                     // TODO: no clone
                     Some(self.immediate_eval_expr(expr, ty)?)
                 } else {
@@ -2878,7 +2878,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.update_cc(fid)?; // kinda hack to check if inlined
         let func = &self.program[fid];
         // TODO: some heuristic based on how many times called and how big the body is.
-        let force_inline = func.cc == Some(CallConv::Inline);
+        let force_inline = func.cc == BigOption::Some(CallConv::Inline);
         let deny_inline = func.has_tag(Flag::NoInline);
         assert!(!(force_inline && deny_inline), "{fid:?} is both @inline and @noinline");
         let will_inline = force_inline || func.get_flag(AllowRtCapture) || !func.capture_vars.is_empty();
@@ -2932,7 +2932,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Vec<u8>> {
         if self.program[original_f].arg.bindings.len() == 1 {
-            let arg_ty = self.compile_expr(arg_expr, self.program[original_f].finished_arg)?;
+            let arg_ty = self.compile_expr(arg_expr, self.program[original_f].finished_arg.into())?;
             let value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
             if !matches!(arg_expr.expr, Expr::Value { .. }) {
                 arg_expr.set(value.clone(), arg_ty);
@@ -3110,7 +3110,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     });
                     self[id].vars.push(block);
                 }
-                new_func.scope = Some(id);
+                new_func.scope = BigOption::Some(id);
             }
         }
         let scope = new_func.scope.unwrap();
@@ -3321,7 +3321,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             if names.contains(&field.name) {
                                 continue;
                             }
-                            let Some(value) = field.default.clone() else {
+                            let BigOption::Some(value) = field.default.clone() else {
                                 err!("Missing required field {}", self.pool.get(field.name));
                             };
 
@@ -3332,7 +3332,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 Binding {
                                     name: Name::Ident(field.name),
                                     ty: LazyType::Infer,
-                                    default: Some(expr),
+                                    default: BigOption::Some(expr),
                                     kind: VarType::Var,
                                 },
                             );

@@ -94,7 +94,7 @@ pub struct BasicBlock {
 pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,
-    pub var_names: Vec<Option<Var<'p>>>,
+    pub var_names: Vec<BigOption<Var<'p>>>,
     pub when: ExecStyle,
     pub func: FuncId,
     pub current_block: BbId,
@@ -160,6 +160,8 @@ impl<'p> FnBody<'p> {
 }
 
 pub type Value = i64;
+
+#[repr(C, i64)]
 #[derive(InterpSend, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum Values {
     Big(Vec<u8>),
@@ -225,7 +227,7 @@ impl Values {
     }
 }
 
-use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{BigOption, BigResult::*};
 #[track_caller]
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
     T::get_or_create_type(program); // sigh

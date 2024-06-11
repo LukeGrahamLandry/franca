@@ -5,6 +5,7 @@ use codemap::Span;
 use crate::{
     ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
     bc::{ReadBytes, WriteBytes},
+    export_ffi::BigOption,
     Map,
 };
 
@@ -420,7 +421,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn create_type(program: &mut Program) -> TypeId {
         let ty = T::get_or_create_type(program);
         let ty = program.intern_type(TypeInfo::Ptr(ty));
-        program.tuple_of(vec![ty, TypeId::i64()]) // TODO: not this
+        program.tuple_of(vec![ty, TypeId::i64(), TypeId::i64()]) // TODO: not this
     }
 
     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
@@ -430,6 +431,70 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         for e in self {
             debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
             e.serialize_to_ints(program, &mut parts);
+        }
+        debug_assert_eq!(
+            parts.0.len(),
+            total_bytes,
+            "vec![{}; {len}] one size = {}",
+            T::name(),
+            T::size_bytes(program)
+        );
+        let (ptr, _, _) = parts.0.into_raw_parts();
+        values.push_i64(ptr as i64);
+        values.push_i64(len as i64); // cap
+        values.push_i64(len as i64);
+    }
+
+    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
+        let ptr = values.next_i64()?;
+        //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
+        let _cap = usize::deserialize_from_ints(program, values)?;
+        let len = usize::deserialize_from_ints(program, values)?;
+
+        let total_bytes = T::size_bytes(program) * len;
+        if total_bytes > 2 << 25 {
+            println!(
+                "err: i hope you didnt have a {}MB vec on purpose... (ptr = 0x{:x}, len = 0x{:x})",
+                total_bytes >> 20,
+                ptr,
+                len,
+            )
+        }
+        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, total_bytes) };
+
+        let mut res = Vec::with_capacity(len);
+        let mut reader = ReadBytes { bytes: s, i: 0 };
+        for _ in 0..len {
+            debug_assert_eq!(reader.i % T::align_bytes(program), 0);
+            res.push(T::deserialize_from_ints(program, &mut reader)?);
+        }
+
+        Some(res)
+    }
+
+    fn name() -> String {
+        format!("RsVec({})", T::name())
+    }
+}
+
+impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
+    fn get_type_key() -> u128 {
+        mix::<T, u16>(999998827262625)
+    }
+
+    fn create_type(program: &mut Program) -> TypeId {
+        let ty = T::get_or_create_type(program);
+        let ty = program.intern_type(TypeInfo::Ptr(ty));
+        program.tuple_of(vec![ty, TypeId::i64()]) // TODO: not this
+    }
+
+    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
+        let len = self.len();
+        let mut parts = WriteBytes::default(); // TODO: with_capacity
+        let total_bytes = T::size_bytes(program) * len;
+        for e in unsafe { &*self } {
+            debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
+            e.clone().serialize_to_ints(program, &mut parts);
         }
         debug_assert_eq!(
             parts.0.len(),
@@ -466,7 +531,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
             res.push(T::deserialize_from_ints(program, &mut reader)?);
         }
 
-        Some(res)
+        Some(res.leak() as *mut [T])
     }
 
     fn name() -> String {
@@ -506,7 +571,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
 }
 
 // TODO: this should be an enum
-impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
+impl<'p, T: InterpSend<'p>> InterpSend<'p> for BigOption<T> {
     fn get_type_key() -> u128 {
         mix::<T, bool>(8090890890986)
     }
@@ -518,11 +583,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
 
     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
         match self {
-            Some(v) => {
+            BigOption::Some(v) => {
                 values.push_i64(0);
                 v.serialize_to_ints(program, values);
             }
-            None => {
+            BigOption::None => {
                 values.push_i64(1);
                 for _ in 0..T::size_bytes(program) {
                     values.push_u8(0);
@@ -534,12 +599,12 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Option<T> {
 
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
         let res = match values.next_i64()? {
-            0 => Some(T::deserialize_from_ints(program, values)),
+            0 => Some(BigOption::Some(T::deserialize_from_ints(program, values)?)),
             1 => {
                 for _ in 0..T::size_bytes(program) {
                     let _ = values.next_u8()?;
                 }
-                Some(None)
+                Some(BigOption::None)
             }
             n => {
                 println!("bad option tag {n}");

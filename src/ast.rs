@@ -2,7 +2,9 @@
 use crate::{
     bc::{Baked, Prim, Values},
     compiler::{CErr, Compile, Res},
-    err, extend_options,
+    err,
+    export_ffi::BigOption,
+    extend_options,
     ffi::InterpSend,
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
@@ -29,6 +31,7 @@ impl std::fmt::Debug for TypeId {
     }
 }
 
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
@@ -37,6 +40,7 @@ pub struct FnType {
     pub arity: u16,
 }
 
+#[repr(i64)]
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
 pub enum VarType {
     Let,
@@ -86,6 +90,7 @@ pub enum TypeInfo<'p> {
     Label(TypeId),
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
 pub struct TypeMeta {
     pub size_slots: u16,
@@ -111,20 +116,23 @@ impl TypeMeta {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
-    pub default: Option<Values>,
+    pub default: BigOption<Values>,
     pub byte_offset: usize,
 }
 
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
-    pub args: Option<FatExpr<'p>>,
+    pub args: BigOption<FatExpr<'p>>,
 }
 
+#[repr(C)]
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug, InterpSend)]
 pub struct Var<'p> {
     pub name: Ident<'p>,
@@ -146,6 +154,7 @@ pub struct Var<'p> {
 //     }
 // }
 // TODO: should really get an arena going because boxes make me sad.
+#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Expr<'p> {
     Poison,
@@ -157,7 +166,7 @@ pub enum Expr<'p> {
     Block {
         body: Vec<FatStmt<'p>>,
         result: Box<FatExpr<'p>>,
-        ret_label: Option<LabelId>,
+        ret_label: BigOption<LabelId>,
         hoisted_constants: bool,
     },
     Tuple(Vec<FatExpr<'p>>),
@@ -265,7 +274,7 @@ pub trait WalkAst<'p> {
     fn stmt(&mut self, stmt: &mut FatStmt<'p>) {
         self.pre_walk_stmt(stmt);
         for a in &mut stmt.annotations {
-            if let Some(args) = &mut a.args {
+            if let BigOption::Some(args) = &mut a.args {
                 self.expr(args)
             }
         }
@@ -298,7 +307,7 @@ pub trait WalkAst<'p> {
         self.walk_pattern(binding);
         for b in &mut binding.bindings {
             self.ty(&mut b.ty);
-            if let Some(arg) = &mut b.default {
+            if let BigOption::Some(arg) = &mut b.default {
                 self.expr(arg);
             }
         }
@@ -325,7 +334,7 @@ pub(crate) struct RenumberVars<'a, 'p, 'aa> {
 
 impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
     fn pre_walk_func(&mut self, func: &mut Func<'p>) {
-        if let Some(name) = &mut func.var_name {
+        if let BigOption::Some(name) = &mut func.var_name {
             if let Some(new) = self.mapping.get(name) {
                 *name = *new;
             } else {
@@ -337,7 +346,7 @@ impl<'a, 'p, 'aa> WalkAst<'p> for RenumberVars<'a, 'p, 'aa> {
                 *name = *new;
             }
         }
-        if let Some(name) = &mut func.return_var {
+        if let BigOption::Some(name) = &mut func.return_var {
             if let Some(new) = self.mapping.get(name) {
                 *name = *new;
             }
@@ -416,6 +425,7 @@ impl<'p> FatExpr<'p> {
 
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
@@ -443,6 +453,7 @@ impl Default for FatExpr<'_> {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Pattern<'p> {
     pub bindings: Vec<Binding<'p>>,
@@ -458,6 +469,7 @@ impl<'p> Default for Pattern<'p> {
     }
 }
 
+#[repr(C, i64)]
 #[derive(Copy, Clone, Debug, InterpSend, PartialEq, Eq)]
 pub enum Name<'p> {
     Ident(Ident<'p>),
@@ -466,11 +478,12 @@ pub enum Name<'p> {
 }
 
 // arguments of a function and left of variable declaration.
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Binding<'p> {
     pub name: Name<'p>,
     pub ty: LazyType<'p>,
-    pub default: Option<FatExpr<'p>>,
+    pub default: BigOption<FatExpr<'p>>,
     pub kind: VarType,
 }
 
@@ -551,7 +564,7 @@ impl<'p> Pattern<'p> {
             self.bindings.push(Binding {
                 name: Name::None,
                 ty: LazyType::Finished(TypeId::unit),
-                default: None,
+                default: BigOption::None,
                 kind: VarType::Let,
             })
         }
@@ -565,7 +578,7 @@ impl<'p> Pattern<'p> {
             self.bindings.push(Binding {
                 name: Name::None,
                 ty: LazyType::Finished(TypeId::unit),
-                default: None,
+                default: BigOption::None,
                 kind: VarType::Let,
             });
         }
@@ -597,6 +610,7 @@ impl<'p> FatExpr<'p> {
     }
 }
 
+#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum Stmt<'p> {
     Noop,
@@ -635,6 +649,7 @@ pub enum Stmt<'p> {
     ExpandParsedStmts(usize),
 }
 
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct FatStmt<'p> {
     pub stmt: Stmt<'p>,
@@ -643,28 +658,31 @@ pub struct FatStmt<'p> {
 }
 
 // NOTE: you can't store the FuncId in here because I clone it!
+// TODO: HACK: my layout is wrong!!!!!! generally putting u32s after BigOptions helped -- Jun 11
+#[repr(C)]
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
-    pub name: Ident<'p>,           // it might be an annonomus closure
-    pub var_name: Option<Var<'p>>, // TODO: having both ^ is redundant
+    pub var_name: BigOption<Var<'p>>, // TODO: having both ^ is redundant
     pub arg: Pattern<'p>,
     pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
+    pub finished_arg: BigOption<TypeId>,
+    pub name: Ident<'p>, // it might be an annonomus closure
+    pub finished_ret: BigOption<TypeId>,
     pub loc: Span,
-    pub finished_arg: Option<TypeId>,
-    pub finished_ret: Option<TypeId>,
 
     // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
-    pub scope: Option<ScopeId>,
-    pub cc: Option<CallConv>,
-    pub return_var: Option<Var<'p>>,
+    pub scope: BigOption<ScopeId>,
+    pub flags: u32,
+    pub cc: BigOption<CallConv>,
+    pub return_var: BigOption<Var<'p>>,
     pub callees: Vec<FuncId>,
     pub mutual_callees: Vec<FuncId>,
     pub body: FuncImpl<'p>,
-    pub flags: u32,
 }
 
+#[repr(i64)]
 pub enum FnFlag {
     NotEvilUninit,
     ResolvedBody,
@@ -691,6 +709,7 @@ impl<'p> Func<'p> {
     }
 }
 
+#[repr(i64)]
 #[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq, Hash)]
 pub enum CallConv {
     CCallReg, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
@@ -704,7 +723,7 @@ pub enum CallConv {
     Inline,
 }
 
-// TODO: use this instead of having a billion fields.
+#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
@@ -761,7 +780,7 @@ impl<'p> Func<'p> {
         if !self.has_tag(name) {
             self.annotations.push(Annotation {
                 name: name.ident(),
-                args: None,
+                args: BigOption::None,
             });
         }
     }
@@ -771,19 +790,19 @@ impl<'p> Func<'p> {
         if cc == CallConv::Inline {
             assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
         }
-        if self.cc == Some(CallConv::OneRetPic) && cc == CallConv::CCallReg {
+        if self.cc == BigOption::Some(CallConv::OneRetPic) && cc == CallConv::CCallReg {
             // TODO: HACK. now with merging. the aarch64 version says OneRetPic and llvm version says Arg8Ret1 but thats fine cause really they're different functions.
             //       so treating them as the same one is kinda but also the old SplitFunc system was more dumb.
             return Ok(());
         }
-        if self.cc == Some(CallConv::CCallReg) && cc == CallConv::OneRetPic {
+        if self.cc == BigOption::Some(CallConv::CCallReg) && cc == CallConv::OneRetPic {
             // TODO: HACK.
-            self.cc = Some(CallConv::OneRetPic);
+            self.cc = BigOption::Some(CallConv::OneRetPic);
             return Ok(());
         }
         match self.cc {
-            Some(old) => assert!(old == cc, "tried to change cc from {old:?} to {cc:?}"),
-            None => self.cc = Some(cc),
+            BigOption::Some(old) => assert!(old == cc, "tried to change cc from {old:?} to {cc:?}"),
+            BigOption::None => self.cc = BigOption::Some(cc),
         }
         Ok(())
     }
@@ -794,8 +813,8 @@ impl<'p> Func<'p> {
     }
 
     pub(crate) fn finished_ty(&self) -> Option<FnType> {
-        if let Some(arg) = self.finished_arg {
-            if let Some(ret) = self.finished_ret {
+        if let BigOption::Some(arg) = self.finished_arg {
+            if let BigOption::Some(ret) = self.finished_ret {
                 return Some(FnType {
                     arg,
                     ret,
@@ -811,7 +830,7 @@ impl<'p> Func<'p> {
             bindings: vec![Binding {
                 ty: LazyType::Finished(arg),
                 name: Name::None,
-                default: None,
+                default: BigOption::None,
                 kind: VarType::Let,
             }],
             loc,
@@ -831,6 +850,7 @@ impl<'p> Func<'p> {
         Ok(())
     }
 }
+#[repr(C, i64)]
 #[derive(Clone, Debug, Default, InterpSend)]
 pub enum LazyType<'p> {
     #[default]
@@ -852,6 +872,7 @@ pub struct Program<'p> {
     pub next_var: u32,
     pub overload_sets: Vec<OverloadSet<'p>>, // TODO: use this instead of lookup_unique_func
     pub ffi_types: Map<u128, TypeId>,
+    pub ffi_sizes: Map<TypeId, usize>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
     pub assertion_count: usize,
     pub comptime_arch: TargetArch,
@@ -871,6 +892,7 @@ impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
 impl_index!(Program<'p>, FuncId, Func<'p>, funcs);
 impl_index!(Program<'p>, OverloadSetId, OverloadSet<'p>, overload_sets);
 
+#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct OverloadSet<'p> {
     pub ready: Vec<OverloadOption>,
@@ -879,6 +901,7 @@ pub struct OverloadSet<'p> {
     pub just_resolved: Vec<Func<'p>>,
 }
 
+#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct OverloadOption {
     pub func: FuncId,
@@ -933,6 +956,7 @@ macro_rules! safe_rec {
 
 pub(crate) use safe_rec;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
 pub struct IntTypeInfo {
     pub bit_count: i64,
@@ -942,6 +966,7 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch) -> Self {
         let mut program = Self {
+            ffi_sizes: Default::default(),
             baked: Default::default(),
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
@@ -1013,6 +1038,7 @@ impl<'p> Program<'p> {
             let name = self.pool.intern(&T::name());
             self.types[placeholder] = TypeInfo::Named(ty, name);
             self.types_extra.borrow_mut().truncate(placeholder);
+            self.ffi_sizes.insert(ty_final, mem::size_of::<T>());
             ty_final
         })
     }
@@ -1046,7 +1072,7 @@ impl<'p> Program<'p> {
                             ty,
                             name: self.pool.intern(f.name),
                             byte_offset: f.offset,
-                            default: None,
+                            default: BigOption::None,
                         })
                     }
                     self.intern_type(TypeInfo::Struct {
@@ -1118,7 +1144,7 @@ impl<'p> Program<'p> {
             fields.push(Field {
                 name,
                 ty,
-                default,
+                default: default.into(),
                 byte_offset: 99999999999,
             });
         }
@@ -1671,11 +1697,11 @@ impl<'p> Default for Func<'p> {
             mutual_callees: vec![],
             flags: 0,
             callees: vec![],
-            return_var: None,
-            cc: None,
+            return_var: BigOption::None,
+            cc: BigOption::None,
             annotations: vec![],
             name: Ident::null(),
-            var_name: None,
+            var_name: BigOption::None,
             body: FuncImpl::Empty,
             arg: Pattern {
                 bindings: vec![],
@@ -1684,9 +1710,9 @@ impl<'p> Default for Func<'p> {
             ret: LazyType::Infer,
             capture_vars: vec![],
             loc: garbage_loc(),
-            finished_arg: None,
-            finished_ret: None,
-            scope: None,
+            finished_arg: BigOption::None,
+            finished_ret: BigOption::None,
+            scope: BigOption::None,
         }
     }
 }

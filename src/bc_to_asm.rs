@@ -7,7 +7,7 @@
 use crate::ast::{CallConv, Flag, FnFlag, FnType, Func, FuncId, FuncImpl, TypeId, TypeInfo};
 use crate::bc::{is_float, BbId, Bc, Prim, PrimSig, Value, Values};
 use crate::compiler::{add_unique, Compile, ExecStyle, Res};
-use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{BigOption, BigResult::*};
 use crate::reflect::BitSet;
 use crate::{ast::Program, bc::FnBody};
 use crate::{err, logging::PoolLog};
@@ -189,7 +189,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let ff = &self.program[f];
-        let is_flat_call = ff.cc == Some(CallConv::Flat);
+        let is_flat_call = ff.cc == BigOption::Some(CallConv::Flat);
         debugln!("=== {f:?} {} flat:{is_flat_call} ===", self.program.pool.get(self.program[f].name));
         debugln!("{}", self.program[f].body.log(self.program.pool));
 
@@ -988,7 +988,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         if Self::DO_BASIC_ASM_INLINE {
             // TODO: save result on the function so dont have to recheck every time?
             if let Some(code) = &self.program[f].body.jitted_aarch64() {
-                if self.program[f].cc == Some(CallConv::OneRetPic) {
+                if self.program[f].cc == BigOption::Some(CallConv::OneRetPic) {
                     // TODO: HACK: for no-op casts, i have two rets because I can't have single element tuples.
                     if code.len() == 2 && code[0] as i64 == ret(()) && code[1] as i64 == ret(()) {
                         if !with_link {

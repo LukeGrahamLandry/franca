@@ -8,8 +8,8 @@ use codemap_diagnostic::{Diagnostic, Level, SpanLabel, SpanStyle};
 use crate::ast::{Binding, Flag, Name, TypeId, VarType};
 use crate::bc::Values;
 use crate::compiler::{CErr, CompileError, Res};
-use crate::export_ffi::get_include_std;
 use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{get_include_std, BigOption};
 use crate::STATS;
 use crate::{
     ast::{Annotation, Expr, FatExpr, FatStmt, Func, LazyType, Pattern, Stmt},
@@ -541,7 +541,11 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let Expr::GetNamed(name) = args.pop().unwrap().expr else {
                         return Err(self.expected("Ident before ':'/'=' in argument pattern"));
                     };
-                    let default = if self.maybe(Equals) { Some(self.parse_expr()?) } else { None };
+                    let default = if self.maybe(Equals) {
+                        BigOption::Some(self.parse_expr()?)
+                    } else {
+                        BigOption::None
+                    };
                     let first = Binding {
                         name: Name::Ident(name),
                         ty: value,
@@ -675,7 +679,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         arg.bindings.push(Binding {
                             name: Name::Ident(name),
                             ty,
-                            default: None,
+                            default: BigOption::None,
                             kind,
                         });
                         self.eat(Semicolon)?;
@@ -827,7 +831,11 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
             self.eat(Hash)?;
             let name = self.ident()?;
-            let args = if LeftParen == self.peek() { Some(self.parse_tuple()?) } else { None };
+            let args = if LeftParen == self.peek() {
+                BigOption::Some(self.parse_tuple()?)
+            } else {
+                BigOption::None
+            };
             annotations.push(Annotation { name, args });
         }
         Ok(annotations)
@@ -884,9 +892,9 @@ impl<'a, 'p> Parser<'a, 'p> {
         };
         let default = if allow_default && Equals == self.peek() {
             self.pop();
-            Some(self.parse_expr()?)
+            BigOption::Some(self.parse_expr()?)
         } else {
-            None
+            BigOption::None
         };
 
         Ok(Binding {
@@ -1057,7 +1065,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         Ok(self.expr(Expr::Block {
             body,
             result: Box::new(result),
-            ret_label: None,
+            ret_label: BigOption::None,
             hoisted_constants: false,
         }))
     }

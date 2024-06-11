@@ -111,6 +111,7 @@ use bc::Values;
 use codemap::{CodeMap, Span};
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 use compiler::CErr;
+use export_ffi::BigOption;
 use export_ffi::STDLIB_PATH;
 use interp_derive::InterpSend;
 use pool::StringPool;
@@ -349,7 +350,7 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
         Expr::Block {
             body: stmts,
             result: Box::new(FatExpr::synthetic_ty(Expr::Value { value: Values::unit() }, user_span, TypeId::unit)),
-            ret_label: None,
+            ret_label: BigOption::None,
             hoisted_constants: false,
         },
         user_span,
@@ -400,6 +401,17 @@ pub fn extend_options<T>(v: &mut Vec<Option<T>>, index: usize) {
     v.reserve(count);
     for _ in 0..count {
         v.push(None);
+    }
+}
+pub fn extend_options2<T>(v: &mut Vec<BigOption<T>>, index: usize) {
+    if v.len() > index {
+        return;
+    }
+
+    let count = index - v.len() + 1;
+    v.reserve(count);
+    for _ in 0..count {
+        v.push(BigOption::None);
     }
 }
 

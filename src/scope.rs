@@ -6,7 +6,9 @@ use crate::{
     assert,
     ast::{Binding, Expr, FatExpr, FatStmt, Flag, FnFlag, Func, FuncImpl, LazyType, Name, ScopeId, Stmt, Var, VarType},
     compiler::{BlockScope, Compile, Res},
-    err, ice,
+    err,
+    export_ffi::BigOption,
+    ice,
     logging::PoolLog,
     pool::Ident,
     STATS,
@@ -61,7 +63,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let (s, b) = (self.scope, self.block);
 
         self.push_scope(Some(func.name));
-        func.scope = Some(self.scope);
+        func.scope = BigOption::Some(self.scope);
 
         if func.get_flag(FnFlag::AllowRtCapture) {
             self.resolve_func_args(func)?;
@@ -143,7 +145,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         self.push_scope(None);
         func.set_flag(FnFlag::ResolvedBody, true);
         if let FuncImpl::Normal(body) = &mut func.body {
-            func.return_var = Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
+            func.return_var = BigOption::Some(self.decl_var(&Flag::__Return.ident(), VarType::Const, body.loc)?);
             self.resolve_expr(body)?;
         }
         self.pop_block();
@@ -200,10 +202,10 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
                 // TOOD: @pub vs @private
                 if let Some(v) = self.find_var(&func.name) {
                     assert!(v.kind == VarType::Const);
-                    func.var_name = Some(v);
+                    func.var_name = BigOption::Some(v);
                 } else {
                     let v = self.decl_var(&func.name, VarType::Const, func.loc)?;
-                    func.var_name = Some(v);
+                    func.var_name = BigOption::Some(v);
                 }
 
                 // Don't move to local_constants yet because want value to be able to reference later constants
@@ -218,7 +220,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
         let loc = stmt.loc;
         self.last_loc = loc;
         for a in &mut stmt.annotations {
-            if let Some(args) = &mut a.args {
+            if let BigOption::Some(args) = &mut a.args {
                 self.resolve_expr(args)?
             }
         }
@@ -499,7 +501,7 @@ impl<'z, 'a, 'p> ResolveScope<'z, 'a, 'p> {
 
     fn resolve_binding(&mut self, binding: &mut Binding<'p>) -> Res<'p, ()> {
         self.walk_ty(&mut binding.ty);
-        if let Some(expr) = &mut binding.default {
+        if let BigOption::Some(expr) = &mut binding.default {
             self.resolve_expr(expr)?;
         }
         Ok(())

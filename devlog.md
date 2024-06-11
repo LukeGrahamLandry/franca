@@ -1208,6 +1208,13 @@ at first i wrote a dumb serial one which was fine but 3x slower than cargo test.
   i also tried on a function from llvm c api but its also different every time.
 - but like also, even without llvm its 0.195 vs 0.077 the second time you run it (release mode).
 
+/// The normal cargo test harness combines the tests of a package into one exe and catches panics to continue after one fails.
+/// It doesn't expect you do be causing segfault/illegal instruction signals, (which is generally a reasonable assumption but less so for my compiler sadly).
+/// So when a test does that it kills the whole thing instead of being recorded as a failing test and continuing.
+/// Instead, I start each test in its own process so no matter what happens, it can't interfear with the other tests
+/// (unless they're like trying to use the write files or something, which like... don't do that then I guess).
+/// My way has higher overhead per test but it feels worth it.
+
 ## VoidPtr & overloads (Apr 5)
 
 It's cringe to make the language more verbose just to make the compiler, but void pointers aren't what I want anyway.

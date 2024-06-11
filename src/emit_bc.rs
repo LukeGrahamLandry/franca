@@ -17,10 +17,10 @@ use crate::ast::{CallConv, Expr, FatExpr, FnFlag, FnType, FuncId, FuncImpl, Labe
 use crate::ast::{FatStmt, Flag, Pattern, Var, VarType};
 use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
-use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{BigOption, BigResult::*};
 use crate::logging::PoolLog;
 use crate::reflect::BitSet;
-use crate::{assert, assert_eq, err, ice, unwrap};
+use crate::{assert, assert_eq, err, extend_options2, ice, unwrap};
 use crate::{bc::*, extend_options, Map, STATS};
 
 struct EmitBc<'z, 'p: 'z> {
@@ -499,8 +499,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let id = result.add_var(ty);
                 if result.want_log {
-                    extend_options(&mut result.var_names, id as usize);
-                    result.var_names[id as usize] = Some(*name);
+                    extend_options2(&mut result.var_names, id as usize);
+                    result.var_names[id as usize] = BigOption::Some(*name);
                 }
                 result.addr_var(id);
                 self.compile_expr(result, value, ResAddr, false)?;
@@ -533,8 +533,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
     fn do_binding(&mut self, result: &mut FnBody<'p>, name: Option<Var<'p>>, ty: TypeId, value: &FatExpr<'p>) -> Res<'p, ()> {
         let id = result.add_var(ty);
         if result.want_log {
-            extend_options(&mut result.var_names, id as usize);
-            result.var_names[id as usize] = name;
+            extend_options2(&mut result.var_names, id as usize);
+            result.var_names[id as usize] = name.into();
         }
         result.addr_var(id);
         self.compile_expr(result, value, ResAddr, false)?;
@@ -592,7 +592,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     assert!(!func.get_flag(FnFlag::Generic));
                     assert!(func.capture_vars.is_empty());
                     assert!(
-                        func.cc != Some(CallConv::Inline),
+                        func.cc != BigOption::Some(CallConv::Inline),
                         "tried to call inlined {}",
                         self.program.pool.get(func.name)
                     );
@@ -662,7 +662,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 let out = self.program.get_info(expr.ty);
                 debug_assert!(out.size_slots < 8 || result_location != PushStack);
 
-                if let Some(ret_var) = ret_label {
+                if let BigOption::Some(ret_var) = ret_label {
                     let entry_block = result.current_block;
                     let return_block = if result_location == PushStack {
                         result.push_block(out.size_slots, out.float_mask)

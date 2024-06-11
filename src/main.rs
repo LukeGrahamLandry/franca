@@ -185,11 +185,7 @@ fn main() {
     }
 
     if no_fork {
-        run_tests_serial(arch);
-        if stats {
-            println!("{:#?}", unsafe { STATS.clone() });
-        }
-        return;
+        panic!("--no-fork is no longer built in to the compiler");
     }
     if do_60fps_ {
         do_60fps(arch);
@@ -309,11 +305,8 @@ fn main() {
             eprint!("Directory 'tests' does not exist in cwd");
             exit(1);
         }
-        let passed = run_tests_find_failures(arch);
+        forked_swallow_passes(arch);
         check_broken(arch);
-        if !passed {
-            exit(1);
-        }
     }
 }
 
@@ -346,95 +339,6 @@ fn run_clang_on_temp_c(sanitize: bool, o2: bool) {
     assert!(res.success());
     let res = Command::new("./target/a.out").status().unwrap();
     assert!(res.success());
-}
-
-/// The normal cargo test harness combines the tests of a package into one exe and catches panics to continue after one fails.
-/// It doesn't expect you do be causing segfault/illegal instruction signals, (which is generally a reasonable assumption but less so for my compiler sadly).
-/// So when a test does that it kills the whole thing instead of being recorded as a failing test and continuing.
-/// Instead, I start each test in its own process so no matter what happens, it can't interfear with the other tests
-/// (unless they're like trying to use the write files or something, which like... don't do that then I guess).
-/// My way has higher overhead per test but it feels worth it.
-
-fn run_tests_find_failures(arch: TargetArch) -> bool {
-    // If we can run all the tests without crashing, cool, we're done.
-    let (success, out, err) = fork_and_catch(|| run_tests_serial(arch));
-    if success {
-        println!("{out}");
-        println!("{err}");
-        return true;
-    }
-
-    println!("TESTS FAILED. Running separately...");
-    println!("=================================");
-    forked_swallow_passes(arch);
-    false
-}
-
-// forking a bunch confuses the profiler.
-// also it seems like a good idea to make sure nothing gets weird when you compile a bunch of stuff on the same compiler instance.
-fn run_tests_serial(arch: TargetArch) {
-    let beg = MEM.get();
-    let pool = Box::leak(Box::<StringPool>::default());
-    let start = timestamp();
-    let mut program = Program::new(pool, arch);
-    let mut comp = Compile::new(pool, &mut program);
-
-    let files = collect_test_files();
-    load_all_toplevel(&mut comp, &files).unwrap_or_else(|e| {
-        log_err(&comp, *e);
-        exit(1);
-    });
-
-    // let assertion_count = ta.iter().map(|(_, i)| i).sum();
-    // let test_count: usize = ta.iter().map(|(i, _)| i).sum();
-
-    // assert_eq!(test_count, comp.tests.len());
-    let mut last = String::new();
-    let test_count = comp.tests.len();
-    for f in comp.tests.clone() {
-        let file = comp.parsing.codemap.look_up_span(comp.program[f].loc).file.name().to_string();
-        let fname = comp.pool.get(comp.program[f].name);
-
-        run_one(&mut comp, f);
-
-        if file != last {
-            println!();
-            set_colour(0, 255, 0);
-            print!("[{}] ", file.to_uppercase());
-            unset_colour();
-            last = file;
-        }
-        print!("{}, ", fname);
-    }
-
-    let assertion_count = if let Some(f) = comp.program.find_unique_func(Flag::__Get_Assertions_Passed.ident()) {
-        let actual: usize = comp.call_jitted(f, ()).unwrap();
-        // assert_eq!(actual, assertion_count, "vm missed assertions?");
-        actual
-    } else {
-        println!("__Get_Assertions_Passed not found. COUNT_ASSERT :: false?");
-        0
-    };
-    let end = timestamp();
-    let seconds = end - start;
-    println!("\n");
-    set_colour(250, 150, 200);
-
-    let end = MEM.get();
-    println!(
-        "{arch:?}: ALL TESTS PASSED! {} files. {} tests. {} assertions. {} ms. {} KB.",
-        files.len(),
-        test_count,
-        assertion_count,
-        (seconds * 1000.0) as i64,
-        (end as usize - beg as usize) / 1000,
-    );
-    unset_colour();
-
-    mem::forget(comp);
-    mem::forget(program);
-
-    // println!("{:#?}", unsafe { &STATS });
 }
 
 #[cfg(feature = "c-backend")]
@@ -506,7 +410,21 @@ fn forked_swallow_passes(arch: TargetArch) {
                 run_one(&mut comp, *f);
             }
         });
-        if !success {
+        if success {
+            let names = fns
+                .iter()
+                .map(|fid| {
+                    let name = comp.program[*fid].name;
+                    comp.pool.get(name)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            set_colour(0, 255, 0);
+            print!("[PASSED] ");
+            unset_colour();
+            println!("{names}",);
+        } else {
             failing.extend(fns)
         }
     }
@@ -528,7 +446,24 @@ fn forked_swallow_passes(arch: TargetArch) {
     }
 
     set_colour(250, 150, 200);
-    println!("FAILED {}/{} tests.", failed, total);
+    if failed == 0 {
+        println!("ALL TESTS PASSED! {} tests", total);
+
+        for (ty, size) in comp.program.ffi_sizes.clone() {
+            let expect = comp.program.get_info(ty).stride_bytes as usize;
+            if size != expect {
+                println!(
+                    "{:?}: {}: fr={} vs rs={}",
+                    comp.program.inferred_type_names[ty.as_index()].and_then(|n| Some(comp.pool.get(n))),
+                    comp.program.log_type(ty),
+                    expect,
+                    size
+                )
+            }
+        }
+    } else {
+        println!("FAILED {}/{} tests.", failed, total);
+    }
     unset_colour();
 }
 

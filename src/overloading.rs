@@ -9,11 +9,11 @@ use crate::bc::from_values;
 use crate::compiler::{Compile, DebugState, ExecStyle, Res};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::{assert, assert_eq, err, unwrap};
+use crate::{assert, assert_eq, err, unwrap, unwrap2};
 use std::mem;
 use std::ops::DerefMut;
 
-use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{BigOption, BigResult::*};
 
 impl<'a, 'p> Compile<'a, 'p> {
     pub fn maybe_direct_fn(&mut self, f: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, ret: Option<TypeId>) -> Res<'p, Option<FuncId>> {
@@ -314,7 +314,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     });
                 }
                 Ok(None) => {
-                    if let Some(arg) = self.program[f].finished_arg {
+                    if let BigOption::Some(arg) = self.program[f].finished_arg {
                         self.program[i].ready.push(OverloadOption {
                             arg,
                             ret: None,
@@ -418,7 +418,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 );
                 let value = pattern.bindings.remove(index);
                 assert!(matches!(value.ty, LazyType::Infer), "use '=' not ':' for named arg");
-                parts.push(unwrap!(value.default, "named arg missing value"));
+                parts.push(unwrap2!(value.default, "named arg missing value"));
             }
             debug_assert!(pattern.bindings.is_empty());
             match parts.len() {
