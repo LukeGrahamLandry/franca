@@ -6,7 +6,7 @@ use std::{
 use codemap::Span;
 
 use crate::{
-    ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
+    ast::{Flag, OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
     bc::{zero_padding, ReadBytes, WriteBytes},
     export_ffi::BigOption,
     Map,
@@ -482,9 +482,16 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         values.push_i64(ptr as i64);
         values.push_i64(len as i64); // cap
         values.push_i64(len as i64);
+
+        // let parts: [i64; 3] = unsafe { mem::transmute(self) };
+        // for p in parts {
+        //     values.push_i64(p);
+        // }
     }
 
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
+        // let s: Self = unsafe { mem::transmute([values.next_i64()?, values.next_i64()?, values.next_i64()?]) };
+        // Some(s)
         let ptr = values.next_i64()?;
         //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let cap = usize::deserialize_from_ints(program, values)?;
@@ -504,16 +511,16 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
             )
         }
 
-        let align = program.get_info(T::get_type(program)).align_bytes;
+        let ty = T::get_type(program);
+        let align = program.get_info(ty).align_bytes;
         debug_assert_eq!(
             ptr % align as i64,
             0,
-            "bad alignment for {} {}",
+            "bad alignment for {} (ptr={ptr}, len={len}, cap={cap})",
             program.log_type(T::get_type(program)),
-            ptr
         );
 
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, total_bytes) };
+        let s = unsafe { &mut *slice_from_raw_parts_mut(ptr as *mut u8, total_bytes) };
 
         let mut res = Vec::with_capacity(len);
         let mut reader = ReadBytes { bytes: s, i: 0 };
@@ -521,9 +528,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
             debug_assert_eq!(reader.i % T::align_bytes(program), 0);
             res.push(T::deserialize_from_ints(program, &mut reader)?);
         }
+        debug_assert_eq!(reader.i, total_bytes);
 
         Some(res)
         // Some(unsafe { Vec::from_raw_parts(ptr as *mut T, len as usize, cap as usize) })
+        // Some(unsafe { &mut *slice_from_raw_parts_mut(ptr as *mut T, len) }.to_vec())
     }
 
     fn name() -> String {
@@ -599,9 +608,8 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
         let mut parts = WriteBytes::default();
         let inner: T = *self;
 
-        // println!("====");
-        // let mut original_bytes = unsafe { &*slice_from_raw_parts(&inner as *const T as *const u8, mem::size_of::<T>()) }.to_vec();
-        // zero_padding(program, T::get_type(program), &mut original_bytes, &mut 0).unwrap();
+        let mut original_bytes = unsafe { &*slice_from_raw_parts(&inner as *const T as *const u8, mem::size_of::<T>()) }.to_vec();
+        zero_padding(program, T::get_type(program), &mut original_bytes, &mut 0).unwrap();
 
         inner.serialize_to_ints(program, &mut parts);
         debug_assert_eq!(parts.0.len(), T::size_bytes(program), "Box<{}> payload size", T::name());
@@ -634,10 +642,22 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for BigOption<T> {
 
     fn create_type(interp: &mut Program) -> TypeId {
         let t = T::get_or_create_type(interp);
-        interp.tuple_of(vec![TypeId::i64(), t])
+        let some = interp.pool.intern("Some");
+        let none = interp.pool.intern("None");
+        interp.intern_type(TypeInfo::Tagged {
+            cases: vec![(some, t), (none, TypeId::unit)],
+        })
     }
 
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
+    fn serialize_to_ints(mut self, program: &Program, values: &mut WriteBytes) {
+        let original_bytes = unsafe { &mut *slice_from_raw_parts_mut(&mut self as *mut Self as *mut u8, mem::size_of::<Self>()) };
+        zero_padding(program, Self::get_type(program), original_bytes, &mut 0).unwrap();
+
+        // for b in original_bytes {
+        //     values.push_u8(*b);
+        // }
+        // mem::forget(self);
+
         match self {
             BigOption::Some(v) => {
                 values.push_i64(0);
@@ -741,7 +761,7 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     }
 
     fn name() -> String {
-        format!("HashMap({}, {})", K::name(), V::name())
+        format!("RsMap({}, {})", K::name(), V::name())
     }
 }
 

@@ -415,7 +415,7 @@ pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usi
             let inner_align = program.get_info(inner).align_bytes;
             for _ in 0..len {
                 zero_padding(program, inner, bytes, i)?;
-                fix_align(bytes, i, inner_align as usize);
+                debug_assert_eq!(*i % inner_align as usize, 0);
             }
         }
         TypeInfo::Struct { fields, layout_done, .. } => {

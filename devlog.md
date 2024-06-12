@@ -32,6 +32,10 @@ that wasn't enough to fix the problem tho.
 
 - also ptr_cast_unchecked(From = Type, To = u8, ptr = mem.ptr) instead of ptr_cast_unchecked(From = Element, To = u8, ptr = mem.ptr)
 
+I was saying the type for Option<T> was (i64, T),
+so zero_padding always tried to walk the None section if it wasn't present,
+fixing that fixed doing zero_padding in box serialize but still not the real problem.
+
 ## (Jun 10)
 
 debug log says width/height can't be zero.

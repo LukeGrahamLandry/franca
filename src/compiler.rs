@@ -3366,7 +3366,13 @@ impl<'a, 'p> Compile<'a, 'p> {
                         self.program.log_type(requested)
                     );
                     // TODO: this needs to be a real err! but we're in a mut_replace
-                    let i = cases.iter().position(|f| f.0 == names[0]).unwrap();
+                    let i = cases.iter().position(|f| f.0 == names[0]).unwrap_or_else(|| {
+                        panic!(
+                            "no field {} exists, expected {:?}",
+                            self.pool.get(names[0]),
+                            cases.iter().map(|n| self.pool.get(n.0)).collect::<Vec<_>>()
+                        )
+                    });
                     let type_hint = cases[i].1;
                     let value = self.compile_expr(values[0], Some(type_hint))?;
                     self.type_check_arg(value, type_hint, "enum case")?;
