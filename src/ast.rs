@@ -135,11 +135,11 @@ pub struct Annotation<'p> {
 #[repr(C)]
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug, InterpSend)]
 pub struct Var<'p> {
+    pub kind: VarType,
     pub name: Ident<'p>,
     pub id: u32,
     pub scope: ScopeId,
     pub block: u16,
-    pub kind: VarType,
 }
 
 // impl<'p> PartialEq for Var<'p> {
@@ -619,9 +619,9 @@ pub enum Stmt<'p> {
 
     // Backend Only
     DeclVar {
-        name: Var<'p>,
-        ty: LazyType<'p>,
         value: FatExpr<'p>,
+        ty: LazyType<'p>,
+        name: Var<'p>,
     },
     // I have to write the logic for this anyway to deal with function args and I need it for inlining because I don't want the backend to have to deal with it.
     // The main thing this solves is letting you defer figuring out how to unwrap an expression.
@@ -637,10 +637,10 @@ pub enum Stmt<'p> {
 
     // Frontend only
     DeclNamed {
-        name: Ident<'p>,
-        ty: LazyType<'p>,
-        value: FatExpr<'p>,
         kind: VarType,
+        value: FatExpr<'p>,
+        ty: LazyType<'p>,
+        name: Ident<'p>,
     },
     Set {
         place: FatExpr<'p>,
@@ -663,23 +663,22 @@ pub struct FatStmt<'p> {
 #[derive(Clone, Debug, InterpSend)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
-    pub var_name: BigOption<Var<'p>>, // TODO: having both ^ is redundant
-    pub arg: Pattern<'p>,
-    pub ret: LazyType<'p>,
     pub capture_vars: Vec<Var<'p>>,
-    pub finished_arg: BigOption<TypeId>,
-    pub name: Ident<'p>, // it might be an annonomus closure
-    pub finished_ret: BigOption<TypeId>,
-    pub loc: Span,
-
-    // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
-    pub scope: BigOption<ScopeId>,
-    pub flags: u32,
-    pub cc: BigOption<CallConv>,
-    pub return_var: BigOption<Var<'p>>,
     pub callees: Vec<FuncId>,
     pub mutual_callees: Vec<FuncId>,
+    pub var_name: BigOption<Var<'p>>, // TODO: having both this and .name is redundant
+    pub finished_arg: BigOption<TypeId>,
+    pub finished_ret: BigOption<TypeId>,
+    pub cc: BigOption<CallConv>,
+    pub return_var: BigOption<Var<'p>>,
+    // This is the scope containing the args/body constants for this function and all its specializations. It's parent contained the function declaration.
+    pub scope: BigOption<ScopeId>,
     pub body: FuncImpl<'p>,
+    pub arg: Pattern<'p>,
+    pub ret: LazyType<'p>,
+    pub name: Ident<'p>, // it might be an annonomus closure
+    pub loc: Span,
+    pub flags: u32,
 }
 
 #[repr(i64)]
@@ -861,6 +860,7 @@ pub enum LazyType<'p> {
     Different(Vec<Self>),
 }
 
+#[repr(C)]
 pub struct Program<'p> {
     pub pool: &'p StringPool<'p>,
     pub types: Vec<TypeInfo<'p>>,
@@ -1499,13 +1499,14 @@ impl<'p> Program<'p> {
                 debug_assert!(*layout_done);
                 let mut size = 0;
                 debug_assert_eq!(fields[0].byte_offset, 0);
-                let align = self.get_info(fields[0].ty).align_bytes;
+                let mut align = 1;
                 let mut mask = 0;
                 let mut pointers = false;
                 let mut bytes = 0;
 
                 for arg in fields {
                     let info = self.get_info(arg.ty);
+                    align = align.max(info.align_bytes);
                     debug_assert_eq!(arg.byte_offset % info.align_bytes as usize, 0, "{}", self.log_struct_layout(fields));
                     debug_assert!(arg.byte_offset as u16 >= bytes, "{}", self.log_struct_layout(fields));
                     let end = arg.byte_offset as u16 + info.stride_bytes;
@@ -1956,15 +1957,19 @@ tagged_index!(LabelId, 27, u32);
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Default)]
 pub struct TypeId(u32);
 
+#[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
 pub struct FuncId(u32);
 
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeId(u32);
 
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OverloadSetId(u32);
 
+#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend, Debug)]
 pub struct LabelId(u32);
 

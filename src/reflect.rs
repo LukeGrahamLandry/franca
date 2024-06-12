@@ -490,6 +490,7 @@ use crate::ast::TypeId;
 
 // Feels like this might be useful for representing padding?
 // But maybe it makes more sense to do it in chunks since its generally all at the end (when not repr(C)?).
+#[repr(C, i64)]
 #[derive(Clone, Debug, InterpSend)]
 pub enum BitSet {
     // Note: not u128 which means they can be split which means it can use the Vec's niche.

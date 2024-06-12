@@ -13,7 +13,7 @@ use franca::{
     parse::{Parser, ANON_BODY_AS_NAME},
     pool::StringPool,
     scope::ResolveScope,
-    timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
+    timestamp, Map, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
     env,
@@ -461,6 +461,7 @@ fn forked_swallow_passes(arch: TargetArch) {
                 )
             }
         }
+        println!("{}", mem::size_of::<Map::<usize, usize>>());
     } else {
         println!("FAILED {}/{} tests.", failed, total);
     }

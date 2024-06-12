@@ -40,7 +40,7 @@ use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, Stats, STACK_M
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
-
+#[repr(C)]
 #[derive(Clone)]
 pub struct CompileError<'p> {
     pub internal_loc: Option<&'static Location<'static>>,
@@ -87,7 +87,7 @@ pub struct Compile<'a, 'p> {
     pub export: Vec<FuncId>,
     pub driver_vtable: (Box<ExportVTable>, *mut ()),
 }
-
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Scope<'p> {
     pub parent: ScopeId,
@@ -99,7 +99,7 @@ pub struct Scope<'p> {
     pub name: Ident<'p>,
     pub block_in_parent: usize,
 }
-
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct BlockScope<'p> {
     pub vars: Vec<Var<'p>>,
@@ -107,7 +107,7 @@ pub struct BlockScope<'p> {
 }
 
 impl_index!(Compile<'_, 'p>, ScopeId, Scope<'p>, scopes);
-
+#[repr(C, i64)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebugState<'p> {
     Compile(FuncId, Ident<'p>),
@@ -538,10 +538,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.type_check_arg(ret_ty, ty.ret, "sanity ICE jit_ret")?;
         self.program.finish_layout_deep(arg_ty)?;
         self.program.finish_layout_deep(ret_ty)?;
-        let bytes = arg.serialize_to_ints_one(self.program);
+        let arg = to_values(self.program, arg)?;
         // let again = Arg::deserialize_from_ints(self.program, &mut ReadBytes { bytes: &bytes, i: 0 }); // TOOD: remove!
         // debug_assert!(again.is_some());
-        let arg = Values::many(bytes);
         let ret = self.run(f, arg)?;
         from_values(self.program, ret)
     }
@@ -1472,8 +1471,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let mut placeholders = walk.placeholders; // drop walk.
 
                         let ty = FatExpr::get_or_create_type(self.program);
-                        let ints = arg.serialize_to_ints_one(self.program);
-                        let value = Values::many(ints);
+                        let value = to_values(self.program, arg)?;
 
                         expr.set(value.clone(), ty);
                         if placeholders.is_empty() {
@@ -2028,8 +2026,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn as_literal<T: InterpSend<'p>>(&mut self, t: T, loc: Span) -> Res<'p, FatExpr<'p>> {
         let ty = T::get_or_create_type(self.program);
         self.program.finish_layout_deep(ty)?;
-        let ints = t.serialize_to_ints_one(self.program);
-        let value = Values::many(ints);
+        let value = to_values(self.program, t)?;
         let mut e = FatExpr::synthetic_ty(Expr::Value { value }, loc, ty);
         e.done = true;
         Ok(e)
@@ -2639,6 +2636,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                         return Ok(());
                     }
                 }
+                // TODO: not this!
+                (TypeInfo::Struct { fields: f, .. }, TypeInfo::Struct { fields: e, .. }) => {
+                    assert_eq!(f.len(), e.len());
+                    for (f, e) in f.iter().zip(e.iter()) {
+                        self.type_check_arg(f.ty, e.ty, msg)?;
+                    }
+                    return Ok(());
+                }
+
                 _ => {}
             }
             err!(CErr::TypeCheck(found, expected, msg))
@@ -3009,6 +3015,11 @@ impl<'a, 'p> Compile<'a, 'p> {
             };
             let mut removed = 0;
             for (i, binding) in self.program[original_f].arg.bindings.iter().enumerate() {
+                if let Some(expected) = binding.ty.ty() {
+                    let found = arg_exprs[i - removed].ty;
+                    self.type_check_arg(found, expected, "const arg")?
+                }
+                // TODO: else!!!
                 if binding.kind == VarType::Const {
                     // TODO: this would be better if i was iterating backwards
                     arg_exprs.remove(i - removed);
@@ -3022,11 +3033,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.set_literal(arg_expr, ())?;
                 } else if v.len() == 1 {
                     *arg_expr = mem::take(v.iter_mut().next().unwrap());
+                    self.type_check_arg(arg_expr.ty, new_arg_type, "const arg")?;
+                } else {
+                    arg_expr.ty = TypeId::unknown;
+                    let found_type = self.compile_expr(arg_expr, Some(new_arg_type))?;
+                    self.type_check_arg(found_type, new_arg_type, "const arg")?;
                 }
+            } else {
+                unreachable!("required tuple above")
             }
-            // We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
-            // Symptom of forgetting this was emit_bc passing extra uninit args.
-            arg_expr.ty = new_arg_type;
             Ok(())
         }
     }

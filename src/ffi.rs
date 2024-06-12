@@ -1,16 +1,19 @@
-use std::{mem, ptr::slice_from_raw_parts};
+use std::{
+    mem::{self, transmute},
+    ptr::{slice_from_raw_parts, slice_from_raw_parts_mut},
+};
 
 use codemap::Span;
 
 use crate::{
     ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
-    bc::{ReadBytes, WriteBytes},
+    bc::{zero_padding, ReadBytes, WriteBytes},
     export_ffi::BigOption,
     Map,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
-pub trait InterpSend<'p>: Sized {
+pub trait InterpSend<'p>: Sized + Clone {
     // TODO: could use ptr&len of a static string of the type name. but thats sad.
     //       cant use std::any because of lifetimes. tho my macro can cheat and refer to the name without lifetimes,
     //       so its jsut about the manual base impls for vec,box,option,hashmap.
@@ -24,6 +27,14 @@ pub trait InterpSend<'p>: Sized {
         let Some(&ty) = program.ffi_types.get(&Self::get_type_key()) else {
             panic!("get_type before calling get_or_create_type for {}", Self::name())
         };
+        let info = program.get_info(ty);
+        debug_assert_eq!(info.stride_bytes as usize, mem::size_of::<Self>());
+        debug_assert_eq!(
+            info.align_bytes as usize,
+            mem::align_of::<Self>(),
+            "bad align for {}",
+            program.log_type(ty)
+        );
         ty
     }
     /// This should only be called once! Use get_type which caches it.
@@ -32,6 +43,15 @@ pub trait InterpSend<'p>: Sized {
     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes);
     #[track_caller]
     fn serialize_to_ints_one(self, program: &Program) -> Vec<u8> {
+        let info = program.get_info(Self::get_type(program));
+        // Nothing special about this condition, I'm just trying to narrow down the problem.
+        if !info.contains_pointers || info.align_bytes != 8 || info.size_slots < 6 {
+            unsafe {
+                let s = &*slice_from_raw_parts(&self as *const Self as *const u8, mem::size_of::<Self>());
+                return s.to_vec();
+            }
+        }
+
         let mut values = WriteBytes::default(); // TODO: with_capacity
         self.serialize_to_ints(program, &mut values);
         debug_assert_eq!(values.0.len(), Self::size_bytes(program), "{} bad ser size\n{:?}", Self::name(), values.0);
@@ -143,8 +163,11 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
         values.push_i64(self as i64)
     }
 
-    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(values.next_i64()? as *mut T)
+    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
+        let ptr = values.next_i64()?;
+        let align = program.get_info(T::get_type(program)).align_bytes;
+        debug_assert_eq!(ptr % align as i64, 0, "bad alignment");
+        Some(ptr as *mut T)
     }
 
     fn name() -> String {
@@ -327,15 +350,19 @@ macro_rules! fixed_array {
 
             fn serialize_to_ints(self, p: &Program, values: &mut WriteBytes) {
                 for i in 0..$len {
+                    values.align_to(<$ty>::align_bytes(p));
                     self[i].serialize_to_ints(p, values);
                 }
+                values.align_to(<$ty>::align_bytes(p));
             }
 
             fn deserialize_from_ints(p: &Program, values: &mut ReadBytes) -> Option<Self> {
                 let mut t: Self = unsafe { mem::zeroed() };
                 for i in 0..$len {
+                    values.align_to(<$ty>::align_bytes(p));
                     t[i] = <$ty>::deserialize_from_ints(p, values)?;
                 }
+                values.align_to(<$ty>::align_bytes(p));
                 Some(t)
             }
 
@@ -431,6 +458,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         for e in self {
             debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
             e.serialize_to_ints(program, &mut parts);
+            debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
         }
         debug_assert_eq!(
             parts.0.len(),
@@ -440,6 +468,17 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
             T::size_bytes(program)
         );
         let (ptr, _, _) = parts.0.into_raw_parts();
+        if len != 0 {
+            let align = program.get_info(T::get_type(program)).align_bytes;
+            debug_assert_eq!(
+                ptr as i64 % align as i64,
+                0,
+                "bad alignment for {} {}",
+                program.log_type(T::get_type(program)),
+                ptr as i64
+            );
+        }
+
         values.push_i64(ptr as i64);
         values.push_i64(len as i64); // cap
         values.push_i64(len as i64);
@@ -448,8 +487,12 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
         let ptr = values.next_i64()?;
         //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
-        let _cap = usize::deserialize_from_ints(program, values)?;
+        let cap = usize::deserialize_from_ints(program, values)?;
         let len = usize::deserialize_from_ints(program, values)?;
+
+        if len == 0 {
+            return Some(vec![]);
+        }
 
         let total_bytes = T::size_bytes(program) * len;
         if total_bytes > 2 << 25 {
@@ -460,6 +503,16 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
                 len,
             )
         }
+
+        let align = program.get_info(T::get_type(program)).align_bytes;
+        debug_assert_eq!(
+            ptr % align as i64,
+            0,
+            "bad alignment for {} {}",
+            program.log_type(T::get_type(program)),
+            ptr
+        );
+
         let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, total_bytes) };
 
         let mut res = Vec::with_capacity(len);
@@ -470,6 +523,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
         }
 
         Some(res)
+        // Some(unsafe { Vec::from_raw_parts(ptr as *mut T, len as usize, cap as usize) })
     }
 
     fn name() -> String {
@@ -488,32 +542,21 @@ impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
         program.tuple_of(vec![ty, TypeId::i64()]) // TODO: not this
     }
 
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        let len = self.len();
-        let mut parts = WriteBytes::default(); // TODO: with_capacity
-        let total_bytes = T::size_bytes(program) * len;
-        for e in unsafe { &*self } {
-            debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
-            e.clone().serialize_to_ints(program, &mut parts);
-        }
-        debug_assert_eq!(
-            parts.0.len(),
-            total_bytes,
-            "vec![{}; {len}] one size = {}",
-            T::name(),
-            T::size_bytes(program)
-        );
-        let (ptr, _, _) = parts.0.into_raw_parts();
+    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
+        let (ptr, len) = self.to_raw_parts();
         values.push_i64(ptr as i64);
         values.push_i64(len as i64);
     }
 
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
         let ptr = values.next_i64()?;
-        //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
         let len = usize::deserialize_from_ints(program, values)?;
+        if len == 0 {
+            return Some(&mut [] as *mut [T]);
+        }
 
         let total_bytes = T::size_bytes(program) * len;
+        let align = program.get_info(T::get_type(program)).align_bytes;
         if total_bytes > 2 << 25 {
             println!(
                 "err: i hope you didnt have a {}MB vec on purpose... (ptr = 0x{:x}, len = 0x{:x})",
@@ -522,6 +565,7 @@ impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
                 len,
             )
         }
+        debug_assert_eq!(ptr % align as i64, 0, "bad alignment at {}", ptr);
         let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, total_bytes) };
 
         let mut res = Vec::with_capacity(len);
@@ -529,9 +573,11 @@ impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
         for _ in 0..len {
             debug_assert_eq!(reader.i % T::align_bytes(program), 0);
             res.push(T::deserialize_from_ints(program, &mut reader)?);
+            debug_assert_eq!(reader.i % T::align_bytes(program), 0);
         }
 
         Some(res.leak() as *mut [T])
+        // Some(slice_from_raw_parts_mut(ptr as *mut T, len))
     }
 
     fn name() -> String {
@@ -552,17 +598,27 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
         let mut parts = WriteBytes::default();
         let inner: T = *self;
+
+        // println!("====");
+        // let mut original_bytes = unsafe { &*slice_from_raw_parts(&inner as *const T as *const u8, mem::size_of::<T>()) }.to_vec();
+        // zero_padding(program, T::get_type(program), &mut original_bytes, &mut 0).unwrap();
+
         inner.serialize_to_ints(program, &mut parts);
         debug_assert_eq!(parts.0.len(), T::size_bytes(program), "Box<{}> payload size", T::name());
+        // zero_padding(program, T::get_type(program), &mut parts.0, &mut 0).unwrap(); // this one works
         let (ptr, _, _) = parts.0.into_raw_parts();
+        // let ptr = Box::into_raw(self);
         values.push_i64(ptr as i64)
     }
 
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
         let ptr = values.next_i64()?;
+        let align = program.get_info(T::get_type(program)).align_bytes;
+        debug_assert_eq!(ptr % align as i64, 0, "bad alignment at {ptr}");
         let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, T::size_bytes(program)) };
         let v = T::deserialize_from_ints(program, &mut ReadBytes { bytes: s, i: 0 })?;
         Some(Box::new(v))
+        // Some(unsafe { Box::from_raw(ptr as *mut T) })
     }
 
     fn name() -> String {
@@ -657,15 +713,31 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
     }
 
     fn create_type(interp: &mut Program) -> TypeId {
-        Vec::<(K, V)>::get_or_create_type(interp)
+        // Vec::<(K, V)>::get_or_create_type(interp)
+        let bytes = mem::size_of::<Self>();
+        debug_assert_eq!(bytes % mem::size_of::<i64>(), 0);
+        let len = (bytes / mem::size_of::<i64>()) as u32;
+        let inner = interp.intern_type(TypeInfo::Array { inner: TypeId::i64(), len });
+        interp.struct_type("", &[("opaque", inner)])
     }
 
     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        self.into_iter().collect::<Vec<_>>().serialize_to_ints(program, values)
+        // self.into_iter().collect::<Vec<_>>().serialize_to_ints(program, values);
+        // values.push_i64(0);
+        let ints: [i64; 4] = unsafe { transmute(self) };
+        for i in ints {
+            values.push_i64(i);
+        }
     }
 
     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(Vec::<(K, V)>::deserialize_from_ints(program, values)?.into_iter().collect::<Self>())
+        // let things = Vec::<(K, V)>::deserialize_from_ints(program, values)?.into_iter().collect::<Self>();
+        // values.next_i64()?;
+        // Some(things)
+        //
+        let ints = [values.next_i64()?, values.next_i64()?, values.next_i64()?, values.next_i64()?];
+        let s: Self = unsafe { transmute(ints) };
+        Some(s)
     }
 
     fn name() -> String {

@@ -1,7 +1,8 @@
 //! Low level instructions
 
 use std::cell::RefCell;
-use std::ptr::slice_from_raw_parts;
+use std::mem;
+use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
 use crate::ast::{LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
@@ -16,9 +17,10 @@ use crate::{
 use crate::{unwrap, Map};
 use interp_derive::InterpSend;
 
+#[repr(transparent)]
 #[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
-
+#[repr(C, i64)]
 #[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
 pub enum Bc {
     CallDirect { sig: PrimSig, f: FuncId, tail: bool },   // <args:m> -> <ret:n>
@@ -47,6 +49,7 @@ pub enum Bc {
     Ret2((Prim, Prim)),
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, PartialEq, InterpSend)]
 pub struct PrimSig {
     pub arg_float_mask: u32,
@@ -58,7 +61,7 @@ pub struct PrimSig {
     pub use_special_register_for_indirect_return: bool,
     pub no_return: bool,
 }
-
+#[repr(i64)]
 #[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
 pub enum Prim {
     I8,
@@ -80,6 +83,7 @@ impl Prim {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, InterpSend)]
 pub struct BasicBlock {
     pub insts: Vec<Bc>,
@@ -90,6 +94,7 @@ pub struct BasicBlock {
     pub height: u16,
 }
 
+#[repr(C)]
 #[derive(Clone, InterpSend)]
 pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
@@ -106,6 +111,7 @@ pub struct FnBody<'p> {
     pub signeture: PrimSig,
 }
 
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, InterpSend, PartialEq)]
 pub struct BakedVarId(pub u32);
 
@@ -122,7 +128,7 @@ pub enum BakedVar {
     AddrOf(BakedVarId),
     VoidPtrArray(Vec<BakedVarId>),
 }
-
+#[repr(C)]
 #[derive(Debug, Default)]
 pub struct Baked {
     pub values: RefCell<Vec<(BakedVar, *const u8)>>,
@@ -181,6 +187,13 @@ impl Values {
             Values::Small(value, len) => unsafe { &*slice_from_raw_parts(value as *const i64 as *const u8, *len as usize) },
         }
     }
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        match self {
+            Values::Big(bytes) => bytes,
+            Values::Small(value, len) => unsafe { &mut *slice_from_raw_parts_mut(value as *mut i64 as *mut u8, *len as usize) },
+        }
+    }
+
     pub fn unit() -> Self {
         Self::Small(0, 0)
     }
@@ -230,22 +243,39 @@ impl Values {
 use crate::export_ffi::{BigOption, BigResult::*};
 #[track_caller]
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
-    T::get_or_create_type(program); // sigh
-    let bytes = t.serialize_to_ints_one(program);
+    let ty = T::get_or_create_type(program); // sigh
+    let mut bytes = t.serialize_to_ints_one(program);
+    debug_assert_eq!(bytes.as_ptr() as usize % mem::align_of::<T>(), 0);
+    debug_assert_eq!(bytes.len(), mem::size_of::<T>());
+    zero_padding(program, ty, &mut bytes, &mut 0)?;
     Ok(Values::many(bytes))
 }
 
-pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, t: Values) -> Res<'p, T> {
+pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) -> Res<'p, T> {
+    debug_assert_eq!(t.bytes().len(), mem::size_of::<T>());
+    let mut i = 0;
+    let ty = T::get_type(program);
+    zero_padding(program, ty, t.bytes_mut(), &mut i)?;
+    debug_assert_eq!(i, t.bytes().len());
+    let info = program.get_info(ty);
+    // Nothing special about this condition, I'm just trying to narrow down the problem.
+    if !info.contains_pointers || info.align_bytes != 8 || info.size_slots < 10 {
+        unsafe {
+            let s = &*(t.bytes().as_ptr() as *const T);
+            return Ok(s.clone());
+        }
+    }
+    debug_assert_eq!(t.bytes().as_ptr() as usize % mem::align_of::<T>(), 0);
     let mut reader = ReadBytes { bytes: t.bytes(), i: 0 };
     let res = Ok(unwrap!(T::deserialize_from_ints(program, &mut reader), "{} from {reader:?}", T::name()));
-    assert_eq!(reader.i, reader.bytes.len());
+    debug_assert_eq!(reader.i, reader.bytes.len());
     res
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.
 pub fn chop_prefix<'p>(program: &Program<'p>, prefix: TypeId, t: &mut ReadBytes) -> Res<'p, Values> {
     let info = program.get_info(prefix);
-    t.align_to(info.align_bytes as usize);
+    debug_assert_eq!(t.i % info.align_bytes as usize, 0);
     let bytes = info.stride_bytes;
     let taken = unwrap!(t.take(bytes as usize), "");
     Ok(Values::many(taken.to_vec()))
@@ -259,7 +289,10 @@ pub fn deconstruct_values(
     out: &mut Vec<i64>,
     offsets: &mut Option<&mut Vec<(Prim, u16)>>, // this is stupid but how else do you call it in a loop??
 ) -> Res<'static, ()> {
-    let size = program.get_info(ty).stride_bytes as usize;
+    let info = program.get_info(ty);
+    let size = info.stride_bytes as usize;
+
+    debug_assert_eq!(bytes.i % info.align_bytes as usize, 0);
     debug_assert!(
         size <= bytes.bytes.len() - bytes.i,
         "deconstruct_values of {} wants {size} bytes but found {bytes:?}",
@@ -337,6 +370,90 @@ pub fn deconstruct_values(
     Ok(())
 }
 
+pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usize) -> Res<'static, ()> {
+    let info = program.get_info(ty);
+    // println!("{}", program.log_type(ty));
+    let size = info.stride_bytes as usize;
+    let align = info.align_bytes as usize;
+    // println!("{:?}", &bytes[*i..*i + size]);
+
+    debug_assert_eq!(*i % align, 0);
+    debug_assert!(
+        size <= bytes.len() - *i,
+        "zero_padding of {} wants {size} bytes but found {bytes:?}",
+        program.log_type(ty)
+    );
+
+    fn eat(bytes: &mut [u8], i: &mut usize) {
+        // print!("{},", bytes[*i]);
+        bytes[*i] = 0;
+        *i += 1;
+    }
+
+    fn fix_align(bytes: &mut [u8], i: &mut usize, align: usize) {
+        while *i % align != 0 {
+            eat(bytes, i);
+        }
+    }
+
+    let ty = program.raw_type(ty);
+    match &program[ty] {
+        TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
+        TypeInfo::Never => err!("invalid type",),
+        TypeInfo::Fn(_)
+        | TypeInfo::Label(_)
+        | TypeInfo::F64
+        | TypeInfo::FnPtr { .. }
+        | TypeInfo::Ptr(_)
+        | TypeInfo::VoidPtr
+        | TypeInfo::F32
+        | TypeInfo::Int(_)
+        | TypeInfo::Bool => {
+            *i += size;
+        }
+        &TypeInfo::Array { inner, len } => {
+            let inner_align = program.get_info(inner).align_bytes;
+            for _ in 0..len {
+                zero_padding(program, inner, bytes, i)?;
+                fix_align(bytes, i, inner_align as usize);
+            }
+        }
+        TypeInfo::Struct { fields, layout_done, .. } => {
+            assert!(*layout_done);
+            let mut prev = 0;
+            let start = *i;
+            for t in fields {
+                assert!(prev <= t.byte_offset);
+                while *i != (start + t.byte_offset) {
+                    eat(bytes, i);
+                }
+                zero_padding(program, t.ty, bytes, i)?;
+                prev = t.byte_offset;
+            }
+
+            fix_align(bytes, i, align); // eat trailing stride padding
+        }
+        TypeInfo::Tagged { cases } => {
+            let start = *i;
+            let tag = int_from_bytes(&bytes[*i..*i + 8]);
+            assert!(tag >= 0 && tag < cases.len() as i64, "bad tag {tag}");
+            *i += 8;
+            zero_padding(program, cases[tag as usize].1, bytes, i)?;
+            while *i != (start + size) {
+                eat(bytes, i);
+            }
+        }
+        &TypeInfo::Enum { .. } | TypeInfo::Named(_, _) => unreachable!(),
+        TypeInfo::Unit => {}
+    }
+    Ok(())
+}
+
+fn int_from_bytes(bytes: &[u8]) -> i64 {
+    debug_assert_eq!(bytes.len(), 8);
+    i64::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
+}
+
 #[derive(Debug)]
 pub struct ReadBytes<'a> {
     pub bytes: &'a [u8],
@@ -353,6 +470,7 @@ impl<'a> ReadBytes<'a> {
         }
     }
     pub fn next_u16(&mut self) -> Option<u16> {
+        debug_assert_eq!(self.i % 2, 0);
         if self.i + 1 < self.bytes.len() {
             self.i += 2;
             Some(u16::from_ne_bytes([self.bytes[self.i - 2], self.bytes[self.i - 1]]))
@@ -361,6 +479,7 @@ impl<'a> ReadBytes<'a> {
         }
     }
     pub fn next_u32(&mut self) -> Option<u32> {
+        debug_assert_eq!(self.i % 4, 0);
         if self.i + 3 < self.bytes.len() {
             self.i += 4;
             Some(u32::from_ne_bytes([
@@ -374,18 +493,10 @@ impl<'a> ReadBytes<'a> {
         }
     }
     pub fn next_i64(&mut self) -> Option<i64> {
+        debug_assert_eq!(self.i % 8, 0);
         if self.i + 7 < self.bytes.len() {
             self.i += 8;
-            Some(i64::from_ne_bytes([
-                self.bytes[self.i - 8],
-                self.bytes[self.i - 7],
-                self.bytes[self.i - 6],
-                self.bytes[self.i - 5],
-                self.bytes[self.i - 4],
-                self.bytes[self.i - 3],
-                self.bytes[self.i - 2],
-                self.bytes[self.i - 1],
-            ]))
+            Some(int_from_bytes(&self.bytes[self.i - 8..self.i]))
         } else {
             None
         }
@@ -417,18 +528,21 @@ impl WriteBytes {
     }
 
     pub fn push_u16(&mut self, v: u16) {
+        debug_assert_eq!(self.0.len() % 2, 0);
         for v in v.to_le_bytes() {
             self.0.push(v)
         }
     }
 
     pub fn push_u32(&mut self, v: u32) {
+        debug_assert_eq!(self.0.len() % 4, 0);
         for v in v.to_le_bytes() {
             self.0.push(v)
         }
     }
 
     pub fn push_i64(&mut self, v: i64) {
+        debug_assert_eq!(self.0.len() % 8, 0);
         for v in v.to_le_bytes() {
             self.0.push(v)
         }

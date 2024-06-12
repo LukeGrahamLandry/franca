@@ -313,6 +313,7 @@ unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> B
     Ok(unwrap!(c.aarch64.get_fn(f), "not compiled {f:?}"))
 }
 
+#[no_mangle]
 unsafe extern "C" fn franca_get_function<'p>(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p> {
     &c.program[f] as *const Func
 }
@@ -835,7 +836,7 @@ pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg
         ret.as_mut_ptr(),
         compile,
         // TODO: decide if flat call is allowed to mutate its args.
-        arg.bytes().as_ptr() as *mut u8,
+        arg.bytes().to_vec().as_ptr() as *mut u8, // TODO: dont clone
         arg.bytes().len() as i64,
         ret.len() as i64,
     );
@@ -1006,6 +1007,15 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
 
 // :UnquotePlaceholders
 fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mut [FatExpr<'p>]) -> FatExpr<'p> {
+    // println!(
+    //     "ptr={} len={} ptr%align={}",
+    //     args.as_mut_ptr() as usize,
+    //     args.len(),
+    //     args.as_mut_ptr() as usize % mem::align_of::<FatExpr>()
+    // );
+    // for a in unsafe { &*args } {
+    //     println!("{}", unsafe { &*a }.log(compile.pool));
+    // }
     let mut args = unsafe { &*args }.to_vec();
     let doo = || {
         let mut template = unwrap!(args.pop(), "template arg");

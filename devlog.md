@@ -1,3 +1,37 @@
+## (Jun 11/12)
+
+> we're at 15404 loc .rs
+
+- hashmaps said the wrong size, i was treating them as a Vec.
+- i was saying align of a struct was the align of the first field, but it should be the max field align.
+  which is wierd cause you have to pad it anyway if you can't reorder.
+- a problem i'd eventually have is rust probably doesn't define padding but i try to use Values as map keys,
+  but i don't see how that could be the current problem.
+  fixing that might help debug this tho.
+- trying to zero_padding on Box<Func> dies somewhere, and that was the sketchy one before so maybe thats interesting.
+  but you can do it after serializing so thats the same as the real problem.
+  its recursing on structs but not on pointers, so the FatExpr in FuncImpl i guess?
+  no, VarType. oh because i have to zero padding on the tag first maybe? no its repr(i64).
+
+oh shit im just not at all typechecking for generics????
+
+```
+// We might have compiled the arg when resolving the call so we'd save the type but it just changed because some were baked.
+// Symptom of forgetting this was emit_bc passing extra uninit args.
+arg_expr.ty = new_arg_type;
+```
+
+what the fuck am i talking about....
+that lets me call slice_from_tuple that expects a Ty(*T, i64) on something that's a Ty(*T, i64, i64) cause i changed it to real vec.
+I don't understand why it doesn't have the constant argument type in there tho.
+Oh its a tuple (T, TTT) and then i remvoe one so its (TTT) and that slots to TTT so it just happens to not need const args remove from the type in this case.
+Right so for fn alloc it doesn't work.
+so the comment is true, but i still need to do the typecheck somewhere!!
+so i was swapping length and capacity of vectors if i try to bit cast them instead of going through my serilizer that just uses length for both for now cause i just leak everything.
+that wasn't enough to fix the problem tho.
+
+- also ptr_cast_unchecked(From = Type, To = u8, ptr = mem.ptr) instead of ptr_cast_unchecked(From = Element, To = u8, ptr = mem.ptr)
+
 ## (Jun 10)
 
 debug log says width/height can't be zero.

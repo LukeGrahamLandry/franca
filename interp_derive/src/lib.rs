@@ -279,6 +279,7 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                 let t = quote!(usize::serialize_to_ints(#i, program, values););
                 quote_spanned! {f.span()=>
                     #left => {
+                        debug_assert_eq!(real_tag_value, #i);
                         #t
                     },
                 }
@@ -308,6 +309,7 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
             });
             let pad = quote!(values.push_u8(0););
             quote! {
+                let real_tag_value = unsafe { *(&self as *const Self as *const usize)};
                 let start = values.0.len();
                 #[allow(unused_variables)]
                 match &self {  #(#recurse_tag)* };
@@ -318,6 +320,7 @@ fn serialize(name: &Ident, data: &Data) -> TokenStream {
                 }
 
                 values.align_to(Self::align_bytes(program));
+                debug_assert_eq!(values.0.len() - start, std::mem::size_of::<Self>());
 
             }
         }
