@@ -308,6 +308,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
         }
         match inst {
+            Bc::Nop => {}
             Bc::SaveSsa { id, .. } => {
                 assert!(self.vars[id as usize].is_none());
                 let slot = self.create_slots(1);

@@ -47,6 +47,7 @@ pub enum Bc {
     Ret0, // flat call uses this too because code has already written to indirect return address.
     Ret1(Prim),
     Ret2((Prim, Prim)),
+    Nop,
 }
 
 #[repr(C)]
@@ -84,7 +85,7 @@ impl Prim {
 }
 
 #[repr(C)]
-#[derive(Clone, InterpSend)]
+#[derive(Clone, InterpSend, Debug)]
 pub struct BasicBlock {
     pub insts: Vec<Bc>,
     pub arg_float_mask: u32,
@@ -103,12 +104,22 @@ pub struct FnBody<'p> {
     pub when: ExecStyle,
     pub func: FuncId,
     pub current_block: BbId,
-    pub inlined_return_addr: Map<LabelId, (BbId, ResultLoc)>, // only used during emit_bc.
+    pub inlined_return_addr: Map<LabelId, ReturnAddr>, // only used during emit_bc.
     pub clock: u16,
     pub name: Ident<'p>,
     pub want_log: bool,
     pub is_ssa_var: BitSet, // only used for debugging. bc has enough info for this.
     pub signeture: PrimSig,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, InterpSend)]
+pub struct ReturnAddr {
+    pub block: BbId,
+    pub result_loc: ResultLoc,
+    pub store_res_ssa_inst: BigOption<(BbId, usize)>,
+    pub res_ssa_id: BigOption<u16>,
+    pub used: bool,
 }
 
 #[repr(transparent)]

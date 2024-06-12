@@ -5,7 +5,7 @@ Token :: @struct(type: TokenType, span: Span);
 TokenType :: @tagged(
     Number: i64,
     Symbol,
-    Quoted: @struct(s: Str, escapes: bool),
+    Quoted: @struct(s: Ast.Symbol, escapes: bool),
     Qualifier: VarType,
     Op: Operator, EqOp: Operator,
     Error: LexErr, Eof,
@@ -29,6 +29,7 @@ LexErr :: @tagged(
 VarType :: @enum(Let, Var, Const);
 
 Lexer :: @struct(
+    pool: *StringPool,
     root: Span,
     src: Str,
     start := 0,
@@ -134,7 +135,7 @@ fn lex_string(self: *Lexer) Unit = {
         self.src.slice(self.start.add(1), self.current.sub(1))
     };
     
-    self.put_token((Quoted = (s = text, escapes = escapes)));
+    self.put_token((Quoted = (s = self.pool.insert_owned(text), escapes = escapes)));
 }
 
 fn lex_num(self: *Lexer) Unit = {
@@ -320,17 +321,18 @@ fn peek_c(self: *Lexer) u8 = self.peek_c(0);
 fn peek_c(self: *Lexer, n: i64) u8 = 
     if(self.current.add(n).lt(self.src.len), => self.src[self.current.add(n)], => 0.trunc());
 
-fn init(root: Span, src: Str) Lexer = {
-    self: Lexer = (root = root, src = src, token = ()!uninitialized);
+fn init(pool: *StringPool, root: Span, src: Str) Lexer = {
+    self: Lexer = (pool = pool, root = root, src = src, token = ()!uninitialized);
     self&.pop(); // get the first token ready. 
     self
 }
 
 #test fn lexer_doesnt_crash() = {
+    pool: StringPool = init(libc_allocator);
     codemap: CodeMap = init(libc_allocator);
     src := " /*}|*/   println(\"hello world\"); const t = fn hello(); + +=; 123; 0xFF; 0b101010; \"\"\" big string \" ending now\"\"\"";
     span := codemap&.add_file("test", src);
-    self: Lexer = init(root = span, src = src);
+    self: Lexer = init(pool = pool&, root = span, src = src);
     count := 0;
     dowhile {|
         t := self&.peek();

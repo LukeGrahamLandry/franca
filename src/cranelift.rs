@@ -326,6 +326,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
         for inst in &block.insts {
             match *inst {
+                Bc::Nop => {}
                 Bc::SaveSsa { id, .. } => {
                     let prev = self.ssa_vars.insert(id, self.stack.pop().unwrap());
                     debug_assert!(prev.is_none());

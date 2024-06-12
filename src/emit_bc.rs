@@ -632,21 +632,25 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let TypeInfo::Label(ret_ty) = self.program[f.ty] {
                     let return_from: LabelId = from_values(self.program, unwrap!(f.as_const(), ""))?;
                     // result_location is the result of the ret() expression, which is Never and we don't care.
-                    let (ip, res_loc) = *unwrap!(
-                        result.inlined_return_addr.get(&return_from),
+                    let ret = unwrap!(
+                        result.inlined_return_addr.get_mut(&return_from),
                         "missing return label. forgot '=>' on function?"
                     );
-                    let slots = match res_loc {
+                    ret.used = true;
+                    let ret = *ret;
+                    let slots = match ret.result_loc {
                         PushStack => self.slot_count(ret_ty),
                         ResAddr => {
-                            ice!("TODO: need be be able to find the ResAddr cause it might not be on top of the stack. (early return from flat_call: big ret/arg value )")
+                            let BigOption::Some(id) = ret.res_ssa_id else { unreachable!() };
+                            result.push(Bc::LoadSsa { id });
+                            0
                         }
                         Discard => 0,
                     };
                     // TODO: sometimes can_tail, if you're returning the main function
-                    self.compile_expr(result, arg, res_loc, false)?;
-                    result.push(Bc::Goto { ip, slots });
-                    result.blocks[ip.0 as usize].incoming_jumps += 1;
+                    self.compile_expr(result, arg, ret.result_loc, false)?;
+                    result.push(Bc::Goto { ip: ret.block, slots });
+                    result.blocks[ret.block.0 as usize].incoming_jumps += 1;
                     return Ok(());
                 }
 
@@ -664,29 +668,51 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 if let BigOption::Some(ret_var) = ret_label {
                     let entry_block = result.current_block;
-                    let return_block = if result_location == PushStack {
-                        result.push_block(out.size_slots, out.float_mask)
-                    } else {
-                        result.push_block(0, 0)
+                    let return_block = match result_location {
+                        PushStack => result.push_block(out.size_slots, out.float_mask),
+                        ResAddr => result.push_block(0, 0),
+                        Discard => result.push_block(0, 0),
                     };
-                    let prev = result.inlined_return_addr.insert(*ret_var, (return_block, result_location));
-                    assert!(prev.is_none());
+                    let mut ret = ReturnAddr {
+                        block: return_block,
+                        result_loc: result_location,
+                        store_res_ssa_inst: BigOption::None,
+                        res_ssa_id: BigOption::None,
+                        used: false,
+                    };
                     result.current_block = entry_block;
+                    if result_location == ResAddr {
+                        result.push(Bc::PeekDup(0));
+                        let id = result.save_ssa_var();
+                        ret.res_ssa_id = BigOption::Some(id);
+                        let index = result.blocks[entry_block.0 as usize].insts.len() - 1;
+                        ret.store_res_ssa_inst = BigOption::Some((entry_block, index));
+                    }
+
+                    let prev = result.inlined_return_addr.insert(*ret_var, ret);
+                    assert!(prev.is_none());
 
                     for stmt in body {
                         self.compile_stmt(result, stmt)?;
                     }
                     self.compile_expr(result, value, result_location, can_tail)?;
 
+                    let ret = result.inlined_return_addr.remove(ret_var).unwrap();
                     if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
+                        debug_assert!(ret.used);
                         let slots = result.blocks[return_block.0 as usize].arg_slots;
                         result.push(Bc::Goto { ip: return_block, slots });
                         result.blocks[return_block.0 as usize].incoming_jumps += 1;
                         result.current_block = return_block;
                     } else {
+                        debug_assert!(!ret.used);
+                        if let BigOption::Some((block, index)) = ret.store_res_ssa_inst {
+                            // if we didn't use it, don't bother asking the backend to save the register with the result address.
+                            result.blocks[block.0 as usize].insts[index] = Bc::Nop;
+                            result.blocks[block.0 as usize].insts[index - 1] = Bc::Nop;
+                        }
                         result.push_to(return_block, Bc::NoCompile);
                     }
-                    result.inlined_return_addr.remove(ret_var);
                 } else {
                     // TODO: sometimes the last one can tail, if value is Unit and we're the body of the main function.
                     for stmt in body {
