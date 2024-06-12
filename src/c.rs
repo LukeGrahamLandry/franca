@@ -13,8 +13,7 @@ use crate::{
     emit_bc::{emit_bc, prim_sig},
     err,
     logging::PoolLog,
-    pops,
-    reflect::BitSet,
+    pops, BitSet,
 };
 use std::{borrow::Cow, collections::HashMap, fmt::Write};
 

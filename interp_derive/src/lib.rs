@@ -1,6 +1,6 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::{quote, quote_spanned};
-use syn::{parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, FieldsNamed, FieldsUnnamed, GenericParam, Generics, TypeParamBound};
+use syn::{parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, GenericParam, Generics, TypeParamBound};
 
 #[proc_macro_derive(InterpSend)]
 pub fn derive_interp_send(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -169,72 +169,4 @@ fn add_trait_bounds(mut generics: Generics, bounds: TypeParamBound) -> Generics 
     }
 
     generics
-}
-
-// TODO: derive debug printing with my string pool
-
-#[proc_macro_derive(Reflect)]
-pub fn derive_reflect(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
-    let (fields, fields_copy) = get_field_data(&input.ident, &input.data);
-    let expanded = quote! {
-        impl #impl_generics crate::reflect::Reflect for #name #ty_generics #where_clause {
-            const TYPE_INFO: &'static crate::reflect::RsType<'static> = &crate::reflect::RsType {
-                name: stringify!(#name),
-                align: std::mem::align_of::<Self>(),
-                stride: std::mem::size_of::<Self>(),
-                data: #fields,
-                is_linear: #fields_copy,
-            };
-        }
-    };
-    proc_macro::TokenStream::from(expanded)
-}
-
-fn get_field_data(name: &Ident, data: &Data) -> (TokenStream, TokenStream) {
-    match data {
-        syn::Data::Struct(data) => match data.fields {
-            syn::Fields::Named(ref fields) => {
-                let recurse = fields.named.iter().map(|f| {
-                    let f_name = &f.ident;
-                    let f_ty = &f.ty;
-                    quote_spanned! {f.span()=>
-                        crate::reflect::RsField {
-                            name: stringify!(#f_name),
-                            offset: crate::reflect::field_offset!(#name, #f_name),
-                            ty: <#f_ty>::get_ty,
-                        }
-                    }
-                });
-                let linear = fields.named.iter().map(|f| {
-                    let ty = &f.ty;
-                    quote_spanned! {f.span()=>
-                        <#ty as crate::reflect::Reflect>::TYPE_INFO.is_linear
-                    }
-                });
-
-                (
-                    quote! {
-                        {
-                            const F: &[crate::reflect::RsField] = &[#(#recurse,)*];
-                            crate::reflect::RsData::Struct(F)
-                        }
-                    },
-                    quote! {
-                        false #(|| #linear)*
-                    },
-                )
-            }
-            syn::Fields::Unnamed(ref _fields) => {
-                todo!()
-            }
-            syn::Fields::Unit => (quote!(), quote!(true)), // dont care
-        },
-        syn::Data::Enum(_) => todo!(),
-        syn::Data::Union(_) => todo!(),
-    }
 }

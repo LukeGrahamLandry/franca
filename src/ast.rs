@@ -8,8 +8,7 @@ use crate::{
     ffi::InterpSend,
     impl_index, impl_index_imm,
     pool::{Ident, StringPool},
-    reflect::{BitSet, RsType},
-    unwrap, Map, STATS,
+    unwrap, BitSet, Map, STATS,
 };
 use codemap::Span;
 use interp_derive::InterpSend;
@@ -1039,57 +1038,6 @@ impl<'p> Program<'p> {
             self.types[placeholder] = TypeInfo::Named(ty, name);
             self.types_extra.borrow_mut().truncate(placeholder);
             self.ffi_sizes.insert(ty_final, mem::size_of::<T>());
-            ty_final
-        })
-    }
-
-    pub(crate) fn get_rs_type(&mut self, type_info: &'static RsType<'static>) -> TypeId {
-        use crate::reflect::*;
-        // TODO: think more about this but need same int type
-        if let RsData::Opaque = type_info.data {
-            return self.intern_type(TypeInfo::Int(IntTypeInfo {
-                bit_count: (type_info.stride * 8) as i64,
-                signed: true, // TODO
-            }));
-        }
-        let id = type_info as *const RsType as usize as u128;
-        self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
-            let placeholder = self.types.len();
-            let ty_final = TypeId::from_index(placeholder);
-            // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
-            // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Placeholder);
-            self.ffi_types.insert(id, ty_final);
-            let ty = match type_info.data {
-                RsData::Struct(data) => {
-                    let mut fields = vec![];
-                    let mut types = vec![];
-                    for f in data {
-                        let ty = self.get_rs_type((f.ty)());
-                        types.push(ty);
-                        fields.push(Field {
-                            ty,
-                            name: self.pool.intern(f.name),
-                            byte_offset: f.offset,
-                            default: BigOption::None,
-                        })
-                    }
-                    self.intern_type(TypeInfo::Struct {
-                        fields,
-                        layout_done: true,
-                        is_tuple: false,
-                    })
-                }
-                RsData::Enum { .. } => todo!(),
-                RsData::Ptr { inner, .. } => {
-                    let inner = self.get_rs_type(inner);
-                    self.ptr_type(inner)
-                }
-                RsData::Opaque => unreachable!(),
-            };
-
-            self.types[placeholder] = TypeInfo::Named(ty, self.pool.intern(type_info.name));
             ty_final
         })
     }

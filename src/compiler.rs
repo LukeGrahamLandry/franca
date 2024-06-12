@@ -25,12 +25,10 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{do_flat_call_values, BigOption, BigResult, ExportVTable, FlatCallFn, RsResolvedSymbol};
+use crate::export_ffi::{do_flat_call_values, BigOption, BigResult, ExportVTable, FlatCallFn};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
-use crate::reflect::Reflect;
 use crate::scope::ResolveScope;
 use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
@@ -2075,7 +2073,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             "FatStmt" => ffi_type!(FatStmt),
             "TypeInfo" => ffi_type!(TypeInfo),
             "IntTypeInfo" => ffi_type!(IntTypeInfo),
-            "RsResolvedSymbol" => self.program.get_rs_type(RsResolvedSymbol::get_ty()),
             "Stats" => ffi_type!(Stats),
             "TargetArch" => ffi_type!(TargetArch),
             "ExecStyle" => ffi_type!(ExecStyle),

@@ -33,9 +33,7 @@ use crate::{
     emit_bc::{emit_bc, empty_fn_body},
     err, extend_options,
     logging::make_err,
-    pops,
-    reflect::BitSet,
-    unwrap,
+    pops, unwrap, BitSet,
 };
 
 pub struct JittedCl<M: Module> {

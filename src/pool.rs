@@ -1,8 +1,7 @@
 use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::PhantomData, mem};
 
 use crate::{
-    ast::{Flag, IntTypeInfo, Program, TypeInfo},
-    bc::{ReadBytes, WriteBytes},
+    ast::{Flag, IntTypeInfo, TypeInfo},
     ffi::InterpSend,
     Map, MY_CONST_DATA,
 };

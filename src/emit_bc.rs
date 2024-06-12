@@ -19,9 +19,9 @@ use crate::bc_to_asm::Jitted;
 use crate::compiler::{CErr, Compile, ExecStyle, Res};
 use crate::export_ffi::{BigOption, BigResult::*};
 use crate::logging::PoolLog;
-use crate::reflect::BitSet;
+use crate::BitSet;
 use crate::{assert, assert_eq, err, extend_options2, ice, unwrap};
-use crate::{bc::*, extend_options, Map, STATS};
+use crate::{bc::*, Map, STATS};
 
 struct EmitBc<'z, 'p: 'z> {
     program: &'z Program<'p>,

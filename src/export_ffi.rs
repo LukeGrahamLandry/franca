@@ -1,14 +1,13 @@
 #![allow(improper_ctypes_definitions)]
 
 use codemap::{File, Span};
-use interp_derive::Reflect;
 use libc::c_void;
 
 use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, WalkAst,
 };
-use crate::bc::{from_values, to_values, ReadBytes, Values};
+use crate::bc::{from_values, to_values, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
@@ -236,7 +235,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     comptime_arch,
 };
 
-unsafe extern "C" fn comptime_arch<'p>() -> (i64, i64) {
+unsafe extern "C" fn comptime_arch() -> (i64, i64) {
     let arch = if cfg!(target_arch = "aarch64") {
         1
     } else if cfg!(target_arch = "x86_64") {
@@ -712,7 +711,7 @@ extern "C-unwind" fn symbol_to_int(_: &mut &mut Program, symbol: u32) -> i64 {
     symbol as i64
 }
 
-#[derive(Reflect)]
+/// This must be kept in sync with the definition in unwind.fr!
 pub struct RsResolvedSymbol {
     line: i64,
     owned_name: *const u8,

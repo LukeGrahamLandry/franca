@@ -1,13 +1,9 @@
-use std::{
-    mem::{self, transmute},
-    ptr::{slice_from_raw_parts, slice_from_raw_parts_mut},
-};
+use std::mem::{self};
 
 use codemap::Span;
 
 use crate::{
-    ast::{Flag, OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
-    bc::{zero_padding, ReadBytes, WriteBytes},
+    ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
     export_ffi::BigOption,
     Map,
 };

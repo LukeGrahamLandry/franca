@@ -7,7 +7,7 @@ use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use crate::ast::{LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
-use crate::reflect::BitSet;
+use crate::BitSet;
 use crate::{
     ast::{FuncId, TypeId},
     compiler::{ExecStyle, Res},
@@ -251,7 +251,7 @@ pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<
     };
     debug_assert_eq!(bytes.as_ptr() as usize % mem::align_of::<T>(), 0);
     debug_assert_eq!(bytes.len(), mem::size_of::<T>());
-    zero_padding(program, ty, &mut bytes, &mut 0)?;
+    zero_padding(program, ty, &mut bytes, &mut 0)?; // TODO: deep?
     Ok(Values::many(bytes))
 }
 
@@ -262,10 +262,9 @@ pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) 
     zero_padding(program, ty, t.bytes_mut(), &mut i)?;
     debug_assert_eq!(i, t.bytes().len());
     debug_assert_eq!(t.bytes().as_ptr() as usize % mem::align_of::<T>(), 0);
-    let info = program.get_info(ty);
     unsafe {
         let s = &*(t.bytes().as_ptr() as *const T);
-        return Ok(s.clone());
+        Ok(s.clone())
     }
 }
 

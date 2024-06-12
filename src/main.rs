@@ -3,7 +3,7 @@
 #![feature(thread_sleep_until)]
 
 use franca::{
-    ast::{garbage_loc, Flag, FuncId, Program, ScopeId, TargetArch},
+    ast::{garbage_loc, FuncId, Program, ScopeId, TargetArch},
     bc::{to_values, Values},
     compiler::{Compile, ExecStyle, Res},
     export_ffi::{end_raw, get_include_std, start_raw, ImportVTable, IMPORT_VTABLE},
@@ -454,7 +454,7 @@ fn forked_swallow_passes(arch: TargetArch) {
             if size != expect {
                 println!(
                     "{:?}: {}: fr={} vs rs={}",
-                    comp.program.inferred_type_names[ty.as_index()].and_then(|n| Some(comp.pool.get(n))),
+                    comp.program.inferred_type_names[ty.as_index()].map(|n| comp.pool.get(n)),
                     comp.program.log_type(ty),
                     expect,
                     size
