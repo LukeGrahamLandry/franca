@@ -2,21 +2,22 @@ fn insert() Unit = unit;
 fn get() Unit = unit;
 fn get_ptr() Unit = unit;
 fn hash();
+fn remove();
 
 // TODO: use a real hashing thing. wyhash is pretty small: https://github.com/wangyi-fudan/wyhash
 // TODO: explicit wrapping_op functions. 
-fn hash(i: *i64) i64 = i[].mul(345678).add(9765432);
+fn hash(i: *i64) i64 = i[].mul(345671).add(9765431);
 fn hash(s: *Str) i64 = {
     h := 0;
     for(s[]) {c|
         c: i64 = c.zext();
-        h += c&.hash().mul(4256465978);
+        h += c&.hash().mul(4256465971);
     };
     h
 }
 
 /// This is the kind where you get bumped to the next slot if you collide, not the kind where you spill out into a linked list.
-/// TODO: remove. tombstones.  
+/// TODO: reuse the first tombstone slot when inserting after a remove. currently im being dumb and just wasting search time until a resize. 
 /// (K: eq + hash + move, V: move)
 fn HashMap(const K: Type, const V: Type) Type = {
     // TODO: instead of complicated traits, just require(eq, Ty(K, K), bool);
@@ -27,13 +28,13 @@ fn HashMap(const K: Type, const V: Type) Type = {
     fn init(gpa: Alloc) Self = (alloc = gpa, arr = @as(Slice(Entry)) empty(), len = 0, capacity = 0);
     
     ::?*V;
-    :: if_opt(*V, ?V);
+    ::if_opt(*V, ?V);
     ::if(?V);
     ::if(?*V);
     
     fn checked_hash(key: *K) i64 = {
         mask :: 1.bit_not();
-        h := hash(key);
+        h := hash(key).abs();
         // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
         if(h.bit_and(mask).eq(0), => h.add(4), => h)   
     }
@@ -44,14 +45,22 @@ fn HashMap(const K: Type, const V: Type) Type = {
         h := key&.checked_hash();
         slot := self.find_slot(key, h);
         
-        if(slot.hash.ne(0)) {|
-            old := slot.value;
-            slot.value = value;
-            some(old)
-        }{| // else
-            slot[] = (hash = h, key = key, value = value);
-            self.len += 1;
-            none()
+        ::if(?V);
+        @switch(slot.hash) {
+            @case(0) fn() ?V => {
+                slot[] = (hash = h, key = key, value = value);
+                self.len += 1;
+                none()
+            };
+            @case(1) fn() ?V => {
+                slot[] = (hash = h, key = key, value = value);
+                none()
+            };
+            @default fn(_: i64) ?V => {
+                old := slot.value;
+                slot.value = value;
+                some(old)
+            };
         }
     }
 
@@ -71,6 +80,16 @@ fn HashMap(const K: Type, const V: Type) Type = {
         } 
     }
     
+    fn remove(self: *Self, key: K) ?V = {
+        if(self.len.eq(0), => (None = ())) {|
+            slot := self.find_slot(key, key&.checked_hash());
+            if(slot.hash.eq(0), => (None = ())) {|
+                slot.hash = 1; // tombstone
+                (Some = slot.value)
+            }
+        } 
+    }
+    
     fn find_slot(self: *Self, key: K, h: i64) *Entry = {
         ret :: @return;
         i := h.mod(self.arr.len);
@@ -79,12 +98,12 @@ fn HashMap(const K: Type, const V: Type) Type = {
             check := self.arr[i]&;
             if(check.hash.eq(h).and(=> check.key.eq(key)), fn() Unit => { ret(check); }) {|
                 if(check.hash.eq(0), fn() Unit => { ret(check); }); // empty, not in map
+                // 1 => placeholder for a removed value
                 // othewise, continue, might have been bumped
             };
             i = i.add(1).mod(self.arr.len);
         };
         
-        @println("key <%> hashes to %. len=% total=% cap=%", key, h, self.len, self.arr.len, self.capacity);
         panic("Unreachable unless you set the load factor to 100%");
         (*Entry).unreachable_hack()
     }
@@ -96,15 +115,15 @@ fn HashMap(const K: Type, const V: Type) Type = {
             slot.hash = 0;
         };
         self.capacity = self.arr.len.mul(load_percent).div(100);
-        found := 0;
+        real_len := 0;
         each(old_arr) {old_slot|
-            if(old_slot.hash.ne(0)) {|
+            if(old_slot.hash.ne(0).and(old_slot.hash.ne(1))) {|
                 new_slot := self.find_slot(old_slot.key, old_slot.hash);
                 new_slot[] = old_slot[];
-                found += 1;
+                real_len += 1;
             };
         };
-        assert_eq(found, self.len); // debug detect corruption.  // TODO: debug_assert_op
+        self.len = real_len;
         
         self.alloc.dealloc(Entry, old_arr);
     }
