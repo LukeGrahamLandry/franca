@@ -2204,10 +2204,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
-        Ok(unwrap!(
-            Ret::deserialize_from_ints(self.program, &mut ReadBytes { bytes: values.bytes(), i: 0 }),
-            ""
-        ))
+        from_values(self.program, values)
     }
 
     pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {

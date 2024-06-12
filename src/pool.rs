@@ -256,15 +256,6 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         }))
     }
 
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        self.0.serialize_to_ints(program, values)
-    }
-
-    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let i = values.next_u32()?;
-        Some(Ident(i, PhantomData))
-    }
-
     fn name() -> String {
         "Symbol".to_string()
     }

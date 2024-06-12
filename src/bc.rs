@@ -187,7 +187,8 @@ impl Values {
             Values::Small(value, len) => unsafe { &*slice_from_raw_parts(value as *const i64 as *const u8, *len as usize) },
         }
     }
-    fn bytes_mut(&mut self) -> &mut [u8] {
+
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
         match self {
             Values::Big(bytes) => bytes,
             Values::Small(value, len) => unsafe { &mut *slice_from_raw_parts_mut(value as *mut i64 as *mut u8, *len as usize) },
@@ -244,7 +245,10 @@ use crate::export_ffi::{BigOption, BigResult::*};
 #[track_caller]
 pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
     let ty = T::get_or_create_type(program); // sigh
-    let mut bytes = t.serialize_to_ints_one(program);
+    let mut bytes = unsafe {
+        let s = &*slice_from_raw_parts(&t as *const T as *const u8, mem::size_of::<T>());
+        s.to_vec()
+    };
     debug_assert_eq!(bytes.as_ptr() as usize % mem::align_of::<T>(), 0);
     debug_assert_eq!(bytes.len(), mem::size_of::<T>());
     zero_padding(program, ty, &mut bytes, &mut 0)?;
@@ -257,19 +261,12 @@ pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) 
     let ty = T::get_type(program);
     zero_padding(program, ty, t.bytes_mut(), &mut i)?;
     debug_assert_eq!(i, t.bytes().len());
-    let info = program.get_info(ty);
-    // Nothing special about this condition, I'm just trying to narrow down the problem.
-    if !info.contains_pointers || info.align_bytes != 8 || info.size_slots < 10 {
-        unsafe {
-            let s = &*(t.bytes().as_ptr() as *const T);
-            return Ok(s.clone());
-        }
-    }
     debug_assert_eq!(t.bytes().as_ptr() as usize % mem::align_of::<T>(), 0);
-    let mut reader = ReadBytes { bytes: t.bytes(), i: 0 };
-    let res = Ok(unwrap!(T::deserialize_from_ints(program, &mut reader), "{} from {reader:?}", T::name()));
-    debug_assert_eq!(reader.i, reader.bytes.len());
-    res
+    let info = program.get_info(ty);
+    unsafe {
+        let s = &*(t.bytes().as_ptr() as *const T);
+        return Ok(s.clone());
+    }
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.

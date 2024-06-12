@@ -8,7 +8,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, WalkAst,
 };
-use crate::bc::{to_values, ReadBytes, Values};
+use crate::bc::{from_values, to_values, ReadBytes, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
@@ -384,9 +384,11 @@ macro_rules! bounce_flat_call {
                 unsafe {
                     let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
                     debugln!("bounce ARG: {argslice:?}");
-                    let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: argslice, i: 0}), "deserialize arg")));
+                    // TODO: no clone
+                    let arg: $Arg = $crate::bc::from_values(compile.program, Values::many(argslice.to_vec())).unwrap();
+                    // let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: argslice, i: 0}), "deserialize arg")));
                     let ret: $Ret = $f(compile, arg);
-                    let ret = ret.serialize_to_ints_one(compile.program);
+                    let ret = to_values(compile.program, ret).unwrap().vec();
                     let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
                     out.fill(0); // TODO: remove
                     out.copy_from_slice(&ret);
@@ -821,10 +823,16 @@ pub type FlatCallFn = extern "C-unwind" fn(ret: *mut u8, program: &mut Compile<'
 pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
     Arg::get_or_create_type(compile.program); // sigh
     Ret::get_or_create_type(compile.program); // sigh
-    let mut arg = arg.serialize_to_ints_one(compile.program);
+    let mut arg = to_values(compile.program, arg).unwrap();
     let mut ret = vec![0u8; Ret::size_bytes(compile.program)];
-    f(ret.as_mut_ptr(), compile, arg.as_mut_ptr(), arg.len() as i64, ret.len() as i64);
-    Ret::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: &ret, i: 0 }).unwrap()
+    f(
+        ret.as_mut_ptr(),
+        compile,
+        arg.bytes_mut().as_mut_ptr(),
+        arg.bytes().len() as i64,
+        ret.len() as i64,
+    );
+    from_values(compile.program, Values::many(ret)).unwrap()
 }
 
 // This the interpreter call a flat_call without knowing its types

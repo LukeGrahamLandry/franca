@@ -39,24 +39,6 @@ pub trait InterpSend<'p>: Sized + Clone {
     }
     /// This should only be called once! Use get_type which caches it.
     fn create_type(interp: &mut Program) -> TypeId;
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self>;
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes);
-    #[track_caller]
-    fn serialize_to_ints_one(self, program: &Program) -> Vec<u8> {
-        let info = program.get_info(Self::get_type(program));
-        // Nothing special about this condition, I'm just trying to narrow down the problem.
-        if !info.contains_pointers || info.align_bytes != 8 || info.size_slots < 6 {
-            unsafe {
-                let s = &*slice_from_raw_parts(&self as *const Self as *const u8, mem::size_of::<Self>());
-                return s.to_vec();
-            }
-        }
-
-        let mut values = WriteBytes::default(); // TODO: with_capacity
-        self.serialize_to_ints(program, &mut values);
-        debug_assert_eq!(values.0.len(), Self::size_bytes(program), "{} bad ser size\n{:?}", Self::name(), values.0);
-        values.0
-    }
 
     fn definition() -> String {
         String::new()
@@ -76,10 +58,6 @@ pub trait InterpSend<'p>: Sized + Clone {
     fn align_bytes(program: &Program) -> usize {
         program.get_info(Self::get_type(program)).align_bytes as usize
     }
-}
-
-pub fn deserialize_from_ints<'p, T: InterpSend<'p> + Sized>(program: &Program, values: &mut ReadBytes) -> Option<T> {
-    T::deserialize_from_ints(program, values)
 }
 
 macro_rules! send_num {
@@ -111,14 +89,6 @@ macro_rules! send_num {
                         signed: $signed,
                     }))
                     .expect("number type should be pre-interned")
-            }
-
-            fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-                values.$write_fn(self as $as_int)
-            }
-
-            fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-                Some(values.$read_fn()? as $ty)
             }
 
             fn name() -> String {
@@ -159,17 +129,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
         p.intern_type(TypeInfo::Ptr(t))
     }
 
-    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        values.push_i64(self as i64)
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let ptr = values.next_i64()?;
-        let align = program.get_info(T::get_type(program)).align_bytes;
-        debug_assert_eq!(ptr % align as i64, 0, "bad alignment");
-        Some(ptr as *mut T)
-    }
-
     fn name() -> String {
         format!("*{}", T::name())
     }
@@ -189,14 +148,6 @@ impl<'p> InterpSend<'p> for bool {
 
     fn get_or_create_type(_: &mut Program) -> TypeId {
         TypeId::bool()
-    }
-
-    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        values.push_u8(if self { 1 } else { 0 })
-    }
-
-    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(values.next_u8()? != 0)
     }
 
     fn name() -> String {
@@ -219,12 +170,6 @@ impl<'p> InterpSend<'p> for () {
         TypeId::unit
     }
 
-    fn serialize_to_ints(self, _: &Program, _: &mut WriteBytes) {}
-
-    fn deserialize_from_ints(_: &Program, _: &mut ReadBytes) -> Option<Self> {
-        Some(())
-    }
-
     fn name() -> String {
         "Unit".to_string()
     }
@@ -238,14 +183,6 @@ impl<'p> InterpSend<'p> for char {
         TypeId::i64()
     }
 
-    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        values.push_u32(self as u32)
-    }
-
-    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        char::from_u32(values.next_u32()?)
-    }
-
     fn name() -> String {
         "u32".to_string()
     }
@@ -257,14 +194,6 @@ impl<'p> InterpSend<'p> for f64 {
     }
     fn create_type(_program: &mut Program) -> TypeId {
         TypeId::f64()
-    }
-
-    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        values.push_i64(self.to_bits() as i64)
-    }
-
-    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(f64::from_bits(values.next_i64()? as u64))
     }
 
     fn name() -> String {
@@ -288,14 +217,6 @@ macro_rules! ffi_index {
             fn get_or_create_type(_: &mut Program) -> TypeId {
                 $typeid
             }
-            fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-                values.push_u32(self.as_raw())
-            }
-
-            fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-                Some(<$ty>::from_raw(values.next_u32()?))
-            }
-
             fn name() -> String {
                 $name.to_string()
             }
@@ -321,14 +242,6 @@ impl<'p> InterpSend<'p> for TypeId {
     fn get_or_create_type(_: &mut Program) -> TypeId {
         TypeId::ty
     }
-    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        values.push_u32(self.as_raw())
-    }
-
-    fn deserialize_from_ints(_: &Program, values: &mut ReadBytes) -> Option<Self> {
-        Some(TypeId::from_raw(values.next_u32()?))
-    }
-
     fn name() -> String {
         "Type".to_string()
     }
@@ -347,25 +260,6 @@ macro_rules! fixed_array {
                 };
                 p.intern_type(info)
             }
-
-            fn serialize_to_ints(self, p: &Program, values: &mut WriteBytes) {
-                for i in 0..$len {
-                    values.align_to(<$ty>::align_bytes(p));
-                    self[i].serialize_to_ints(p, values);
-                }
-                values.align_to(<$ty>::align_bytes(p));
-            }
-
-            fn deserialize_from_ints(p: &Program, values: &mut ReadBytes) -> Option<Self> {
-                let mut t: Self = unsafe { mem::zeroed() };
-                for i in 0..$len {
-                    values.align_to(<$ty>::align_bytes(p));
-                    t[i] = <$ty>::deserialize_from_ints(p, values)?;
-                }
-                values.align_to(<$ty>::align_bytes(p));
-                Some(t)
-            }
-
             fn name() -> String {
                 format!("Array({}, {})", <$ty>::name(), $len)
             }
@@ -385,21 +279,6 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
         program.tuple_of(vec![a, b])
     }
 
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        self.0.serialize_to_ints(program, values);
-        values.align_to(B::align_bytes(program));
-        self.1.serialize_to_ints(program, values);
-        values.align_to(Self::align_bytes(program));
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let a = A::deserialize_from_ints(program, values)?;
-        values.align_to(B::align_bytes(program));
-        let b = B::deserialize_from_ints(program, values)?;
-        values.align_to(Self::align_bytes(program));
-        Some((a, b))
-    }
-
     fn name() -> String {
         format!("Ty({}, {})", A::name(), B::name())
     }
@@ -416,25 +295,6 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
         program.tuple_of(vec![a, b, c])
     }
 
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        self.0.serialize_to_ints(program, values);
-        values.align_to(B::align_bytes(program));
-        self.1.serialize_to_ints(program, values);
-        values.align_to(C::align_bytes(program));
-        self.2.serialize_to_ints(program, values);
-        values.align_to(Self::align_bytes(program));
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let a = A::deserialize_from_ints(program, values)?;
-        values.align_to(B::align_bytes(program));
-        let b = B::deserialize_from_ints(program, values)?;
-        values.align_to(C::align_bytes(program));
-        let c = C::deserialize_from_ints(program, values)?;
-        values.align_to(Self::align_bytes(program));
-        Some((a, b, c))
-    }
-
     fn name() -> String {
         format!("Ty({}, {}, {})", A::name(), B::name(), C::name()) // TODO: unnest
     }
@@ -448,91 +308,7 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
     fn create_type(program: &mut Program) -> TypeId {
         let ty = T::get_or_create_type(program);
         let ty = program.intern_type(TypeInfo::Ptr(ty));
-        program.tuple_of(vec![ty, TypeId::i64(), TypeId::i64()]) // TODO: not this
-    }
-
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        let len = self.len();
-        let mut parts = WriteBytes::default(); // TODO: with_capacity
-        let total_bytes = T::size_bytes(program) * len;
-        for e in self {
-            debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
-            e.serialize_to_ints(program, &mut parts);
-            debug_assert_eq!(parts.0.len() % T::align_bytes(program), 0);
-        }
-        debug_assert_eq!(
-            parts.0.len(),
-            total_bytes,
-            "vec![{}; {len}] one size = {}",
-            T::name(),
-            T::size_bytes(program)
-        );
-        let (ptr, _, _) = parts.0.into_raw_parts();
-        if len != 0 {
-            let align = program.get_info(T::get_type(program)).align_bytes;
-            debug_assert_eq!(
-                ptr as i64 % align as i64,
-                0,
-                "bad alignment for {} {}",
-                program.log_type(T::get_type(program)),
-                ptr as i64
-            );
-        }
-
-        values.push_i64(ptr as i64);
-        values.push_i64(len as i64); // cap
-        values.push_i64(len as i64);
-
-        // let parts: [i64; 3] = unsafe { mem::transmute(self) };
-        // for p in parts {
-        //     values.push_i64(p);
-        // }
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        // let s: Self = unsafe { mem::transmute([values.next_i64()?, values.next_i64()?, values.next_i64()?]) };
-        // Some(s)
-        let ptr = values.next_i64()?;
-        //debug_assert_eq!(ptr % 8, 0, "{ptr} is unaligned");
-        let cap = usize::deserialize_from_ints(program, values)?;
-        let len = usize::deserialize_from_ints(program, values)?;
-
-        if len == 0 {
-            return Some(vec![]);
-        }
-
-        let total_bytes = T::size_bytes(program) * len;
-        if total_bytes > 2 << 25 {
-            println!(
-                "err: i hope you didnt have a {}MB vec on purpose... (ptr = 0x{:x}, len = 0x{:x})",
-                total_bytes >> 20,
-                ptr,
-                len,
-            )
-        }
-
-        let ty = T::get_type(program);
-        let align = program.get_info(ty).align_bytes;
-        debug_assert_eq!(
-            ptr % align as i64,
-            0,
-            "bad alignment for {} (ptr={ptr}, len={len}, cap={cap})",
-            program.log_type(T::get_type(program)),
-        );
-
-        let s = unsafe { &mut *slice_from_raw_parts_mut(ptr as *mut u8, total_bytes) };
-
-        let mut res = Vec::with_capacity(len);
-        let mut reader = ReadBytes { bytes: s, i: 0 };
-        for _ in 0..len {
-            debug_assert_eq!(reader.i % T::align_bytes(program), 0);
-            res.push(T::deserialize_from_ints(program, &mut reader)?);
-        }
-        debug_assert_eq!(reader.i, total_bytes);
-
-        Some(res)
-        // Some(unsafe { Vec::from_raw_parts(ptr as *mut T, len as usize, cap as usize) })
-        // Some(unsafe { &mut *slice_from_raw_parts_mut(ptr as *mut T, len) }.to_vec())
+        program.tuple_of(vec![TypeId::i64(), ty, TypeId::i64()]) // TODO: not this
     }
 
     fn name() -> String {
@@ -551,44 +327,6 @@ impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
         program.tuple_of(vec![ty, TypeId::i64()]) // TODO: not this
     }
 
-    fn serialize_to_ints(self, _: &Program, values: &mut WriteBytes) {
-        let (ptr, len) = self.to_raw_parts();
-        values.push_i64(ptr as i64);
-        values.push_i64(len as i64);
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let ptr = values.next_i64()?;
-        let len = usize::deserialize_from_ints(program, values)?;
-        if len == 0 {
-            return Some(&mut [] as *mut [T]);
-        }
-
-        let total_bytes = T::size_bytes(program) * len;
-        let align = program.get_info(T::get_type(program)).align_bytes;
-        if total_bytes > 2 << 25 {
-            println!(
-                "err: i hope you didnt have a {}MB vec on purpose... (ptr = 0x{:x}, len = 0x{:x})",
-                total_bytes >> 20,
-                ptr,
-                len,
-            )
-        }
-        debug_assert_eq!(ptr % align as i64, 0, "bad alignment at {}", ptr);
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, total_bytes) };
-
-        let mut res = Vec::with_capacity(len);
-        let mut reader = ReadBytes { bytes: s, i: 0 };
-        for _ in 0..len {
-            debug_assert_eq!(reader.i % T::align_bytes(program), 0);
-            res.push(T::deserialize_from_ints(program, &mut reader)?);
-            debug_assert_eq!(reader.i % T::align_bytes(program), 0);
-        }
-
-        Some(res.leak() as *mut [T])
-        // Some(slice_from_raw_parts_mut(ptr as *mut T, len))
-    }
-
     fn name() -> String {
         format!("Slice({})", T::name())
     }
@@ -602,31 +340,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
     fn create_type(program: &mut Program) -> TypeId {
         let ty = T::get_or_create_type(program);
         program.intern_type(TypeInfo::Ptr(ty))
-    }
-
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        let mut parts = WriteBytes::default();
-        let inner: T = *self;
-
-        let mut original_bytes = unsafe { &*slice_from_raw_parts(&inner as *const T as *const u8, mem::size_of::<T>()) }.to_vec();
-        zero_padding(program, T::get_type(program), &mut original_bytes, &mut 0).unwrap();
-
-        inner.serialize_to_ints(program, &mut parts);
-        debug_assert_eq!(parts.0.len(), T::size_bytes(program), "Box<{}> payload size", T::name());
-        // zero_padding(program, T::get_type(program), &mut parts.0, &mut 0).unwrap(); // this one works
-        let (ptr, _, _) = parts.0.into_raw_parts();
-        // let ptr = Box::into_raw(self);
-        values.push_i64(ptr as i64)
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let ptr = values.next_i64()?;
-        let align = program.get_info(T::get_type(program)).align_bytes;
-        debug_assert_eq!(ptr % align as i64, 0, "bad alignment at {ptr}");
-        let s = unsafe { &*slice_from_raw_parts(ptr as *const u8, T::size_bytes(program)) };
-        let v = T::deserialize_from_ints(program, &mut ReadBytes { bytes: s, i: 0 })?;
-        Some(Box::new(v))
-        // Some(unsafe { Box::from_raw(ptr as *mut T) })
     }
 
     fn name() -> String {
@@ -649,48 +362,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for BigOption<T> {
         })
     }
 
-    fn serialize_to_ints(mut self, program: &Program, values: &mut WriteBytes) {
-        let original_bytes = unsafe { &mut *slice_from_raw_parts_mut(&mut self as *mut Self as *mut u8, mem::size_of::<Self>()) };
-        zero_padding(program, Self::get_type(program), original_bytes, &mut 0).unwrap();
-
-        // for b in original_bytes {
-        //     values.push_u8(*b);
-        // }
-        // mem::forget(self);
-
-        match self {
-            BigOption::Some(v) => {
-                values.push_i64(0);
-                v.serialize_to_ints(program, values);
-            }
-            BigOption::None => {
-                values.push_i64(1);
-                for _ in 0..T::size_bytes(program) {
-                    values.push_u8(0);
-                }
-            }
-        }
-        values.align_to(Self::align_bytes(program));
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let res = match values.next_i64()? {
-            0 => Some(BigOption::Some(T::deserialize_from_ints(program, values)?)),
-            1 => {
-                for _ in 0..T::size_bytes(program) {
-                    let _ = values.next_u8()?;
-                }
-                Some(BigOption::None)
-            }
-            n => {
-                println!("bad option tag {n}");
-                None
-            }
-        };
-        values.align_to(Self::align_bytes(program));
-        res
-    }
-
     fn name() -> String {
         format!("?{}", T::name())
     }
@@ -704,18 +375,6 @@ impl<'p> InterpSend<'p> for Span {
     fn create_type(program: &mut Program) -> TypeId {
         let ty = <(u32, u32)>::get_or_create_type(program);
         program.named_type(ty, "Span")
-    }
-
-    // This looks wierd because no breaking changes is when private field.
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        let (a, b): (u32, u32) = unsafe { mem::transmute(self) };
-        (a, b).serialize_to_ints(program, values)
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        let (a, b) = <(u32, u32)>::deserialize_from_ints(program, values)?;
-        let res: Span = unsafe { mem::transmute((a, b)) };
-        Some(res)
     }
 
     fn definition() -> String {
@@ -741,52 +400,10 @@ impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend
         interp.struct_type("", &[("opaque", inner)])
     }
 
-    fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-        // self.into_iter().collect::<Vec<_>>().serialize_to_ints(program, values);
-        // values.push_i64(0);
-        let ints: [i64; 4] = unsafe { transmute(self) };
-        for i in ints {
-            values.push_i64(i);
-        }
-    }
-
-    fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-        // let things = Vec::<(K, V)>::deserialize_from_ints(program, values)?.into_iter().collect::<Self>();
-        // values.next_i64()?;
-        // Some(things)
-        //
-        let ints = [values.next_i64()?, values.next_i64()?, values.next_i64()?, values.next_i64()?];
-        let s: Self = unsafe { transmute(ints) };
-        Some(s)
-    }
-
     fn name() -> String {
         format!("RsMap({}, {})", K::name(), V::name())
     }
 }
-
-// impl<'p> InterpSend<'p> for String {
-//     const SIZE: usize = 2;
-//     fn get_type_key() -> u128 {
-//         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-//     }
-
-//     fn create_type(interp: &mut Program<'p>) -> TypeId {
-//         Vec::<u8>::get_type(interp)
-//     }
-
-//     fn serialize_to_ints(self, program: &Program, values: &mut WriteBytes) {
-//         Vec::<u8>::from(self).serialize_to_ints(values)
-//     }
-
-//     fn deserialize_from_ints(program: &Program, values: &mut ReadBytes) -> Option<Self> {
-//         Self::from_utf8(Vec::<u8>::deserialize_from_ints(values)?).ok()
-//     }
-
-//     fn name() -> String {
-//         Vec::<u8>::name()
-//     }
-// }
 
 fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
     A::get_type_key().wrapping_mul(B::get_type_key()).wrapping_mul(extra)
