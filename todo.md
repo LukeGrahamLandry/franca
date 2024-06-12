@@ -8,6 +8,7 @@
 ## regressions
 
 - @tagged tag check on field access
+- I rely on Vec field order (cap, ptr, len) which is crimes
 
 ## Deeply annoying
 

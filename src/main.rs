@@ -461,7 +461,7 @@ fn forked_swallow_passes(arch: TargetArch) {
                 )
             }
         }
-        println!("{}", mem::size_of::<Map::<usize, usize>>());
+        // println!("{}", comp.program.ffi_definitions);
     } else {
         println!("FAILED {}/{} tests.", failed, total);
     }

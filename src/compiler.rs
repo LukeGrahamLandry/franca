@@ -3433,11 +3433,21 @@ impl<'a, 'p> Compile<'a, 'p> {
             err!("const bindings cannot be reassigned so '{name}' cannot be '()!uninitialized'",)
         }
 
-        // TODO: declare placeholder so you can do linked lists.
-        // if let Some(ty) = ty.ty() {
-        //     if ty == TypeId::ty {}
-        //     println!("{}: {}", name.log(self.pool), self.program.log_type(ty));
-        // }
+        let rec = if let Some(real_val) = value.expr.as_suffix_macro_mut(Flag::Rec) {
+            *value = mem::take(real_val);
+            if let Some(ty) = ty.ty() {
+                assert_eq!(ty, TypeId::ty);
+            }
+            // TODO: else!
+            let hole = TypeId::from_index(self.program.types.len());
+            self.program.types.push(TypeInfo::Placeholder);
+            let val = to_values(self.program, hole)?;
+            self.save_const_values(name, val, TypeId::ty, value.loc)?;
+            Some(hole)
+        } else {
+            None
+        };
+
         // You don't need to precompile, immediate_eval_expr will do it for you.
         // However, we want to update value.ty on our copy to use below to give constant pointers better type inference.
         // This makes addr_of const for @enum work
@@ -3446,7 +3456,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // let inferred_type = self.type_of(value)?;
         // println!("{inferred_type:?}");
         let res = self.compile_expr(value, ty.ty())?;
-        let val = self.immediate_eval_expr(value.clone(), res)?;
+        let mut val = self.immediate_eval_expr(value.clone(), res)?;
         // TODO: clean this up. all the vardecl stuff is kinda messy and I need to be able to reuse for the pattern matching version.
         // TODO: more efficient way of handling overload sets
         // TODO: better syntax for inserting a function into an imported overload set.
@@ -3460,6 +3470,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         };
         self.program.finish_layout_deep(final_ty)?;
 
+        if let Some(rec) = rec {
+            assert_eq!(final_ty, TypeId::ty);
+            let ty: TypeId = from_values(self.program, val)?;
+            self.program.types[rec.as_index()] = TypeInfo::Named(ty, name.name);
+            self.program.types_extra.borrow_mut().truncate(rec.as_index()); // just in case. copy-paste
+            val = to_values(self.program, rec)?;
+        }
+
         if final_ty == TypeId::ty {
             let value: TypeId = from_values(self.program, val.clone())?;
             extend_options(&mut self.program.inferred_type_names, value.as_index());
@@ -3471,7 +3489,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
         }
 
-        self.save_const_values(name, val, final_ty, value.loc)?;
+        if rec.is_none() {
+            self.save_const_values(name, val, final_ty, value.loc)?;
+        }
         Ok(())
     }
 

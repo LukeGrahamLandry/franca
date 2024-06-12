@@ -1757,6 +1757,7 @@ pub enum Flag {
     Slice,
     Unquote_Macro_Apply_Placeholders,
     From_Bit_Literal,
+    Rec,
     Quote,
     Unquote,
     Deref,
