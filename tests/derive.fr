@@ -4,30 +4,37 @@ fn sum(self: *i64) i64 = self[];
 fn derive_sum_body(ty: AstExpr, target: AstExpr) AstExpr = {
     ty := const_eval_type(ty);
     info := get_type_info(ty);
-    // TODO: @default for match like switch
-    //(@match(info){ //});
     
-    let value = @switch(info&!tag[]){
-        @case(tag_value(TypeInfo, @symbol Int)) => '()';
-        @case(tag_value(TypeInfo, @symbol Struct)) fn()AstExpr => {  // TODO: better type inference. 
-            var total = '0'; // its a bit sad that this looks like rust but means something totally different 
-            // TODO: ffi cant refer to Slice so its just a (ptr, len) tuple. 
+    let value = @match(info){
+        (fn Int(_) => '()');
+        // TODO: better type inference. 
+        (fn Struct(_) AstExpr => { 
+            total := '0'; // its a bit sad that this looks like rust but means something totally different 
+            // TODO: ffi cant refer to Slice so its just a (cap, ptr, len) tuple. 
             fields := Field.slice_from_tuple(info.Struct.fields);
             each(fields) {f|
                 // TODO: be able to !unquote an identifier somehow so don't have to do this. 
-                var field_access = '@[target][].__name';
+                field_access := '@[target][].__name';
                 field_access.expr.FieldAccess._1 = f[].name;
                 total = 'sum(@[field_access]&).add(@[total])';
             };
             total
-        };
+        });
         // TODO: better error message if you forget the arg
         // TODO: HACK: this should panic at comptime but never asm isn't handled properly -- May 6 TODO: add regresssion 
         // TODO: work without capture =>
-        @default() fn(_: i64) => 'panic("TODO: derive_sum")';
+        @default => 'panic("TODO: derive_sum")';
     };
 
     value
+}
+
+
+// TODO: the macro can't expand to a function declaration, because that's seen as a constant in the macro function.
+//       so it gets hoisted there instead of being ignored until the expansion. 
+
+fn Sum(const T: Type) Unit = {
+    fn sum(self: *T) i64 = (@derive_sum_body(T) self);
 }
 
 #test
@@ -35,10 +42,8 @@ fn derive_body(canary: i64) i64 = {
     const Thing = @struct(a: i64, b: i64);
     const Other = @struct(t: Thing, b: i64);
     
-    // TODO: the macro can't expand to a function declaration, because that's seen as a constant in the macro function.
-    //       so it gets hoisted there instead of being ignored until the expansion. 
-    fn sum(self: *Thing) i64 = (@derive_sum_body(Thing) self);
-    fn sum(self: *Other) i64 = (@derive_sum_body(Other) self);
+    :: Sum(Thing);
+    :: Sum(Other);
     
     var t: Thing = (a = 1, b = 2);
     let s: i64 = t&.sum();

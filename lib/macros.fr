@@ -70,50 +70,71 @@ fn match(arg: FatExpr, target: FatExpr) FatExpr = {
         let tag_val = arg_ptr!tag[];
         @[{
             count := 0;
-            each(stmts) { (stmt) | 
+            i := stmts.len.sub(1);
+            first := true;
+            had_default := false;
+            while(=> i.ge(0)) {|
+                stmt: *FatStmt = stmts.index(i); 
+                i -= 1;
                 if(eq(stmt[].stmt&!tag[], tag_value(Stmt, @symbol(Eval)))) {|  // (1)
                     handler_body := stmt.stmt.Eval&;
-                    closure := handler_body.expr.Closure&;
-                    name: Symbol = closure.name; // (2)
-                    index := tag_value(enum_type, name); // they're always sequential
-                    name_ty := varients.get(index);
-                    assert(name_ty._0.eq(name), "ICE: bad enum index");
-                    
-                    ty := name_ty._1;
-                    if(is_ptr){|
-                        p: TypeInfo = (Ptr = ty);
-                        ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
-                    };
-            
-                    // If they didn't say the argument type, we can fill it in based on the varient name. 
-                    // If they don't put an argument, just ignore the value. Have to set the type because it defaults to Unit. 
-                    bindings := Binding.slice_from_tuple(closure.arg.bindings);
-                    if(bindings.len.eq(1)){|
-                        first := bindings[0]&;
-                        infer := first.ty&!tag[].eq(tag_value(LazyType, @symbol Infer));
-                        Name :: Name!builtin;
-                        no_name := first.name&!tag[].eq(tag_value(Name, @symbol None)); 
-                        if (infer.or(no_name)){|
-                            first.ty = (Finished = ty);
+                    if(eq(handler_body.expr&!tag[], tag_value(Expr, @symbol Closure))) {| 
+                        closure := handler_body.expr.Closure&;
+                        name: Symbol = closure.name; // (2)
+                        index := tag_value(enum_type, name); // they're always sequential
+                        name_ty := varients.get(index);
+                        assert(name_ty._0.eq(name), "ICE: bad enum index");
+                        
+                        ty := name_ty._1;
+                        if(is_ptr){|
+                            p: TypeInfo = (Ptr = ty);
+                            ty = intern_type(p); // TODO: should work to pass @as(TypeInfo) (Ptr = ty) directly
                         };
+                
+                        // If they didn't say the argument type, we can fill it in based on the varient name. 
+                        // If they don't put an argument, just ignore the value. Have to set the type because it defaults to Unit. 
+                        bindings := Binding.slice_from_tuple(closure.arg.bindings);
+                        if(bindings.len.eq(1)){|
+                            first := bindings[0]&;
+                            infer := first.ty&!tag[].eq(tag_value(LazyType, @symbol Infer));
+                            Name :: Name!builtin;
+                            no_name := first.name&!tag[].eq(tag_value(Name, @symbol None)); 
+                            if (infer.or(no_name)){|
+                                first.ty = (Finished = ty);
+                            };
+                        };
+                        case_access := 'arg_ptr.___';
+                        case_access.expr.FieldAccess._1 = name;  // (3)
+                        let tag = 'tag_value(@[@literal(Type) enum_type], @[@literal(name)])';
+                        if(is_ptr){|
+                            case_access = '@[case_access]&';
+                        };
+                        count = count.add(1);
+                        body = '(eq(tag_val, @[tag]), => @[handler_body[]](@[case_access]), => @[body])!if';
+                    } {| // else
+                        assert(eq(handler_body.expr&!tag[], tag_value(Expr, @symbol PrefixMacro)), "expected @default");
+                        branch := handler_body.expr.PrefixMacro&;
+                        macro := branch.handler;
+                        // TODO: better error message that shows more context on how you got to a certain type in the nested exprression. 
+                        //       it took me so long to figure out you don't need .GetNamed[0][] to index through the first single element tuple because it gets flattened. -- Apr 21 
+                        name := (@as(*Symbol) macro.expr.GetNamed&)[]; // TODO: allow GetVar becuase they might have shadowed 'case' and 'default'? or should we respect their shadowing once you're allowed to expand custom macros in there. even then should give warning cause its confusing.  
+                        arg := branch.arg;
+                        action := branch.target[];
+                        assert(name.eq(@symbol default), "unhandled prefix in @match");
+                        assert(first, "@default must be the last handler in @match");
+                        body = '@[action]()';
+                        had_default = true;
                     };
-                    case_access := 'arg_ptr.___';
-                    case_access.expr.FieldAccess._1 = name;  // (3)
-                    let tag = 'tag_value(@[@literal(Type) enum_type], @[@literal(name)])';
-                    if(is_ptr){|
-                        case_access = '@[case_access]&';
-                    };
-                    count = count.add(1);
-                    body = '(eq(tag_val, @[tag]), => @[handler_body[]](@[case_access]), => @[body])!if';
                 };
             };
-            if(count.ne(varients.len)) {|
+            if(count.ne(varients.len).and(not(had_default))) {|
                 print("warning: wrong number of @match cases (did you forget to wrap them in brackets?). ");
                 print("expected ");
                 print(varients.len);
                 print(" but found ");
                 println(count);
             };
+            assert(not(had_default).or(count.lt(varients.len)), "@default but too many @match cases");
             body
         }]
     }'

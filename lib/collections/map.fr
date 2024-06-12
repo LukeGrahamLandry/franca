@@ -1,25 +1,56 @@
-
 fn insert() Unit = unit;
 fn get() Unit = unit;
 fn get_ptr() Unit = unit;
+fn hash();
 
-fn DumbMap(const K: Type, const V: Type) Type = {
+// TODO: use a real hashing thing. wyhash is pretty small: https://github.com/wangyi-fudan/wyhash
+// TODO: explicit wrapping_op functions. 
+fn hash(i: *i64) i64 = i[].mul(345678).add(9765432);
+fn hash(s: *Str) i64 = {
+    h := 0;
+    for(s[]) {c|
+        c: i64 = c.zext();
+        h += c&.hash().mul(4256465978);
+    };
+    h
+}
+
+/// This is the kind where you get bumped to the next slot if you collide, not the kind where you spill out into a linked list.
+/// TODO: remove. tombstones.  
+/// (K: eq + hash + move, V: move)
+fn HashMap(const K: Type, const V: Type) Type = {
     // TODO: instead of complicated traits, just require(eq, Ty(K, K), bool);
-    const Self = @struct(arr: List(Ty(K, V)));
+    const Self = @struct(alloc: Alloc, arr: Slice(Entry), len: i64, capacity: i64);
+    Entry :: @struct(hash: i64, key: K, value: V);
+    load_percent :: 70; // TODO: default arugments in functions so its not annoying to let you set this -- Jun 12
     
-    fn init(gpa: Alloc) Self = (arr = list(gpa));
+    fn init(gpa: Alloc) Self = (alloc = gpa, arr = @as(Slice(Entry)) empty(), len = 0, capacity = 0);
     
     ::?*V;
     :: if_opt(*V, ?V);
+    ::if(?V);
+    ::if(?*V);
+    
+    fn checked_hash(key: *K) i64 = {
+        mask :: 1.bit_not();
+        h := hash(key);
+        // I use 0 to indicate an empty slot and 1 as a tombstone to mark removals. 
+        if(h.bit_and(mask).eq(0), => h.add(4), => h)   
+    }
     
     fn insert(self: *Self, key: K, value: V) ?V = {
-        self.get_ptr(key).if { v |
-            let old = v[];
-            v[] = value;
+        full := self.len.add(1).gt(self.capacity);
+        if(full, => self.resize()); // does it sooner than necessary (if replacing a slot) but thats fine. 
+        h := key&.checked_hash();
+        slot := self.find_slot(key, h);
+        
+        if(slot.hash.ne(0)) {|
+            old := slot.value;
+            slot.value = value;
             some(old)
-        }{|
-            let entry = (key, value);
-            self.arr&.push(entry);
+        }{| // else
+            slot[] = (hash = h, key = key, value = value);
+            self.len += 1;
             none()
         }
     }
@@ -34,30 +65,53 @@ fn DumbMap(const K: Type, const V: Type) Type = {
     
     /// SAFETY: the returned pointer is invalid after a call to 'insert' (which may trigger a resize)
     fn get_ptr(self: *Self, key: K) ?*V = {
-        i := 0;
-        let count = self.arr.len;
-        out: ?*V = none();
-        if(count.ne(0)) {|
-            dowhile {|
-                a := self.arr&; // TODO: can't inline. need to propagate after addr of? 
-                let p = a.index(i);
-                let k: K = p._0;
-                if(k.eq(key)) {|
-                    let v = p._1&;
-                    out = some(v);
-                };
-                
-                i = i.add(1);
-                i.lt(count).and(out.is_none())
+        if(self.len.eq(0), => (None = ())) {|
+            slot := self.find_slot(key, key&.checked_hash());
+            if(slot.hash.eq(0), => (None = ()), => (Some = slot.value&))
+        } 
+    }
+    
+    fn find_slot(self: *Self, key: K, h: i64) *Entry = {
+        ret :: @return;
+        i := h.mod(self.arr.len);
+        
+        range(0, self.arr.len) {_|
+            check := self.arr[i]&;
+            if(check.hash.eq(h).and(=> check.key.eq(key)), fn() Unit => { ret(check); }) {|
+                if(check.hash.eq(0), fn() Unit => { ret(check); }); // empty, not in map
+                // othewise, continue, might have been bumped
+            };
+            i = i.add(1).mod(self.arr.len);
+        };
+        
+        @println("key <%> hashes to %. len=% total=% cap=%", key, h, self.len, self.arr.len, self.capacity);
+        panic("Unreachable unless you set the load factor to 100%");
+        (*Entry).unreachable_hack()
+    }
+    
+    fn resize(self: *Self) Unit = {
+        old_arr := self.arr;
+        self.arr = self.alloc.alloc(Entry, old_arr.len.mul(2).max(4));
+        each(self.arr) {slot|
+            slot.hash = 0;
+        };
+        self.capacity = self.arr.len.mul(load_percent).div(100);
+        found := 0;
+        each(old_arr) {old_slot|
+            if(old_slot.hash.ne(0)) {|
+                new_slot := self.find_slot(old_slot.key, old_slot.hash);
+                new_slot[] = old_slot[];
+                found += 1;
             };
         };
-    
-        out
+        assert_eq(found, self.len); // debug detect corruption.  // TODO: debug_assert_op
+        
+        self.alloc.dealloc(Entry, old_arr);
     }
     
     // TODO: drop entries? 
     fn drop(self: *Self) Unit = {
-        self.arr&.drop();
+        self.alloc.dealloc(Entry, self.arr);
     }
     
     Self

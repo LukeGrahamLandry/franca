@@ -52,3 +52,134 @@ ImportVTable :: @struct(
     get_function_name: @FnPtr(c: Compiler, f: FuncId) Symbol,
     comptime_arch: @FnPtr() Ty(Arch, Os),
 );
+
+Ast :: @namespace => {
+    fn RsVec(const T: Type) Type = @struct(cap: i64, ptr: *T, len: i64);
+    
+    LabelId :: @struct(id: u32);
+    ScopeId :: @struct(id: u32);
+    FatExpr :: (@struct(
+        expr: Expr,
+        loc: Span,
+        ty: Type,
+        done: bool,
+    ))!rec;
+    Expr :: @tagged(
+        Poison: Unit,
+        Value: @struct(value: Values),
+        WipFunc: FuncId,
+        Call: Ty(*FatExpr, *FatExpr),
+        Block: @struct(body: RsVec(FatStmt), result: *FatExpr, ret_label: ?LabelId, hoisted_constants: bool),
+        Tuple: RsVec(FatExpr),
+        Closure: *Func,
+        AddToOverloadSet: RsVec(Func),
+        SuffixMacro: Ty(Symbol, *FatExpr),
+        FieldAccess: Ty(*FatExpr, Symbol),
+        StructLiteralP: Pattern,
+        PrefixMacro: @struct(handler: *FatExpr, arg: *FatExpr, target: *FatExpr),
+        GetVar: Var,
+        GetNamed: Symbol,
+        String: Symbol,
+        PtrOffset: @struct(ptr: *FatExpr, bytes: usize, name: Symbol),
+        GetParsed: usize,
+        Cast: *FatExpr,
+    );
+    Values :: @tagged(
+        Big: RsVec(u8),
+        Small: Ty(i64, u8),
+    );
+    FuncId :: @struct(id: u32);
+    FatStmt :: (@struct(
+        stmt: Stmt,
+        annotations: RsVec(Annotation),
+        loc: Span,
+    ))!rec;
+    Stmt :: @tagged(
+        Noop: Unit,
+        Eval: FatExpr,
+        DeclFunc: *Func,
+        DeclVar: @struct(value: FatExpr, ty: LazyType, name: Var),
+        DeclVarPattern: @struct(binding: Pattern, value: FatExpr),
+        DeclNamed: @struct(kind: VarType, value: FatExpr, ty: LazyType, name: Symbol),
+        Set: @struct(place: FatExpr, value: FatExpr),
+        ExpandParsedStmts: usize,
+    );
+    Func :: @struct(
+        annotations: RsVec(Annotation),
+        capture_vars: RsVec(Var),
+        callees: RsVec(FuncId),
+        mutual_callees: RsVec(FuncId),
+        var_name: ?Var,
+        finished_arg: ?Type,
+        finished_ret: ?Type,
+        cc: ?CallConv,
+        return_var: ?Var,
+        scope: ?ScopeId,
+        body: FuncImpl,
+        arg: Pattern,
+        ret: LazyType,
+        name: Symbol,
+        loc: Span,
+        flags: u32,
+    );
+    Annotation :: @struct(
+        name: Symbol,
+        args: ?FatExpr,
+    );
+    Var :: @struct(
+        kind: VarType,
+        name: Symbol,
+        id: u32,
+        scope: ScopeId,
+        block: u16,
+    );
+    VarType :: @tagged(
+        Let: Unit,
+        Var: Unit,
+        Const: Unit,
+    );
+    CallConv :: @tagged(
+        CCallReg: Unit,
+        CCallRegCt: Unit,
+        Flat: Unit,
+        FlatCt: Unit,
+        OneRetPic: Unit,
+        Inline: Unit,
+    );
+    FuncImpl :: (@tagged(
+        Normal: FatExpr,
+        DynamicImport: Symbol,
+        ComptimeAddr: usize,
+        JittedAarch64: RsVec(u32),
+        LlvmIr: Symbol,
+        CSource: Symbol,
+        EmitCranelift: usize,
+        PendingRedirect: @struct(arg: Type, ret: Type, os: OverloadSet),
+        Redirect: FuncId,
+        Merged: RsVec(FuncImpl),
+        Empty: Unit,
+    ))!rec;
+    Pattern :: @struct(
+        bindings: RsVec(Binding),
+        loc: Span,
+    );
+    Binding :: @struct(
+        name: Name,
+        ty: LazyType,
+        default: ?FatExpr,
+        kind: VarType,
+    );
+    Name :: @tagged(
+        Ident: Symbol,
+        Var: Var,
+        None: Unit,
+    );
+    LazyType :: (@tagged(
+        EvilUnit: Unit,
+        Infer: Unit,
+        PendingEval: FatExpr, 
+        Finished: Type, 
+        Different: RsVec(LazyType), 
+    ))!rec;
+    Span :: @struct(low: u32, high: u32);
+};

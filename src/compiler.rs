@@ -28,6 +28,7 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, BigOption, BigResult, ExportVTable, FlatCallFn};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::scope::ResolveScope;
 use crate::{
@@ -291,8 +292,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let comp_ctx = self.program[f].has_tag(Flag::Ct);
             self.program.finish_layout(ty.arg)?;
             self.program.finish_layout(ty.ret)?;
-            let is_big = false;
-            if self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::Macro) || is_big {
+            if self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::Macro) {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 if comp_ctx {
                     self.program[f].set_cc(CallConv::FlatCt)?;
@@ -3492,6 +3492,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         if rec.is_none() {
             self.save_const_values(name, val, final_ty, value.loc)?;
         }
+
         Ok(())
     }
 
