@@ -240,6 +240,10 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert!(target.is_raw_unit());
                 return Ok(tagged_macro(self, mem::take(arg)));
             }
+            Flag::Enum => {
+                assert!(!target.is_raw_unit(), "@enum type must be specified while bootstrapping.");
+                return self.enum_constant_macro(mem::take(arg), mem::take(target));
+            }
             _ => err!("unknown macro invocation {:?} while bootstrapping", name),
         }
     }
@@ -507,7 +511,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].callees
         );
         self.flush_cpu_instruction_cache();
-        let expected_ret_bytes = self.program.get_or_create_info(ty.ret)?.stride_bytes;
+        let expected_ret_bytes = self.program.get_info(ty.ret).stride_bytes;
         let mut ints = vec![];
         deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints, &mut None)?;
         debugln_call!("IN: {ints:?}");
@@ -654,9 +658,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if let Some(tag) = self.program[f].get_tag(Flag::Comptime_Addr) {
-            let addr: usize = self.immediate_eval_expr_known(unwrap2!(tag.args.clone(), ""))?;
+            let addr: i64 = self.immediate_eval_expr_known(unwrap2!(tag.args.clone(), ""))?;
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
-            self.program[f].body = FuncImpl::ComptimeAddr(addr);
+            self.program[f].body = FuncImpl::ComptimeAddr(addr as usize);
             self.aarch64.extend_blanks(f);
             self.aarch64.dispatch[f.as_index()] = addr as *const u8;
             special = true;
@@ -705,9 +709,9 @@ impl<'a, 'p> Compile<'a, 'p> {
         #[cfg(feature = "cranelift")]
         if let Some(addr) = self.program[f].get_tag(Flag::Cranelift_Emit) {
             let arg = unwrap2!(addr.args.clone(), "Cranelift_Emit needs arg");
-            let addr: usize = self.immediate_eval_expr_known(arg)?;
+            let addr: i64 = self.immediate_eval_expr_known(arg)?;
             assert!(matches!(self.program[f].body, FuncImpl::Empty));
-            self.program[f].body = FuncImpl::EmitCranelift(addr);
+            self.program[f].body = FuncImpl::EmitCranelift(addr as usize);
             special = true;
         }
 
@@ -1762,7 +1766,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Tuple(names) => {
                 for (i, name) in names.iter().enumerate() {
                     let name = unwrap!(name.as_ident(), "@enum expected ident");
-                    fields.push((name, to_values(self.program, i)?)); // TODO: check that expected type is int
+                    fields.push((name, to_values(self.program, i as i64)?)); // TODO: check that expected type is int
                 }
             }
             _ => err!("Expected struct literal found {target:?}",),
@@ -2201,29 +2205,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(ty)
     }
 
-    fn deserialize_values<Ret: InterpSend<'p>>(&mut self, values: Values) -> Res<'p, Ret> {
-        from_values(self.program, values)
-    }
-
-    pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, mut e: FatExpr<'p>) -> Res<'p, Ret> {
+    pub fn immediate_eval_expr_known<Ret: InterpSend<'p>>(&mut self, e: FatExpr<'p>) -> Res<'p, Ret> {
         unsafe { STATS.const_eval_node += 1 };
         let ret_ty = Ret::get_or_create_type(self.program);
         self.program.finish_layout(ret_ty)?;
-        if let Some(val) = self.check_quick_eval(&mut e, ret_ty)? {
-            return self.deserialize_values(val);
-        }
-        let func_id = self.make_lit_function(e, ret_ty)?;
-        // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
-        //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
-        // TODO: bring back? idk bro. dont want to deal with while doing `body: FuncImpl` -- May 18
-        // let mut e = self.program[func_id].body.as_mut().unwrap().clone(); // TODO: no clone so remove
-        // if let Some(res) = self.check_quick_eval(&mut e, ret_ty)? {
-        //     return Ok(unwrap!(Ret::deserialize_from_ints(&mut res.vec().into_iter()), ""));
-        // }
-
-        let res = self.call_jitted(func_id, ());
-        self.discard(func_id);
-        res
+        let values = self.immediate_eval_expr(e, ret_ty)?;
+        from_values(self.program, values)
     }
 
     fn discard(&mut self, f: FuncId) {
@@ -2387,7 +2374,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let mut stolen_body = mem::take(body);
             self.compile_expr(&mut stolen_body, Some(ret_ty)).unwrap();
             if let Some(values) = self.check_quick_eval(&mut stolen_body, ret_ty)? {
-                self.program[func_id].body = FuncImpl::Normal(stolen_body);
+                self.discard(func_id);
                 return Ok(values);
             }
             self.program[func_id].body = FuncImpl::Normal(stolen_body);
@@ -3626,8 +3613,8 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             self.placeholders.push(Some(mem::take(arg.deref_mut())));
             *expr = placeholder;
         } else if *name == Flag::Placeholder.ident() {
-            let index: usize = from_values(self.compiler.program, arg.as_const().unwrap()).unwrap();
-            let value = self.placeholders[index].take(); // TODO: make it more obvious that its only one use and the slot is empty.
+            let index: i64 = from_values(self.compiler.program, arg.as_const().unwrap()).unwrap();
+            let value = self.placeholders[index as usize].take(); // TODO: make it more obvious that its only one use and the slot is empty.
             *expr = value.unwrap();
         } else if *name == Flag::Quote.ident() {
             // TODO: add a simpler test case than the derive thing (which is what discovered this problem).

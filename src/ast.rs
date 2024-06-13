@@ -4,9 +4,7 @@ use crate::{
     compiler::{CErr, Compile, Res},
     err,
     export_ffi::BigOption,
-    extend_options,
-    ffi::InterpSend,
-    impl_index, impl_index_imm,
+    extend_options, impl_index, impl_index_imm,
     pool::{Ident, StringPool},
     unwrap, BitSet, Map, STATS,
 };
@@ -50,11 +48,11 @@ pub enum VarType {
 #[repr(C, i64)]
 #[derive(Clone, PartialEq, Hash, Eq, Debug, Default)]
 pub enum TypeInfo<'p> {
+    Int(IntTypeInfo),
     #[default]
     Never,
     F64,
     F32,
-    Int(IntTypeInfo),
     Bool,
     Fn(FnType),
     FnPtr {
@@ -192,7 +190,7 @@ pub enum Expr<'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn is_raw_unit(&self) -> bool {
+    pub(crate) fn is_raw_unit(&self) -> bool {
         matches!(self.expr, Expr::Value { .. }) && self.ty == TypeId::unit // TODO: Unique
     }
 }
@@ -386,7 +384,7 @@ impl<'a, 'p, 'aa> RenumberVars<'a, 'p, 'aa> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn renumber_vars(&mut self, vars: u32, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> u32 {
+    pub(crate) fn renumber_vars(&mut self, vars: u32, mapping: &mut Map<Var<'p>, Var<'p>>, compile: &mut Compile<'_, 'p>) -> u32 {
         let mut ctx = RenumberVars {
             vars,
             mapping,
@@ -397,7 +395,7 @@ impl<'p> FatExpr<'p> {
     }
 
     // TODO: this is weak! should replace with is_const then immediate_eval_expr.
-    pub fn as_const(&self) -> Option<Values> {
+    pub(crate) fn as_const(&self) -> Option<Values> {
         if let Expr::Value { value } = &self.expr {
             Some(value.clone())
         } else {
@@ -406,7 +404,7 @@ impl<'p> FatExpr<'p> {
     }
 
     // this is intended to be called after compile_expr.
-    pub fn is_const(&self) -> bool {
+    pub(crate) fn is_const(&self) -> bool {
         match &self.expr {
             Expr::String(_) | Expr::Closure(_) | Expr::AddToOverloadSet(_) | Expr::WipFunc(_) | Expr::Value { .. } => true,
             Expr::Block { .. } => false, // TODO
@@ -414,10 +412,6 @@ impl<'p> FatExpr<'p> {
             Expr::PtrOffset { ptr: inner, .. } | Expr::Cast(inner) => inner.is_const(),
             _ => false,
         }
-    }
-
-    pub fn expect_const(&self) -> Res<'p, Values> {
-        Ok(unwrap!(self.as_const(), "expected const values"))
     }
 }
 
@@ -433,7 +427,7 @@ pub struct FatExpr<'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn set(&mut self, value: Values, ty: TypeId) {
+    pub(crate) fn set(&mut self, value: Values, ty: TypeId) {
         debug_assert!(!ty.is_unknown());
         self.expr = Expr::Value { value };
         self.ty = ty;
@@ -482,7 +476,7 @@ pub struct Binding<'p> {
 }
 
 impl<'p> Name<'p> {
-    pub fn ident(&self) -> Option<Ident<'p>> {
+    pub(crate) fn ident(&self) -> Option<Ident<'p>> {
         match self {
             Name::Ident(n) => Some(*n),
             Name::Var(n) => Some(n.name),
@@ -493,36 +487,36 @@ impl<'p> Name<'p> {
 
 impl<'p> Binding<'p> {
     #[track_caller]
-    pub fn unwrap(&self) -> TypeId {
+    pub(crate) fn unwrap(&self) -> TypeId {
         self.ty.unwrap()
     }
 
-    pub fn name(&self) -> Option<Ident<'p>> {
+    pub(crate) fn name(&self) -> Option<Ident<'p>> {
         match self.name {
             Name::Ident(n) => Some(n),
             Name::Var(n) => Some(n.name),
             Name::None => None,
         }
     }
-    pub fn var(&self) -> Option<Var<'p>> {
+    pub(crate) fn var(&self) -> Option<Var<'p>> {
         match self.name {
             Name::Ident(_) => None,
             Name::Var(n) => Some(n),
             Name::None => None,
         }
     }
-    pub fn lazy(&self) -> &LazyType<'p> {
+    pub(crate) fn lazy(&self) -> &LazyType<'p> {
         &self.ty
     }
 }
 
 impl<'p> Pattern<'p> {
-    pub fn empty(loc: Span) -> Self {
+    pub(crate) fn empty(loc: Span) -> Self {
         Self { loc, bindings: vec![] }
     }
 
     #[track_caller]
-    pub fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId, VarType)> {
+    pub(crate) fn flatten(&self) -> Vec<(Option<Var<'p>>, TypeId, VarType)> {
         self.bindings
             .iter()
             .map(|b| {
@@ -535,19 +529,19 @@ impl<'p> Pattern<'p> {
             .collect()
     }
 
-    pub fn flatten_names(&self) -> Vec<Ident<'p>> {
+    pub(crate) fn flatten_names(&self) -> Vec<Ident<'p>> {
         self.bindings.iter().map(|b| b.name().unwrap()).collect()
     }
 
-    pub fn flatten_defaults_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
+    pub(crate) fn flatten_defaults_mut(&mut self) -> Option<Vec<&mut FatExpr<'p>>> {
         self.bindings.iter_mut().map(|b| b.default.as_mut()).collect()
     }
 
-    pub fn flatten_defaults_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
+    pub(crate) fn flatten_defaults_ref(&self) -> Option<Vec<&FatExpr<'p>>> {
         self.bindings.iter().map(|b| b.default.as_ref()).collect()
     }
 
-    pub fn remove_named(&mut self, arg_name: Var<'p>) {
+    pub(crate) fn remove_named(&mut self, arg_name: Var<'p>) {
         let start = self.bindings.len();
         self.bindings.retain(|b| match b.name {
             Name::Var(name) => name != arg_name,
@@ -567,7 +561,7 @@ impl<'p> Pattern<'p> {
     // TODO: probably shouldn't do this because ideally someone would take it out later anyway.
     //       but for now it fixes a Poison debug check on inferp and kinda makes it more consistant
     //       so all functions have an argument (but I could just know empty means Unit).
-    pub fn if_empty_add_unit(&mut self) {
+    pub(crate) fn if_empty_add_unit(&mut self) {
         if self.bindings.is_empty() {
             self.bindings.push(Binding {
                 name: Name::None,
@@ -580,7 +574,7 @@ impl<'p> Pattern<'p> {
 }
 
 impl<'p> FatExpr<'p> {
-    pub fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
+    pub(crate) fn synthetic(expr: Expr<'p>, loc: Span) -> Self {
         unsafe { STATS.ast_expr_nodes_all += 1 };
 
         FatExpr {
@@ -590,7 +584,7 @@ impl<'p> FatExpr<'p> {
             done: false,
         }
     }
-    pub fn synthetic_ty(expr: Expr<'p>, loc: Span, ty: TypeId) -> Self {
+    pub(crate) fn synthetic_ty(expr: Expr<'p>, loc: Span, ty: TypeId) -> Self {
         debug_assert!(!ty.is_unknown());
         let mut e = Self::synthetic(expr, loc);
         e.ty = ty;
@@ -599,7 +593,7 @@ impl<'p> FatExpr<'p> {
     }
 
     // used for moving out of ast
-    pub fn null(loc: Span) -> Self {
+    pub(crate) fn null(loc: Span) -> Self {
         FatExpr::synthetic(Expr::Poison, loc)
     }
 }
@@ -690,10 +684,10 @@ pub enum FnFlag {
 }
 
 impl<'p> Func<'p> {
-    pub fn get_flag(&self, f: FnFlag) -> bool {
+    pub(crate) fn get_flag(&self, f: FnFlag) -> bool {
         self.flags & (1 << f as u32) != 0
     }
-    pub fn set_flag(&mut self, f: FnFlag, v: bool) {
+    pub(crate) fn set_flag(&mut self, f: FnFlag, v: bool) {
         if v {
             self.flags |= 1 << f as u32;
         } else {
@@ -741,7 +735,7 @@ pub enum FuncImpl<'p> {
 }
 
 impl<'p> Func<'p> {
-    pub fn new(name: Ident<'p>, arg: Pattern<'p>, ret: LazyType<'p>, body: Option<FatExpr<'p>>, loc: Span, allow_rt_capture: bool) -> Self {
+    pub(crate) fn new(name: Ident<'p>, arg: Pattern<'p>, ret: LazyType<'p>, body: Option<FatExpr<'p>>, loc: Span, allow_rt_capture: bool) -> Self {
         let mut f = Func {
             name,
             arg,
@@ -756,27 +750,19 @@ impl<'p> Func<'p> {
     }
 
     /// Find annotation ignoring arguments
-    pub fn has_tag(&self, flag: Flag) -> bool {
+    pub(crate) fn has_tag(&self, flag: Flag) -> bool {
         self.annotations.iter().any(|a| a.name == flag.ident())
     }
 
-    pub fn get_tag_mut(&mut self, flag: Flag) -> Option<&mut Annotation<'p>> {
+    pub(crate) fn get_tag_mut(&mut self, flag: Flag) -> Option<&mut Annotation<'p>> {
         self.annotations.iter_mut().find(|a| a.name == flag.ident())
     }
-    pub fn get_tag(&self, flag: Flag) -> Option<&Annotation<'p>> {
+    pub(crate) fn get_tag(&self, flag: Flag) -> Option<&Annotation<'p>> {
         self.annotations.iter().find(|a| a.name == flag.ident())
-    }
-    pub fn add_tag(&mut self, name: Flag) {
-        if !self.has_tag(name) {
-            self.annotations.push(Annotation {
-                name: name.ident(),
-                args: BigOption::None,
-            });
-        }
     }
 
     #[track_caller]
-    pub fn set_cc(&mut self, cc: CallConv) -> Res<'static, ()> {
+    pub(crate) fn set_cc(&mut self, cc: CallConv) -> Res<'static, ()> {
         if cc == CallConv::Inline {
             assert!(!self.has_tag(Flag::NoInline), "#inline and #noinline");
         }
@@ -866,10 +852,8 @@ pub struct Program<'p> {
     pub ffi_types: Map<u128, TypeId>,
     pub ffi_sizes: Map<TypeId, usize>,
     pub log_type_rec: RefCell<Vec<TypeId>>,
-    pub assertion_count: usize,
     pub comptime_arch: TargetArch,
     pub inline_llvm_ir: Vec<FuncId>,
-    pub ffi_definitions: String,
     // After binding const args to a function, you get a new function with fewer arguments.
     pub const_bound_memo: Map<(FuncId, Values), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
@@ -880,7 +864,6 @@ pub struct Program<'p> {
     pub save_cstr_t: Option<TypeId>,
 
     pub fat_expr_type: Option<TypeId>,
-    pub symbol_type: Option<TypeId>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -905,28 +888,21 @@ pub struct OverloadOption {
     pub arity: u16,
 }
 
-impl<'p> Stmt<'p> {
-    // used for moving out of ast
-    pub fn null(loc: Span) -> Stmt<'p> {
-        Stmt::Eval(FatExpr::null(loc))
-    }
-}
-
 // TODO: print actual type info
 impl<'p> LazyType<'p> {
     #[track_caller]
-    pub fn unwrap(&self) -> TypeId {
+    pub(crate) fn unwrap(&self) -> TypeId {
         self.ty().unwrap()
     }
 
-    pub fn ty(&self) -> Option<TypeId> {
+    pub(crate) fn ty(&self) -> Option<TypeId> {
         match self {
             LazyType::Finished(ty) => Some(*ty),
             _ => None,
         }
     }
 
-    pub fn expr_ref(&self) -> Option<&FatExpr<'p>> {
+    pub(crate) fn expr_ref(&self) -> Option<&FatExpr<'p>> {
         match self {
             LazyType::PendingEval(e) => Some(e),
             _ => None,
@@ -961,21 +937,20 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch) -> Self {
         let mut program = Self {
-            symbol_type: None,
             fat_expr_type: None,
             ffi_sizes: Default::default(),
             baked: Default::default(),
             finished_layout_deep: BitSet::empty(),
             // these are hardcoded numbers in TypeId constructors
+            // if you remove any remember to fix later indices!
             types: vec![
                 TypeInfo::Placeholder, // Unknown
                 TypeInfo::Unit,
-                TypeInfo::Named(TypeId::from_index(10), pool.intern("Type")),
+                TypeInfo::Named(TypeId::from_index(10), Flag::Type.ident()),
                 TypeInfo::Int(IntTypeInfo { bit_count: 64, signed: true }),
                 TypeInfo::Bool,
                 TypeInfo::VoidPtr,
-                // TODO: this is flawed now that its a hashmap -- Apr 28 also if you remove it remember to fix later indices!
-                TypeInfo::Never, // This needs to be here before calling get_ffi_type so if you try to intern one for some reason you get a real one.
+                TypeInfo::Never,
                 TypeInfo::F64,
                 TypeInfo::Named(TypeId::from_index(10), pool.intern("OverloadSet")),
                 TypeInfo::Named(TypeId::from_index(10), pool.intern("Scope")),
@@ -995,11 +970,9 @@ impl<'p> Program<'p> {
             overload_sets: Default::default(),
             ffi_types: Default::default(),
             log_type_rec: RefCell::new(vec![]),
-            assertion_count: 0,
             comptime_arch,
             inline_llvm_ir: vec![],
             type_lookup: Default::default(),
-            ffi_definitions: String::new(),
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
             inferred_type_names: vec![],
@@ -1011,36 +984,6 @@ impl<'p> Program<'p> {
         }
 
         program
-    }
-
-    pub(crate) fn add_ffi_definition<'a, T: InterpSend<'a>>(&mut self) {
-        let def = T::definition();
-        if !def.is_empty() {
-            self.ffi_definitions.push_str(&T::name());
-            self.ffi_definitions.push_str(" :: ");
-            self.ffi_definitions.push_str(&def);
-            self.ffi_definitions.push_str(";\n");
-        }
-    }
-
-    /// This allows ffi types to be unique.
-    pub(crate) fn get_ffi_type<'a, T: InterpSend<'a>>(&mut self, id: u128) -> TypeId {
-        self.ffi_types.get(&id).copied().unwrap_or_else(|| {
-            self.add_ffi_definition::<T>();
-            // for recusive data structures, you need to create a place holder for where you're going to put it when you're ready.
-            let placeholder = self.types.len();
-            let ty_final = TypeId::from_index(placeholder);
-            // This is unfortuante. My clever backpatching thing doesn't work because structs and enums save thier size on creation.
-            // The problem manifested as wierd bugs in array stride for a few types.
-            self.types.push(TypeInfo::Placeholder);
-            self.ffi_types.insert(id, ty_final);
-            let ty = T::create_type(self); // Note: Not get_type!
-            let name = self.pool.intern(&T::name());
-            self.types[placeholder] = TypeInfo::Named(ty, name);
-            self.types_extra.borrow_mut().truncate(placeholder);
-            self.ffi_sizes.insert(ty_final, mem::size_of::<T>());
-            ty_final
-        })
     }
 
     #[track_caller]
@@ -1191,11 +1134,6 @@ impl<'p> Program<'p> {
         Ok(())
     }
 
-    pub fn named_type(&mut self, ty: TypeId, name: &str) -> TypeId {
-        let ty = TypeInfo::Named(ty, self.pool.intern(name));
-        self.intern_type(ty)
-    }
-
     pub fn find_unique_func(&self, name: Ident<'p>) -> Option<FuncId> {
         for overloads in &self.overload_sets {
             if overloads.name == name {
@@ -1243,7 +1181,7 @@ impl<'p> Program<'p> {
         Ok((unwrap!(self.prim(types[0]), ""), unwrap!(self.prim(types[1]), "")))
     }
 
-    pub fn arity(&self, expr: &FatExpr<'p>) -> u16 {
+    pub(crate) fn arity(&self, expr: &FatExpr<'p>) -> u16 {
         if !expr.ty.is_unknown() {
             let raw = self.raw_type(expr.ty);
             return match &self[raw] {
@@ -1263,7 +1201,7 @@ impl<'p> Program<'p> {
 }
 
 impl<'p> Program<'p> {
-    pub fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
+    pub(crate) fn intern_type(&mut self, ty: TypeInfo<'p>) -> TypeId {
         let deduplicate = match &ty {
             TypeInfo::Placeholder => panic!("Unfinished type {ty:?}",),
             TypeInfo::Never | TypeInfo::F32 | TypeInfo::F64 | TypeInfo::Bool | TypeInfo::Unit | TypeInfo::VoidPtr => {
@@ -1290,14 +1228,14 @@ impl<'p> Program<'p> {
     }
 
     #[track_caller]
-    pub fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
+    pub(crate) fn add_func<'a>(&'a mut self, func: Func<'p>) -> FuncId {
         debug_assert!(func.get_flag(FnFlag::NotEvilUninit));
         let id = FuncId::from_index(self.funcs.len());
         self.funcs.push(func);
         id
     }
 
-    pub fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
+    pub(crate) fn fn_ty(&mut self, id: TypeId) -> Option<FnType> {
         match self[id] {
             TypeInfo::Fn(ty) | TypeInfo::FnPtr { ty, .. } => Some(ty),
             _ => None,
@@ -1305,13 +1243,13 @@ impl<'p> Program<'p> {
     }
 
     #[track_caller]
-    pub fn func_type(&mut self, id: FuncId) -> TypeId {
+    pub(crate) fn func_type(&mut self, id: FuncId) -> TypeId {
         let ty = self[id].unwrap_ty();
         self.intern_type(TypeInfo::Fn(ty))
     }
 
     #[track_caller]
-    pub fn fn_type(&mut self, id: FuncId) -> Option<TypeId> {
+    pub(crate) fn fn_type(&mut self, id: FuncId) -> Option<TypeId> {
         self[id].finished_ty().map(|ty| self.intern_type(TypeInfo::Fn(ty)))
     }
 
@@ -1319,7 +1257,7 @@ impl<'p> Program<'p> {
         self.intern_type(TypeInfo::Ptr(value_ty))
     }
 
-    pub fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
+    pub(crate) fn unptr_ty(&self, ptr_ty: TypeId) -> Option<TypeId> {
         let ptr_ty = self.raw_type(ptr_ty);
         let ptr_ty = &self[ptr_ty];
         if let TypeInfo::Ptr(ty) = ptr_ty {
@@ -1330,14 +1268,14 @@ impl<'p> Program<'p> {
     }
 
     // TODO: get rid of this. its dumb now that it needs to reallocate the vec everytime -- May 25
-    pub fn tuple_types(&self, ty: TypeId) -> Option<Vec<TypeId>> {
+    pub(crate) fn tuple_types(&self, ty: TypeId) -> Option<Vec<TypeId>> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => Some(fields.iter().map(|f| f.ty).collect()),
             &TypeInfo::Named(ty, _) => self.tuple_types(ty),
             _ => None,
         }
     }
-    pub fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
+    pub(crate) fn flat_tuple_types(&self, ty: TypeId) -> Vec<TypeId> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => fields.iter().flat_map(|f| self.flat_tuple_types(f.ty)).collect(),
             &TypeInfo::Enum { raw: ty, .. } | &TypeInfo::Named(ty, _) => self.flat_tuple_types(ty),
@@ -1355,7 +1293,7 @@ impl<'p> Program<'p> {
         }
     }
     // TODO: skip through named and unique as well.
-    pub fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
+    pub(crate) fn ptr_depth(&self, mut ptr_ty: TypeId) -> usize {
         ptr_ty = self.raw_type(ptr_ty);
         let mut d = 0;
         while let &TypeInfo::Ptr(inner) = &self[ptr_ty] {
@@ -1363,66 +1301,6 @@ impl<'p> Program<'p> {
             ptr_ty = self.raw_type(inner);
         }
         d
-    }
-
-    pub fn struct_type(&mut self, name: &str, fields_in: &[(&str, TypeId)]) -> TypeId {
-        let pool = self.pool;
-        let info = self
-            .make_struct(fields_in.iter().map(|(name, ty)| Ok((*ty, pool.intern(name), None))), false)
-            .unwrap();
-        let name = pool.intern(name);
-        let ty = self.intern_type(info);
-        self.intern_type(TypeInfo::Named(ty, name))
-    }
-
-    pub fn enum_type(&mut self, name: &str, varients: &[TypeId]) -> TypeId {
-        let ty = self.intern_type(TypeInfo::Tagged {
-            cases: varients.iter().enumerate().map(|(i, ty)| (self.synth_name(*ty, i), *ty)).collect(),
-        });
-        let name = self.pool.intern(name);
-        self.intern_type(TypeInfo::Named(ty, name))
-    }
-
-    pub fn synth_name(&self, ty: TypeId, hint: usize) -> Ident<'p> {
-        match self[ty] {
-            TypeInfo::Named(_, name) => name,
-
-            _ => self.pool.intern(&format!("_{hint}")),
-        }
-    }
-
-    pub fn to_enum(&mut self, ty: TypeInfo<'p>) -> TypeId {
-        if let TypeInfo::Struct { fields, .. } = ty {
-            let ty = TypeInfo::Tagged {
-                cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
-            };
-            self.intern_type(ty)
-        } else {
-            let ty = self.intern_type(ty);
-            panic!("{}", self.log_type(ty));
-        }
-    }
-
-    pub fn log_struct_layout(&self, fields: &[Field]) -> String {
-        fields
-            .iter()
-            .map(|f| {
-                format!(
-                    "{}: {}; // align={} size={} offset={}\n",
-                    self.pool.get(f.name),
-                    self.log_type(f.ty),
-                    self.get_info(f.ty).align_bytes,
-                    self.get_info(f.ty).stride_bytes,
-                    f.byte_offset
-                )
-            })
-            .collect::<String>()
-    }
-
-    pub fn get_or_create_info(&mut self, ty: TypeId) -> Res<'p, TypeMeta> {
-        let ty = self.raw_type(ty);
-        self.finish_layout(ty)?;
-        Ok(self.get_info(ty))
     }
 
     // TODO: Unsized types. Any should be a TypeId and then some memory with AnyPtr being the fat ptr version.
@@ -1450,8 +1328,8 @@ impl<'p> Program<'p> {
                 for arg in fields {
                     let info = self.get_info(arg.ty);
                     align = align.max(info.align_bytes);
-                    debug_assert_eq!(arg.byte_offset % info.align_bytes as usize, 0, "{}", self.log_struct_layout(fields));
-                    debug_assert!(arg.byte_offset as u16 >= bytes, "{}", self.log_struct_layout(fields));
+                    debug_assert_eq!(arg.byte_offset % info.align_bytes as usize, 0);
+                    debug_assert!(arg.byte_offset as u16 >= bytes);
                     let end = arg.byte_offset as u16 + info.stride_bytes;
                     bytes = bytes.max(end);
                     size += info.size_slots;
@@ -1530,10 +1408,6 @@ impl<'p> Program<'p> {
     pub(crate) fn slot_count(&self, ty: TypeId) -> u16 {
         self.get_info(ty).size_slots
     }
-
-    pub fn size_bytes(&self, ty: TypeId) -> usize {
-        self.get_info(ty).stride_bytes as usize
-    }
 }
 
 impl<'p> Deref for FatExpr<'p> {
@@ -1565,7 +1439,7 @@ impl<'p> DerefMut for FatStmt<'p> {
 }
 
 impl<'p> Expr<'p> {
-    pub fn as_ident(&self) -> Option<Ident<'p>> {
+    pub(crate) fn as_ident(&self) -> Option<Ident<'p>> {
         match self {
             Expr::GetVar(v) => Some(v.name),
             &Expr::GetNamed(i) => Some(i),
@@ -1573,19 +1447,7 @@ impl<'p> Expr<'p> {
         }
     }
 
-    // TODO: this needs to be removed becuase it doesn't respect shadowing or arbitrary expressions that evaluate to the expected builtin thing.
-    //       maybe all the ones the compiler knows about should be a different syntax/node? but the eventual goal is consistancy.     -- Apr 21
-    pub fn as_prefix_macro(&self, flag: Flag) -> Option<(&FatExpr, &FatExpr)> {
-        if let Expr::PrefixMacro { handler, arg, target } = self {
-            if let Some(name) = handler.as_ident() {
-                if name == flag.ident() {
-                    return Some((arg, target));
-                }
-            }
-        }
-        None
-    }
-    pub fn as_suffix_macro(&self, flag: Flag) -> Option<&FatExpr<'p>> {
+    pub(crate) fn as_suffix_macro(&self, flag: Flag) -> Option<&FatExpr<'p>> {
         if let Expr::SuffixMacro(name, arg) = self {
             if *name == flag.ident() {
                 return Some(arg);
@@ -1593,7 +1455,7 @@ impl<'p> Expr<'p> {
         }
         None
     }
-    pub fn as_suffix_macro_mut(&mut self, flag: Flag) -> Option<&mut FatExpr<'p>> {
+    pub(crate) fn as_suffix_macro_mut(&mut self, flag: Flag) -> Option<&mut FatExpr<'p>> {
         if let Expr::SuffixMacro(name, arg) = self {
             if *name == flag.ident() {
                 return Some(arg);
@@ -1645,14 +1507,14 @@ impl<'p, M: FnMut(&mut Expr<'p>)> WalkAst<'p> for M {
 
 #[allow(non_upper_case_globals)]
 impl TypeId {
-    pub fn is_unit(&self) -> bool {
+    pub(crate) fn is_unit(&self) -> bool {
         *self == Self::unit
     }
 
-    pub fn is_unknown(&self) -> bool {
+    pub(crate) fn is_unknown(&self) -> bool {
         *self == Self::unknown
     }
-    pub fn is_never(&self) -> bool {
+    pub(crate) fn is_never(&self) -> bool {
         *self == Self::never
     }
 
@@ -1667,13 +1529,13 @@ impl TypeId {
     }
 
     // Be careful that this is in the pool correctly!
-    pub fn bool() -> TypeId {
+    pub(crate) fn bool() -> TypeId {
         TypeId::from_index(4)
     }
 
     pub const never: Self = Self::from_index(6);
 
-    pub fn f64() -> TypeId {
+    pub(crate) fn f64() -> TypeId {
         TypeId::from_index(7)
     }
 
@@ -1681,7 +1543,7 @@ impl TypeId {
     pub const scope: Self = Self::from_index(9);
     // u32 = (10)
     pub const voidptr: Self = Self::from_index(11);
-    pub fn f32() -> TypeId {
+    pub(crate) fn f32() -> TypeId {
         TypeId::from_index(12)
     }
     pub const func: Self = Self::from_index(13);
@@ -1795,6 +1657,7 @@ pub enum Flag {
     Type,
     Struct,
     Tagged,
+    Enum,
     _Reserved_Count_,
 }
 
@@ -1856,7 +1719,7 @@ macro_rules! tagged_index {
                 Self(value as $backing | Self::MASK)
             }
 
-            pub fn is_valid(self) -> bool {
+            pub(crate) fn is_valid(self) -> bool {
                 cfg!(not(debug_assertions)) || (self.0 & Self::MASK) != 0
             }
         }
@@ -1907,19 +1770,19 @@ macro_rules! func_impl_getter {
     };
 }
 impl<'p> FuncImpl<'p> {
-    pub fn jitted_aarch64(&self) -> Option<&Vec<u32>> {
+    pub(crate) fn jitted_aarch64(&self) -> Option<&Vec<u32>> {
         func_impl_getter!(self, JittedAarch64)
     }
 
-    pub fn cranelift_emit(&self) -> Option<&usize> {
+    pub(crate) fn cranelift_emit(&self) -> Option<&usize> {
         func_impl_getter!(self, EmitCranelift)
     }
 
-    pub fn comptime_addr(&self) -> Option<&usize> {
+    pub(crate) fn comptime_addr(&self) -> Option<&usize> {
         func_impl_getter!(self, ComptimeAddr)
     }
 
-    pub fn c_source(&self) -> Option<&Ident<'p>> {
+    pub(crate) fn c_source(&self) -> Option<&Ident<'p>> {
         func_impl_getter!(self, CSource)
     }
 }

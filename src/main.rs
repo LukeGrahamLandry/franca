@@ -117,10 +117,6 @@ fn main() {
                 "log_export_ffi" => {
                     println!("{}", get_include_std("compiler").unwrap());
                     println!("{}", get_include_std("libc").unwrap());
-
-                    let pool = Box::leak(Box::<StringPool>::default());
-                    let program = Program::new(pool, arch);
-                    println!("{}", program.ffi_definitions);
                 }
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats, --c, --run-clang"),
                 "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
@@ -254,7 +250,7 @@ fn main() {
         }
 
         if let Some(f) = comp.program.find_unique_func(comp.pool.intern("driver")) {
-            let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as usize).unwrap();
+            let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as i64).unwrap();
             if let franca::export_ffi::BigResult::Err(e) = comp.compile(f, ExecStyle::Jit) {
                 log_err(&comp, *e);
                 exit(1);

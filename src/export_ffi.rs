@@ -516,14 +516,10 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
     ("fn __compiler_save_fatexpr_type(t: Type) Unit;", compiler_save_fatexpr_type as *const u8),
-    ("fn __compiler_save_symbol_type(t: Type) Unit;", compiler_save_symbol_type as *const u8),
 ];
 
 extern "C-unwind" fn compiler_save_fatexpr_type(compiler: &mut Compile, f: TypeId) {
     compiler.program.fat_expr_type = Some(f);
-}
-extern "C-unwind" fn compiler_save_symbol_type(compiler: &mut Compile, f: TypeId) {
-    compiler.program.symbol_type = Some(f);
 }
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
     compiler.make_slice_t = Some(f);
@@ -938,7 +934,12 @@ pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cas
                 }
             }
             let ty = compile.struct_type(pattern)?;
-            let ty = compile.program.to_enum(ty);
+            let TypeInfo::Struct { fields, .. } = ty else { unreachable!() };
+            let ty = TypeInfo::Tagged {
+                cases: fields.into_iter().map(|f| (f.name, f.ty)).collect(),
+            };
+            let ty = compile.program.intern_type(ty);
+
             compile.set_literal(&mut cases, ty)?;
         } else {
             err!("expected map literal: .{{ name: Type, ... }} but found {:?}", cases);

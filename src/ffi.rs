@@ -1,11 +1,6 @@
 use std::mem::{self};
 
-use codemap::Span;
-
-use crate::{
-    ast::{FatExpr, FuncId, LabelId, OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
-    export_ffi::BigOption,
-};
+use crate::ast::{FatExpr, FuncId, LabelId, OverloadSetId, Program, ScopeId, TypeId, TypeInfo};
 
 // TODO: figure out how to check that my garbage type keys are unique.
 pub trait InterpSend<'p>: Sized + Clone {
@@ -14,7 +9,12 @@ pub trait InterpSend<'p>: Sized + Clone {
     //       so its jsut about the manual base impls for vec,box,option,hashmap.
     fn get_type_key() -> u128; // fuck off bro
     fn get_or_create_type(program: &mut Program) -> TypeId {
-        program.get_ffi_type::<Self>(Self::get_type_key())
+        let id = Self::get_type_key();
+        program.ffi_types.get(&id).copied().unwrap_or_else(|| {
+            let ty = Self::create_type(program); // Note: Not get_type!
+            program.ffi_types.insert(id, ty);
+            ty
+        })
     }
 
     fn get_type(program: &Program) -> TypeId {
@@ -35,23 +35,8 @@ pub trait InterpSend<'p>: Sized + Clone {
     /// This should only be called once! Use get_type which caches it.
     fn create_type(interp: &mut Program) -> TypeId;
 
-    fn definition() -> String {
-        String::new()
-    }
-
     fn name() -> String {
         String::new()
-    }
-
-    fn add_child_ffi_definitions(_: Program<'p>) {}
-
-    #[track_caller]
-    fn size_bytes(program: &Program) -> usize {
-        program.size_bytes(Self::get_type(program))
-    }
-
-    fn align_bytes(program: &Program) -> usize {
-        program.get_info(Self::get_type(program)).align_bytes as usize
     }
 }
 
@@ -94,7 +79,6 @@ macro_rules! send_num {
 }
 
 send_num!(i64, 64, true, 8, next_i64, push_i64, i64);
-send_num!(usize, 64, false, 8, next_i64, push_i64, i64);
 send_num!(u32, 32, false, 4, next_u32, push_u32, u32);
 send_num!(u16, 16, false, 2, next_u16, push_u16, u16);
 send_num!(u8, 8, false, 1, next_u8, push_u8, u8);
@@ -145,19 +129,6 @@ impl<'p> InterpSend<'p> for FatExpr<'p> {
     }
 }
 
-impl<'p> InterpSend<'p> for char {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_program: &mut Program) -> TypeId {
-        TypeId::i64()
-    }
-
-    fn name() -> String {
-        "u32".to_string()
-    }
-}
-
 macro_rules! ffi_builtin_type {
     ($ty:ty, $typeid:expr, $name:expr) => {
         impl<'p> InterpSend<'p> for $ty {
@@ -190,28 +161,6 @@ ffi_builtin_type!(bool, TypeId::bool(), "bool");
 ffi_builtin_type!(f64, TypeId::f64(), "f64");
 ffi_builtin_type!((), TypeId::unit, "Unit");
 
-macro_rules! fixed_array {
-    ($ty:ty, $len:expr) => {
-        impl<'p> InterpSend<'p> for [$ty; $len] {
-            fn get_type_key() -> u128 {
-                unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-            }
-            fn create_type(p: &mut Program) -> TypeId {
-                let info = TypeInfo::Array {
-                    inner: <$ty>::create_type(p),
-                    len: $len,
-                };
-                p.intern_type(info)
-            }
-            fn name() -> String {
-                format!("Array({}, {})", <$ty>::name(), $len)
-            }
-        }
-    };
-}
-
-fixed_array!(usize, 2);
-
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {
     fn get_type_key() -> u128 {
         mix::<A, B>(6749973390999)
@@ -240,61 +189,6 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
 
     fn name() -> String {
         format!("Ty({}, {}, {})", A::name(), B::name(), C::name()) // TODO: unnest
-    }
-}
-
-impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
-    fn get_type_key() -> u128 {
-        mix::<T, u16>(999998827262625)
-    }
-
-    fn create_type(program: &mut Program) -> TypeId {
-        let ty = T::get_or_create_type(program);
-        let ty = program.intern_type(TypeInfo::Ptr(ty));
-        program.tuple_of(vec![ty, TypeId::i64()]) // TODO: not this
-    }
-
-    fn name() -> String {
-        format!("Slice({})", T::name())
-    }
-}
-
-// TODO: this should be an enum
-impl<'p, T: InterpSend<'p>> InterpSend<'p> for BigOption<T> {
-    fn get_type_key() -> u128 {
-        mix::<T, bool>(8090890890986)
-    }
-
-    fn create_type(interp: &mut Program) -> TypeId {
-        let t = T::get_or_create_type(interp);
-        let some = interp.pool.intern("Some");
-        let none = interp.pool.intern("None");
-        interp.intern_type(TypeInfo::Tagged {
-            cases: vec![(some, t), (none, TypeId::unit)],
-        })
-    }
-
-    fn name() -> String {
-        format!("?{}", T::name())
-    }
-}
-
-impl<'p> InterpSend<'p> for Span {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-
-    fn create_type(program: &mut Program) -> TypeId {
-        let ty = <(u32, u32)>::get_or_create_type(program);
-        program.named_type(ty, "Span")
-    }
-
-    fn definition() -> String {
-        "(u32, u32)".to_string()
-    }
-
-    fn name() -> String {
-        "Span".to_string()
     }
 }
 
