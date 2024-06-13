@@ -560,7 +560,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
                 writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
             }
             for (sig, ptr) in COMPILER_FLAT {
-                writeln!(out, "#comptime_addr({}) #ct #flat_call {sig};", *ptr as usize).unwrap();
+                writeln!(out, "#comptime_addr({}) #ct {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -859,117 +859,60 @@ type Unit = ();
 
 // TODO: this needs to be less painful. want to have it just parse rust signetures and expose them.
 // TODO: documenet which ones can only be used in macros because they need the 'result: &mut FnWip'
-pub const COMPILER_FLAT: &[(&str, FlatCallFn)] = &[
-    ("fn test_flat_call_fma(a: i64, b: i64, add_this: i64) i64;", test_flat_call),
-    ("fn test_flat_call_callback(addr: rawptr) i64;", test_flat_call_callback),
-    (
-        "fn test_flat_call_fma2(a: i64, b: i64, add_this: i64) i64;",
-        bounce_flat_call!(((i64, i64), i64), i64, test_flat_call2),
-    ),
+pub const COMPILER_FLAT: &[(&str, *const u8)] = &[
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
-    ("fn get_type_info(ty: Type) TypeInfo;", bounce_flat_call!(TypeId, TypeInfo, get_type_info)),
-    (
-        "fn get_type_info_raw(ty: Type) TypeInfo;",
-        bounce_flat_call!(TypeId, TypeInfo, get_type_info_raw),
-    ),
+    ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
+    ("fn get_type_info_raw(ty: Type) TypeInfo;", get_type_info_raw as *const u8),
     (
         "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) Unit;",
-        bounce_flat_call!(((FatExpr, TypeId), usize), Unit, const_eval_any),
+        const_eval_any as *const u8,
     ),
     // Calls Compiler::compile_expr
     // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
-    (
-        "fn compile_ast(value: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, compile_ast),
-    ),
-    ("fn debug_log_ast(expr: FatExpr) Unit;", bounce_flat_call!(FatExpr, Unit, log_ast)),
+    ("fn compile_ast(value: FatExpr) FatExpr;", compile_ast as *const u8),
+    ("fn debug_log_ast(expr: FatExpr) Unit;", log_ast as *const u8),
     (
         "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
-        bounce_flat_call!(*mut [FatExpr], FatExpr, unquote_macro_apply_placeholders),
+        unquote_macro_apply_placeholders as *const u8,
     ),
-    (
-        "fn get_type_int(e: FatExpr) IntTypeInfo;",
-        bounce_flat_call!(FatExpr, IntTypeInfo, get_type_int),
-    ),
+    ("fn get_type_int(e: FatExpr) IntTypeInfo;", get_type_int as *const u8),
     // Convert a pointer to a value into an ast that will produce that value when evaluated.
     // It is illegal to pass a <ty> that does not match the value behind <ptr>.
-    (
-        "fn literal_ast(ty: Type, ptr: rawptr) FatExpr;",
-        bounce_flat_call!((TypeId, usize), FatExpr, literal_ast),
-    ),
-    (
-        "fn can_assign_types(found: Type, expected: Type) bool;",
-        bounce_flat_call!((TypeId, TypeId), bool, type_check_arg),
-    ),
+    ("fn literal_ast(ty: Type, ptr: rawptr) FatExpr;", literal_ast as *const u8),
+    ("fn can_assign_types(found: Type, expected: Type) bool;", type_check_arg as *const u8),
     (
         "#macro #outputs(Type) fn enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
-        bounce_flat_call!((FatExpr, FatExpr), FatExpr, enum_macro),
+        enum_macro as *const u8,
     ),
-    (
-        "#macro fn namespace(block: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, namespace_macro),
-    ),
-    (
-        "#macro #outputs(Type) fn tagged(cases: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, tagged_macro),
-    ),
-    (
-        "#macro #outputs(Type) fn struct(fields: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, struct_macro),
-    ),
-    (
-        "#macro #outputs(Symbol) fn symbol(fields: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, symbol_macro),
-    ),
+    ("#macro fn namespace(block: FatExpr) FatExpr;", namespace_macro as *const u8),
+    ("#macro #outputs(Type) fn tagged(cases: FatExpr) FatExpr;", tagged_macro as *const u8),
+    ("#macro #outputs(Type) fn struct(fields: FatExpr) FatExpr;", struct_macro as *const u8),
+    ("#macro #outputs(Symbol) fn symbol(fields: FatExpr) FatExpr;", symbol_macro as *const u8),
     (
         "#macro #outputs(Unit) fn assert_compile_error(fields: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, assert_compile_error_macro),
+        assert_compile_error_macro as *const u8,
     ),
-    (
-        "#macro #outputs(Type) fn type(e: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, type_macro),
-    ),
-    (
-        "#macro #outputs(u32) fn BITS(parts: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, bits_macro),
-    ),
-    (
-        "fn __get_comptime_dispatch_ptr() **i64",
-        bounce_flat_call!((), *mut i64, get_dispatch_ptr),
-    ),
+    ("#macro #outputs(Type) fn type(e: FatExpr) FatExpr;", type_macro as *const u8),
+    ("#macro #outputs(u32) fn BITS(parts: FatExpr) FatExpr;", bits_macro as *const u8),
+    ("fn __get_comptime_dispatch_ptr() **i64", get_dispatch_ptr as *const u8),
     (
         "#macro fn resolve(function_type: FatExpr, overload_set_id: FatExpr) FatExpr;",
-        bounce_flat_call!((FatExpr, FatExpr), FatExpr, resolve_os),
+        resolve_os as *const u8,
     ),
-    (
-        "#macro fn as(T: FatExpr, e: FatExpr) FatExpr;",
-        bounce_flat_call!((FatExpr, FatExpr), FatExpr, as_macro),
-    ),
-    (
-        "#macro fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr;",
-        bounce_flat_call!((FatExpr, FatExpr), FatExpr, fn_type_macro),
-    ),
-    (
-        "#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;",
-        bounce_flat_call!((FatExpr, FatExpr), FatExpr, fn_ptr_type_macro),
-    ),
-    (
-        "#macro fn Fn(Ret: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, fn_type_macro_single),
-    ),
-    (
-        "#macro fn FnPtr( Ret: FatExpr) FatExpr;",
-        bounce_flat_call!(FatExpr, FatExpr, fn_ptr_type_macro_single),
-    ),
+    ("#macro fn as(T: FatExpr, e: FatExpr) FatExpr;", as_macro as *const u8),
+    ("#macro fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_type_macro as *const u8),
+    ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
+    ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
+    ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
 ];
 
-fn as_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+extern "C-unwind" fn as_macro<'p>(compile: &mut Compile<'_, 'p>, arg: FatExpr<'p>, target: FatExpr<'p>) -> FatExpr<'p> {
     compile.last_loc = Some(arg.loc);
     let res = compile.as_cast_macro(arg, target);
     hopec(compile, || res)
 }
 
-fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, (arg, target): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+extern "C-unwind" fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, arg: FatExpr<'p>, target: FatExpr<'p>) -> FatExpr<'p> {
     compile.last_loc = Some(arg.loc);
     let res = compile.enum_constant_macro(arg, target);
     res.unwrap()
@@ -979,10 +922,10 @@ extern "C-unwind" fn intern_type<'p>(compile: &mut Compile<'_, 'p>, ty: &TypeInf
     compile.program.intern_type(ty.clone())
 }
 
-fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
+extern "C-unwind" fn get_type_info<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
     compile.program[ty].clone()
 }
-fn get_type_info_raw<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
+extern "C-unwind" fn get_type_info_raw<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> {
     let ty = compile.program.raw_type(ty);
     compile.program[ty].clone()
 }
@@ -990,7 +933,7 @@ fn get_type_info_raw<'p>(compile: &Compile<'_, 'p>, ty: TypeId) -> TypeInfo<'p> 
 // TODO: at least use hope(|| ...) instead of unwrapping so much.
 //       need to think of better error handling story.
 
-fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((FatExpr<'p>, TypeId), usize)) {
+extern "C-unwind" fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>, ty: TypeId, addr: usize) {
     // TODO: immediate_eval_expr doesn't do a type check. -- Apr 27
     compile.compile_expr(&mut expr, Some(ty)).unwrap();
 
@@ -1005,7 +948,7 @@ fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, ((mut expr, ty), addr): ((F
     }
 }
 
-fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatExpr<'p> {
     compile.last_loc = Some(expr.loc);
     let res = compile.compile_expr(&mut expr, None);
     hopec(compile, || res);
@@ -1013,7 +956,7 @@ fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: FatExpr<'p>) -> FatE
 }
 
 // :UnquotePlaceholders
-fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mut [FatExpr<'p>]) -> FatExpr<'p> {
+extern "C-unwind" fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mut [FatExpr<'p>]) -> FatExpr<'p> {
     // println!(
     //     "ptr={} len={} ptr%align={}",
     //     args.as_mut_ptr() as usize,
@@ -1043,7 +986,7 @@ fn unquote_macro_apply_placeholders<'p>(compile: &mut Compile<'_, 'p>, args: *mu
     compile.tag_err(res).unwrap_or_else(|e| panic!("{e:?}"))
 }
 
-fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntTypeInfo {
+extern "C-unwind" fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntTypeInfo {
     hope(|| {
         match &mut arg.expr {
             Expr::Call(_, _) => {
@@ -1065,7 +1008,7 @@ fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> IntT
     })
 }
 
-fn literal_ast<'p>(compile: &Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> FatExpr<'p> {
+extern "C-unwind" fn literal_ast<'p>(compile: &Compile<'_, 'p>, ty: TypeId, ptr: usize) -> FatExpr<'p> {
     let bytes = compile.program.get_info(ty).stride_bytes as usize;
     let value = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
     let value = Values::many(value.to_vec());
@@ -1073,12 +1016,12 @@ fn literal_ast<'p>(compile: &Compile<'_, 'p>, (ty, ptr): (TypeId, usize)) -> Fat
     FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
 }
 
-fn type_check_arg(compile: &Compile, (found, expected): (TypeId, TypeId)) -> bool {
+extern "C-unwind" fn type_check_arg(compile: &Compile, found: TypeId, expected: TypeId) -> bool {
     compile.type_check_arg(found, expected, "").is_ok()
 }
 
 // TODO: what if struct const fields were lazy like normal values and then could use that instead of this.
-fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) -> FatExpr<'p> {
     let loc = block.loc;
     // give any other macros a chance to expand.
     let ty = compile.program.intern_type(TypeInfo::Fn(FnType {
@@ -1095,7 +1038,7 @@ fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut block: FatExpr<'p>) ->
     compile.as_literal(s, loc).unwrap()
 }
 
-fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
             for b in &mut pattern.bindings {
@@ -1116,7 +1059,7 @@ fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> Fa
     cases
 }
 
-fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut fields.expr {
             let ty = compile.struct_type(pattern)?;
@@ -1131,7 +1074,7 @@ fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> F
     fields
 }
 
-fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         // TODO: use match
         let value = match &mut arg.expr {
@@ -1156,7 +1099,7 @@ fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatE
     arg
 }
 
-fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         // TODO: this can still have side-effects on the compiler state tho :(
         let before = compile.debug_trace.len();
@@ -1179,7 +1122,7 @@ fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExp
     arg
 }
 
-fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         // Note: this does not evaluate the expression.
         // TODO: warning if it has side effects. especially if it does const stuff.
@@ -1191,7 +1134,7 @@ fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExp
     arg
 }
 
-fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn bits_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         let Expr::Tuple(parts) = arg.expr else {
             err!("Expected @Bits(Tuple...)",)
@@ -1262,10 +1205,10 @@ extern "C-unwind" fn shift_or_slice(compiler: &mut Compile, ptr: *const i64, len
     })
 }
 
-fn get_dispatch_ptr(comp: &mut Compile, _: ()) -> *mut i64 {
+extern "C-unwind" fn get_dispatch_ptr(comp: &mut Compile) -> *mut i64 {
     comp.aarch64.get_dispatch() as usize as *mut i64
 }
-fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+extern "C-unwind" fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, f_ty: FatExpr<'p>, os: FatExpr<'p>) -> FatExpr<'p> {
     let loc = os.loc;
     let ty: TypeId = hope(|| comp.immediate_eval_expr_known(f_ty));
     let os: OverloadSetId = hope(|| comp.immediate_eval_expr_known(os));
@@ -1290,7 +1233,7 @@ fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, (f_ty, os): (FatExpr<'p>, FatExpr<
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }
 
-fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {
+extern "C-unwind" fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {
     let types = match &mut arg.expr {
         Expr::StructLiteralP(parts) => {
             parts.if_empty_add_unit();
@@ -1316,7 +1259,7 @@ fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: F
     let f_ty = FnType { arg, ret, arity };
     Ok(f_ty)
 }
-fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+extern "C-unwind" fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         let f_ty = make_fn_type(compile, &mut arg, ret)?;
         let ty = compile.program.intern_type(TypeInfo::Fn(f_ty));
@@ -1327,7 +1270,7 @@ fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr<'p>
     arg
 }
 
-fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr<'p>, FatExpr<'p>)) -> FatExpr<'p> {
+extern "C-unwind" fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         let f_ty = make_fn_type(compile, &mut arg, ret)?;
         let ty = compile.program.intern_type(TypeInfo::FnPtr {
@@ -1341,18 +1284,20 @@ fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, (mut arg, ret): (FatExpr
     arg
 }
 
-fn fn_ptr_type_macro_single<'p>(compile: &mut Compile<'_, 'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn fn_ptr_type_macro_single<'p>(compile: &mut Compile<'_, 'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
     let loc = ret.loc;
     fn_ptr_type_macro(
         compile,
-        (FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![], loc }), loc), ret),
+        FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![], loc }), loc),
+        ret,
     )
 }
 
-fn fn_type_macro_single<'p>(compile: &mut Compile<'_, 'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
+extern "C-unwind" fn fn_type_macro_single<'p>(compile: &mut Compile<'_, 'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
     let loc = ret.loc;
     fn_type_macro(
         compile,
-        (FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![], loc }), loc), ret),
+        FatExpr::synthetic(Expr::StructLiteralP(Pattern { bindings: vec![], loc }), loc),
+        ret,
     )
 }

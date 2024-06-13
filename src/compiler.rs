@@ -291,7 +291,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let comp_ctx = self.program[f].has_tag(Flag::Ct);
             self.program.finish_layout(ty.arg)?;
             self.program.finish_layout(ty.ret)?;
-            if self.program[f].has_tag(Flag::Flat_Call) || self.program[f].has_tag(Flag::Macro) {
+            if self.program[f].has_tag(Flag::Flat_Call) {
                 // my cc can do 8 returns in the arg regs but my ffi with compiler can't
                 if comp_ctx {
                     self.program[f].set_cc(CallConv::FlatCt)?;
@@ -309,6 +309,15 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     self.program[f].set_cc(CallConv::CCallReg)?;
                 }
+            }
+
+            // TODO: copy-paste
+            if comp_ctx {
+                debug_assert!(
+                    self.program[f].body.comptime_addr().is_some() || self.program[f].has_tag(Flag::Comptime_Addr),
+                    "#ct is only for compiler builtins"
+                );
+                self.program[f].set_cc(CallConv::CCallRegCt)?;
             }
 
             if self.program[f].cc.is_none() {
@@ -1111,7 +1120,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let var = func.var_name;
         if func.has_tag(Flag::Macro) {
             assert!(!func.has_tag(Flag::Rt));
-            func.add_tag(Flag::Ct);
+            // func.add_tag(Flag::Ct);
         }
 
         let id = self.add_func(func)?;
@@ -1696,7 +1705,19 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.infer_types(f)?;
                     self.compile(f, ExecStyle::Jit)?;
                     self.typecheck_macro_outputs(f, requested)?;
-                    let new_expr: FatExpr<'p> = self.call_jitted(f, arg)?;
+
+                    self.update_cc(f)?;
+                    self.flush_callees(f)?;
+                    self.flush_cpu_instruction_cache();
+                    self.aarch64.make_exec();
+                    let ptr = self.aarch64.get_fn(f).unwrap();
+                    let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::FlatCt | CallConv::CCallRegCt);
+
+                    let f_ty = self.program[f].finished_ty().unwrap();
+                    let values = ffi::c::call(self, ptr as usize, f_ty, vec![Box::into_raw(Box::new(arg)) as i64], comp_ctx)?;
+                    let new_expr: FatExpr<'p> = from_values(self.program, values)?;
+                    let new_expr = new_expr.clone(); // TODO: no clone
+
                     *expr = new_expr;
                     if expr.done {
                         assert!(!expr.ty.is_unknown());
@@ -1708,9 +1729,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                 assert!(os2.next().is_none(), "ambigous macro overload");
                 assert!(self.program[f].has_tag(Flag::Macro));
                 self.infer_types(f)?;
-
+                self.compile(f, ExecStyle::Jit)?;
                 self.typecheck_macro_outputs(f, requested)?;
-                let new_expr: FatExpr<'p> = self.call_jitted(f, (arg, target))?;
+
+                // TODO: copy-paste
+                self.update_cc(f)?;
+                self.flush_callees(f)?;
+                self.flush_cpu_instruction_cache();
+                self.aarch64.make_exec();
+                let ptr = self.aarch64.get_fn(f).unwrap();
+                let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::FlatCt | CallConv::CCallRegCt);
+                let f_ty = self.program[f].finished_ty().unwrap();
+                let values = ffi::c::call(
+                    self,
+                    ptr as usize,
+                    f_ty,
+                    vec![Box::into_raw(Box::new(arg)) as i64, Box::into_raw(Box::new(target)) as i64],
+                    comp_ctx,
+                )?;
+                let new_expr: FatExpr<'p> = from_values(self.program, values)?;
+                let new_expr = new_expr.clone(); // TODO: no clone
+
                 *expr = new_expr;
                 if expr.done {
                     assert!(!expr.ty.is_unknown());

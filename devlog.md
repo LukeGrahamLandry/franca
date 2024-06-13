@@ -1,5 +1,3 @@
-> for reference, `franca run_tests.fr`, just unit tests: 62 ms. before prim_sig change.
-
 ## (Jun 11/12)
 
 > we're at 15404 loc .rs
@@ -39,6 +37,17 @@ so zero_padding always tried to walk the None section if it wasn't present,
 fixing that fixed doing zero_padding in box serialize but still not the real problem.
 
 I'm just stupid and assumed vec would be in order of the fields (ptr, cap, len) but ptr is in the middle.
+
+> for reference, `franca run_tests.fr`, just unit tests: 62 ms. before prim_sig change.
+
+Actually, now i don't even need all the flat call shit, I'm just using it for macros because that's what one does apparently.
+
+- stop using bounce_flat_call for COMPILER_FLAT
+- update_cc wasn't setting for #ct unless you specified #flat_call or #c_call. which i wasn't doing cause #c_call is the default.
+- change a bunch of `(arg, reg): (E, E)` to `arg: E, ret E`
+
+- TODO: that broke exceptional.fr somehow (bus error. maybe just a make_exec thing?) and I haven't actually taken the win yet and removed the flat_call code.
+  leaving that for tommorrow. also need to fix the single vs double arg copy-paste, now that it can easily be dynamic with the vec.
 
 ## (Jun 10)
 
