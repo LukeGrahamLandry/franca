@@ -85,7 +85,7 @@ impl Prim {
 }
 
 #[repr(C)]
-#[derive(Clone, InterpSend, Debug)]
+#[derive(Clone, Debug)]
 pub struct BasicBlock {
     pub insts: Vec<Bc>,
     pub arg_float_mask: u32,
@@ -96,7 +96,7 @@ pub struct BasicBlock {
 }
 
 #[repr(C)]
-#[derive(Clone, InterpSend)]
+#[derive(Clone)]
 pub struct FnBody<'p> {
     pub blocks: Vec<BasicBlock>,
     pub vars: Vec<TypeId>,

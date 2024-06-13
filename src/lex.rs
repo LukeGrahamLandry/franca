@@ -16,13 +16,13 @@ use std::str::Chars;
 use std::sync::Arc;
 
 // TODO: why tf is Range not copy
-#[derive(Debug, Clone, InterpSend)]
+#[derive(Debug, Clone)]
 pub struct Token<'p> {
     pub kind: TokenType<'p>,
     pub span: Span,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, InterpSend)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TokenType<'p> {
     Symbol(Ident<'p>),
     Number(i64),

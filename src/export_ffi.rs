@@ -515,8 +515,16 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
+    ("fn __compiler_save_fatexpr_type(t: Type) Unit;", compiler_save_fatexpr_type as *const u8),
+    ("fn __compiler_save_symbol_type(t: Type) Unit;", compiler_save_symbol_type as *const u8),
 ];
 
+extern "C-unwind" fn compiler_save_fatexpr_type(compiler: &mut Compile, f: TypeId) {
+    compiler.program.fat_expr_type = Some(f);
+}
+extern "C-unwind" fn compiler_save_symbol_type(compiler: &mut Compile, f: TypeId) {
+    compiler.program.symbol_type = Some(f);
+}
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
     compiler.make_slice_t = Some(f);
 }
@@ -546,7 +554,6 @@ pub fn get_include_std(name: &str) -> Option<String> {
         "compiler" => {
             let mut out = String::new();
             writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
-            writeln!(out, "const CallConv = @enum(i64) (C = {});", CallConv::CCallReg as u8,).unwrap();
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER {
                 writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
@@ -607,17 +614,17 @@ fn hopec<'p, T>(comp: &Compile<'_, 'p>, res: impl FnOnce() -> Res<'p, T>) -> T {
     })
 }
 
-extern "C-unwind" fn tag_value<'p>(program: &&Program<'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
+extern "C-unwind" fn tag_value<'p>(comp: &mut Compile<'_, 'p>, enum_ty: TypeId, name: Ident<'p>) -> i64 {
     let cases = hope(|| {
         Ok(unwrap!(
-            program.get_enum(enum_ty),
+            comp.program.get_enum(enum_ty),
             "{} is not enum. (tried tag_value of {})",
-            program.log_type(enum_ty),
-            program.pool.get(name)
+            comp.program.log_type(enum_ty),
+            comp.program.pool.get(name)
         ))
     });
     let index = cases.iter().position(|f| f.0 == name);
-    let index = hope(|| Ok(unwrap!(index, "bad case name")));
+    let index = hope(|| Ok(unwrap!(index, "bad case name id={}", name.0)));
     index as i64
 }
 
@@ -921,7 +928,7 @@ extern "C-unwind" fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut bloc
     compile.as_literal(s, loc).unwrap()
 }
 
-extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
+pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
             for b in &mut pattern.bindings {
@@ -943,14 +950,14 @@ extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: 
     cases
 }
 
-extern "C-unwind" fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
+pub extern "C-unwind" fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         if let Expr::StructLiteralP(pattern) = &mut fields.expr {
             let ty = compile.struct_type(pattern)?;
             let ty = compile.program.intern_type(ty);
             compile.set_literal(&mut fields, ty)?;
         } else {
-            err!("expected map literal: .{{ name: Type, ... }} but found {:?}", fields);
+            err!("expected map literal: (name: Type, ... ) but found {:?}", fields);
         }
         Ok(())
     });
@@ -1009,7 +1016,7 @@ extern "C-unwind" fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p
     arg
 }
 
-extern "C-unwind" fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
+pub extern "C-unwind" fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>) -> FatExpr<'p> {
     hope(|| {
         // Note: this does not evaluate the expression.
         // TODO: warning if it has side effects. especially if it does const stuff.

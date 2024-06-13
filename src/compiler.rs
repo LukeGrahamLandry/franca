@@ -25,9 +25,10 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{BigOption, BigResult, ExportVTable};
+use crate::export_ffi::{struct_macro, tagged_macro, type_macro, BigOption, BigResult, ExportVTable};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
+use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::scope::ResolveScope;
 use crate::{
@@ -219,6 +220,28 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.compile_expr(expr, Some(ty))
             }
             _ => err!("no contextual fields for type {ty:?} {}", self.program.log_type(ty)),
+        }
+    }
+
+    fn builtin_prefix_macro(&mut self, handler: &mut FatExpr<'p>, arg: &mut FatExpr<'p>, target: &mut FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+        let Expr::GetVar(name) = handler.expr else {
+            err!("macro invocations must be GetVar while bootstrapping",)
+        };
+        let name = Flag::try_from(name.name)?;
+        match name {
+            Flag::Type => {
+                assert!(target.is_raw_unit());
+                return Ok(type_macro(self, mem::take(arg)));
+            }
+            Flag::Struct => {
+                assert!(target.is_raw_unit());
+                return Ok(struct_macro(self, mem::take(arg)));
+            }
+            Flag::Tagged => {
+                assert!(target.is_raw_unit());
+                return Ok(tagged_macro(self, mem::take(arg)));
+            }
+            _ => err!("unknown macro invocation {:?} while bootstrapping", name),
         }
     }
 }
@@ -1419,6 +1442,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                     expr.done = true;
                     ty
                 } else {
+                    let var = *var;
+                    where_the_fuck_am_i(self, expr.loc);
                     ice!("Missing resolved variable {}", var.log(self.pool),)
                 }
             }
@@ -1448,7 +1473,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         walk.expr(&mut arg);
                         let mut placeholders = walk.placeholders; // drop walk.
 
-                        let ty = FatExpr::get_or_create_type(self.program);
+                        let ty = unwrap!(self.program.fat_expr_type, "used quoted ast during bootstrapping");
                         let value = to_values(self.program, arg)?;
 
                         expr.set(value.clone(), ty);
@@ -1638,43 +1663,44 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.ty
             }
             Expr::PrefixMacro { handler, arg, target } => {
-                let expr_ty = FatExpr::get_or_create_type(self.program);
-                let mut arg = mem::take(arg.deref_mut());
-                let mut target = mem::take(target.deref_mut());
-                let want = FatExpr::get_or_create_type(self.program);
+                // This allows @a E; instead of @a(E);
+                if arg.is_raw_unit() && !target.is_raw_unit() {
+                    mem::swap(arg, target);
+                }
+                let Some(expr_ty) = self.program.fat_expr_type else {
+                    *expr = self.builtin_prefix_macro(handler, arg, target)?;
+                    return self.compile_expr(expr, requested);
+                };
+                let arg = mem::take(arg.deref_mut());
+                let target = mem::take(target.deref_mut());
+                let want = expr_ty;
                 let arg_ty = self.program.tuple_of(vec![expr_ty, expr_ty]);
                 // TODO: this is dump copy-paste cause i cant easily resovle on type instead of expr
                 // TODO: ask for a callable but its hard because i dont know if i want one or two argument version yet. actually i guess i do, just look an target sooner. but im not sure eval will resolve the overload for me yet -- Apr 21
                 let os_id: OverloadSetId = self.immediate_eval_expr_known(*handler.clone())?;
                 self.compute_new_overloads(os_id, None)?;
 
+                let name = self.program[os_id].name;
                 let os = self.program[os_id].ready.iter().filter(|o| (o.ret.is_none()) || o.ret.unwrap() == want);
                 let mut os2 = os.clone().filter(|o| o.arg == arg_ty);
 
-                // This allows @a E; instead of @a(E);
-                if arg.is_raw_unit() && !target.is_raw_unit() {
-                    mem::swap(&mut arg, &mut target);
-                }
-                debugln_call!(
-                    "invoke macro: @{}({}) {}",
-                    self.pool.get(self.program[os_id].name),
-                    arg.log(self.pool),
-                    target.log(self.pool)
-                );
+                debugln_call!("invoke macro: @{}({}) {}", self.pool.get(name), arg.log(self.pool), target.log(self.pool));
                 // If they did '@m(e)' instead of '@m(e) s', prefer a handler that only expects one argument.
                 // TODO: should probably distinguish '@m(e) unit' just incase
                 let (f, args) = if target.is_raw_unit() {
                     let mut os1 = os.clone().filter(|o| o.arg == want);
+                    self.last_loc = Some(arg.loc);
                     let f = unwrap!(
                         os1.next(),
-                        "Missing macro overload (Expr) -> Expr. maybe you forgot a target expr on the invocation of {}",
+                        "Missing macro overload {} (Expr) -> Expr. maybe you forgot a target expr on the invocation of {}",
+                        self.pool.get(name),
                         handler.log(self.pool)
                     );
                     assert!(os1.next().is_none(), "ambigous macro overload");
                     let f = f.func;
                     (f, vec![Box::into_raw(Box::new(arg)) as i64])
                 } else {
-                    let f = unwrap!(os2.next(), "missing macro overload").func;
+                    let f = unwrap!(os2.next(), "missing macro overload {}", self.pool.get(name),).func;
                     assert!(os2.next().is_none(), "ambigous macro overload");
                     (f, vec![Box::into_raw(Box::new(arg)) as i64, Box::into_raw(Box::new(target)) as i64])
                 };
@@ -1938,7 +1964,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         // }
                         return Ok(None);
                     }
-                    Flag::Quote => FatExpr::get_or_create_type(self.program),
+                    Flag::Quote => unwrap!(self.program.fat_expr_type, "used quoted ast during bootstrapping"),
                     Flag::Loop => TypeId::never,
                     // TODO: there's no reason this couldn't look at the types, but if logic is more complicated (so i dont want to reproduce it) and might fail often (so id be afraid of it getting to a broken state).
                     Flag::If => return Ok(None),
@@ -2048,15 +2074,12 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         Some(match name {
-            "Symbol" => ffi_type!(Ident),
-            "FatExpr" => ffi_type!(FatExpr),
-            "Var" => ffi_type!(Var),
-            "FatStmt" => ffi_type!(FatStmt),
-            "TypeInfo" => ffi_type!(TypeInfo),
-            "IntTypeInfo" => ffi_type!(IntTypeInfo),
             "Stats" => ffi_type!(Stats),
-            "TargetArch" => ffi_type!(TargetArch),
             "ExecStyle" => ffi_type!(ExecStyle),
+            "LabelId" => ffi_type!(LabelId),
+            "ScopeId" => ffi_type!(ScopeId),
+            "FuncId" => ffi_type!(FuncId),
+            "Symbol" => ffi_type!(Ident),
             _ => {
                 let name = self.pool.intern(name);
                 self.program.find_ffi_type(name)?
@@ -3594,7 +3617,7 @@ impl<'z, 'a, 'p> WalkAst<'p> for Unquote<'z, 'a, 'p> {
             return true;
         };
         if *name == Flag::Unquote.ident() {
-            let expr_ty = FatExpr::get_or_create_type(self.compiler.program);
+            let expr_ty = self.compiler.program.fat_expr_type.expect("used unquote ast while bootstrapping");
             // self.compiler
             //     .compile_expr(self.arg, Some(expr_ty))
             //     .unwrap_or_else(|e| panic!("Expected comple ast but \n{e:?}\n{:?}", arg.log(self.compiler.pool))); // TODO

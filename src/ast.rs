@@ -31,7 +31,7 @@ impl std::fmt::Debug for TypeId {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub struct FnType {
     // Functions with multiple arguments are treated as a tuple.
     pub arg: TypeId,
@@ -40,7 +40,7 @@ pub struct FnType {
 }
 
 #[repr(i64)]
-#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug, InterpSend)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Debug)]
 pub enum VarType {
     Let,
     Var,
@@ -49,7 +49,7 @@ pub enum VarType {
 
 // TODO: HACK the layout of this is fragile becuase i pass it by reference without going through InterpSend -- May 27
 #[repr(C, i64)]
-#[derive(Clone, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
+#[derive(Clone, PartialEq, Hash, Eq, Debug, Default)]
 pub enum TypeInfo<'p> {
     #[default]
     Never,
@@ -132,7 +132,7 @@ pub struct Annotation<'p> {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug, InterpSend)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct Var<'p> {
     pub kind: VarType,
     pub name: Ident<'p>,
@@ -154,7 +154,7 @@ pub struct Var<'p> {
 // }
 // TODO: should really get an arena going because boxes make me sad.
 #[repr(C, i64)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub enum Expr<'p> {
     Poison,
     Value {
@@ -425,7 +425,7 @@ impl<'p> FatExpr<'p> {
 // Some common data needed by all expression types.
 // This is annoying and is why I want `using(SomeStructType, SomeEnumType)` in my language.
 #[repr(C)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub struct FatExpr<'p> {
     pub expr: Expr<'p>,
     pub loc: Span,
@@ -449,7 +449,7 @@ impl Default for FatExpr<'_> {
 }
 
 #[repr(C)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub struct Pattern<'p> {
     pub bindings: Vec<Binding<'p>>,
     pub loc: Span,
@@ -465,7 +465,7 @@ impl<'p> Default for Pattern<'p> {
 }
 
 #[repr(C, i64)]
-#[derive(Copy, Clone, Debug, InterpSend, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Name<'p> {
     Ident(Ident<'p>),
     Var(Var<'p>),
@@ -474,7 +474,7 @@ pub enum Name<'p> {
 
 // arguments of a function and left of variable declaration.
 #[repr(C)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub struct Binding<'p> {
     pub name: Name<'p>,
     pub ty: LazyType<'p>,
@@ -606,7 +606,7 @@ impl<'p> FatExpr<'p> {
 }
 
 #[repr(C, i64)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub enum Stmt<'p> {
     Noop,
     Eval(FatExpr<'p>),
@@ -645,7 +645,7 @@ pub enum Stmt<'p> {
 }
 
 #[repr(C)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub struct FatStmt<'p> {
     pub stmt: Stmt<'p>,
     pub annotations: Vec<Annotation<'p>>,
@@ -655,7 +655,7 @@ pub struct FatStmt<'p> {
 // NOTE: you can't store the FuncId in here because I clone it!
 // TODO: HACK: my layout is wrong!!!!!! generally putting u32s after BigOptions helped -- Jun 11
 #[repr(C)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub struct Func<'p> {
     pub annotations: Vec<Annotation<'p>>,
     pub capture_vars: Vec<Var<'p>>,
@@ -704,7 +704,7 @@ impl<'p> Func<'p> {
 }
 
 #[repr(i64)]
-#[derive(Copy, Clone, Debug, InterpSend, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum CallConv {
     CCallReg, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
     CCallRegCt,
@@ -715,7 +715,7 @@ pub enum CallConv {
 }
 
 #[repr(C, i64)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub enum FuncImpl<'p> {
     Normal(FatExpr<'p>),
     /// An external symbol to be resolved by the dynamic loader at runtime.
@@ -843,7 +843,7 @@ impl<'p> Func<'p> {
 }
 
 #[repr(C, i64)]
-#[derive(Clone, Debug, Default, InterpSend)]
+#[derive(Clone, Debug, Default)]
 pub enum LazyType<'p> {
     #[default]
     EvilUnit,
@@ -879,6 +879,9 @@ pub struct Program<'p> {
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
     // TODO: this could just be a !builtin, is that better?
     pub save_cstr_t: Option<TypeId>,
+
+    pub fat_expr_type: Option<TypeId>,
+    pub symbol_type: Option<TypeId>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -950,7 +953,7 @@ macro_rules! safe_rec {
 pub(crate) use safe_rec;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, InterpSend, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct IntTypeInfo {
     pub bit_count: i64,
     pub signed: bool,
@@ -959,6 +962,8 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch) -> Self {
         let mut program = Self {
+            symbol_type: None,
+            fat_expr_type: None,
             ffi_sizes: Default::default(),
             baked: Default::default(),
             finished_layout_deep: BitSet::empty(),
@@ -1687,7 +1692,7 @@ impl TypeId {
 
 /// It's important that these are consecutive in flags for safety of TryFrom
 #[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TargetArch {
     Aarch64 = Flag::Aarch64 as u8,
@@ -1698,7 +1703,7 @@ pub enum TargetArch {
 /// I don't require the values be stable, it just needs to be fixed within one run of the compiler so I can avoid a billion hash lookups.
 /// They're converted to lowercase which means you can't express an uppercase one.
 #[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
+#[derive(Copy, Clone, Hash, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Flag {
     _Reserved_Null_,
@@ -1788,6 +1793,9 @@ pub enum Flag {
     C,
     Unsafe_Noop_Cast,
     Import,
+    Type,
+    Struct,
+    Tagged,
     _Reserved_Count_,
 }
 

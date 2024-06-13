@@ -3,7 +3,7 @@ use std::mem::{self};
 use codemap::Span;
 
 use crate::{
-    ast::{OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
+    ast::{FatExpr, OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
     export_ffi::BigOption,
     Map,
 };
@@ -148,6 +148,27 @@ impl<'p> InterpSend<'p> for bool {
 
     fn name() -> String {
         "bool".to_string()
+    }
+}
+
+impl<'p> InterpSend<'p> for FatExpr<'p> {
+    fn get_type_key() -> u128 {
+        9014097120714207
+    }
+    fn create_type(p: &mut Program) -> TypeId {
+        p.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
+    }
+
+    fn get_type(p: &Program) -> TypeId {
+        p.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
+    }
+
+    fn get_or_create_type(p: &mut Program) -> TypeId {
+        p.fat_expr_type.expect("used FatExpr::InterpSend during bootstrapping")
+    }
+
+    fn name() -> String {
+        "FatExpr".to_string()
     }
 }
 
