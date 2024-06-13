@@ -409,8 +409,6 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn flush_callees(&mut self, f: FuncId) -> Res<'p, ()> {
-        #[cfg(target_arch = "aarch64")]
-        self.aarch64.make_exec();
         #[cfg(feature = "cranelift")]
         self.cranelift.flush_pending_defs(&mut self.aarch64)?;
 
@@ -454,6 +452,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             )
         }
 
+        self.flush_cpu_instruction_cache();
         Ok(())
     }
 
@@ -1682,7 +1681,6 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.update_cc(f)?;
                 self.flush_callees(f)?;
                 self.flush_cpu_instruction_cache();
-                self.aarch64.make_exec();
                 let ptr = self.aarch64.get_fn(f).unwrap();
                 let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::CCallRegCt);
                 let f_ty = self.program[f].finished_ty().unwrap();
@@ -2907,14 +2905,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
     }
 
-    fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Vec<u8>> {
+    fn const_args_key(&mut self, original_f: FuncId, arg_expr: &mut FatExpr<'p>) -> Res<'p, Values> {
         if self.program[original_f].arg.bindings.len() == 1 {
             let arg_ty = self.compile_expr(arg_expr, self.program[original_f].finished_arg.into())?;
             let value = self.immediate_eval_expr(arg_expr.clone(), arg_ty)?;
             if !matches!(arg_expr.expr, Expr::Value { .. }) {
                 arg_expr.set(value.clone(), arg_ty);
             }
-            Ok(value.vec())
+            Ok(value)
         } else {
             let check_len = |len| {
                 assert_eq!(
@@ -2971,7 +2969,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 all_const_args.extend(value.bytes());
                 i += 1;
             }
-            Ok(all_const_args)
+            Ok(Values::many(all_const_args))
         }
     }
 
@@ -3471,6 +3469,8 @@ impl<'a, 'p> Compile<'a, 'p> {
     }
 
     pub fn flush_cpu_instruction_cache(&mut self) {
+        let (beg, end) = self.aarch64.bump_dirty(); // this also sets the old page executable.
+
         // x86 doesn't this. TODO: what about riscv?
         #[cfg(target_arch = "aarch64")]
         {
@@ -3484,7 +3484,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             // https://github.com/apple/darwin-libplatform/blob/main/src/cachecontrol/arm64/cache.s
             // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sys_icache_invalidate.3.htmls
 
-            let (beg, end) = self.aarch64.bump_dirty();
             if beg != end {
                 unsafe { crate::export_ffi::__clear_cache(beg as *mut libc::c_char, end as *mut libc::c_char) }
             }

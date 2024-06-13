@@ -214,15 +214,25 @@ impl Values {
         Self::Small(v, 8)
     }
 
-    pub fn many(mut v: Vec<u8>) -> Self {
+    pub fn many(v: Vec<u8>) -> Self {
         if v.len() <= 8 {
-            let len = v.len() as u8;
-            while v.len() < 8 {
-                v.push(0);
-            }
-            Self::Small(i64::from_ne_bytes([v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]]), len)
+            Self::from_bytes(&v)
         } else {
             Self::Big(v)
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.len() <= 8 {
+            let mut v = 0;
+            let mut shift = 0;
+            for b in bytes {
+                v |= (*b as i64) << shift;
+                shift += 8;
+            }
+            Self::Small(v, bytes.len() as u8)
+        } else {
+            Self::Big(bytes.to_vec())
         }
     }
 
@@ -254,16 +264,13 @@ impl Values {
 
 use crate::export_ffi::{BigOption, BigResult::*};
 #[track_caller]
-pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, t: T) -> Res<'p, Values> {
+pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, mut t: T) -> Res<'p, Values> {
     let ty = T::get_or_create_type(program); // sigh
-    let mut bytes = unsafe {
-        let s = &*slice_from_raw_parts(&t as *const T as *const u8, mem::size_of::<T>());
-        s.to_vec()
-    };
+    let bytes = unsafe { &mut *slice_from_raw_parts_mut(&mut t as *mut T as *mut u8, mem::size_of::<T>()) };
     debug_assert_eq!(bytes.as_ptr() as usize % mem::align_of::<T>(), 0);
     debug_assert_eq!(bytes.len(), mem::size_of::<T>());
-    zero_padding(program, ty, &mut bytes, &mut 0)?; // TODO: deep?
-    Ok(Values::many(bytes))
+    zero_padding(program, ty, bytes, &mut 0)?; // TODO: deep?
+    Ok(Values::from_bytes(bytes))
 }
 
 pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) -> Res<'p, T> {
@@ -273,10 +280,7 @@ pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) 
     zero_padding(program, ty, t.bytes_mut(), &mut i)?;
     debug_assert_eq!(i, t.bytes().len());
     debug_assert_eq!(t.bytes().as_ptr() as usize % mem::align_of::<T>(), 0);
-    unsafe {
-        let s = &*(t.bytes().as_ptr() as *const T);
-        Ok(s.clone())
-    }
+    unsafe { Ok(std::ptr::read(t.bytes().as_ptr() as *const T)) }
 }
 
 // When binding const arguments you want to split a large value into smaller ones that can be referred to by name.

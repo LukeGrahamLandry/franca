@@ -841,6 +841,7 @@ impl<'p> Func<'p> {
         Ok(())
     }
 }
+
 #[repr(C, i64)]
 #[derive(Clone, Debug, Default, InterpSend)]
 pub enum LazyType<'p> {
@@ -871,7 +872,7 @@ pub struct Program<'p> {
     pub inline_llvm_ir: Vec<FuncId>,
     pub ffi_definitions: String,
     // After binding const args to a function, you get a new function with fewer arguments.
-    pub const_bound_memo: Map<(FuncId, Vec<u8>), FuncId>,
+    pub const_bound_memo: Map<(FuncId, Values), FuncId>,
     pub types_extra: RefCell<Vec<Option<TypeMeta>>>,
     finished_layout_deep: BitSet,
     pub baked: Baked,

@@ -138,7 +138,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         if self.asm.get_fn(f).is_some() || self.wip.contains(&f) {
             return Ok(());
         }
-        self.asm.make_write();
 
         self.wip.push(f);
 
@@ -1119,18 +1118,20 @@ extern "C-unwind" fn not_compiled(a: i64, b: i64, c: i64) {
 }
 
 pub mod jit {
+    use libc::c_void;
+
     use crate::ast::FuncId;
     use crate::bc_to_asm::brk;
     use crate::{JITTED_PAGE, STATS};
     use std::cell::UnsafeCell;
-    use std::ptr::null;
+    use std::ptr::{null, null_mut};
     use std::slice;
 
     use super::not_compiled;
+    const PAGE_SIZE: usize = 16384; // TODO
 
     pub struct Jitted {
-        map_mut: Option<memmap2::MmapMut>,
-        pub map_exec: Option<memmap2::Mmap>,
+        mmapped: *const u8,
         /// This is redundant but is the pointer used for actually calling functions and there aren't that many bits in the instruction,
         /// so I don't want to spend one doubling to skip lengths.
         pub dispatch: Vec<*const u8>,
@@ -1146,18 +1147,25 @@ pub mod jit {
     // TODO: https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/caches-and-self-modifying-code
     impl Jitted {
         pub fn new(bytes: usize) -> Self {
-            let mut map = memmap2::MmapOptions::new().len(bytes).map_anon().unwrap();
-            assert_eq!(map.as_ptr() as usize % 4, 0, "alignment's fucked");
-            unsafe { JITTED_PAGE = (map.as_ptr() as usize, bytes) }
-
+            let mmapped = unsafe {
+                libc::mmap(
+                    null_mut(),
+                    bytes,
+                    libc::PROT_WRITE | libc::PROT_READ,
+                    libc::MAP_ANON | libc::MAP_PRIVATE,
+                    -1,
+                    0,
+                )
+            } as *mut u8;
+            assert_eq!(mmapped as usize % 4, 0, "alignment's fucked");
+            unsafe { JITTED_PAGE = (mmapped as usize, bytes) }
             Self {
-                current_start: map.as_ptr(),
-                low: map.as_mut_ptr() as usize,
-                high: map.as_mut_ptr() as usize + bytes,
-                next: map.as_mut_ptr(),
-                old: map.as_mut_ptr(),
-                map_mut: Some(map),
-                map_exec: None,
+                current_start: mmapped,
+                low: mmapped as usize,
+                high: mmapped as usize + bytes,
+                next: mmapped,
+                old: mmapped,
+                mmapped,
                 dispatch: Vec::with_capacity(99999), // Dont ever resize!
                 ranges: vec![],
                 pending_indirect: vec![],
@@ -1166,18 +1174,11 @@ pub mod jit {
 
         pub fn copy_inline_asm(&mut self, f: FuncId, insts: &[u32]) {
             self.mark_start(f);
-            self.make_write();
             for op in insts {
                 let op = *op as i64;
                 self.push(op);
             }
             self.save_current(f);
-        }
-
-        pub fn bytes(&self) -> &[u8] {
-            let map = self.map_mut.as_ref().unwrap();
-            let len = unsafe { self.next.offset_from(map.as_ptr()) } as usize;
-            &map[0..len]
         }
 
         // This is a better marker for not compiled yet.
@@ -1215,9 +1216,8 @@ pub mod jit {
         }
 
         pub fn push(&mut self, inst: i64) {
-            let map = self.map_mut.as_ref().expect("No push while exec.");
             unsafe {
-                debug_assert!(map.as_ptr().add(map.len()) > self.next, "OOB");
+                debug_assert!((self.next as usize) < self.high, "OOB");
                 *(self.next as *mut u32) = inst as u32;
                 self.next = self.next.add(4);
             }
@@ -1238,7 +1238,8 @@ pub mod jit {
         }
 
         pub fn save_current(&mut self, f: FuncId) {
-            debug_assert!(self.map_mut.is_some());
+            debug_assert_ne!(self.next as usize, self.old as usize);
+            debug_assert_ne!(self.next as usize, self.current_start as usize);
             self.extend_blanks(f);
             unsafe {
                 // TODO: make sure there's not an off by one thing here.
@@ -1253,24 +1254,21 @@ pub mod jit {
             }
         }
 
-        pub fn make_exec(&mut self) {
-            if let Some(map) = self.map_mut.take() {
-                self.map_exec = Some(map.make_exec().unwrap());
-                unsafe { STATS.jit_mprotect += 1 };
-            }
-        }
-
-        pub fn make_write(&mut self) {
-            if let Some(map) = self.map_exec.take() {
-                self.map_mut = Some(map.make_mut().unwrap());
-                unsafe { STATS.jit_mprotect += 1 };
-            }
-        }
-
         // Returns the range of memory we've written since the last call.
         pub fn bump_dirty(&mut self) -> (*mut u8, *mut u8) {
             let dirty = (self.old, self.next);
-            self.old = self.next;
+            if self.old as usize != self.next as usize {
+                debug_assert_eq!(self.next as usize, self.current_start as usize);
+                self.push(brk(0x9801));
+                let len = (self.next as usize) - self.old as usize;
+                unsafe {
+                    libc::mprotect(self.old as *mut c_void, len, libc::PROT_EXEC | libc::PROT_READ);
+                };
+                let page_start = (self.next as usize / PAGE_SIZE) * PAGE_SIZE;
+                self.next = (page_start + PAGE_SIZE) as *mut u8;
+                self.old = self.next;
+                self.current_start = self.next;
+            }
             dirty
         }
     }

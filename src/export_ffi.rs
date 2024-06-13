@@ -16,7 +16,7 @@ use crate::overloading::where_the_fuck_am_i;
 use crate::parse::Parser;
 use crate::pool::{Ident, StringPool};
 use crate::scope::ResolveScope;
-use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
+use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
 use std::fmt::{Debug, Write};
 use std::mem::{self};
 use std::ops::{FromResidual, Try};
@@ -204,6 +204,7 @@ pub struct ImportVTable {
     give_vtable: unsafe extern "C" fn(c: &mut Compile, vtable: *const ExportVTable, userdata: *mut ()),
     get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
+    get_mem_mark: unsafe extern "C" fn() -> usize,
 }
 
 #[repr(C)]
@@ -232,7 +233,12 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     give_vtable,
     get_function_name,
     comptime_arch,
+    get_mem_mark,
 };
+
+unsafe extern "C" fn get_mem_mark() -> usize {
+    MEM.get() as usize
+}
 
 unsafe extern "C" fn comptime_arch() -> (i64, i64) {
     let arch = if cfg!(target_arch = "aarch64") {
@@ -346,7 +352,6 @@ unsafe extern "C" fn make_and_resolve_and_compile_top_level<'p>(c: &mut Compile<
 }
 
 unsafe extern "C" fn make_jitted_exec(c: &mut Compile) {
-    c.aarch64.make_exec();
     c.flush_cpu_instruction_cache();
 }
 
@@ -775,7 +780,6 @@ fn return_from_ffi(compile: &mut Compile) {
     // -- May 30
     // TODO: its wasteful to leave the map in exec mode if we're going to be writing to it again soon.
     compile.flush_cpu_instruction_cache();
-    compile.aarch64.make_exec();
 }
 
 extern "C-unwind" fn as_macro<'p>(compile: &mut Compile<'_, 'p>, arg: FatExpr<'p>, target: FatExpr<'p>) -> FatExpr<'p> {
