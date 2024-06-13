@@ -4,7 +4,7 @@
 
 - hashmaps said the wrong size, i was treating them as a Vec.
 - i was saying align of a struct was the align of the first field, but it should be the max field align.
-  which is wierd cause you have to pad it anyway if you can't reorder.
+  which is weird cause you have to pad it anyway if you can't reorder.
 - a problem i'd eventually have is rust probably doesn't define padding but i try to use Values as map keys,
   but i don't see how that could be the current problem.
   fixing that might help debug this tho.

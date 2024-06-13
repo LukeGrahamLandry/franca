@@ -757,7 +757,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].finished_ret = BigOption::Some(ret_ty);
             self.program[f].ret = LazyType::Finished(ret_ty);
         }
-        self.program[f].body = FuncImpl::Normal(body_expr);
+
+        // UNSURE. It offended me to see recursing ptr::drop_in_place in the profiler if im leaking all the memory anyway.
+        // the right answer is not clone in the first place but maybe you want to allow recovering from errors
+        // im not really sure.  -- Jun 12
+        let mut temp = FuncImpl::Normal(body_expr);
+        mem::swap(&mut self.program[f].body, &mut temp);
+        mem::forget(temp); //
 
         let func = &self.program[f];
         self.type_check_arg(ret_ty, func.finished_ret.unwrap(), "bad return value")?;
@@ -2321,7 +2327,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // TODO: @enum field access
             _ => {} // fallthrough
         }
-
+        // println!("{}\n\n\n", e.log(self.pool));
         Ok(None)
     }
 
@@ -2357,6 +2363,17 @@ impl<'a, 'p> Compile<'a, 'p> {
             return Ok(values);
         }
         let func_id = self.make_lit_function(e, ret_ty)?;
+        if let FuncImpl::Normal(body) = &mut self.program[func_id].body {
+            let mut stolen_body = mem::take(body);
+            self.compile_expr(&mut stolen_body, Some(ret_ty)).unwrap();
+            if let Some(values) = self.check_quick_eval(&mut stolen_body, ret_ty)? {
+                self.program[func_id].body = FuncImpl::Normal(stolen_body);
+                return Ok(values);
+            }
+            self.program[func_id].body = FuncImpl::Normal(stolen_body);
+        }
+
+        // println!("{}", self.program[func_id].body.log(self.pool));
 
         // TODO: HACK kinda because it might need to be compiled in the function context to notice that its really a constant so this gets double checked which is sad -- May 1
         //       also maybe undo this opt if can't find the asm bug cause its a simpler test case.
