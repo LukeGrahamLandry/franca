@@ -461,7 +461,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         break;
                     }
                 }
-                Bc::PushConstant { value } => {
+                Bc::PushConstant { value, .. } => {
                     self.stack.push(Val::literal(value));
                 }
                 Bc::PushGlobalAddr { id } => {
@@ -469,6 +469,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         _ty: None,
                         refer: format!("(&_const{})", id.0),
                         offset: 0,
+                        is_rvalue: false,
                     });
                 }
                 Bc::JumpIf { true_ip, false_ip, slots } => {
@@ -517,6 +518,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                         _ty: Some(Prim::I64),
                         refer: format!("&_FN{}", f.as_index()),
                         offset: 0,
+                        is_rvalue: false,
                     });
                 }
                 Bc::Load { ty } => {
@@ -529,14 +531,12 @@ impl<'z, 'p> Emit<'z, 'p> {
                 Bc::StorePost { ty } => {
                     let addr = self.stack.pop().unwrap();
                     let value = self.stack.pop().unwrap();
-                    let ty = c_type_spec(ty);
-                    writeln!(self.code, "    *({ty}*) ({addr}) = ({ty}) {value};").unwrap();
+                    self.store(ty, addr, value);
                 }
                 Bc::StorePre { ty } => {
                     let value = self.stack.pop().unwrap();
                     let addr = self.stack.pop().unwrap();
-                    let ty = c_type_spec(ty);
-                    writeln!(self.code, "    *({ty}*) ({addr}) = ({ty}) {value};").unwrap();
+                    self.store(ty, addr, value);
                 }
                 Bc::AddrVar { id } => {
                     self.stack.push(Val::of_var(id as usize + STACK_ARG_SLOTS));
@@ -639,6 +639,20 @@ impl<'z, 'p> Emit<'z, 'p> {
         }
         Ok(())
     }
+
+    fn store(&mut self, ty: Prim, addr: Val, value: Val) {
+        let c_ty = c_type_spec(ty);
+        if matches!(ty, Prim::F32 | Prim::F64) {
+            if value.is_rvalue {
+                // writeln!(self.code, "    *({c_ty}*) ({addr}) = *(({c_ty}*) &{value});").unwrap();
+                todo!()
+            } else {
+                writeln!(self.code, "    *({c_ty}*) ({addr}) = *(({c_ty}*) &{value});").unwrap();
+            }
+        } else {
+            writeln!(self.code, "    *({c_ty}*) ({addr}) = ({c_ty}) {value};").unwrap();
+        }
+    }
 }
 
 fn ty_spec(is_float: bool) -> &'static str {
@@ -666,6 +680,7 @@ struct Val {
     _ty: Option<Prim>,
     refer: String,
     offset: u16,
+    is_rvalue: bool,
 }
 
 impl Val {
@@ -674,6 +689,7 @@ impl Val {
             _ty: None,
             refer: format!("_{id}"),
             offset: 0,
+            is_rvalue: false,
         }
     }
     fn literal(value: i64) -> Self {
@@ -681,6 +697,7 @@ impl Val {
             _ty: None,
             refer: format!("{value:#0x}"),
             offset: 0,
+            is_rvalue: false,
         }
     }
 }

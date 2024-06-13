@@ -1,3 +1,5 @@
+> for reference, `franca run_tests.fr`, just unit tests: 62 ms. before prim_sig change.
+
 ## (Jun 11/12)
 
 > we're at 15404 loc .rs

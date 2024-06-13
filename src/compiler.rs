@@ -28,7 +28,6 @@ use crate::emit_bc::emit_bc;
 use crate::export_ffi::{do_flat_call_values, BigOption, BigResult, ExportVTable, FlatCallFn};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
-use crate::overloading::where_the_fuck_am_i;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
 use crate::scope::ResolveScope;
 use crate::{

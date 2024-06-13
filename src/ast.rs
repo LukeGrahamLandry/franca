@@ -440,10 +440,6 @@ impl<'p> FatExpr<'p> {
         self.ty = ty;
         self.done = true;
     }
-
-    pub fn value(value: Values, ty: TypeId, loc: Span) -> Self {
-        FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
-    }
 }
 
 impl Default for FatExpr<'_> {
@@ -1566,38 +1562,6 @@ impl<'p> Deref for FatStmt<'p> {
 impl<'p> DerefMut for FatStmt<'p> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.stmt
-    }
-}
-
-impl<'p> Stmt<'p> {
-    pub fn fat_empty(self, loc: Span) -> FatStmt<'p> {
-        FatStmt {
-            stmt: self,
-            annotations: vec![],
-            loc,
-        }
-    }
-
-    pub fn fat_with(self, annotations: Vec<Annotation<'p>>, loc: Span) -> FatStmt<'p> {
-        FatStmt {
-            stmt: self,
-            annotations,
-            loc,
-        }
-    }
-}
-
-impl<'p> FatStmt<'p> {
-    pub fn null(loc: Span) -> Self {
-        FatStmt {
-            stmt: Stmt::null(loc),
-            annotations: vec![],
-            loc,
-        }
-    }
-
-    pub fn get_tag_arg(&self, name: Flag) -> Option<&FatExpr<'p>> {
-        self.annotations.iter().find(|a| a.name == name.ident()).and_then(|a| a.args.as_ref())
     }
 }
 

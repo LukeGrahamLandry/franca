@@ -281,7 +281,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.eat(RightSquiggle)?;
                 Ok(expr)
             }
-            DotLeftSquiggle => Err(self.error_next(String::from("Use '(Name: Value)' instead of '.{ Name: Value }'"))),
+            DotLeftSquiggle => Err(self.error_next(String::from("Use '(Name = Value)' instead of '.{ Name: Value }'"))),
             LeftParen => self.parse_tuple(),
             Number(f) => {
                 self.start_subexpr();
@@ -419,13 +419,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 Ok(self.expr(Expr::SuffixMacro(Flag::Const_Eval.ident(), Box::new(e))))
             }
             Bang => {
-                // !name === ()!name
-                self.start_subexpr();
-                self.start_subexpr();
-                self.eat(Bang)?;
-                let name = self.ident()?;
-                let prefix = Box::new(self.raw_unit());
-                Ok(self.expr(Expr::SuffixMacro(name, prefix)))
+                return Err(self.error_next(String::from("prefix bang macro deprecated, use `()!name` instead of `!name`.")));
             }
             _ => Err(self.expected("Expr === 'fn' or '{' or '(' or '\"' or '@' or Num or Ident...")),
         }
@@ -461,7 +455,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.push_arg(&mut prefix, callback)?;
                     prefix
                 }
-
                 Bang => {
                     self.start_subexpr();
                     self.eat(Bang)?;

@@ -13,7 +13,7 @@ use franca::{
     parse::{Parser, ANON_BODY_AS_NAME},
     pool::StringPool,
     scope::ResolveScope,
-    timestamp, Map, MEM, MMAP_ARENA_START, STACK_START, STATS,
+    timestamp, MEM, MMAP_ARENA_START, STACK_START, STATS,
 };
 use std::{
     env,

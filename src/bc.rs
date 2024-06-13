@@ -25,7 +25,7 @@ pub struct BbId(pub u16);
 pub enum Bc {
     CallDirect { sig: PrimSig, f: FuncId, tail: bool },   // <args:m> -> <ret:n>
     CallFnPtr { sig: PrimSig },                           // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
-    PushConstant { value: i64 },                          // _ -> <v:1>
+    PushConstant { value: i64, ty: Prim },                // _ -> <v:1>
     JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !
     Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
     GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>

@@ -359,7 +359,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::NoCompile => unreachable!("{}", self.program[self.f].log(self.program.pool)),
 
-            Bc::PushConstant { value } => self.state.stack.push(Val::Literal(value)),
+            Bc::PushConstant { value, .. } => self.state.stack.push(Val::Literal(value)),
             Bc::PushGlobalAddr { id } => {
                 let ptr = self.program.baked.get(id).1;
                 self.state.stack.push(Val::Literal(ptr as i64));

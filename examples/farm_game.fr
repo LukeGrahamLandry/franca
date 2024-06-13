@@ -164,6 +164,8 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     dylib_path := if(is_x86, => "target/sokol-x86_64.dylib", => "target/sokol-aarch64.dylib");
     dylib_path_c := dylib_path.maybe_borrow_cstr(libc_allocator);
     sokol := dlopen(dylib_path_c, DlFlag.Lazy);
+    macos_args := ("-DSOKOL_METAL", "-x", "objective-c", "-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore")!slice;
+    common_args := ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY",  "-O2")!slice;
     if(sokol.lib.is_null()){|
         c_file := open_temp_file();
         c_file.fd&.write(SOKOL_C);
@@ -171,12 +173,11 @@ fn driver(vtable: *ImportVTable) Unit #export = {
         // TODO: don't hardcode platform. 
         // build it!
         // macos_args must go first to treat source as objective c!
-        macos_args := ("-DSOKOL_METAL", "-x", "objective-c", "-framework", "Metal", "-framework", "MetalKit", "-framework", "Cocoa", "-framework", "QuartzCore")!slice;
-        common_args := ("-Ivendor/sokol", "-DSOKOL_IMPL", "-DSOKOL_NO_ENTRY",  "-O2", c_file&.s_name())!slice;
         dyn_args := ("-DSOKOL_DLL", "-dynamiclib", "-o", dylib_path)!slice;
         args := macos_args.clone(libc_allocator);
         args&.push_all(common_args);
         args&.push_all(dyn_args);
+        args&.push(c_file&.s_name());
         if(is_x86) {|
             // cross compile for rosetta. 
             args&.push_all(("-target", "x86_64-apple-darwin")!slice);
@@ -205,14 +206,32 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     comp := vtable.new_with_src(src.items(), if(is_x86, => .Cranelift, => .Aarch64));
     {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
     
-    jit_and_run_main(vtable, comp);
-    fn jit_and_run_main(vtable: *ImportVTable, comp: Compiler) Unit = {
-        main_sym := {vtable.intern_string}(comp, "main");
-        main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
-        {vtable.compile_func}(comp, main_f, .Jit).unwrap();
-        ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
-        {vtable.make_jitted_exec}(comp);
-        f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
-        f();
-    }
+    main_sym := {vtable.intern_string}(comp, "main");
+    main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
+    {vtable.compile_func}(comp, main_f, .Jit).unwrap();
+    
+    /* 
+    c := {vtable.emit_c}(comp, (main_f)!slice, false).unwrap();
+    c_file := open_temp_file();
+    c_file.fd&.write(c);
+    args := macos_args.clone(libc_allocator);
+    args&.push_all(common_args);
+    args&.push(c_file&.s_name());
+    warnings := clang_hack_ignore_warning_args;
+    args&.push_all(warnings&.slice());
+    
+    ::display_slice(Str);
+    @println("building sokol dylib for runtime: %", args.items());
+    success := run_cmd_blocking(CLANG_PATH, args.items());
+    assert(success, "clang failed");
+    
+    c_file.remove(); // TODO: defer
+    */
+    
+    
+    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+    {vtable.make_jitted_exec}(comp);
+    f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
+    f();
+    
 }

@@ -236,6 +236,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             _pushed += 1;
                             result.push(Bc::PushConstant {
                                 value: value.bytes().as_ptr() as i64,
+                                ty: Prim::I64,
                             });
                             continue;
                         }
@@ -782,15 +783,16 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 match result_location {
                     PushStack => {
                         let mut parts = vec![];
+                        let mut info = vec![];
                         deconstruct_values(
                             self.program,
                             expr.ty,
                             &mut ReadBytes { bytes: value.bytes(), i: 0 },
                             &mut parts,
-                            &mut None,
+                            &mut Some(&mut info),
                         )?;
-                        for value in parts {
-                            result.push(Bc::PushConstant { value });
+                        for (value, (ty, _)) in parts.into_iter().zip(info.into_iter()) {
+                            result.push(Bc::PushConstant { value, ty });
                         }
                     }
                     ResAddr => {
@@ -801,7 +803,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             //       this solution is extra bad becuase it relies on the value vec not being free-ed
                             // TODO: need to leak when small by value?
                             let ptr = value.bytes().as_ptr();
-                            result.push(Bc::PushConstant { value: ptr as i64 });
+                            result.push(Bc::PushConstant {
+                                value: ptr as i64,
+                                ty: Prim::I64,
+                            });
 
                             result.push(Bc::CopyBytesToFrom {
                                 bytes: self.program.get_info(expr.ty).stride_bytes, // Note: not the same as value.len!!!!!
@@ -820,7 +825,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             for (value, (ty, offset)) in parts.into_iter().zip(offsets.into_iter()) {
                                 result.push(Bc::PeekDup(0));
                                 result.inc_ptr_bytes(offset);
-                                result.push(Bc::PushConstant { value });
+                                result.push(Bc::PushConstant { value, ty });
                                 result.push(Bc::StorePre { ty });
                             }
                             result.pop(1) // res ptr
@@ -853,7 +858,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         self.compile_expr(result, arg, ResAddr, false)?;
 
                         result.addr_var(id);
-                        result.push(Bc::PushConstant { value: count as i64 });
+                        result.push(Bc::PushConstant {
+                            value: count as i64,
+                            ty: Prim::I64,
+                        });
                         match result_location {
                             PushStack => {}
                             ResAddr => {
@@ -941,7 +949,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             PushStack => {
                                 let slots = self.slot_count(expr.ty);
                                 for _ in 0..slots {
-                                    result.push(Bc::PushConstant { value: 0 });
+                                    result.push(Bc::PushConstant { value: 0, ty: Prim::I64 });
+                                    // TODO: wrong prim!
                                 }
                             }
                             ResAddr => result.push(Bc::Snipe(0)), // just pop the res ptr
@@ -1140,16 +1149,22 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 match result_location {
                     PushStack => {
-                        result.push(Bc::PushConstant { value: i as i64 });
+                        result.push(Bc::PushConstant {
+                            value: i as i64,
+                            ty: Prim::I64,
+                        });
                         self.compile_expr(result, values[0], result_location, false)?;
                         // If this is a smaller varient, pad out the slot.
                         for _ in (payload_size + 1)..size {
-                            result.push(Bc::PushConstant { value: 0 });
+                            result.push(Bc::PushConstant { value: 0, ty: Prim::I64 });
                         }
                     }
                     ResAddr => {
                         result.push(Bc::PeekDup(0));
-                        result.push(Bc::PushConstant { value: i as i64 });
+                        result.push(Bc::PushConstant {
+                            value: i as i64,
+                            ty: Prim::I64,
+                        });
                         result.push(Bc::StorePre { ty: Prim::I64 });
                         result.inc_ptr_bytes(8); // TODO: differetn sizes of tag
                         self.compile_expr(result, values[0], result_location, false)?;
@@ -1179,9 +1194,11 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let (arg, ret) = self.program.get_infos(f_ty);
         result.push(Bc::PushConstant {
             value: arg.stride_bytes as i64,
+            ty: Prim::I64,
         });
         result.push(Bc::PushConstant {
             value: ret.stride_bytes as i64,
+            ty: Prim::I64,
         });
     }
 }

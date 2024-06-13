@@ -451,7 +451,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     }
                     self.cast_ret_from_float(builder, ret_val.len() as u16, sig.ret_float_mask);
                 }
-                Bc::PushConstant { value } => self.stack.push(builder.ins().iconst(I64, value)),
+                Bc::PushConstant { value, .. } => self.stack.push(builder.ins().iconst(I64, value)),
                 Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
                     BakedVar::Bytes(bytes) => {
                         let id: DataId = Into::<Res<_>>::into(self.cl.module.declare_anonymous_data(false, false).map_err(wrap))?;
