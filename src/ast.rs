@@ -11,7 +11,6 @@ use crate::{
     unwrap, BitSet, Map, STATS,
 };
 use codemap::Span;
-use interp_derive::InterpSend;
 use std::{
     cell::RefCell,
     hash::Hash,
@@ -90,7 +89,7 @@ pub enum TypeInfo<'p> {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, InterpSend, Default)]
+#[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, Default)]
 pub struct TypeMeta {
     pub size_slots: u16,
     pub stride_bytes: u16,
@@ -116,7 +115,7 @@ impl TypeMeta {
 }
 
 #[repr(C)]
-#[derive(Clone, Hash, Debug, PartialEq, Eq, InterpSend)]
+#[derive(Clone, Hash, Debug, PartialEq, Eq)]
 pub struct Field<'p> {
     pub name: Ident<'p>,
     pub ty: TypeId,
@@ -125,7 +124,7 @@ pub struct Field<'p> {
 }
 
 #[repr(C)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub struct Annotation<'p> {
     pub name: Ident<'p>,
     pub args: BigOption<FatExpr<'p>>,
@@ -986,6 +985,9 @@ impl<'p> Program<'p> {
                 }),
                 TypeInfo::VoidPtr,
                 TypeInfo::F32,
+                TypeInfo::Named(TypeId::from_index(10), pool.intern("FuncId")),
+                TypeInfo::Named(TypeId::from_index(10), pool.intern("LabelId")),
+                TypeInfo::Named(TypeId::from_index(10), pool.intern("Symbol")),
             ],
             funcs: Default::default(),
             next_var: 0,
@@ -1401,12 +1403,6 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub(crate) fn named_tuple(&mut self, name: &str, types: Vec<TypeId>) -> TypeId {
-        let ty = self.tuple_of(types);
-        let name = self.pool.intern(name);
-        self.intern_type(TypeInfo::Named(ty, name))
-    }
-
     pub fn log_struct_layout(&self, fields: &[Field]) -> String {
         fields
             .iter()
@@ -1688,6 +1684,9 @@ impl TypeId {
     pub fn f32() -> TypeId {
         TypeId::from_index(12)
     }
+    pub const func: Self = Self::from_index(13);
+    pub const label: Self = Self::from_index(14);
+    pub const ident: Self = Self::from_index(15);
 }
 
 /// It's important that these are consecutive in flags for safety of TryFrom
@@ -1876,7 +1875,7 @@ tagged_index!(LabelId, 27, u32);
 pub struct TypeId(u32);
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Eq, PartialEq, Hash, InterpSend)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct FuncId(u32);
 
 #[repr(transparent)]
@@ -1888,7 +1887,7 @@ pub struct ScopeId(u32);
 pub struct OverloadSetId(u32);
 
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, InterpSend, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LabelId(u32);
 
 macro_rules! func_impl_getter {

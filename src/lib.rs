@@ -114,7 +114,6 @@ use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, Spa
 use compiler::CErr;
 use export_ffi::BigOption;
 use export_ffi::STDLIB_PATH;
-use interp_derive::InterpSend;
 use pool::StringPool;
 
 macro_rules! mut_replace {
@@ -154,7 +153,8 @@ use crate::{
     compiler::{Compile, CompileError},
 };
 
-#[derive(Clone, Debug, InterpSend)]
+#[repr(C)]
+#[derive(Clone, Debug)]
 pub struct Stats {
     pub ast_expr_nodes_all: usize,
     pub fn_body_resolve: usize,
@@ -438,7 +438,7 @@ fn signed_truncate(mut x: i64, bit_count: i64) -> i64 {
 // Feels like this might be useful for representing padding?
 // But maybe it makes more sense to do it in chunks since its generally all at the end (when not repr(C)?).
 #[repr(C, i64)]
-#[derive(Clone, Debug, InterpSend)]
+#[derive(Clone, Debug)]
 pub enum BitSet {
     // Note: not u128 which means they can be split which means it can use the Vec's niche.
     Small([usize; 2]),

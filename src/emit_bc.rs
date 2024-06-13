@@ -9,7 +9,6 @@
 #![allow(clippy::wrong_self_convention)]
 
 use codemap::Span;
-use interp_derive::InterpSend;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 
@@ -39,7 +38,7 @@ pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res
     Ok(body)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, InterpSend)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultLoc {
     PushStack,
     ResAddr,

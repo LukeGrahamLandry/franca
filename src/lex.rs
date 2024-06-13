@@ -3,12 +3,10 @@
 // TODO: this could be a good thing to start with for trying self hosting.
 
 use crate::ast::Flag;
-use crate::ast::TypeId;
 use crate::ast::VarType;
 use crate::lex::TokenType::*;
 use crate::pool::{Ident, StringPool};
 use codemap::{File, Span};
-use interp_derive::InterpSend;
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::ops::Deref;
@@ -67,7 +65,7 @@ pub enum TokenType<'p> {
     Error(LexErr),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, InterpSend)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LexErr {
     UnterminatedStr,
     Unexpected(char),

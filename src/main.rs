@@ -669,7 +669,6 @@ fn do_60fps(arch: TargetArch) {
             }
         }
 
-        todo!();
         // let mut temp = memmap2::MmapOptions::new().len(0).map_anon().unwrap().make_exec().unwrap();
         // comp.aarch64.make_exec(); // if we were using cranelift backend, it might be write the first time.
         // mem::swap(comp.aarch64.map_exec.as_mut().unwrap(), &mut temp);
@@ -687,6 +686,8 @@ fn do_60fps(arch: TargetArch) {
         mem::forget(program);
         // Reset the arena
         MEM.set(base);
+
+        todo!();
     }
     let end = timestamp();
     let s = end - start;

@@ -17,6 +17,21 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     fork_run_main(vtable, "main.fr");
     chdir("../../".maybe_borrow_cstr(libc_allocator));
     
+    
+    // TODO: #import_std uses relative paths. 
+    chdir("compiler".maybe_borrow_cstr(libc_allocator));
+    check_driver_compiles(vtable, "first.fr");
+    s__ := fork_and_catch(libc_allocator) {|
+        src := "#include_std(\"core.fr\");".clone(libc_allocator);
+        src&.read_and_push("main.fr");
+        comp := vtable.new_with_src(src.items(), TARGET);
+        run_tests(vtable, comp);
+    };
+    // TODO: @assert
+    assert(s__._0, "compiler tests failed");
+    println("- ran compiler tests");
+    chdir("../".maybe_borrow_cstr(libc_allocator));
+    
     mandelbrot(vtable);
     set_colour(250, 150, 200);
     println("ALL EXAMPLES PASSED!");
@@ -52,6 +67,24 @@ fn run_sequential(vtable: *ImportVTable) Compiler = {
     };
     {vtable.make_and_resolve_and_compile_top_level}(comp, all_stmts.items()).unwrap();
     
+    
+    len := run_tests(vtable, comp);
+    end := timestamp();
+    mem_end := {vtable.get_mem_mark}();
+    
+    set_colour(250, 150, 200);
+    @println(
+        "ALL TESTS PASSED! % files. % tests. % ms. % KB.",
+        found.len,
+        len,
+        end.sub(start),
+        mem_end.sub(mem_start).div(1024)
+    );
+    unset_colour();
+    comp
+}
+
+fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
     sym_test := {vtable.intern_string}(comp, "test");
     tests := {vtable.get_fns_with_tag}(comp, sym_test);
     
@@ -77,20 +110,8 @@ fn run_sequential(vtable: *ImportVTable) Compiler = {
         f();
     };
     println("");
+    tests.len
     
-    end := timestamp();
-    mem_end := {vtable.get_mem_mark}();
-    
-    set_colour(250, 150, 200);
-    @println(
-        "ALL TESTS PASSED! % files. % tests. % ms. % KB.",
-        found.len(),
-        tests.len(),
-        end.sub(start),
-        mem_end.sub(mem_start).div(1024)
-    );
-    unset_colour();
-    comp
 }
 
 fn mandelbrot(vtable: *ImportVTable) Unit = {

@@ -7,7 +7,6 @@
 use codemap::Span;
 use codemap_diagnostic::Diagnostic;
 use core::slice;
-use interp_derive::InterpSend;
 use std::ffi::CString;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -35,7 +34,7 @@ use crate::{
     ast::{Expr, FatExpr, FnType, Func, FuncId, LazyType, Program, Stmt, TypeId, TypeInfo},
     pool::{Ident, StringPool},
 };
-use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, Stats, STACK_MIN, STATS};
+use crate::{bc::*, extend_options, ffi, impl_index, unwrap2, Map, STACK_MIN, STATS};
 
 use crate::{assert, assert_eq, err, ice, unwrap};
 use BigResult::*;
@@ -2059,6 +2058,9 @@ impl<'a, 'p> Compile<'a, 'p> {
             "rawptr" => return Some(TypeId::voidptr),
             "OverloadSet" => return Some(TypeId::overload_set),
             "ScopedBlock" => return Some(TypeId::scope),
+            "LabelId" => return Some(TypeId::label),
+            "ScopeId" => return Some(TypeId::scope),
+            "FuncId" => return Some(TypeId::func),
             _ => None,
         };
         if let Some(ty) = ty {
@@ -2074,11 +2076,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         Some(match name {
-            "Stats" => ffi_type!(Stats),
-            "ExecStyle" => ffi_type!(ExecStyle),
-            "LabelId" => ffi_type!(LabelId),
-            "ScopeId" => ffi_type!(ScopeId),
-            "FuncId" => ffi_type!(FuncId),
             "Symbol" => ffi_type!(Ident),
             _ => {
                 let name = self.pool.intern(name);
@@ -3587,7 +3584,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 }
 
 #[repr(i64)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, InterpSend)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExecStyle {
     Jit = 0,
     Aot = 1,

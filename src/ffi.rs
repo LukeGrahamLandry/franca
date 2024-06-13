@@ -3,9 +3,8 @@ use std::mem::{self};
 use codemap::Span;
 
 use crate::{
-    ast::{FatExpr, OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
+    ast::{FatExpr, FuncId, LabelId, OverloadSetId, Program, ScopeId, TypeId, TypeInfo},
     export_ffi::BigOption,
-    Map,
 };
 
 // TODO: figure out how to check that my garbage type keys are unique.
@@ -95,19 +94,14 @@ macro_rules! send_num {
 }
 
 send_num!(i64, 64, true, 8, next_i64, push_i64, i64);
-send_num!(u64, 64, false, 8, next_i64, push_i64, i64);
-send_num!(isize, 64, true, 8, next_i64, push_i64, i64);
 send_num!(usize, 64, false, 8, next_i64, push_i64, i64);
-send_num!(i32, 32, true, 4, next_u32, push_u32, u32);
 send_num!(u32, 32, false, 4, next_u32, push_u32, u32);
-send_num!(i16, 16, true, 2, next_u16, push_u16, u16);
 send_num!(u16, 16, false, 2, next_u16, push_u16, u16);
-send_num!(i8, 8, true, 1, next_u8, push_u8, u8);
 send_num!(u8, 8, false, 1, next_u8, push_u8, u8);
 
 impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
     fn get_type_key() -> u128 {
-        mix::<T, Box<()>>(1274222)
+        mix::<T, i64>(1274222)
     }
     fn create_type(p: &mut Program) -> TypeId {
         let t = T::get_or_create_type(p);
@@ -127,27 +121,6 @@ impl<'p, T: InterpSend<'p>> InterpSend<'p> for *mut T {
 
     fn name() -> String {
         format!("*{}", T::name())
-    }
-}
-
-impl<'p> InterpSend<'p> for bool {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_: &mut Program) -> TypeId {
-        TypeId::bool()
-    }
-
-    fn get_type(_: &Program) -> TypeId {
-        TypeId::bool()
-    }
-
-    fn get_or_create_type(_: &mut Program) -> TypeId {
-        TypeId::bool()
-    }
-
-    fn name() -> String {
-        "bool".to_string()
     }
 }
 
@@ -172,26 +145,6 @@ impl<'p> InterpSend<'p> for FatExpr<'p> {
     }
 }
 
-impl<'p> InterpSend<'p> for () {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_: &mut Program) -> TypeId {
-        TypeId::unit
-    }
-
-    fn get_type(_: &Program) -> TypeId {
-        TypeId::unit
-    }
-    fn get_or_create_type(_: &mut Program) -> TypeId {
-        TypeId::unit
-    }
-
-    fn name() -> String {
-        "Unit".to_string()
-    }
-}
-
 impl<'p> InterpSend<'p> for char {
     fn get_type_key() -> u128 {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
@@ -205,20 +158,7 @@ impl<'p> InterpSend<'p> for char {
     }
 }
 
-impl<'p> InterpSend<'p> for f64 {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_program: &mut Program) -> TypeId {
-        TypeId::f64()
-    }
-
-    fn name() -> String {
-        "f64".to_string()
-    }
-}
-
-macro_rules! ffi_index {
+macro_rules! ffi_builtin_type {
     ($ty:ty, $typeid:expr, $name:expr) => {
         impl<'p> InterpSend<'p> for $ty {
             fn get_type_key() -> u128 {
@@ -241,28 +181,14 @@ macro_rules! ffi_index {
     };
 }
 
-ffi_index!(OverloadSetId, TypeId::overload_set, "OverloadSet");
-ffi_index!(ScopeId, TypeId::scope, "Scope");
-
-// This needs to be 8 bytes because it can't have a special Load function.
-impl<'p> InterpSend<'p> for TypeId {
-    fn get_type_key() -> u128 {
-        unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) }
-    }
-    fn create_type(_: &mut Program) -> TypeId {
-        TypeId::ty
-    }
-
-    fn get_type(_: &Program) -> TypeId {
-        TypeId::ty
-    }
-    fn get_or_create_type(_: &mut Program) -> TypeId {
-        TypeId::ty
-    }
-    fn name() -> String {
-        "Type".to_string()
-    }
-}
+ffi_builtin_type!(OverloadSetId, TypeId::overload_set, "OverloadSet");
+ffi_builtin_type!(ScopeId, TypeId::scope, "Scope");
+ffi_builtin_type!(TypeId, TypeId::ty, "Type");
+ffi_builtin_type!(LabelId, TypeId::label, "LabelId");
+ffi_builtin_type!(FuncId, TypeId::func, "FuncId");
+ffi_builtin_type!(bool, TypeId::bool(), "bool");
+ffi_builtin_type!(f64, TypeId::f64(), "f64");
+ffi_builtin_type!((), TypeId::unit, "Unit");
 
 macro_rules! fixed_array {
     ($ty:ty, $len:expr) => {
@@ -317,22 +243,6 @@ impl<'p, A: InterpSend<'p>, B: InterpSend<'p>, C: InterpSend<'p>> InterpSend<'p>
     }
 }
 
-impl<'p, T: InterpSend<'p>> InterpSend<'p> for Vec<T> {
-    fn get_type_key() -> u128 {
-        mix::<T, i16>(999998827262625)
-    }
-
-    fn create_type(program: &mut Program) -> TypeId {
-        let ty = T::get_or_create_type(program);
-        let ty = program.intern_type(TypeInfo::Ptr(ty));
-        program.tuple_of(vec![TypeId::i64(), ty, TypeId::i64()]) // TODO: not this
-    }
-
-    fn name() -> String {
-        format!("RsVec({})", T::name())
-    }
-}
-
 impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
     fn get_type_key() -> u128 {
         mix::<T, u16>(999998827262625)
@@ -346,21 +256,6 @@ impl<'p, T: InterpSend<'p> + Clone> InterpSend<'p> for *mut [T] {
 
     fn name() -> String {
         format!("Slice({})", T::name())
-    }
-}
-
-impl<'p, T: InterpSend<'p>> InterpSend<'p> for Box<T> {
-    fn get_type_key() -> u128 {
-        mix::<T, i8>(67445234555533)
-    }
-
-    fn create_type(program: &mut Program) -> TypeId {
-        let ty = T::get_or_create_type(program);
-        program.intern_type(TypeInfo::Ptr(ty))
-    }
-
-    fn name() -> String {
-        format!("*{}", T::name())
     }
 }
 
@@ -400,25 +295,6 @@ impl<'p> InterpSend<'p> for Span {
 
     fn name() -> String {
         "Span".to_string()
-    }
-}
-
-impl<'p, K: InterpSend<'p> + Eq + std::hash::Hash, V: InterpSend<'p>> InterpSend<'p> for Map<K, V> {
-    fn get_type_key() -> u128 {
-        mix::<K, V>(1234567890)
-    }
-
-    fn create_type(interp: &mut Program) -> TypeId {
-        // Vec::<(K, V)>::get_or_create_type(interp)
-        let bytes = mem::size_of::<Self>();
-        debug_assert_eq!(bytes % mem::size_of::<i64>(), 0);
-        let len = (bytes / mem::size_of::<i64>()) as u32;
-        let inner = interp.intern_type(TypeInfo::Array { inner: TypeId::i64(), len });
-        interp.struct_type("", &[("opaque", inner)])
-    }
-
-    fn name() -> String {
-        format!("RsMap({}, {})", K::name(), V::name())
     }
 }
 
@@ -479,7 +355,7 @@ pub mod c {
                 1 => to_values(program.program, r as u8),
                 2 => to_values(program.program, r as u16),
                 4 => to_values(program.program, r as u32),
-                8 => to_values(program.program, r as u64),
+                8 => to_values(program.program, r),
                 _ => err!("bad byte size",),
             }
         } else if ret.size_slots == 2 {
@@ -629,21 +505,4 @@ pub mod c {
             )
         }
     }
-}
-
-pub const fn const_max(sizes: &[usize]) -> usize {
-    pub const fn helper(sizes: &[usize], start: usize) -> usize {
-        if sizes.len() - 1 == start {
-            sizes[start]
-        } else {
-            let s = helper(sizes, start + 1);
-            if sizes[start] > s {
-                sizes[start]
-            } else {
-                s
-            }
-        }
-    }
-
-    helper(sizes, 0)
 }

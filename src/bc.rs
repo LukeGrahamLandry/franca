@@ -15,13 +15,12 @@ use crate::{
     ffi::InterpSend,
 };
 use crate::{unwrap, Map};
-use interp_derive::InterpSend;
 
 #[repr(transparent)]
-#[derive(Copy, Clone, InterpSend, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
 #[repr(C, i64)]
-#[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc {
     CallDirect { sig: PrimSig, f: FuncId, tail: bool },   // <args:m> -> <ret:n>
     CallFnPtr { sig: PrimSig },                           // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
@@ -51,7 +50,7 @@ pub enum Bc {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, InterpSend)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct PrimSig {
     pub arg_float_mask: u32,
     pub ret_float_mask: u32,
@@ -63,7 +62,7 @@ pub struct PrimSig {
     pub no_return: bool,
 }
 #[repr(i64)]
-#[derive(Clone, Debug, Copy, PartialEq, InterpSend)]
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Prim {
     I8,
     I16,
@@ -113,7 +112,7 @@ pub struct FnBody<'p> {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, InterpSend)]
+#[derive(Copy, Clone)]
 pub struct ReturnAddr {
     pub block: BbId,
     pub result_loc: ResultLoc,
@@ -123,7 +122,7 @@ pub struct ReturnAddr {
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, InterpSend, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BakedVarId(pub u32);
 
 // A piece of static data that can be baked into an output file (c code, object, etc).
@@ -179,7 +178,7 @@ impl<'p> FnBody<'p> {
 pub type Value = i64;
 
 #[repr(C, i64)]
-#[derive(InterpSend, Clone, Hash, PartialEq, Eq, Debug)]
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub enum Values {
     Big(Vec<u8>),
     Small(i64, u8),
@@ -238,13 +237,6 @@ impl Values {
 
     pub fn is_unit(&self) -> bool {
         self.bytes().is_empty()
-    }
-
-    pub(crate) fn vec(self) -> Vec<u8> {
-        match self {
-            Values::Big(v) => v,
-            Values::Small(v, len) => v.to_ne_bytes()[0..len as usize].to_vec(),
-        }
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{cell::SyncUnsafeCell, fmt::Debug, hash::Hash, io::Write, marker::PhantomData, mem};
 
 use crate::{
-    ast::{Flag, IntTypeInfo, TypeInfo},
+    ast::{Flag, TypeId},
     ffi::InterpSend,
     Map, MY_CONST_DATA,
 };
@@ -248,11 +248,16 @@ impl<'p> InterpSend<'p> for Ident<'p> {
         unsafe { std::mem::transmute(std::any::TypeId::of::<Ident>()) }
     }
 
-    fn create_type(program: &mut crate::ast::Program) -> crate::ast::TypeId {
-        program.intern_type(TypeInfo::Int(IntTypeInfo {
-            bit_count: 32,
-            signed: false,
-        }))
+    fn create_type(_: &mut crate::ast::Program) -> crate::ast::TypeId {
+        TypeId::ident
+    }
+
+    fn get_or_create_type(_: &mut crate::ast::Program) -> crate::ast::TypeId {
+        TypeId::ident
+    }
+
+    fn get_type(_: &crate::ast::Program) -> crate::ast::TypeId {
+        TypeId::ident
     }
 
     fn name() -> String {
