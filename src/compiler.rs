@@ -11,7 +11,7 @@ use interp_derive::InterpSend;
 use std::ffi::CString;
 use std::fmt::Write;
 use std::hash::Hash;
-use std::mem::{self, transmute};
+use std::mem::{self};
 use std::ops::DerefMut;
 use std::ptr;
 use std::sync::atomic::AtomicIsize;
@@ -25,7 +25,7 @@ use crate::ast::{
 
 use crate::bc_to_asm::{emit_aarch64, Jitted};
 use crate::emit_bc::emit_bc;
-use crate::export_ffi::{do_flat_call_values, BigOption, BigResult, ExportVTable, FlatCallFn};
+use crate::export_ffi::{BigOption, BigResult, ExportVTable};
 use crate::ffi::InterpSend;
 use crate::logging::PoolLog;
 use crate::parse::{ParseTasks, ANON_BODY_AS_NAME};
@@ -291,36 +291,13 @@ impl<'a, 'p> Compile<'a, 'p> {
             let comp_ctx = self.program[f].has_tag(Flag::Ct);
             self.program.finish_layout(ty.arg)?;
             self.program.finish_layout(ty.ret)?;
-            if self.program[f].has_tag(Flag::Flat_Call) {
-                // my cc can do 8 returns in the arg regs but my ffi with compiler can't
-                if comp_ctx {
-                    self.program[f].set_cc(CallConv::FlatCt)?;
-                } else {
-                    self.program[f].set_cc(CallConv::Flat)?;
-                }
-            }
-            if self.program[f].has_tag(Flag::C_Call) {
-                if comp_ctx {
-                    debug_assert!(
-                        self.program[f].body.comptime_addr().is_some() || self.program[f].has_tag(Flag::Comptime_Addr),
-                        "#ct is only for compiler builtins"
-                    );
-                    self.program[f].set_cc(CallConv::CCallRegCt)?;
-                } else {
-                    self.program[f].set_cc(CallConv::CCallReg)?;
-                }
-            }
-
-            // TODO: copy-paste
             if comp_ctx {
                 debug_assert!(
                     self.program[f].body.comptime_addr().is_some() || self.program[f].has_tag(Flag::Comptime_Addr),
                     "#ct is only for compiler builtins"
                 );
                 self.program[f].set_cc(CallConv::CCallRegCt)?;
-            }
-
-            if self.program[f].cc.is_none() {
+            } else {
                 self.program[f].set_cc(CallConv::CCallReg)?;
             }
         }
@@ -498,33 +475,23 @@ impl<'a, 'p> Compile<'a, 'p> {
         let addr = unwrap!(self.aarch64.get_fn(f), "not compiled {f:?} {}", self.pool.get(self.program[f].name));
 
         let cc = self.program[f].cc.unwrap();
-        let c_call = matches!(cc, CallConv::CCallReg | CallConv::CCallRegCt | CallConv::OneRetPic);
-        let flat_call = matches!(cc, CallConv::Flat | CallConv::FlatCt);
 
         #[cfg(target_arch = "aarch64")]
         debug_assert_eq!(addr as usize % 4, 0);
 
         debugln_call!(
-            "Call {f:?} {} 0x{:x} flat:{flat_call};      callees={:?}",
+            "Call {f:?} {} 0x{:x};      callees={:?}",
             self.pool.get(self.program[f].name),
             addr as usize,
             self.program[f].callees
         );
         self.flush_cpu_instruction_cache();
         let expected_ret_bytes = self.program.get_or_create_info(ty.ret)?.stride_bytes;
-        let result = if flat_call {
-            do_flat_call_values(self, unsafe { transmute::<*const u8, FlatCallFn>(addr) }, arg, ty.ret)
-        } else if c_call {
-            assert!(!flat_call);
-            let mut ints = vec![];
-            deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints, &mut None)?;
-            debugln_call!("IN: {ints:?}");
-            let r = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt);
-            debugln_call!("OUT: {r:?}");
-            r
-        } else {
-            todo!()
-        };
+        let mut ints = vec![];
+        deconstruct_values(self.program, ty.arg, &mut ReadBytes { bytes: arg.bytes(), i: 0 }, &mut ints, &mut None)?;
+        debugln_call!("IN: {ints:?}");
+        let result = ffi::c::call(self, addr as usize, ty, ints, cc == CallConv::CCallRegCt);
+        debugln_call!("OUT: {result:?}");
 
         let result = self.tag_err(result);
         if let Ok(result) = &result {
@@ -1557,8 +1524,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         if let TypeInfo::Fn(_) = self.program[ty] {
                             let id: FuncId = self.immediate_eval_expr_known(*arg.clone())?;
                             assert!(!self.program[id].any_const_args());
-                            // TODO: for now you just need to not make a mistake lol
-                            //       you cant do a flat_call through the pointer but you can pass it to the compiler when it's expecting to do a flat_call.
+                            // TODO: for now you just need to not make a mistake with calling convention
                             self.add_callee(id);
                             self.ensure_compiled(id, self.exec_style())?;
                             // The backend still needs to do something with this, so just leave it
@@ -1692,7 +1658,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 );
                 // If they did '@m(e)' instead of '@m(e) s', prefer a handler that only expects one argument.
                 // TODO: should probably distinguish '@m(e) unit' just incase
-                if target.is_raw_unit() {
+                let (f, args) = if target.is_raw_unit() {
                     let mut os1 = os.clone().filter(|o| o.arg == want);
                     let f = unwrap!(
                         os1.next(),
@@ -1701,54 +1667,27 @@ impl<'a, 'p> Compile<'a, 'p> {
                     );
                     assert!(os1.next().is_none(), "ambigous macro overload");
                     let f = f.func;
-                    assert!(self.program[f].has_tag(Flag::Macro));
-                    self.infer_types(f)?;
-                    self.compile(f, ExecStyle::Jit)?;
-                    self.typecheck_macro_outputs(f, requested)?;
+                    (f, vec![Box::into_raw(Box::new(arg)) as i64])
+                } else {
+                    let f = unwrap!(os2.next(), "missing macro overload").func;
+                    assert!(os2.next().is_none(), "ambigous macro overload");
+                    (f, vec![Box::into_raw(Box::new(arg)) as i64, Box::into_raw(Box::new(target)) as i64])
+                };
 
-                    self.update_cc(f)?;
-                    self.flush_callees(f)?;
-                    self.flush_cpu_instruction_cache();
-                    self.aarch64.make_exec();
-                    let ptr = self.aarch64.get_fn(f).unwrap();
-                    let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::FlatCt | CallConv::CCallRegCt);
-
-                    let f_ty = self.program[f].finished_ty().unwrap();
-                    let values = ffi::c::call(self, ptr as usize, f_ty, vec![Box::into_raw(Box::new(arg)) as i64], comp_ctx)?;
-                    let new_expr: FatExpr<'p> = from_values(self.program, values)?;
-                    let new_expr = new_expr.clone(); // TODO: no clone
-
-                    *expr = new_expr;
-                    if expr.done {
-                        assert!(!expr.ty.is_unknown());
-                    }
-                    return self.compile_expr(expr, requested);
-                }
-
-                let f = unwrap!(os2.next(), "missing macro overload").func;
-                assert!(os2.next().is_none(), "ambigous macro overload");
                 assert!(self.program[f].has_tag(Flag::Macro));
                 self.infer_types(f)?;
                 self.compile(f, ExecStyle::Jit)?;
                 self.typecheck_macro_outputs(f, requested)?;
 
-                // TODO: copy-paste
                 self.update_cc(f)?;
                 self.flush_callees(f)?;
                 self.flush_cpu_instruction_cache();
                 self.aarch64.make_exec();
                 let ptr = self.aarch64.get_fn(f).unwrap();
-                let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::FlatCt | CallConv::CCallRegCt);
+                let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::CCallRegCt);
                 let f_ty = self.program[f].finished_ty().unwrap();
-                let values = ffi::c::call(
-                    self,
-                    ptr as usize,
-                    f_ty,
-                    vec![Box::into_raw(Box::new(arg)) as i64, Box::into_raw(Box::new(target)) as i64],
-                    comp_ctx,
-                )?;
+                let values = ffi::c::call(self, ptr as usize, f_ty, args, comp_ctx)?;
                 let new_expr: FatExpr<'p> = from_values(self.program, values)?;
-                let new_expr = new_expr.clone(); // TODO: no clone
 
                 *expr = new_expr;
                 if expr.done {
@@ -3263,10 +3202,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn inline_asm_body(&mut self, f: FuncId, asm: &mut FatExpr<'p>) -> Res<'p, FuncImpl<'p>> {
         self.last_loc = Some(self.program[f].loc);
         assert!(
-            self.program[f].has_tag(Flag::C)
-                || self.program[f].has_tag(Flag::C_Call)
-                || self.program[f].has_tag(Flag::Flat_Call)
-                || self.program[f].has_tag(Flag::One_Ret_Pic),
+            self.program[f].has_tag(Flag::C) || self.program[f].has_tag(Flag::C_Call) || self.program[f].has_tag(Flag::One_Ret_Pic),
             "inline asm msut specify calling convention. but just: {:?}",
             self.program[f].annotations.iter().map(|a| self.pool.get(a.name)).collect::<Vec<_>>()
         );

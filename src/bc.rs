@@ -44,7 +44,7 @@ pub enum Bc {
     NoCompile,
     PushGlobalAddr { id: BakedVarId },
     Snipe(u16),
-    Ret0, // flat call uses this too because code has already written to indirect return address.
+    Ret0, // big return uses this too because code has already written to indirect return address.
     Ret1(Prim),
     Ret2((Prim, Prim)),
     Nop,

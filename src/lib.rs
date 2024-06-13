@@ -65,6 +65,7 @@ unsafe impl GlobalAlloc for MyAllocator {
     }
 }
 
+// TODO: i now rely on not freeing things :( -- Jun 12
 // TODO: #[cfg(not(feature="free_memory"))]
 // Apr 29. this makes (release mode) tests ~20% faster.
 #[global_allocator]

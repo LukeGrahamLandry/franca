@@ -7,7 +7,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, WalkAst,
 };
-use crate::bc::{from_values, to_values, Values};
+use crate::bc::{to_values, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
@@ -18,8 +18,7 @@ use crate::pool::{Ident, StringPool};
 use crate::scope::ResolveScope;
 use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, STATS};
 use std::fmt::{Debug, Write};
-use std::hint::black_box;
-use std::mem::{self, transmute};
+use std::mem::{self};
 use std::ops::{FromResidual, Try};
 use std::path::PathBuf;
 use std::ptr::{addr_of, null, slice_from_raw_parts, slice_from_raw_parts_mut};
@@ -359,56 +358,6 @@ unsafe extern "C" fn get_function_name<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -
     c.program[f].name
 }
 
-// This lets rust _declare_ a flat_call like its normal
-// Ideally you could do this with a generic but you can't be generic over a function value whose type depends on other generic parameters.
-macro_rules! bounce_flat_call {
-    ($Arg:ty, $Ret:ty, $f:ident) => {{
-        // weird hack becuase you can't concat_idents! for a function name and you can't declare an unnamed function as an expression.
-        mod $f {
-            use super::*;
-            // TODO: can't do this because of lifetimes. you still get the error message if it doesn't compile so its not a big deal but I find it less clear.
-            // const F: fn(compile: &mut Compile, a: $Arg) -> $Ret = $f; // force a typecheck
-
-            pub extern "C-unwind" fn bounce(retptr: *mut u8, compile: &mut Compile<'_, '_>, argptr: *mut u8, arg_count: i64, ret_count: i64) {
-                debugln!("bounce_flat_call {}", stringify!($f));
-                let ty = <$Arg>::get_or_create_type(compile.program);
-                compile.program.finish_layout_deep(ty).unwrap();
-                let ty = <$Ret>::get_or_create_type(compile.program);
-                compile.program.finish_layout_deep(ty).unwrap();
-                debug_assert_eq!(arg_count, <$Arg>::size_bytes(compile.program) as i64, "bad arg count. expected {}", stringify!($Arg));
-                debug_assert_eq!(ret_count, <$Ret>::size_bytes(compile.program) as i64, "bad ret count. expected {}", stringify!($Ret));
-
-                // debug_assert_eq!(argptr as usize % <$Arg>::align_bytes(compile.program) as usize, 0, "bad arg align for {}", stringify!($Arg));
-                // debug_assert_eq!(retptr as usize % <$Ret>::align_bytes(compile.program) as usize, 0, "bad ret align for {}", stringify!($Ret));
-                unsafe {
-                    let argslice = &mut *slice_from_raw_parts_mut(argptr, arg_count as usize);
-                    debugln!("bounce ARG: {argslice:?}");
-                    // TODO: no clone
-                    let arg: $Arg = $crate::bc::from_values(compile.program, Values::many(argslice.to_vec())).unwrap();
-                    // let arg: $Arg = hopec(compile, || Ok(unwrap!(<$Arg>::deserialize_from_ints(compile.program, &mut ReadBytes { bytes: argslice, i: 0}), "deserialize arg")));
-                    let ret: $Ret = $f(compile, arg);
-                    let ret = to_values(compile.program, ret).unwrap().vec();
-                    let out = &mut *slice_from_raw_parts_mut(retptr, ret_count as usize);
-                    out.fill(0); // TODO: remove
-                    out.copy_from_slice(&ret);
-                    argslice.fill(0); // TODO: remove
-                    debugln!("bounce RET: {out:?}");
-                }
-                // Since we just called into a compiler function, it might have emitted new code and left it in write mode...
-                // but our caller might be jitted code (like a macro), so before returning to them, we need to make sure they're executable.
-                // this avoids a `exc_bad_access (code=2, <some code address>)`. The problem only happened in the lox demo, not my small tests, so its fairly rare.
-                // -- May 30
-                // TODO: i probably have to do this before returning from any export_ffi function, not just flat_call ones.
-                //       its wasteful to leave the map in exec mode if we're going to be writing to it again soon.
-                compile.flush_cpu_instruction_cache();
-                compile.aarch64.make_exec();
-            }
-        }
-
-        $f::bounce
-    }};
-}
-
 // TODO: use the right int types
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
@@ -517,6 +466,50 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
     ("fn __save_cstr_t(T: Type) Unit", save_cstr_t as *const u8),
     ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
+    // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
+    ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
+    ("fn get_type_info_raw(ty: Type) TypeInfo;", get_type_info_raw as *const u8),
+    (
+        "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) Unit;",
+        const_eval_any as *const u8,
+    ),
+    // Calls Compiler::compile_expr
+    // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
+    ("fn compile_ast(value: FatExpr) FatExpr;", compile_ast as *const u8),
+    ("fn debug_log_ast(expr: FatExpr) Unit;", log_ast as *const u8),
+    (
+        "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
+        unquote_macro_apply_placeholders as *const u8,
+    ),
+    ("fn get_type_int(e: FatExpr) IntTypeInfo;", get_type_int as *const u8),
+    // Convert a pointer to a value into an ast that will produce that value when evaluated.
+    // It is illegal to pass a <ty> that does not match the value behind <ptr>.
+    ("fn literal_ast(ty: Type, ptr: rawptr) FatExpr;", literal_ast as *const u8),
+    ("fn can_assign_types(found: Type, expected: Type) bool;", type_check_arg as *const u8),
+    (
+        "#macro #outputs(Type) fn enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
+        enum_macro as *const u8,
+    ),
+    ("#macro fn namespace(block: FatExpr) FatExpr;", namespace_macro as *const u8),
+    ("#macro #outputs(Type) fn tagged(cases: FatExpr) FatExpr;", tagged_macro as *const u8),
+    ("#macro #outputs(Type) fn struct(fields: FatExpr) FatExpr;", struct_macro as *const u8),
+    ("#macro #outputs(Symbol) fn symbol(fields: FatExpr) FatExpr;", symbol_macro as *const u8),
+    (
+        "#macro #outputs(Unit) fn assert_compile_error(fields: FatExpr) FatExpr;",
+        assert_compile_error_macro as *const u8,
+    ),
+    ("#macro #outputs(Type) fn type(e: FatExpr) FatExpr;", type_macro as *const u8),
+    ("#macro #outputs(u32) fn BITS(parts: FatExpr) FatExpr;", bits_macro as *const u8),
+    ("fn __get_comptime_dispatch_ptr() **i64", get_dispatch_ptr as *const u8),
+    (
+        "#macro fn resolve(function_type: FatExpr, overload_set_id: FatExpr) FatExpr;",
+        resolve_os as *const u8,
+    ),
+    ("#macro fn as(T: FatExpr, e: FatExpr) FatExpr;", as_macro as *const u8),
+    ("#macro fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_type_macro as *const u8),
+    ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
+    ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
+    ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
 ];
 
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
@@ -548,19 +541,10 @@ pub fn get_include_std(name: &str) -> Option<String> {
         "compiler" => {
             let mut out = String::new();
             writeln!(out, "{}", include_str!("../compiler/driver_api.fr")).unwrap();
-            writeln!(
-                out,
-                "const CallConv = @enum(i64) (C = {}, Flat = {});",
-                CallConv::CCallReg as u8,
-                CallConv::Flat as u8,
-            )
-            .unwrap();
+            writeln!(out, "const CallConv = @enum(i64) (C = {});", CallConv::CCallReg as u8,).unwrap();
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in COMPILER {
                 writeln!(out, "#comptime_addr({}) #ct #c_call {sig};", *ptr as usize).unwrap();
-            }
-            for (sig, ptr) in COMPILER_FLAT {
-                writeln!(out, "#comptime_addr({}) #ct {sig};", *ptr as usize).unwrap();
             }
             Some(out)
         }
@@ -681,11 +665,7 @@ extern "C-unwind" fn fn_ptr_type(program: &mut &mut Program, arg: TypeId, ret: T
         assert!(ret.as_index() < program.types.len(), "TypeId OOB {:?}", ret);
         program.finish_layout(arg)?;
         program.finish_layout(ret)?;
-        let cc = if program.get_info(arg).size_slots > 8 {
-            CallConv::Flat
-        } else {
-            CallConv::CCallReg
-        };
+        let cc = CallConv::CCallReg;
         let arity = program.tuple_types(arg).map(|t| t.len()).unwrap_or_else(|| 1) as u16;
         Ok(program.intern_type(TypeInfo::FnPtr {
             ty: FnType { arg, ret, arity },
@@ -788,123 +768,15 @@ extern "C-unwind" fn debug_log_str(_: &mut &mut Program<'_>, s: &str) {
     println!("{s}");
 }
 
-extern "C-unwind" fn test_flat_call(ret: *mut u8, compile: &mut Compile, arg: *mut u8, arg_count: i64, ret_count: i64) {
-    debug_assert!(arg_count == 3 * 8);
-    debug_assert!(ret_count == 8);
-    let _ = black_box(compile.program.assertion_count); // dereference the pointer.
-    unsafe {
-        let s = &mut *slice_from_raw_parts_mut(arg as *mut i64, 3);
-        *(ret as *mut i64) = (s[0] * s[1]) + s[2];
-    }
+fn return_from_ffi(compile: &mut Compile) {
+    // Since we just called into a compiler function, it might have emitted new code and left it in write mode...
+    // but our caller might be jitted code (like a macro), so before returning to them, we need to make sure they're executable.
+    // this avoids a `exc_bad_access (code=2, <some code address>)`. The problem only happened in the lox demo, not my small tests, so its fairly rare.
+    // -- May 30
+    // TODO: its wasteful to leave the map in exec mode if we're going to be writing to it again soon.
+    compile.flush_cpu_instruction_cache();
+    compile.aarch64.make_exec();
 }
-extern "C-unwind" fn test_flat_call_callback(ret: *mut u8, compile: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret_count: i64) {
-    debug_assert!(arg_count == 8);
-    debug_assert!(ret_count == 8);
-    let _ = black_box(compile.program.assertion_count); // dereference the pointer.
-    unsafe {
-        let addr = *(arg as *mut usize);
-        // TODO: i love this. could do even better if i looked at ranges of memory in my arenas probably.
-        debug_assert!(
-            addr % 4 == 0 && (addr as u32 & FuncId::MASK == 0 || FuncId::from_raw(addr as u32).as_index() > compile.program.funcs.len()),
-            "thats a weird ptr my dude, did you mean to call {:?}?",
-            FuncId::from_raw(addr as u32)
-        );
-        let f: FlatCallFn = transmute(addr);
-        let ret = ret as *mut i64;
-        *ret = do_flat_call(compile, f, ((10i64, 5i64), 7i64));
-        debug_assert_eq!(*ret, 57);
-    }
-}
-
-pub type FlatCallFn = extern "C-unwind" fn(ret: *mut u8, program: &mut Compile<'_, '_>, arg: *mut u8, arg_count: i64, ret_count: i64);
-
-// This lets rust _call_ a flat_call like its normal
-pub fn do_flat_call<'p, Arg: InterpSend<'p>, Ret: InterpSend<'p>>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Arg) -> Ret {
-    Arg::get_or_create_type(compile.program); // sigh
-    Ret::get_or_create_type(compile.program); // sigh
-    let mut arg = to_values(compile.program, arg).unwrap();
-    let mut ret = vec![0u8; Ret::size_bytes(compile.program)];
-    f(
-        ret.as_mut_ptr(),
-        compile,
-        arg.bytes_mut().as_mut_ptr(),
-        arg.bytes().len() as i64,
-        ret.len() as i64,
-    );
-    from_values(compile.program, Values::many(ret)).unwrap()
-}
-
-// This the interpreter call a flat_call without knowing its types
-pub fn do_flat_call_values<'p>(compile: &mut Compile<'_, 'p>, f: FlatCallFn, arg: Values, ret_type: TypeId) -> Res<'p, Values> {
-    let ret_count = compile.program.get_info(ret_type).stride_bytes as usize;
-    debugln_call!("IN: {arg:?} addr=0x{:x}", f as usize);
-    let mut ret = vec![0u8; ret_count];
-    f(
-        ret.as_mut_ptr(),
-        compile,
-        // TODO: decide if flat call is allowed to mutate its args.
-        arg.bytes().to_vec().as_ptr() as *mut u8, // TODO: dont clone
-        arg.bytes().len() as i64,
-        ret.len() as i64,
-    );
-    debugln_call!("OUT: {ret:?}");
-    Ok(Values::many(ret))
-}
-
-fn test_flat_call2(_: &mut Compile, ((a, b), c): ((i64, i64), i64)) -> i64 {
-    a * b + c
-}
-
-type Unit = ();
-
-// TODO: this needs to be less painful. want to have it just parse rust signetures and expose them.
-// TODO: documenet which ones can only be used in macros because they need the 'result: &mut FnWip'
-pub const COMPILER_FLAT: &[(&str, *const u8)] = &[
-    // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
-    ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
-    ("fn get_type_info_raw(ty: Type) TypeInfo;", get_type_info_raw as *const u8),
-    (
-        "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) Unit;",
-        const_eval_any as *const u8,
-    ),
-    // Calls Compiler::compile_expr
-    // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
-    ("fn compile_ast(value: FatExpr) FatExpr;", compile_ast as *const u8),
-    ("fn debug_log_ast(expr: FatExpr) Unit;", log_ast as *const u8),
-    (
-        "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
-        unquote_macro_apply_placeholders as *const u8,
-    ),
-    ("fn get_type_int(e: FatExpr) IntTypeInfo;", get_type_int as *const u8),
-    // Convert a pointer to a value into an ast that will produce that value when evaluated.
-    // It is illegal to pass a <ty> that does not match the value behind <ptr>.
-    ("fn literal_ast(ty: Type, ptr: rawptr) FatExpr;", literal_ast as *const u8),
-    ("fn can_assign_types(found: Type, expected: Type) bool;", type_check_arg as *const u8),
-    (
-        "#macro #outputs(Type) fn enum(Raw: FatExpr, Cases: FatExpr) FatExpr;",
-        enum_macro as *const u8,
-    ),
-    ("#macro fn namespace(block: FatExpr) FatExpr;", namespace_macro as *const u8),
-    ("#macro #outputs(Type) fn tagged(cases: FatExpr) FatExpr;", tagged_macro as *const u8),
-    ("#macro #outputs(Type) fn struct(fields: FatExpr) FatExpr;", struct_macro as *const u8),
-    ("#macro #outputs(Symbol) fn symbol(fields: FatExpr) FatExpr;", symbol_macro as *const u8),
-    (
-        "#macro #outputs(Unit) fn assert_compile_error(fields: FatExpr) FatExpr;",
-        assert_compile_error_macro as *const u8,
-    ),
-    ("#macro #outputs(Type) fn type(e: FatExpr) FatExpr;", type_macro as *const u8),
-    ("#macro #outputs(u32) fn BITS(parts: FatExpr) FatExpr;", bits_macro as *const u8),
-    ("fn __get_comptime_dispatch_ptr() **i64", get_dispatch_ptr as *const u8),
-    (
-        "#macro fn resolve(function_type: FatExpr, overload_set_id: FatExpr) FatExpr;",
-        resolve_os as *const u8,
-    ),
-    ("#macro fn as(T: FatExpr, e: FatExpr) FatExpr;", as_macro as *const u8),
-    ("#macro fn Fn(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_type_macro as *const u8),
-    ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
-    ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
-    ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
-];
 
 extern "C-unwind" fn as_macro<'p>(compile: &mut Compile<'_, 'p>, arg: FatExpr<'p>, target: FatExpr<'p>) -> FatExpr<'p> {
     compile.last_loc = Some(arg.loc);
@@ -915,6 +787,7 @@ extern "C-unwind" fn as_macro<'p>(compile: &mut Compile<'_, 'p>, arg: FatExpr<'p
 extern "C-unwind" fn enum_macro<'p>(compile: &mut Compile<'_, 'p>, arg: FatExpr<'p>, target: FatExpr<'p>) -> FatExpr<'p> {
     compile.last_loc = Some(arg.loc);
     let res = compile.enum_constant_macro(arg, target);
+    return_from_ffi(compile);
     res.unwrap()
 }
 
@@ -942,6 +815,7 @@ extern "C-unwind" fn const_eval_any<'p>(compile: &mut Compile<'_, 'p>, mut expr:
             let bytes = val.bytes();
             debug_assert_eq!(bytes.len(), compile.program.get_info(ty).stride_bytes as usize);
             let out = unsafe { &mut *slice_from_raw_parts_mut(addr as *mut u8, bytes.len()) };
+            return_from_ffi(compile);
             out.copy_from_slice(bytes);
         }
         Err(e) => panic!("{e:?}"),
@@ -952,6 +826,7 @@ extern "C-unwind" fn compile_ast<'p>(compile: &mut Compile<'_, 'p>, mut expr: Fa
     compile.last_loc = Some(expr.loc);
     let res = compile.compile_expr(&mut expr, None);
     hopec(compile, || res);
+    return_from_ffi(compile);
     expr
 }
 
@@ -999,6 +874,7 @@ extern "C-unwind" fn get_type_int<'p>(compile: &mut Compile<'_, 'p>, mut arg: Fa
                 let ty = compile.compile_expr(&mut arg, None)?;
                 let ty = compile.program.raw_type(ty);
                 if let TypeInfo::Int(int) = compile.program[ty] {
+                    return_from_ffi(compile);
                     return Ok(int);
                 }
                 err!("expected expr of int type not {}", compile.program.log_type(ty));
@@ -1012,6 +888,7 @@ extern "C-unwind" fn literal_ast<'p>(compile: &Compile<'_, 'p>, ty: TypeId, ptr:
     let bytes = compile.program.get_info(ty).stride_bytes as usize;
     let value = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
     let value = Values::many(value.to_vec());
+    // TODO: zero_padding
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
     FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
 }
@@ -1035,6 +912,8 @@ extern "C-unwind" fn namespace_macro<'p>(compile: &mut Compile<'_, 'p>, mut bloc
     compile.compile(id, ExecStyle::Jit).unwrap();
     let func = &mut compile.program[id];
     let s = func.scope.unwrap();
+
+    return_from_ffi(compile);
     compile.as_literal(s, loc).unwrap()
 }
 
@@ -1055,6 +934,7 @@ extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cases: 
         }
         Ok(())
     });
+    return_from_ffi(compile);
 
     cases
 }
@@ -1070,6 +950,7 @@ extern "C-unwind" fn struct_macro<'p>(compile: &mut Compile<'_, 'p>, mut fields:
         }
         Ok(())
     });
+    return_from_ffi(compile);
 
     fields
 }
@@ -1095,6 +976,7 @@ extern "C-unwind" fn symbol_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: Fa
         compile.set_literal(&mut arg, value)?;
         Ok(())
     });
+    return_from_ffi(compile);
 
     arg
 }
@@ -1118,6 +1000,7 @@ extern "C-unwind" fn assert_compile_error_macro<'p>(compile: &mut Compile<'_, 'p
         compile.set_literal(&mut arg, ())?;
         Ok(())
     });
+    return_from_ffi(compile);
 
     arg
 }
@@ -1130,6 +1013,7 @@ extern "C-unwind" fn type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatE
         compile.set_literal(&mut arg, ty)?;
         Ok(())
     });
+    return_from_ffi(compile);
 
     arg
 }
@@ -1230,6 +1114,7 @@ extern "C-unwind" fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, f_ty: FatExpr<'p
     let val = to_values(comp.program, found).unwrap();
     // It might have been a function pointer type. this lets you do `thing.field = (@resolve(@type thing.field) overloadset)!fnptr`
     let ty = comp.program.intern_type(TypeInfo::Fn(f_ty));
+    return_from_ffi(comp);
     FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
 }
 
@@ -1257,6 +1142,7 @@ extern "C-unwind" fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut F
     let arg = compile.program.tuple_of(types);
     let ret: TypeId = compile.immediate_eval_expr_known(ret)?;
     let f_ty = FnType { arg, ret, arity };
+    return_from_ffi(compile);
     Ok(f_ty)
 }
 extern "C-unwind" fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: FatExpr<'p>, ret: FatExpr<'p>) -> FatExpr<'p> {
@@ -1266,6 +1152,7 @@ extern "C-unwind" fn fn_type_macro<'p>(compile: &mut Compile<'_, 'p>, mut arg: F
         compile.set_literal(&mut arg, ty)?;
         Ok(())
     });
+    return_from_ffi(compile);
 
     arg
 }
@@ -1280,6 +1167,7 @@ extern "C-unwind" fn fn_ptr_type_macro<'p>(compile: &mut Compile<'_, 'p>, mut ar
         compile.set_literal(&mut arg, ty)?;
         Ok(())
     });
+    return_from_ffi(compile);
 
     arg
 }

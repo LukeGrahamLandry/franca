@@ -190,8 +190,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     fn bc_to_asm(&mut self, f: FuncId) -> Res<'p, ()> {
         let ff = &self.program[f];
-        let is_flat_call = ff.cc == BigOption::Some(CallConv::Flat);
-        debugln!("=== {f:?} {} flat:{is_flat_call} ===", self.program.pool.get(self.program[f].name));
+        debugln!("=== {f:?} {} ===", self.program.pool.get(self.program[f].name));
         debugln!("{}", self.program[f].body.log(self.program.pool));
 
         let func = self.body;
@@ -484,7 +483,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             Bc::CallFnPtr { sig } => {
                 // TODO: tail call
                 self.dyn_c_call(sig, |s| {
-                    // call_flat will have popped the args, so now stack is just the pointer to call
+                    // dyn_c_call will have popped the args, so now stack is just the pointer to call
                     let callee = s.state.stack.pop().unwrap();
                     // TODO: this does redundant spilling every time!
                     match callee {

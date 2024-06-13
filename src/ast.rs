@@ -708,9 +708,6 @@ impl<'p> Func<'p> {
 pub enum CallConv {
     CCallReg, // This is what #c_call means currently but its not the real c abi cause it can't do structs.
     CCallRegCt,
-    // #flat_call
-    Flat,   // first arg is a zero
-    FlatCt, // first arg is compiler context pointer
     // #one_ret_pic.
     OneRetPic,
     /// The front end duplicates the function body ast at each callsite.
@@ -1752,7 +1749,6 @@ pub enum Flag {
     Operator_Star_Equal,
     Operator_Slash_Equal,
     Operator_Index,
-    Flat_Call,
     Builtin,
     No_Memo,
     Uninitialized,

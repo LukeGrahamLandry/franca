@@ -49,6 +49,8 @@ Actually, now i don't even need all the flat call shit, I'm just using it for ma
 - TODO: that broke exceptional.fr somehow (bus error. maybe just a make_exec thing?) and I haven't actually taken the win yet and removed the flat_call code.
   leaving that for tommorrow. also need to fix the single vs double arg copy-paste, now that it can easily be dynamic with the vec.
 
+flat call served me well but it will not be missed.
+
 ## (Jun 10)
 
 debug log says width/height can't be zero.

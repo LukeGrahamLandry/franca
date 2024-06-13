@@ -77,17 +77,11 @@ fn forward_declare(comp: &mut Compile, out: &mut CProgram, callee: FuncId) {
     }
     out.fn_forward.insert(callee.as_index(), true);
 
-    let is_flat = matches!(comp.program[callee].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
-    if is_flat {
-        let name = comp.program.pool.get(comp.program[callee].name);
-        writeln!(out.forward, " /* fn {name} */ static \nvoid _FN{}{FLAT_ARGS_SIGN}", callee.as_index()).unwrap();
-    } else {
-        declare(comp, &mut out.forward, callee, false, false, &mut out.ret_sizes);
-    }
+    declare(comp, &mut out.forward, callee, false, false, &mut out.ret_sizes);
+
     writeln!(out.forward, ";").unwrap();
 }
 
-const FLAT_ARGS_SIGN: &str = "(void* _flat_ret_ptr, int _a, void* _flat_arg_ptr, int _b, int _c)";
 pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runner_main: bool) -> Res<'p, String> {
     let mut out = CProgram::default();
 
@@ -108,7 +102,6 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
             forward_declare(comp, out, callee);
             emit(comp, out, callee)?;
         }
-        let name = comp.program.pool.get(comp.program[f].name);
 
         // println!("do {}", name);
         if let Some(&body) = comp.program[f].body.c_source() {
@@ -117,12 +110,7 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
             writeln!(out.functions, "}}").unwrap();
         } else if let FuncImpl::Normal(_) = comp.program[f].body {
             if comp.program[f].cc.unwrap() != CallConv::Inline {
-                let is_flat = matches!(comp.program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
-                if is_flat {
-                    writeln!(out.functions, "/* fn {name} */ static \nvoid _FN{}{FLAT_ARGS_SIGN}", f.as_index()).unwrap();
-                } else {
-                    declare(comp, &mut out.functions, f, false, false, &mut out.ret_sizes);
-                }
+                declare(comp, &mut out.functions, f, false, false, &mut out.ret_sizes);
 
                 let body = emit_bc(comp, f, ExecStyle::Aot)?;
                 let mut wip = Emit {
@@ -132,9 +120,8 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
                     code: String::new(),
                     blocks_done: BitSet::empty(),
                     stack: vec![],
-                    flat_args_already_offset: Default::default(),
+                    saved_ssa: Default::default(),
                     f,
-                    is_flat,
                     var_id: STACK_ARG_SLOTS,
                 };
 
@@ -218,11 +205,11 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
         comp.compile(f, ExecStyle::Aot)?;
         emit(comp, &mut out, f)?;
 
-        if comp.program[f].cc.unwrap() != CallConv::Flat && !test_runner_main {
+        if !test_runner_main {
             declare(comp, &mut out.functions, f, true, true, &mut out.ret_sizes);
             emit_named_redirect_body(comp, &mut out.functions, f, false);
         } else {
-            writeln!(out.functions, "// Skip exporting flat call: fn {}", comp.pool.get(comp.program[f].name)).unwrap();
+            writeln!(out.functions, "// Skip exporting: fn {}", comp.pool.get(comp.program[f].name)).unwrap();
         }
     }
 
@@ -379,9 +366,8 @@ struct Emit<'z, 'p> {
     code: String,
     blocks_done: BitSet,
     stack: Vec<Val>,
-    flat_args_already_offset: HashMap<u16, Val>,
+    saved_ssa: HashMap<u16, Val>,
     f: FuncId,
-    is_flat: bool,
     var_id: usize,
 }
 
@@ -396,7 +382,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         let block = &self.body.blocks[b];
 
-        if b == 0 && !self.is_flat {
+        if b == 0 {
             if self.body.signeture.use_special_register_for_indirect_return {
                 writeln!(self.code, "    Ret{} _temp_return;", self.body.signeture.return_value_bytes).unwrap();
                 writeln!(self.code, "    void *_arg_0 = &_temp_return;").unwrap();
@@ -542,10 +528,10 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.stack.push(Val::of_var(id as usize + STACK_ARG_SLOTS));
                 }
                 Bc::SaveSsa { id, .. } => {
-                    self.flat_args_already_offset.insert(id, self.stack.pop().unwrap());
+                    self.saved_ssa.insert(id, self.stack.pop().unwrap());
                 }
                 Bc::LoadSsa { id, .. } => {
-                    let val = self.flat_args_already_offset.get(&id).unwrap().clone();
+                    let val = self.saved_ssa.get(&id).unwrap().clone();
                     self.stack.push(val);
                 }
                 Bc::IncPtrBytes { bytes } => {

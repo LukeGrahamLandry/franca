@@ -29,7 +29,6 @@ struct EmitBc<'z, 'p: 'z> {
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
-    is_flat_call: bool,
 }
 
 pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
@@ -74,7 +73,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             program,
             locals: vec![],
             var_lookup: Default::default(),
-            is_flat_call: false,
         }
     }
 
@@ -97,88 +95,64 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn bind_args(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>) -> Res<'p, ()> {
         let arguments = pattern.flatten();
-        // TODO: cringe copy-paste
-        if self.is_flat_call {
-            // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
-            result.pop(2);
 
-            let mut offset = 0;
-            for (name, ty, kind) in arguments.into_iter() {
-                result.push(Bc::PeekDup(0));
-                assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
+        let mut pushed = if result.signeture.first_arg_is_indirect_return { 1 } else { 0 };
+        // reversed because they're on the stack like [0, 1, 2]
+        for (name, ty, kind) in arguments.into_iter().rev() {
+            // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
+            // TODO: the frontend needs to remove the 'const' parts from the ast in DeclVarPattern
+            assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
 
-                let info = self.program.get_info(ty);
-                offset = align_to(offset, info.align_bytes as usize);
-                result.inc_ptr_bytes(offset as u16);
-                let id = result.save_ssa_var();
-                offset += info.stride_bytes as usize;
+            let info = self.program.get_info(ty);
 
-                self.locals.last_mut().unwrap().push(id);
-                if let Some(name) = name {
-                    let prev = self.var_lookup.insert(name, id);
-                    assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
-                }
-            }
-            result.pop(2);
-            // Now just ret_ptr is on top of the stack, which matches normal cc.
-        } else {
-            let mut pushed = if result.signeture.first_arg_is_indirect_return { 1 } else { 0 };
-            // reversed because they're on the stack like [0, 1, 2]
-            for (name, ty, kind) in arguments.into_iter().rev() {
-                // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
-                // TODO: the frontend needs to remove the 'const' parts from the ast in DeclVarPattern
-                assert!(kind != VarType::Const, "{:?}", name.map(|v| v.log(self.program.pool)));
-
-                let info = self.program.get_info(ty);
-
-                let id = if info.size_slots == 0 {
-                    continue;
-                } else if info.pass_by_ref {
-                    pushed += 1;
-                    // TODO: callee make copy if it wants to modify
-                    result.save_ssa_var()
-                } else {
-                    let slots = self.program.slot_count(ty);
-                    let id = result.add_var(ty);
-                    match slots {
-                        0 => {}
-                        1 => {
-                            let ty = self.program.prim(ty).unwrap();
-                            result.addr_var(id);
-                            result.push(Bc::StorePost { ty });
-                            pushed += 1;
-                        }
-                        2 => {
-                            let types = self.program.flat_tuple_types(ty);
-                            let offset_2 = align_to(
-                                self.program.get_info(types[0]).stride_bytes as usize,
-                                self.program.get_info(types[1]).align_bytes as usize,
-                            );
-                            result.addr_var(id);
-                            result.inc_ptr_bytes(offset_2 as u16);
-                            result.push(Bc::StorePost {
-                                ty: self.program.prim(types[1]).unwrap(),
-                            });
-                            result.addr_var(id);
-                            result.push(Bc::StorePost {
-                                ty: self.program.prim(types[0]).unwrap(),
-                            });
-                            pushed += 2;
-                        }
-                        _ => unreachable!(),
+            let id = if info.size_slots == 0 {
+                continue;
+            } else if info.pass_by_ref {
+                pushed += 1;
+                // TODO: callee make copy if it wants to modify
+                result.save_ssa_var()
+            } else {
+                let slots = self.program.slot_count(ty);
+                let id = result.add_var(ty);
+                match slots {
+                    0 => {}
+                    1 => {
+                        let ty = self.program.prim(ty).unwrap();
+                        result.addr_var(id);
+                        result.push(Bc::StorePost { ty });
+                        pushed += 1;
                     }
-                    id
-                };
-
-                self.locals.last_mut().unwrap().push(id);
-                if let Some(name) = name {
-                    let prev = self.var_lookup.insert(name, id);
-                    assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+                    2 => {
+                        let types = self.program.flat_tuple_types(ty);
+                        let offset_2 = align_to(
+                            self.program.get_info(types[0]).stride_bytes as usize,
+                            self.program.get_info(types[1]).align_bytes as usize,
+                        );
+                        result.addr_var(id);
+                        result.inc_ptr_bytes(offset_2 as u16);
+                        result.push(Bc::StorePost {
+                            ty: self.program.prim(types[1]).unwrap(),
+                        });
+                        result.addr_var(id);
+                        result.push(Bc::StorePost {
+                            ty: self.program.prim(types[0]).unwrap(),
+                        });
+                        pushed += 2;
+                    }
+                    _ => unreachable!(),
                 }
-            }
+                id
+            };
 
-            assert_eq!(pushed, result.signeture.arg_slots);
+            self.locals.last_mut().unwrap().push(id);
+            if let Some(name) = name {
+                let prev = self.var_lookup.insert(name, id);
+                assert!(prev.is_none(), "overwrite arg? {}", name.log(self.program.pool));
+            }
         }
+
+        assert_eq!(pushed, result.signeture.arg_slots);
+
         Ok(())
     }
 
@@ -320,8 +294,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
     fn emit_body(&mut self, result: &mut FnBody<'p>, f: FuncId) -> Res<'p, ()> {
         let func = &self.program[f];
-        let is_flat_call = matches!(func.cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
-        self.is_flat_call = is_flat_call;
 
         let FuncImpl::Normal(body) = &func.body else {
             // You should never actually try to run this code, the caller should have just done the call,
@@ -344,8 +316,8 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         result.current_block = entry_block;
 
-        // TODO: flat_call tail
-        self.compile_expr(result, body, result_location, !is_flat_call)?;
+        // TODO: indirect return tail
+        self.compile_expr(result, body, result_location, !result.signeture.first_arg_is_indirect_return)?;
 
         if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
             result.push(Bc::Goto {
@@ -365,14 +337,10 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let ret = self.program[f].finished_ret.unwrap();
         if !ret.is_never() {
             let slots = self.program.slot_count(ret);
-            let op = if self.is_flat_call {
-                Bc::Ret0
-            } else {
-                match slots {
-                    1 => Bc::Ret1(self.program.prim(ret).unwrap()),
-                    2 => Bc::Ret2(self.program.prim_pair(ret)?),
-                    _ => Bc::Ret0, // void or indirect return
-                }
+            let op = match slots {
+                1 => Bc::Ret1(self.program.prim(ret).unwrap()),
+                2 => Bc::Ret2(self.program.prim_pair(ret)?),
+                _ => Bc::Ret0, // void or indirect return
             };
 
             result.push(op);
@@ -394,93 +362,53 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         can_tail: bool,
         do_call: impl FnOnce(&mut FnBody, PrimSig, bool),
     ) -> Res<'p, ()> {
-        // TODO: what if it hasnt been compiled to bc yet so hasn't had the tag added yet but will later?  -- May 7
-        //       should add test of inferred flatcall mutual recursion.
-        let force_flat = matches!(cc, CallConv::Flat | CallConv::FlatCt);
         let sig = prim_sig(self.program, f_ty, cc)?;
-        if force_flat {
-            // (ret_ptr, compiler, arg_ptr, arg_len, ret_len)
 
-            let id = result.add_var(arg_expr.ty); // Note: this is kinda good because it gets scary if both sides try to avoid the copy and they alias.
+        let result_var = if sig.first_arg_is_indirect_return && result_location != ResAddr {
+            let id = result.add_var(f_ty.ret);
             result.addr_var(id);
-            self.compile_expr(result, arg_expr, ResAddr, false)?;
+            Some(id)
+        } else {
+            None
+        };
 
+        if cc == CallConv::CCallRegCt {
+            result.push(Bc::GetCompCtx);
+        }
+
+        let any_by_ref = self.compile_for_arg(result, arg_expr, f_ty.arity as usize)?;
+        // if any args are pointers, they might be to the stack and then you probably can't tail call.
+        // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
+        // TODO: !tail to force it when you know its fine.
+        let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers && !any_by_ref;
+        do_call(result, sig, tail);
+        let slots = self.slot_count(f_ty.ret);
+        if slots > 0 {
             match result_location {
                 PushStack => {
-                    let ret_id = result.add_var(f_ty.ret);
-                    result.addr_var(ret_id);
-                    result.push(Bc::GetCompCtx);
-                    result.addr_var(id);
-                    self.push_flat_lengths(result, f_ty);
-                    do_call(result, sig, false);
-                    result.addr_var(ret_id);
-                    self.load(result, f_ty.ret);
-                    result.push(Bc::LastUse { id: ret_id });
+                    if sig.first_arg_is_indirect_return {
+                        if let Some(id) = result_var {
+                            result.addr_var(id);
+                        }
+                        self.load(result, f_ty.ret);
+                    }
                 }
                 ResAddr => {
-                    // res ptr was already on stack
-                    result.push(Bc::GetCompCtx);
-                    result.addr_var(id);
-                    self.push_flat_lengths(result, f_ty);
-                    do_call(result, sig, false);
+                    if !sig.first_arg_is_indirect_return {
+                        self.store_pre(result, f_ty.ret);
+                    }
                 }
                 Discard => {
-                    let ret_id = result.add_var(f_ty.ret);
-                    result.addr_var(ret_id);
-                    result.push(Bc::GetCompCtx);
-                    result.addr_var(id);
-                    self.push_flat_lengths(result, f_ty);
-                    do_call(result, sig, false);
-                    result.push(Bc::LastUse { id: ret_id });
-                }
-            }
-            result.push(Bc::LastUse { id });
-        } else {
-            let result_var = if sig.first_arg_is_indirect_return && result_location != ResAddr {
-                let id = result.add_var(f_ty.ret);
-                result.addr_var(id);
-                Some(id)
-            } else {
-                None
-            };
-
-            if cc == CallConv::CCallRegCt {
-                result.push(Bc::GetCompCtx);
-            }
-
-            let any_by_ref = self.compile_for_arg(result, arg_expr, f_ty.arity as usize)?;
-            // if any args are pointers, they might be to the stack and then you probably can't tail call.
-            // TODO: can do better than this without getting too fancy, function pointers are fine, and anything in constant data is fine (we know if the arg is a Values).
-            // TODO: !tail to force it when you know its fine.
-            let tail = can_tail && !self.program.get_info(f_ty.arg).contains_pointers && !any_by_ref;
-            do_call(result, sig, tail);
-            let slots = self.slot_count(f_ty.ret);
-            if slots > 0 {
-                match result_location {
-                    PushStack => {
-                        if sig.first_arg_is_indirect_return {
-                            if let Some(id) = result_var {
-                                result.addr_var(id);
-                            }
-                            self.load(result, f_ty.ret);
-                        }
-                    }
-                    ResAddr => {
-                        if !sig.first_arg_is_indirect_return {
-                            self.store_pre(result, f_ty.ret);
-                        }
-                    }
-                    Discard => {
-                        if !sig.first_arg_is_indirect_return {
-                            result.pop(slots)
-                        }
+                    if !sig.first_arg_is_indirect_return {
+                        result.pop(slots)
                     }
                 }
-            } else if result_location == ResAddr {
-                // pop dest!
-                result.pop(1)
             }
+        } else if result_location == ResAddr {
+            // pop dest!
+            result.pop(1)
         }
+
         if f_ty.ret.is_never() {
             result.push(Bc::Unreachable);
         }
@@ -615,7 +543,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
                 if let TypeInfo::FnPtr { ty: f_ty, cc } = self.program[f.ty] {
                     self.compile_expr(result, f, PushStack, false)?;
-                    let will_use_indirect_ret = cc == CallConv::Flat || cc == CallConv::CCallRegCt || self.program.slot_count(f_ty.ret) > 2;
+                    let will_use_indirect_ret = self.program.slot_count(f_ty.ret) > 2; // TODO: get this from sig
                     if result_location == ResAddr && will_use_indirect_ret {
                         // grab the result pointer to the top of the stack so the layout matches a normal call.
                         // however, if the function wants to push stack but we want it to a resaddr, we don't do this here because emit_runtime_call handles it which is kinda HACK.
@@ -1189,18 +1117,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
         Ok(())
     }
-
-    fn push_flat_lengths(&self, result: &mut FnBody, f_ty: crate::ast::FnType) {
-        let (arg, ret) = self.program.get_infos(f_ty);
-        result.push(Bc::PushConstant {
-            value: arg.stride_bytes as i64,
-            ty: Prim::I64,
-        });
-        result.push(Bc::PushConstant {
-            value: ret.stride_bytes as i64,
-            ty: Prim::I64,
-        });
-    }
 }
 
 // TODO: i should have constant pointers as a concept in my language.
@@ -1388,18 +1304,6 @@ impl<'p> FnBody<'p> {
 
 pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig> {
     let (arg, ret) = program.get_infos(f_ty);
-    if matches!(cc, CallConv::Flat | CallConv::FlatCt) {
-        return Ok(PrimSig {
-            arg_slots: 5,
-            arg_float_mask: 0,
-            ret_slots: 0,
-            ret_float_mask: 0,
-            first_arg_is_indirect_return: true, // really it does have indirect ret but we don't want to pass the first arg in x8
-            use_special_register_for_indirect_return: false,
-            no_return: f_ty.ret.is_never(),
-            return_value_bytes: ret.stride_bytes,
-        });
-    }
 
     let has_indirect_ret = ret.size_slots > 2;
 

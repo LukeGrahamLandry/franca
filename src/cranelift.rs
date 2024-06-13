@@ -118,14 +118,6 @@ fn emit_cl_inner<'p, M: Module>(
     }
     let ctx = cl.module.make_context();
 
-    let mut flat_sig = Signature::new(cl.module.target_config().default_call_conv);
-    flat_sig.params.push(AbiParam::new(I64));
-    flat_sig.params.push(AbiParam::new(I64));
-    flat_sig.params.push(AbiParam::new(I64));
-    flat_sig.params.push(AbiParam::new(I64));
-    flat_sig.params.push(AbiParam::new(I64));
-
-    let is_flat = matches!(program[f].cc.unwrap(), CallConv::Flat | CallConv::FlatCt);
     let mut e = Emit {
         body,
         blocks: vec![],
@@ -138,7 +130,6 @@ fn emit_cl_inner<'p, M: Module>(
         program,
         asm,
         cl,
-        is_flat,
     };
     e.emit_func(f, FunctionBuilderContext::new(), ctx)?;
     cl.funcs_done.insert(f.as_index(), true);
@@ -210,7 +201,7 @@ impl JittedCl<JITModule> {
 }
 
 struct Emit<'z, 'p, M: Module> {
-    compile_ctx_ptr: usize, // TODO: HACK. should really pass this through correctly as an argument. seperate which flat calls really need it.
+    compile_ctx_ptr: usize, // TODO: HACK. should really pass this through correctly as an argument.
     program: &'z mut Program<'p>,
     asm: Option<&'z mut Jitted>, // TODO: kinda hack. other side should be able to do too
     cl: &'z mut JittedCl<M>,
@@ -222,7 +213,6 @@ struct Emit<'z, 'p, M: Module> {
 
     vars: Vec<StackSlot>,
     f: FuncId,
-    is_flat: bool,
 }
 
 impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
@@ -318,7 +308,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             let v = args[i as usize];
             self.stack.push(v)
         }
-        if b == 0 && !self.is_flat {
+        if b == 0 {
             let sig = self.body.signeture;
             debug_assert_eq!(sig.arg_slots, block.arg_slots);
             self.cast_ret_from_float(builder, sig.arg_slots, sig.arg_float_mask);
