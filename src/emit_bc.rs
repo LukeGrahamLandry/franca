@@ -1276,7 +1276,18 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
                 return Ok(program.baked.make(BakedVar::VoidPtrArray(ptrs), jit_ptr));
             }
         }
-        TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union: {}", program.log_type(ty)),
+        TypeInfo::Tagged { cases } => {
+            let tag = unsafe { *(value.bytes().as_ptr() as *const usize) };
+            assert!(cases.len() > tag, "invalid constant tagged union");
+            if !program.get_info(cases[tag].1).contains_pointers {
+                // it happens that this varient is easy.
+                let value = program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr);
+                Ok(value)
+            } else {
+                println!("{:?}", program.pool.get(cases[tag].0));
+                err!("TODO: pointers in constant tagged union: {}", program.log_type(ty))
+            }
+        }
         TypeInfo::Enum { raw, .. } => emit_relocatable_constant(*raw, value, program, dispatch),
         TypeInfo::VoidPtr => {
             if value.bytes().iter().all(|b| *b == 0) {

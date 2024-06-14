@@ -2693,7 +2693,8 @@ impl<'a, 'p> Compile<'a, 'p> {
             unreachable!()
         };
         match place.deref_mut().deref_mut() {
-            Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
+            // TODO: PrefixMacro is sketchy but makes []->.index work.
+            Expr::PrefixMacro {.. } | Expr::GetVar(_) | Expr::FieldAccess(_, _) | Expr::SuffixMacro(_, _) => {
                 self.compile_place_expr(place, None, true)?;
                 let oldty = place.ty;
                 let value_ty = self.compile_expr(value, Some(oldty))?;
@@ -2702,7 +2703,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::PtrOffset { .. } => unreachable!("compiled twice?"),
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
-            _ => ice!("TODO: other `place=e;`"),
+            e => ice!("TODO: other `place=e;` --"),
         }
     }
 

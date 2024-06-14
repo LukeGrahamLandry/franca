@@ -1,21 +1,30 @@
+// I'm not super thrilled about writing it this way but its really annoying to do the boring stack manipulation every time. 
+
 // TODO: traits
-// fn inst_call(self: *B, sig: PrimSig, f: FuncId, tail: bool) Slice(B.Val);
-// fn inst_trap(self: *B) Unit;
-// fn inst_call_ptr(self: *B, sig: PrimSig, ptr: B.Val) Slice(B.Val);
-// fn inst_offset(self: *B, ptr: B.Val, bytes: u16) B.Val;
-// fn inst_literal(self: *B, value: i64, ty: Prim) B.Val;
-// fn inst_load(self: *B, addr: B.Val, ty: Prim) B.Val;
-// fn inst_store(self: *B, addr: B.Val, value: B.Val, ty: Prim) B.Val;
-// fn inst_copy(self: *B, from: B.Val, to: B.Val, bytes: u16) B.Val;
-// fn inst_func_ref(self: *B, fid: FuncId) B.Val;
-// fn inst_global(self: *B, id: BakedVarId) B.Val;
-// fn inst_jump_if(self: *B, cond: B.Val, true: BbId, false: BbId, args: Slice(B.Val)) Unit;
-// fn inst_jump(self: *B, always: BbId, args: Slice(B.Val)) Unit;
-// fn inst_return(self: *B, args: Slice(B.Val)) Unit;
-// fn move_to_block(self: *B, block: BbId) Unit;
-// - declare basic blocks
-// - declare stack slots for local variables
-// fn setup(self: *B, body: *FnBody, vars_out: *List(B.Val)) Unit;
+/*
+Backend :: @trait fn(const B: Type) = {
+    // B.Val needs to be Copy.
+    :: assert_eq(@type :: B.Val, Type); // TODO: better syntax for associated types? 
+    
+    fn inst_call(self: *B, sig: PrimSig, f: FuncId, tail: bool) Slice(B.Val);
+    fn inst_trap(self: *B) Unit;
+    fn inst_call_ptr(self: *B, sig: PrimSig, ptr: B.Val) Slice(B.Val);
+    fn inst_offset(self: *B, ptr: B.Val, bytes: u16) B.Val;
+    fn inst_literal(self: *B, value: i64, ty: Prim) B.Val;
+    fn inst_load(self: *B, addr: B.Val, ty: Prim) B.Val;
+    fn inst_store(self: *B, addr: B.Val, value: B.Val, ty: Prim) B.Val;
+    fn inst_copy(self: *B, from: B.Val, to: B.Val, bytes: u16) B.Val;
+    fn inst_func_ref(self: *B, fid: FuncId) B.Val;
+    fn inst_global(self: *B, id: BakedVarId) B.Val;
+    fn inst_jump_if(self: *B, cond: B.Val, true: BbId, false: BbId, args: Slice(B.Val)) Unit;
+    fn inst_jump(self: *B, always: BbId, args: Slice(B.Val)) Unit;
+    fn inst_return(self: *B, args: Slice(B.Val)) Unit;
+    fn move_to_block(self: *B, block: *BasicBlock, ip: BbId) Slice(B.Val);
+    // - declare basic blocks
+    // - declare stack slots for local variables
+    fn setup(self: *B, body: *FnBody, vars_out: *List(B.Val)) Unit;
+};
+*/
 
 fn CodeGen(const B: Type) Type = @struct(
     comp: CompCtx,
@@ -28,35 +37,42 @@ fn CodeGen(const B: Type) Type = @struct(
 GenQbe :: CodeGen(EmitQbe);
 
 fn walk_block(self: *GenQbe, b: BbId) Unit = {
+    // TODO: you cant call pop unless its been instantiated but it cant be instantiated if the type doesn't exist.
+    :: ?EmitQbe.Val; ::?Slice(EmitQbe.Val);
     block := self.body.blocks.items()[b.id.zext()]&;
+    assert(self.stack.len.ge(block.arg_prims.len), "stack missing block args");
+    args := self.backend&.move_to_block(block, b);
+    self.stack&.push_all(args);
+    
     break :: @return;
-    each(block.insts){ inst |
+    for(block.insts.items()){ inst |
         @match(inst){
             (fn Nop() => ());
             (fn SaveSsa(slot) => {
-                v := self.stack.pop().unwrap();
+                v := self.stack&.pop().unwrap();
                 self.vars[slot.id.zext()] = v;
             });
             (fn LoadSsa(slot) => {
                 v := self.vars[slot.id.zext()];
-                self.stack.push(v);
+                self.stack&.push(v);
             });
             (fn GetCompCtx() => {
                 panic("AOT bytecode should not use GetCompCtx");
             });
             (fn CallDirect(call) => { //  f, tail, sig
-                arg_count := call.sig.arg_slots.zext();
+                arg_count: i64 = call.sig.arg_slots.zext();
                 args := self.stack.items().slice_last(arg_count).unwrap();
                 ret := self.backend&.inst_call(call.sig, call.f, call.tail);
                 self.stack.len -= arg_count;
                 self.stack&.push_all(ret);
-                if(call.tail.or(sig.no_return)){|
+                if(call.tail.or(call.sig.no_return)){|
                     self.backend&.inst_trap();
                     break();
                 };
             });
             (fn CallFnPtr(call) => {
-                arg_count := call.sig.arg_slots.zext();
+                // TODO: better error message if you don't put the type annotation here. 
+                arg_count: i64 = call.sig.arg_slots.zext();
                 ptr := self.stack.items()[self.stack.len.sub(arg_count).sub(1)];
                 args := self.stack.items().slice_last(arg_count).unwrap();
                 ret := self.backend&.inst_call_ptr(call.sig, ptr);
@@ -73,23 +89,21 @@ fn walk_block(self: *GenQbe, b: BbId) Unit = {
                 self.stack&.push(v);
             });
             (fn JumpIf(jump) => { //  { true_ip, false_ip, slots }
-                cond := self.stack.pop().unwrap();
+                cond := self.stack&.pop().unwrap();
                 args := self.stack.items().slice_last(jump.slots.zext()).unwrap();
                 self.backend&.inst_jump_if(cond, jump.true_ip, jump.false_ip, args);
                 self.stack.len -= jump.slots.zext();
-                let stack = self.stack.clone();
-                self.emit_block(true_ip.0 as usize, builder)?;
+                stack := self.stack.items().clone(temp());
+                self.walk_block(jump.true_ip);
                 self.stack = stack;
-                self.walk_block(jump.false_ip, builder)?;
+                self.walk_block(jump.false_ip);
                 break();
             });
-            // fn inst_jump_if(self: *B, cond: B.Val, true: BbId, false: BbId, args: Slice(B.Val)) Unit;
-            // fn inst_jump(self: *B, always: BbId, args: Slice(B.Val)) Unit;
             (fn Goto(jump) => { // { ip, slots }
                 args := self.stack.items().slice_last(jump.slots.zext()).unwrap();
                 self.backend&.inst_jump(jump.ip, args);
                 self.stack.len -= jump.slots.zext();
-                self.emit_block(jump.ip)?;
+                self.walk_block(jump.ip);
                 break();
             });
             (fn Ret0() => {
@@ -102,7 +116,7 @@ fn walk_block(self: *GenQbe, b: BbId) Unit = {
                 self.stack.len -= 1;
                 break();
             });
-            (fn Ret2(_, __) => {
+            (fn Ret2(_) => {
                 args := self.stack.items().slice_last(2).unwrap();
                 self.backend&.inst_return(args);
                 self.stack.len -= 2;
@@ -113,31 +127,32 @@ fn walk_block(self: *GenQbe, b: BbId) Unit = {
                 self.stack&.push(v);
             });
             (fn Load(ty) => {
-                addr := self.stack.pop().unwrap();
+                addr := self.stack&.pop().unwrap();
                 v    := self.backend&.inst_load(addr, ty);
-                self.stack.push(v);
+                self.stack&.push(v);
             });
             (fn StorePost(ty) => {
-                addr := self.stack.pop().unwrap();
-                v    := self.stack.pop().unwrap();
+                addr := self.stack&.pop().unwrap();
+                v    := self.stack&.pop().unwrap();
                 self.backend&.inst_store(addr, v, ty);
                 self.stack.len -= 2;
             });
             (fn StorePre(ty) => {
-                v    := self.stack.pop().unwrap();
-                addr := self.stack.pop().unwrap();
+                v    := self.stack&.pop().unwrap();
+                addr := self.stack&.pop().unwrap();
                 self.backend&.inst_store(addr, v, ty);
                 self.stack.len -= 2;
             });
             (fn AddrVar(slot) => {
+                @println("get var %. count = %", @as(i64) slot.id.zext(), self.vars.len);
                 ptr := self.vars[slot.id.zext()];
                 self.stack&.push(ptr);
             });
             (fn IncPtrBytes(bytes) => {
-                ptr := self.stack.pop().unwrap();
+                ptr := self.stack&.pop().unwrap();
                 res := self.backend&.inst_offset(ptr, bytes);
-                self.stack.push(res);
-            })
+                self.stack&.push(res);
+            }); // TODO: better error message if you forget this semi-colon
             (fn Unreachable() => {
                 self.backend&.inst_trap();
                 break();
@@ -147,16 +162,17 @@ fn walk_block(self: *GenQbe, b: BbId) Unit = {
             });
             (fn LastUse(_) => ());
             (fn PeekDup(skip) => {
-                v := self.stack[self.stack.len() - skip as usize - 1];
+                i := self.stack.len().sub(skip.zext()).sub(1);
+                v := self.stack[i];
                 self.stack&.push(v);
             });
             (fn Snipe(skip) => {
                 index := self.stack.len().sub(skip.zext()).sub(1);
-                self.stack&.remove(index);
+                self.stack&.ordered_remove(index);
             });
             (fn CopyBytesToFrom(bytes) => {
-                from := self.stack.pop().unwrap();
-                to := self.stack.pop().unwrap();
+                from := self.stack&.pop().unwrap();
+                to := self.stack&.pop().unwrap();
                 self.backend&.inst_copy(from, to, bytes);
             });
         };

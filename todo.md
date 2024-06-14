@@ -3,6 +3,8 @@
 - seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.
   then need to allow different reprs.
 - sign extend
+- clear temp alloc when emitting for AOT
+- have an overload set that types can add to when they have special constant emit rules instead of the current hardcoded thing.
 
 ## regressions
 

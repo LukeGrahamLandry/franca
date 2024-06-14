@@ -341,12 +341,15 @@ impl<'a, 'p> Compile<'a, 'p> {
         for opt in overloads.drain(1..) {
             debug_assert!(merged.len() < 10); // wtf
             assert!(opt.arg == output.arg, "overload missmatch. unreachable?");
+            // TODO: better error message if they just forgot a type annotation.
             assert!(
                 opt.ret == output.ret,
-                "overload missmatch for {}. unreachable? {:?} {:?}",
+                "overload missmatch for {}. unreachable? {:?} {:?} {:?} {:?}",
                 self.pool.get(self.program[i].name),
                 opt.ret,
-                output.ret
+                output.ret,
+                opt.ret.map(|t| self.program.log_type(t)),
+                output.ret.map(|t| self.program.log_type(t)),
             );
 
             let f = opt.func;

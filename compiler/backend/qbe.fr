@@ -1,24 +1,119 @@
-
 fn emit_qbe(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = {
+    s: EmitQbe = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
+    gen: GenQbe = (
+        comp = comp,
+        backend = s,
+        body = zeroed(*FnBody), // EVIL
+        vars = list(20, temp()),
+        stack = list(20, temp()),
+    );
     
+    for(fns){fid|
+        body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
+        gen.body = body&;
+        gen.backend&.setup(gen.body, gen.vars&);
+        gen&.walk_block((id = 0.trunc()));
+        
+        gen.vars&.clear();
+        gen.stack&.clear();
+    };
+    
+    gen.backend.out
 }
 
-EmitQbe :: @struct(
-    
+// TODO: better error mwssage if you use @enum instead of @tagged. -- Jun 14
+QbeVal :: @tagged(
+    Var: @struct(id: i64, ty: Prim),
+    Lit: @struct(value: i64, ty: Prim),
 );
 
-//fn inst_call(self: *B, sig: PrimSig, f: FuncId, tail: bool) Slice(B.Val);
-//fn inst_trap(self: *B) Unit;
-//fn inst_call_ptr(self: *B, sig: PrimSig, ptr: B.Val) Slice(B.Val);
-//fn inst_offset(self: *B, ptr: B.Val, bytes: u16) B.Val;
-//fn inst_literal(self: *B, value: i64, ty: Prim) B.Val;
-//fn inst_load(self: *B, addr: B.Val, ty: Prim) B.Val;
-//fn inst_store(self: *B, addr: B.Val, value: B.Val, ty: Prim) B.Val;
-//fn inst_copy(self: *B, from: B.Val, to: B.Val, bytes: u16) B.Val;
-//fn inst_func_ref(self: *B, fid: FuncId) B.Val;
-//fn inst_global(self: *B, id: BakedVarId) B.Val;
-//fn inst_jump_if(self: *B, cond: B.Val, true: BbId, false: BbId, args: Slice(B.Val)) Unit;
-//fn inst_jump(self: *B, always: BbId, args: Slice(B.Val)) Unit;
-//fn inst_return(self: *B, args: Slice(B.Val)) Unit;
-//fn move_to_block(self: *B, block: BbId) Unit;
-//fn setup(self: *B, body: *FnBody, vars_out: *List(B.Val)) Unit;
+EmitQbe :: @struct(
+    comp: CompCtx,
+    out: BucketArray(u8),
+    current: BbId,
+    const Val := QbeVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
+);
+
+fn setup(self: *EmitQbe, body: *FnBody, vars_out: *List(EmitQbe.Val)) Unit = {
+    // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
+    vars := body.vars.items();
+    @println("There are % vars", vars.len);
+    enumerate(vars) {i, ty|
+        meta := {self.comp.vtable.get_type_meta}(self.comp.data, ty[]);
+        vars_out.push((Var = (id = i, ty = .P64)));
+        init := @format("   %v% =l alloc8 %\n", "%", i, @as(i64) meta.stride_bytes.zext()) temp(); // uhg % was a bad choice. 
+        // TODO: this copy is dumb. reserve enough up front and then @fmt into the bucket array. 
+        //       the whole point is to avoid copies. 
+        self.out&.push_all(init.items());
+    };
+    println(self.out.buckets[0].items());
+}
+
+fn inst_call(self: *EmitQbe, sig: PrimSig, f: FuncId, tail: bool) Slice(EmitQbe.Val) = {
+    println("call");
+    todo()
+}
+
+fn inst_trap(self: *EmitQbe) Unit = {
+    todo()
+}
+
+fn inst_call_ptr(self: *EmitQbe, sig: PrimSig, ptr: EmitQbe.Val) Slice(EmitQbe.Val) = {
+    todo()
+}
+
+fn inst_offset(self: *EmitQbe, ptr: EmitQbe.Val, bytes: u16) EmitQbe.Val = {
+    todo()
+}
+
+fn inst_literal(self: *EmitQbe, value: i64, ty: Prim) EmitQbe.Val = {
+    todo()
+}
+
+fn inst_load(self: *EmitQbe, addr: EmitQbe.Val, ty: Prim) EmitQbe.Val = {
+    todo()
+}
+
+fn inst_store(self: *EmitQbe, addr: EmitQbe.Val, value: EmitQbe.Val, ty: Prim) EmitQbe.Val = {
+    println("store");
+    todo()
+}
+
+fn inst_copy(self: *EmitQbe, from: EmitQbe.Val, to: EmitQbe.Val, bytes: u16) EmitQbe.Val = {
+    todo()
+}
+
+fn inst_func_ref(self: *EmitQbe, fid: FuncId) EmitQbe.Val = {
+    todo()
+}
+
+fn inst_global(self: *EmitQbe, id: BakedVarId) EmitQbe.Val = {
+    println("global");
+    {self.comp.vtable.debug_log_baked_constant}(self.comp.data, id);
+    todo()
+}
+
+fn inst_jump_if(self: *EmitQbe, cond: EmitQbe.Val, true: BbId, false: BbId, args: Slice(EmitQbe.Val)) Unit = {
+    todo()
+}
+
+fn inst_jump(self: *EmitQbe, always: BbId, args: Slice(EmitQbe.Val)) Unit = {
+    todo()
+}
+
+fn inst_return(self: *EmitQbe, args: Slice(EmitQbe.Val)) Unit = {
+    todo()
+}
+
+fn move_to_block(self: *EmitQbe, block: *BasicBlock, ip: BbId) Slice(EmitQbe.Val) = {
+    self.current = ip;
+    args: List(EmitQbe.Val) = list(block.arg_prims.len, temp());
+    
+    @println("block arg count is %", block.arg_prims.len);
+    enumerate(block.arg_prims) {i, ty| 
+        todo();
+    };
+    
+    
+    args.items()
+}
