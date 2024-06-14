@@ -98,7 +98,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         let arg_ty = self.program[result.func].finished_ty().unwrap().arg;
         let mut pushed = if result.signeture.first_arg_is_indirect_return { 1 } else { 0 };
-        let mut prim_args = if self.program.get_primitives((arg_ty, arity, false)).is_some() {
+        let mut prim_args = if self.program.get_primitives((arg_ty, arity, false, false)).is_some() {
             None
         } else {
             Some(vec![])
@@ -170,15 +170,15 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             args.reverse(); // sigh
             let mut prims = self.program.primitives.borrow_mut();
             debug_assert!(result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
-            prims.insert((arg_ty, arity, false), args.clone());
+            prims.insert((arg_ty, arity, false, false), args.clone());
             args.insert(0, Prim::P64); // sad
             debug_assert!(!result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
-            prims.insert((arg_ty, arity, true), args);
+            prims.insert((arg_ty, arity, true, false), args);
         }
 
         Ok(self
             .program
-            .get_primitives((arg_ty, arity, result.signeture.first_arg_is_indirect_return))
+            .get_primitives((arg_ty, arity, result.signeture.first_arg_is_indirect_return, false))
             .unwrap())
     }
 
@@ -396,7 +396,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         arg_expr: &FatExpr<'p>,
         result_location: ResultLoc,
         can_tail: bool,
-        do_call: impl FnOnce(&mut FnBody, PrimSig, bool),
+        do_call: impl FnOnce(&mut FnBody<'p>, PrimSig<'p>, bool), // its an ICE if you forget the lifetime annotations here.
     ) -> Res<'p, ()> {
         let sig = prim_sig(self.program, f_ty, cc)?;
 
@@ -1373,19 +1373,33 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         first_arg_is_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
         return_value_bytes: ret.stride_bytes,
+        ret1: None,
+        ret2: None,
     };
 
-    if has_indirect_ret {
-        sig.arg_slots += 1;
-        sig.ret_slots = 0;
-        sig.ret_float_mask = 0;
-    }
-
-    if matches!(cc, CallConv::CCallRegCt) {
-        sig.arg_slots += 1;
+    match ret.size_slots {
+        0 => {}
+        1 => sig.ret1 = program.prim(f_ty.ret),
+        2 => {
+            let (a, b) = program.prim_pair(f_ty.ret)?;
+            sig.ret1 = Some(a);
+            sig.ret2 = Some(b);
+        }
+        _ => {
+            sig.arg_slots += 1;
+            sig.ret_slots = 0;
+            sig.ret_float_mask = 0;
+        }
     }
 
     let mut args = vec![];
+
+    let comp_ctx = matches!(cc, CallConv::CCallRegCt);
+    if comp_ctx {
+        sig.arg_slots += 1;
+        args.push(Prim::P64);
+    }
+
     // sad copy paste from compile_for_arg
     if arg.pass_by_ref {
         if f_ty.arity == 1 {
@@ -1393,7 +1407,19 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
             sig.arg_slots += 1;
             args.push(Prim::P64);
         } else if let Some(types) = program.tuple_types(f_ty.arg) {
-            if !types.iter().all(|t| !program.get_info(*t).pass_by_ref) {
+            if types.iter().all(|t| program.get_info(*t).pass_by_ref) {
+                for ty in types {
+                    if !ty.is_unit() && !ty.is_never() {
+                        args.push(Prim::P64);
+                        sig.arg_slots += 1;
+                        sig.arg_slots -= program.get_info(ty).size_slots;
+                    }
+                }
+            } else if types.iter().all(|t| !program.get_info(*t).pass_by_ref) {
+                for t in program.flat_tuple_types(f_ty.arg) {
+                    args.push(program.prim(t).unwrap());
+                }
+            } else {
                 for ty in types {
                     let info = program.get_info(ty);
                     if info.pass_by_ref {
@@ -1410,16 +1436,35 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
                         }
                     }
                 }
-            } else {
-                todo!()
             }
         } else {
             // if arity == 1 ??
             sig.arg_slots = 1;
             args.push(Prim::P64);
         }
+    } else if !f_ty.arg.is_unit() && !f_ty.arg.is_never() {
+        args.extend(program.as_primatives(f_ty.arg));
+    }
+
+    let mut key = (f_ty.arg, sig.arg_slots, false, comp_ctx);
+    program.primitives.borrow_mut().insert(key, args.clone());
+    args.insert(0, Prim::P64); // sad
+    key.2 = true;
+    program.primitives.borrow_mut().insert(key, args); // TODO: stupid that i have to do this here
+    key.2 = false;
+    sig.args = program.get_primitives(key).unwrap();
+
+    if sig.first_arg_is_indirect_return {
+        debug_assert_eq!(sig.args.len() + 1, sig.arg_slots as usize);
     } else {
-        sig.args = program.as_primatives(f_ty.arg);
+        debug_assert_eq!(
+            sig.args.len(),
+            sig.arg_slots as usize,
+            "arg={}\n{sig:?}\n{:?}\nret={}",
+            program.log_type(f_ty.arg),
+            sig.args,
+            program.log_type(f_ty.ret),
+        );
     }
 
     Ok(sig)

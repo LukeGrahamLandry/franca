@@ -60,6 +60,8 @@ pub struct PrimSig<'p> {
     pub return_value_bytes: u16,
     pub first_arg_is_indirect_return: bool,
     pub no_return: bool,
+    pub ret1: Option<Prim>,
+    pub ret2: Option<Prim>,
 }
 #[repr(u8)]
 #[derive(Clone, Debug, Copy, PartialEq)]

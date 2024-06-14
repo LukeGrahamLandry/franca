@@ -864,7 +864,7 @@ pub struct Program<'p> {
     // TODO: this could just be a !builtin, is that better?
     pub save_cstr_t: Option<TypeId>,
     pub fat_expr_type: Option<TypeId>,
-    pub primitives: RefCell<HashMap<(TypeId, u16, bool), Vec<Prim>>>,
+    pub primitives: RefCell<HashMap<(TypeId, u16, bool, bool), Vec<Prim>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -1201,7 +1201,7 @@ impl<'p> Program<'p> {
         }
     }
 
-    pub(crate) fn get_primitives(&self, key: (TypeId, u16, bool)) -> Option<&'p [Prim]> {
+    pub(crate) fn get_primitives(&self, key: (TypeId, u16, bool, bool)) -> Option<&'p [Prim]> {
         self.primitives
             .borrow()
             .get(&key)
@@ -1213,20 +1213,27 @@ impl<'p> Program<'p> {
             return &[];
         }
         let slots = self.get_info(ty).size_slots;
-        let mut key = (ty, slots, false);
+        let mut key = (ty, slots, false, false);
         if let Some(p) = self.get_primitives(key) {
             return p;
         }
         let types = self.flat_tuple_types(ty);
         let mut types = types
             .into_iter()
-            .map(|t| self.prim(t).unwrap_or_else(|| panic!("not prim {}", self.log_type(t))))
+            .flat_map(|t| {
+                if t.is_unit() || t.is_never() {
+                    None
+                } else {
+                    Some(self.prim(t).unwrap_or_else(|| panic!("not prim {}", self.log_type(t))))
+                }
+            })
             .collect::<Vec<_>>();
         self.primitives.borrow_mut().insert(key, types.clone());
 
         types.insert(0, Prim::P64); // sad
         key.2 = true;
         self.primitives.borrow_mut().insert(key, types); // TODO: stupid that i have to do this here
+        key.2 = false;
 
         self.get_primitives(key).unwrap()
     }

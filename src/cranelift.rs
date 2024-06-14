@@ -580,29 +580,44 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
     fn make_sig(&mut self, sign: PrimSig) -> Signature {
         let mut sig = self.cl.module.make_signature();
-        for i in 0..sign.arg_slots as usize {
-            let value_type = if is_float(i, sign.arg_slots, sign.arg_float_mask) { F64 } else { I64 };
-            // TODO: sign extend once I use small int types? but really caller should always do it I think.
-            let purpose = if sign.first_arg_is_indirect_return && i == 0 {
-                // TODO: a test that fails if you don't do this
-                ArgumentPurpose::StructReturn
-            } else {
-                ArgumentPurpose::Normal
-            };
+        if sign.first_arg_is_indirect_return {
+            let value_type = primitive(Prim::P64);
             sig.params.push(AbiParam {
                 value_type,
-                purpose,
+                purpose: ArgumentPurpose::StructReturn,
                 extension: ArgumentExtension::None,
             });
         }
-        for i in 0..sign.ret_slots as usize {
-            let value_type = if is_float(i, sign.ret_slots, sign.ret_float_mask) { F64 } else { I64 };
+
+        for ty in sign.args {
+            let mut ty = *ty;
+            if matches!(ty, Prim::I8 | Prim::I16 | Prim::I32) {
+                ty = Prim::I64;
+            }
             // TODO: sign extend once I use small int types? but really caller should always do it I think.
-            sig.returns.push(AbiParam {
-                value_type,
+            sig.params.push(AbiParam {
+                value_type: primitive(ty),
                 purpose: ArgumentPurpose::Normal,
                 extension: ArgumentExtension::None,
             });
+        }
+
+        let make_ret = |sig: &mut Signature, mut ty: Prim| {
+            if matches!(ty, Prim::I8 | Prim::I16 | Prim::I32) {
+                ty = Prim::I64;
+            }
+            // TODO: sign extend once I use small int types?
+            sig.returns.push(AbiParam {
+                value_type: primitive(ty),
+                purpose: ArgumentPurpose::Normal,
+                extension: ArgumentExtension::None,
+            });
+        };
+        if let Some(r) = sign.ret1 {
+            make_ret(&mut sig, r);
+        }
+        if let Some(r) = sign.ret2 {
+            make_ret(&mut sig, r);
         }
 
         sig
