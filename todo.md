@@ -1,9 +1,8 @@
 - generic Read/Write instead of hardcoding List(u8).
-- remove flat call from backends, just do it in bc.
-- make sure fn load is always correctly inlined by #one_ret_pic
 - handle #generic in overloading.rs so you don't have to add useless @as casts in nested expressions.
 - seperate fn stride_of and fn size_of so you can avoid extra padding in nested structs.
   then need to allow different reprs.
+- sign extend
 
 ## regressions
 
@@ -16,10 +15,8 @@
 - can't output an exe, only jit
 - no way to say trait bounds on generics (it just tries to compile like c++ templates). at least have fn require_overload(Ident, Type, Type);
 - need to explicitly instantiate generics
-- stdlib isn't in seperate modules. need to allow nested modules.
 - test runner glue code is done in rust instead of fancy metaprogram
 - sometimes it can't show the codemap. should never use garbage_loc.
-- no default branch in @match
 - can't import a file as a namespace.
 - can't write a macro that expands to statements
 - errors don't show multiple locations (like conflicting overloads should show the problem)
@@ -65,7 +62,6 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 - !defer
 - Box(T) and box(t) for quick allocations
 - fix impl generics now that public vars work
-- give macros access to type info for auto debug printing
 - const SafetyCheck = @flagset(Bounds, Overflow, DivByZero, UnreachableCode, WrongEnumTag, CastBounds, Align, FfiNull, UseUninitCanary);
   safety(Bounds, fn= lt(i, len(self));
 - enum bitset
@@ -80,24 +76,13 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
     Ptr$T "a pointer to a T" vs T.Ptr() "a T that is behind a pointer"
   - Rc$ T.RefCell() === Rc(RefCell(T))
 - function that take a slice of args called like variadic functions.
-- field auto ref/deref for primitive types?
-- my expression output thingy broke some struct stuff (aliasing + asm consecutive slots)
 - let macros code generate a string and compile that
-- panics show stack trace
 - super cold calling convention for panics with constant args where you use return address to lookup arg values (i feel like i can do better than rustc which is really strange)
 - asm panic on invalid enum field instead of faulting
 - explicit runtime data struct.
-- feature to turn off backtrace-rs dependency
 - u32/u16 pointers as indexes into per type arrays. deref trait so that can be a library feature? want to be able to toggle easily not at every use so can benchmark
 - command line argument parser
 - getters and setters so enums and flag sets could be done in the language and still have natural syntax.
-- free standing versions of functions. so like during comptime you want the compiler to control allocations/printing/panics probably
-  but need to be able compile a real binary too. this gets back into the problem of compiling anything used at both multiple times.
-  do you try to represent that in the ast so they share work or have fully seperate Func instances for anything that indirectly calls an env function.
-- have addressable bytes (u8, u16, u32, u64) and measure size_of in bytes.
-  - then you could reliably do c ffi
-  - seperate logical (pattern matching) size from real size.
-- c struct padding logic for ffi
 - expose c variadic functions on llvm (because why not)
 - add @rt for freestanding which denies calling @ct fns and can resolve overloads.
   - tho I suppose you should be able to still call @rt at compile time if no overload conflict? or does that make it pointless?
@@ -139,7 +124,7 @@ fn render_func_body(f: FuncId, out: \*List$u8, ir: IrFormat) Unit;
 
 ## UB
 
-- (CHECKED) accessing the wrong enum field
+- accessing the wrong enum field
 - holding a pointer to an enum member while changing its tag
 - read off the end of an array
 - div(0)

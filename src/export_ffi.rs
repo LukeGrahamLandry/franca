@@ -5,9 +5,9 @@ use libc::c_void;
 
 use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
-    ScopeId, TargetArch, TypeId, TypeInfo, WalkAst,
+    ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{to_values, Values};
+use crate::bc::{to_values, FnBody, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
@@ -16,7 +16,7 @@ use crate::overloading::where_the_fuck_am_i;
 use crate::parse::Parser;
 use crate::pool::{Ident, StringPool};
 use crate::scope::ResolveScope;
-use crate::{assert, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
+use crate::{assert, emit_bc::emit_bc, err, ice, log_err, make_toplevel, signed_truncate, Stats, MEM, STATS};
 use std::fmt::{Debug, Write};
 use std::mem::{self};
 use std::ops::{FromResidual, Try};
@@ -205,6 +205,8 @@ pub struct ImportVTable {
     get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
     get_mem_mark: unsafe extern "C" fn() -> usize,
+    emit_bc: for<'p> extern "C" fn(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>>,
+    get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
 }
 
 #[repr(C)]
@@ -234,7 +236,13 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     get_function_name,
     comptime_arch,
     get_mem_mark,
+    emit_bc,
+    get_type_meta,
 };
+
+extern "C" fn get_type_meta(compile: &Compile, ty: TypeId) -> TypeMeta {
+    compile.program.get_info(ty)
+}
 
 unsafe extern "C" fn get_mem_mark() -> usize {
     MEM.get() as usize

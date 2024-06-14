@@ -30,7 +30,7 @@ struct EmitBc<'z, 'p: 'z> {
     var_lookup: Map<Var<'p>, u16>,
 }
 
-pub fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
+pub extern "C" fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
     let mut emit = EmitBc::new(compile.program, &compile.aarch64);
 
     let body = emit.compile_inner(f, when)?;
@@ -168,6 +168,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         assert_eq!(pushed, result.signeture.arg_slots);
         if let Some(mut args) = prim_args {
             args.reverse(); // sigh
+            debug_assert_eq!(&args, result.signeture.args); // TODO: remove all this shit cause now its redundant.
             let mut prims = self.program.primitives.borrow_mut();
             debug_assert!(result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
             prims.insert((arg_ty, arity, false, false), args.clone());
@@ -1260,18 +1261,22 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
                 let addr = program.baked.make(BakedVar::AddrOf(value), jit_ptr);
                 Ok(addr)
             } else {
-                if fields.iter().all(|f| program.get_info(f.ty).stride_bytes == 8) {
-                    let mut ptrs = vec![];
-                    for (i, f) in fields.iter().enumerate() {
-                        let v = value.bytes()[i * 8..(i + 1) * 8].to_vec();
-                        ptrs.push(emit_relocatable_constant(f.ty, &Values::many(v), program, dispatch)?)
+                let mut ptrs = vec![];
+                for f in fields {
+                    let info = program.get_info(f.ty);
+                    assert_eq!(info.stride_bytes % 8, 0, "TODO");
+                    let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
+                    let field = emit_relocatable_constant(f.ty, &Values::many(v), program, dispatch)?;
+                    if let BakedVar::VoidPtrArray(parts) = program.baked.get(field).0 {
+                        ptrs.extend(parts);
+                    } else {
+                        ptrs.push(field);
                     }
-                    return Ok(program.baked.make(BakedVar::VoidPtrArray(ptrs), jit_ptr));
                 }
-                todo!("{}", program.log_type(raw))
+                return Ok(program.baked.make(BakedVar::VoidPtrArray(ptrs), jit_ptr));
             }
         }
-        TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union",),
+        TypeInfo::Tagged { .. } => err!("TODO: pointers in constant tagged union: {}", program.log_type(ty)),
         TypeInfo::Enum { raw, .. } => emit_relocatable_constant(*raw, value, program, dispatch),
         TypeInfo::VoidPtr => {
             if value.bytes().iter().all(|b| *b == 0) {
@@ -1373,17 +1378,17 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         first_arg_is_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
         return_value_bytes: ret.stride_bytes,
-        ret1: None,
-        ret2: None,
+        ret1: BigOption::None,
+        ret2: BigOption::None,
     };
 
     match ret.size_slots {
         0 => {}
-        1 => sig.ret1 = program.prim(f_ty.ret),
+        1 => sig.ret1 = program.prim(f_ty.ret).into(),
         2 => {
             let (a, b) = program.prim_pair(f_ty.ret)?;
-            sig.ret1 = Some(a);
-            sig.ret2 = Some(b);
+            sig.ret1 = BigOption::Some(a);
+            sig.ret2 = BigOption::Some(b);
         }
         _ => {
             sig.arg_slots += 1;

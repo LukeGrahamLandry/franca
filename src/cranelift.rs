@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, mem};
 
-use crate::export_ffi::BigResult::*;
+use crate::export_ffi::{BigOption, BigResult::*};
 use cranelift::{
     codegen::{
         control::ControlPlane,
@@ -27,7 +27,7 @@ use types::{F32, I16};
 
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program},
-    bc::{is_float, BakedVar, BasicBlock, Bc, FnBody, Prim, PrimSig},
+    bc::{BakedVar, BasicBlock, Bc, FnBody, Prim, PrimSig},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
     emit_bc::{emit_bc, empty_fn_body},
@@ -485,11 +485,11 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     builder.ins().return_(&[]);
                     break;
                 }
-                Bc::Ret1(prim) => {
+                Bc::Ret1(_) => {
                     self.emit_return(builder, 1);
                     break;
                 }
-                Bc::Ret2((a, b)) => {
+                Bc::Ret2(_) => {
                     self.emit_return(builder, 2);
                     break;
                 }
@@ -573,7 +573,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         }
 
         for ty in sign.args {
-            let mut ty = *ty;
+            let ty = *ty;
             // TODO: sign extend once I use small int types? but really caller should always do it I think.
             sig.params.push(AbiParam {
                 value_type: primitive(ty),
@@ -582,7 +582,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             });
         }
 
-        let make_ret = |sig: &mut Signature, mut ty: Prim| {
+        let make_ret = |sig: &mut Signature, ty: Prim| {
             // TODO: sign extend once I use small int types?
             sig.returns.push(AbiParam {
                 value_type: primitive(ty),
@@ -590,10 +590,10 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 extension: ArgumentExtension::None,
             });
         };
-        if let Some(r) = sign.ret1 {
+        if let BigOption::Some(r) = sign.ret1 {
             make_ret(&mut sig, r);
         }
-        if let Some(r) = sign.ret2 {
+        if let BigOption::Some(r) = sign.ret2 {
             make_ret(&mut sig, r);
         }
 

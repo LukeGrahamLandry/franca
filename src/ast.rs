@@ -90,10 +90,10 @@ pub enum TypeInfo<'p> {
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, Default)]
 pub struct TypeMeta {
+    pub float_mask: u32,
     pub size_slots: u16,
     pub stride_bytes: u16,
     pub align_bytes: u16,
-    pub float_mask: u32,
     pub contains_pointers: bool,
     pub pass_by_ref: bool,
 }

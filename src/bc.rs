@@ -19,6 +19,8 @@ use crate::{unwrap, Map};
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BbId(pub u16);
+
+// TODO: suddenly my new PrimSig makes this super chonky. 80 bytes is not ok
 #[repr(C, i64)]
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Bc<'p> {
@@ -53,6 +55,8 @@ pub enum Bc<'p> {
 #[derive(Clone, Copy, PartialEq)]
 pub struct PrimSig<'p> {
     pub args: &'p [Prim],
+    pub ret1: BigOption<Prim>,
+    pub ret2: BigOption<Prim>,
     pub arg_float_mask: u32,
     pub ret_float_mask: u32,
     pub arg_slots: u16,
@@ -60,10 +64,9 @@ pub struct PrimSig<'p> {
     pub return_value_bytes: u16,
     pub first_arg_is_indirect_return: bool,
     pub no_return: bool,
-    pub ret1: Option<Prim>,
-    pub ret2: Option<Prim>,
 }
-#[repr(u8)]
+
+#[repr(i64)]
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Prim {
     I8,
@@ -76,12 +79,8 @@ pub enum Prim {
 }
 
 impl Prim {
-    pub(crate) fn is_float(self) -> u32 {
-        if matches!(self, Prim::F64 | Prim::F32) {
-            1
-        } else {
-            0
-        }
+    pub(crate) fn is_float(self) -> bool {
+        matches!(self, Prim::F64 | Prim::F32)
     }
 }
 
@@ -89,7 +88,7 @@ impl Prim {
 #[derive(Clone, Debug)]
 pub struct BasicBlock<'p> {
     pub insts: Vec<Bc<'p>>,
-    pub arg_prims: &'p [Prim],
+    pub arg_prims: &'p [Prim], // TODO: not ffi safe!
     pub arg_float_mask: u32,
     pub incoming_jumps: u16,
     pub arg_slots: u16,
@@ -132,6 +131,8 @@ pub struct BakedVarId(pub u32);
 // TODO: deduplicate
 // TODO: track type so structs can be more than just a blob of bytes.
 // TODO: distinguish between constant and static. For now, everything is a mutable static because the language doesn't have the concept of const pointers.
+
+#[repr(C, i64)]
 #[derive(Debug, Clone)]
 pub enum BakedVar {
     Zeros { bytes: usize },

@@ -218,8 +218,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         } else {
             sig.arg_slots
         };
-        self.ccall_reg_to_stack(slots, sig.arg_float_mask);
 
+        debug_assert_eq!(int_count as usize, sig.args.iter().filter(|p| !p.is_float()).count());
+        self.ccall_reg_to_stack(sig.args);
+
+        debug_assert_eq!(slots as usize, sig.args.len());
         // Any registers not containing args can be used.
         for i in int_count..8 {
             self.state.free_reg.push(i as i64);
@@ -272,9 +275,11 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // TODO: handle normal args here as well.
         if args_not_vstacked {
             self.state.free_reg.clear();
+            debug_assert_eq!(slots as usize, block.arg_prims.len());
             let int_count = slots as u32 - mask.count_ones();
+            debug_assert_eq!(int_count as usize, block.arg_prims.iter().filter(|p| !p.is_float()).count());
             if slots > 0 {
-                self.ccall_reg_to_stack(slots, mask);
+                self.ccall_reg_to_stack(block.arg_prims);
             }
             for i in int_count..8 {
                 self.drop_reg(i as i64);
@@ -302,7 +307,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     fn emit_inst(&mut self, b: usize, inst: Bc, i: usize) -> Res<'p, bool> {
         if TRACE_ASM || self.log_asm_bc {
             let ins = self.asm.offset_words(self.asm.current_start, self.asm.next) - 1;
-
             self.markers.push((format!("[{b}:{i}] {inst:?}: {:?}", self.state.stack), ins as usize));
         }
         match inst {
@@ -405,8 +409,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                     debug_assert!(self.block_ips[ip.0 as usize].is_none());
                     self.emit_block(ip.0 as usize, false);
                 } else {
-                    let mask = block.arg_float_mask;
-                    self.stack_to_ccall_reg(slots, mask);
+                    debug_assert_eq!(block.arg_prims.len(), block.arg_slots as usize);
+                    self.stack_to_ccall_reg(block.arg_prims);
                     self.spill_abi_stompable();
                     if self.block_ips[ip.0 as usize].is_some() {
                         self.asm.push(brk(0));
@@ -429,9 +433,9 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 });
                 return Ok(tail);
             }
-            Bc::Ret0 => return self.emit_return(0, 0),
-            Bc::Ret1(prim) => return self.emit_return(1, prim.is_float()),
-            Bc::Ret2((a, b)) => return self.emit_return(2, a.is_float() << 1 | b.is_float()),
+            Bc::Ret0 => return self.emit_return(&[]),
+            Bc::Ret1(prim) => return self.emit_return(&[prim]),
+            Bc::Ret2((a, b)) => return self.emit_return(&[a, b]),
             // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
             Bc::IncPtrBytes { bytes } => {
                 match self.state.stack.last_mut().unwrap() {
@@ -523,7 +527,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
             Bc::CopyBytesToFrom { bytes } => {
                 self.state.stack.push(Val::Literal(bytes as i64));
-                self.stack_to_ccall_reg(3, 0);
+                self.stack_to_ccall_reg(&[Prim::P64, Prim::P64, Prim::I64]);
                 self.spill_abi_stompable();
                 let addr = libc::memcpy as *const u8;
                 // let offset = self.asm.offset_words(self.asm.next, addr);
@@ -539,16 +543,15 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
     }
 
     // TODO: refactor this. its a problem that im afraid of it! -- May 8
-    fn stack_to_ccall_reg(&mut self, slots: u16, float_mask: u32) {
-        debug_assert!((slots as u32 - float_mask.count_ones()) <= 8);
-        debug_assert!(self.state.stack.len() >= slots as usize);
+    fn stack_to_ccall_reg(&mut self, types: &[Prim]) {
+        debug_assert!(self.state.stack.len() >= types.len());
         let mut next_int = 0;
         let mut next_float = 0;
 
-        for slot_index in 0..(slots as usize) {
+        for (slot_index, ty) in types.iter().enumerate() {
             debug_assert_eq!(slot_index, next_int + next_float);
-            let f = is_float(slot_index, slots, float_mask);
-            let stack_index = self.state.stack.len() - (slots as usize) + slot_index;
+            let f = ty.is_float();
+            let stack_index = self.state.stack.len() - (types.len()) + slot_index;
 
             if f {
                 if let Val::FloatReg(have) = self.state.stack[stack_index] {
@@ -659,18 +662,15 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             next_int += 1;
         }
         debugln!();
-        self.state.stack.truncate(self.state.stack.len() - slots as usize);
-        debug_assert_eq!(next_float as u32, float_mask.count_ones());
-        debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
+        self.state.stack.truncate(self.state.stack.len() - types.len());
     }
 
-    fn ccall_reg_to_stack(&mut self, slots: u16, float_mask: u32) {
-        debug_assert!((slots as u32 - float_mask.count_ones()) <= 8);
+    fn ccall_reg_to_stack(&mut self, types: &[Prim]) {
         let mut next_float = 0;
         let mut next_int = 0;
-        for i in 0..slots {
-            debug_assert_eq!(i, (next_int + next_float) as u16);
-            let f = is_float(i as usize, slots, float_mask);
+        for (i, ty) in types.iter().enumerate() {
+            debug_assert_eq!(i, (next_int + next_float) as usize);
+            let f = ty.is_float();
             let v = if f {
                 Val::FloatReg(next_float)
             } else {
@@ -683,9 +683,6 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             *(if f { &mut next_float } else { &mut next_int }) += 1;
             self.state.stack.push(v);
         }
-
-        debug_assert_eq!(next_float as u32, float_mask.count_ones());
-        debug_assert_eq!(next_int as u32, slots as u32 - float_mask.count_ones());
     }
 
     fn emit_store(&mut self, addr: Val, value: Val, ty: Prim) {
@@ -955,7 +952,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         } else {
             sig.arg_slots
         };
-        self.stack_to_ccall_reg(slots, sig.arg_float_mask);
+        self.stack_to_ccall_reg(sig.args);
         self.spill_abi_stompable();
         // TODO: don't spill!
         if sig.first_arg_is_indirect_return {
@@ -970,10 +967,18 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
             }
         }
         do_call(self);
-        self.ccall_reg_to_stack(sig.ret_slots, sig.ret_float_mask);
 
         let float_count = sig.ret_float_mask.count_ones();
         let int_count = sig.ret_slots as u32 - float_count;
+
+        if let BigOption::Some(fst) = sig.ret1 {
+            if let BigOption::Some(snd) = sig.ret2 {
+                self.ccall_reg_to_stack(&[fst, snd]);
+            } else {
+                self.ccall_reg_to_stack(&[fst]);
+                debug_assert_eq!(int_count == 0, fst.is_float());
+            }
+        }
 
         for i in int_count..8 {
             add_unique(&mut self.state.free_reg, i as i64); // now the extras are usable again.
@@ -1077,10 +1082,10 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         }
     }
 
-    fn emit_return(&mut self, count: u16, floats: u32) -> Res<'p, bool> {
+    fn emit_return(&mut self, sig: &[Prim]) -> Res<'p, bool> {
         // We have the values on virtual stack and want them in r0-r7, that's the same as making a call.
-        if count != 0 {
-            self.stack_to_ccall_reg(count, floats);
+        if !sig.is_empty() {
+            self.stack_to_ccall_reg(sig);
         }
         self.emit_stack_fixup();
         self.asm.push(ret(()));
