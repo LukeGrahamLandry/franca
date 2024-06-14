@@ -437,6 +437,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // Ideally this would just work with tuple syntax but L((a, b), c) === L(a, b, c) !=== L(Ty(a, b), c) because of arg flattening.
     ("fn Ty(fst: Type, snd: Type) Type #fold;", pair_type as *const u8),
     ("fn Ty(fst: Type, snd: Type, trd: Type) Type #fold;", triple_type as *const u8),
+    ("fn Ty(fst: Type, snd: Type, trd: Type, frt: Type) Type #fold;", quad_type as *const u8),
     // The type of 'fun(Arg) Ret'. This is a comptime only value.
     // All calls are inlined, as are calls that pass one of these as an argument.
     // Captures of runtime variables are allowed since you just inline everything anyway.
@@ -645,6 +646,9 @@ extern "C-unwind" fn triple_type(program: &mut &mut Program, a: TypeId, b: TypeI
         assert!(c.as_index() < program.types.len(), "TypeId OOB {:?}", c);
         Ok(program.tuple_of(vec![a, b, c]))
     })
+}
+extern "C-unwind" fn quad_type(program: &mut &mut Program, a: TypeId, b: TypeId, c: TypeId, d: TypeId) -> TypeId {
+    hope(|| Ok(program.tuple_of(vec![a, b, c, d])))
 }
 extern "C-unwind" fn fn_type(program: &mut &mut Program, arg: TypeId, ret: TypeId) -> TypeId {
     hope(|| {

@@ -280,11 +280,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
             self.blocks.push(builder.create_block());
             if i != 0 {
                 for p in block.arg_prims {
-                    let cl_ty = match p {
-                        Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::P64 => I64,
-                        Prim::F64 => F64,
-                        Prim::F32 => F32,
-                    };
+                    let cl_ty = primitive(*p);
                     builder.append_block_param(*self.blocks.last().unwrap(), cl_ty);
                 }
             }
@@ -442,7 +438,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     }
                 }
                 Bc::PushConstant { value, ty } => match ty {
-                    Prim::P64 | Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 => self.stack.push(builder.ins().iconst(I64, value)),
+                    Prim::P64 | Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 => self.stack.push(builder.ins().iconst(primitive(ty), value)),
                     Prim::F64 => {
                         let v = builder.ins().iconst(I64, value);
                         self.stack.push(builder.ins().bitcast(F64, MemFlags::new(), v));
@@ -512,28 +508,15 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                 Bc::Load { ty } => {
                     let addr = self.stack.pop().unwrap();
                     let v = builder.ins().load(primitive(ty), MemFlags::new(), addr, 0);
-                    let v = match ty {
-                        Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().uextend(I64, v),
-                        Prim::P64 | Prim::I64 => v,
-                        Prim::F64 | Prim::F32 => v,
-                    };
                     self.stack.push(v);
                 }
-                Bc::StorePost { ty } => {
+                Bc::StorePost { .. } => {
                     let addr = self.stack.pop().unwrap();
                     let v = self.stack.pop().unwrap();
-                    let v = match ty {
-                        Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
-                        Prim::F32 | Prim::P64 | Prim::I64 | Prim::F64 => v,
-                    };
                     builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
-                Bc::StorePre { ty } => {
+                Bc::StorePre { .. } => {
                     let v = self.stack.pop().unwrap();
-                    let v = match ty {
-                        Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
-                        Prim::F32 | Prim::P64 | Prim::I64 | Prim::F64 => v,
-                    };
                     let addr = self.stack.pop().unwrap();
                     builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
@@ -591,9 +574,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
 
         for ty in sign.args {
             let mut ty = *ty;
-            if matches!(ty, Prim::I8 | Prim::I16 | Prim::I32) {
-                ty = Prim::I64;
-            }
             // TODO: sign extend once I use small int types? but really caller should always do it I think.
             sig.params.push(AbiParam {
                 value_type: primitive(ty),
@@ -603,9 +583,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         }
 
         let make_ret = |sig: &mut Signature, mut ty: Prim| {
-            if matches!(ty, Prim::I8 | Prim::I16 | Prim::I32) {
-                ty = Prim::I64;
-            }
             // TODO: sign extend once I use small int types?
             sig.returns.push(AbiParam {
                 value_type: primitive(ty),
@@ -664,7 +641,7 @@ macro_rules! icmp {
     ($name:ident) => {
         |builder: &mut FunctionBuilder, v: &[Value]| {
             let cond = builder.ins().icmp(IntCC::$name, v[0], v[1]);
-            builder.ins().uextend(I64, cond)
+            cond
         }
     };
 }
@@ -673,7 +650,7 @@ macro_rules! fcmp {
     ($name:ident) => {
         |builder: &mut FunctionBuilder, v: &[Value]| {
             let cond = builder.ins().fcmp(FloatCC::$name, v[0], v[1]);
-            builder.ins().uextend(I64, cond)
+            cond
         }
     };
 }
@@ -714,7 +691,7 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_to_sint_sat(I64, v[0])
     }),
-    ("fn typeid_to_int(_: Type) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
+    ("fn typeid_to_int(_: Type) i64;", Z_EXT_64),
     ("fn float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_from_sint(F64, v[0])
     }),
@@ -730,4 +707,29 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn cast(_: f64) f32;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fdemote(F32, v[0])
     }),
+    ("fn zext(_: u32) u64;", Z_EXT_64),
+    ("fn zext(_: u8) u64;", Z_EXT_64),
+    ("fn zext(_: u16) u64;", Z_EXT_64),
+    ("fn zext(_: u8) u32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().uextend(I32, v[0])
+    }),
+    ("fn intcast(_: i64) i32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().ireduce(I32, v[0])
+    }),
+    ("fn intcast(_: i32) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+        builder.ins().sextend(I64, v[0])
+    }),
+    ("fn trunc(_: u64) u8;", TRUNC_8),
+    ("fn trunc(_: u32) u8;", TRUNC_8),
+    ("fn trunc(_: i64) u8;", TRUNC_8),
+    ("fn trunc(_: u64) u32;", TRUNC_32),
+    ("fn trunc(_: i64) u32;", TRUNC_32),
+    ("fn sext(_: i32) i64;", S_EXT_64),
+    ("fn sext(_: i16) i64;", S_EXT_64),
+    ("fn sext(_: i8) i64;", S_EXT_64),
 ];
+
+const S_EXT_64: CfEmit = |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().sextend(I64, v[0]);
+const TRUNC_8: CfEmit = |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().ireduce(I8, v[0]);
+const TRUNC_32: CfEmit = |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().ireduce(I32, v[0]);
+const Z_EXT_64: CfEmit = |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().uextend(I64, v[0]);
