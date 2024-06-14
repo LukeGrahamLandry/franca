@@ -2,6 +2,7 @@ TARGET: Backend : .Aarch64;
 
 fn driver(vtable: *ImportVTable) Unit #export = {
     _comp := run_sequential(vtable);
+    __temp_alloc.reset_retaining_capacity();
     // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
     
     fork_run_main(vtable, "examples/bf.fr");
@@ -13,16 +14,17 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     check_driver_compiles(vtable, "examples/farm_game.fr");  // the game runs in the driver 
     
     // TODO: #import_std uses relative paths. 
-    chdir("examples/lox".maybe_borrow_cstr(libc_allocator));
+    chdir("examples/lox".maybe_borrow_cstr(temp()));
     fork_run_main(vtable, "main.fr");
-    chdir("../../".maybe_borrow_cstr(libc_allocator));
+    chdir("../../".maybe_borrow_cstr(temp()));
     
-    
+    __temp_alloc.reset_retaining_capacity();
+     
     // TODO: #import_std uses relative paths. 
-    chdir("compiler".maybe_borrow_cstr(libc_allocator));
+    chdir("compiler".maybe_borrow_cstr(temp()));
     check_driver_compiles(vtable, "first.fr");
-    s__ := fork_and_catch(libc_allocator) {|
-        src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    s__ := fork_and_catch(temp()) {|
+        src := "#include_std(\"core.fr\");".clone(temp());
         src&.read_and_push("main.fr");
         comp := vtable.new_with_src(src.items(), TARGET);
         run_tests(vtable, comp);
@@ -30,7 +32,7 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     // TODO: @assert
     assert(s__._0, "compiler tests failed");
     println("- ran compiler tests");
-    chdir("../".maybe_borrow_cstr(libc_allocator));
+    chdir("../".maybe_borrow_cstr(temp()));
     
     mandelbrot(vtable);
     set_colour(250, 150, 200);
@@ -41,8 +43,8 @@ fn driver(vtable: *ImportVTable) Unit #export = {
 fn run_sequential(vtable: *ImportVTable) Compiler = {
     mem_start := {vtable.get_mem_mark}();
     start := timestamp();
-    path := "tests".maybe_borrow_cstr(libc_allocator);
-    found: List(List(u8)) = list(20, libc_allocator); // LEAK
+    path := "tests".maybe_borrow_cstr(temp());
+    found: List(List(u8)) = list(20, temp()); // LEAK
     walk_directory(path) {entry|
         // TODO: recurse with another list if .Directory
         if(eq(@as(u8) entry.d_type, @as(u8) DirEntType.File)) {|
@@ -54,13 +56,13 @@ fn run_sequential(vtable: *ImportVTable) Compiler = {
     file := {vtable.add_file}(comp, "lib", "#include_std(\"core.fr\");");
     all_stmts := {vtable.parse_stmts}(comp, file).unwrap();
     ::List(FatStmtHack);
-    all_stmts := all_stmts.clone(libc_allocator);
+    all_stmts := all_stmts.clone(temp());
     
     each(found){name|
         continue :: @return;
         if(not(name.items().ends_with(".fr")), => continue());
         
-        src := libc_allocator.read_to_string(name.items());
+        src := temp().read_to_string(name.items());
         file := {vtable.add_file}(comp, name.items(), src.items());
         stmts := {vtable.parse_stmts}(comp, file).unwrap();
         all_stmts&.push_all(stmts);
@@ -117,13 +119,13 @@ fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {
 fn mandelbrot(vtable: *ImportVTable) Unit = {
     // Note: can't import core at the end because you need slice type to be shared with the compiler 
     //       before '::' blocks in the program try to run because they might use !slice. 
-    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    src := "#include_std(\"core.fr\");".clone(temp());
     src&.read_and_push("examples/mandelbrot.fr");
     f := jit_from_source(vtable, src&.items(), "render");
     f := assume_types_fn(Arg = Unit, Ret = List(u8), ptr = f);
     mandelbrot := f();
     
-    pass_out_err := fork_and_catch(libc_allocator) {|
+    pass_out_err := fork_and_catch(temp()) {|
         arg := "util/mandelbrot.lua";
         HACK_LUA_PATH :: "/usr/local/bin/luajit";
         exec_cmd(HACK_LUA_PATH, (ptr = arg&, len = 1));
@@ -134,8 +136,8 @@ fn mandelbrot(vtable: *ImportVTable) Unit = {
 }
 
 fn fork_run_main(vtable: *ImportVTable, filepath: Str) Unit = {
-    s__ := fork_and_catch(libc_allocator) {|
-        src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    s__ := fork_and_catch(temp()) {|
+        src := "#include_std(\"core.fr\");".clone(temp());
         src&.read_and_push(filepath);
         f := jit_from_source(vtable, src&.items(), "main");
         f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = f);
@@ -143,7 +145,7 @@ fn fork_run_main(vtable: *ImportVTable, filepath: Str) Unit = {
     };
     // TODO: @assert
     assert(s__._0) {() List(u8)|
-        s: List(u8) = list(0, libc_allocator);
+        s: List(u8) = list(0, temp());
         @fmt(s&, "failed to compile %", filepath);
         s
     };
@@ -151,14 +153,14 @@ fn fork_run_main(vtable: *ImportVTable, filepath: Str) Unit = {
 }
 
 fn check_main_compiles(vtable: *ImportVTable, filepath: Str) Unit = {
-    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    src := "#include_std(\"core.fr\");".clone(temp());
     src&.read_and_push(filepath);
     f := jit_from_source(vtable, src&.items(), "main");
     @println("- compiled %:main", filepath);
 }
 
 fn check_driver_compiles(vtable: *ImportVTable, filepath: Str) Unit = {
-    src := "#include_std(\"core.fr\");".clone(libc_allocator);
+    src := "#include_std(\"core.fr\");".clone(temp());
     src&.read_and_push(filepath);
     f := jit_from_source(vtable, src&.items(), "driver");
     @println("- compiled %:driver", filepath);

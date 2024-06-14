@@ -43,11 +43,11 @@ fn fmt(arg: AstExpr) AstExpr = {
     params := args.rest(2);  // TODO: fix bounds check when this is one long?
     
     fmt_string := const_eval_string(args[1]);
-    parts := fmt_string.split("%", libc_allocator);  // TODO: dont leak
+    parts := fmt_string.split("%", temp());
     parts := parts&.items();
     parts.len().eq(params.len().add(1)).assert("Fmt specifier count mismatch");
     count := parts.len().add(params.len());
-    actions: List(AstExpr) = list(count, libc_allocator);  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
+    actions: List(AstExpr) = list(count, ast_alloc());  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
     
     // TODO: reserve space for known length args. 
     emit :: fn(msg: AstExpr) Unit => {
@@ -68,13 +68,13 @@ fn fmt(arg: AstExpr) AstExpr = {
 }
 
 #macro 
-fn concat(arg: AstExpr) AstExpr = {
+fn concat(arg: AstExpr, rt_alloc: AstExpr) AstExpr = {
     args := AstExpr.slice_from_tuple(arg.expr.Tuple);
-    actions: List(AstExpr) = list(args.len(), libc_allocator);
+    actions: List(AstExpr) = list(args.len(), ast_alloc());
     
     '{
         // TODO: caller needs to pass allocator since this is at runtime. 
-        join_list: List(u8) = list(libc_allocator);
+        join_list: List(u8) = list(@[rt_alloc]);
         @[{
             args.enumerate(fn(i, param) => {  // TODO: zip iterators 
                 // TODO: having () in the cast instead of lit(Unit) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
@@ -96,7 +96,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
     // TODO: now that i dont double track types, this will break everything if you do it to an int literal. -- May 1
     target.ty = UnknownType;
     original := AstExpr.slice_from_tuple(target.expr.Tuple);
-    tuple: List(AstExpr) = list(original.len.add(1), libc_allocator);
+    tuple: List(AstExpr) = list(original.len.add(1), ast_alloc()); 
     tuple&.push(arg);
     tuple&.push_all(original);
     target.expr.Tuple = (tuple.len, tuple.maybe_uninit.ptr, tuple.len); // TODO
@@ -105,9 +105,7 @@ fn prepend_tuple(arg: AstExpr, target: AstExpr) AstExpr = {
 
 #macro 
 fn println(arg: AstExpr) AstExpr = '{
-    // TODO: caller needs to pass allocator since this is at runtime. 
-    //       but also thats really fucking annoying. 
-    out: List(u8) = list(0, libc_allocator);
+    out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     println(out&.items());
     out&.drop();
@@ -115,9 +113,7 @@ fn println(arg: AstExpr) AstExpr = '{
 
 #macro 
 fn print(arg: AstExpr) AstExpr = '{
-    // TODO: caller needs to pass allocator since this is at runtime. 
-    //       but also thats really fucking annoying. 
-    out: List(u8) = list(0, libc_allocator);
+    out: List(u8) = list(0, temp());
     @fmt(@prepend_tuple(out&) @[arg]);
     print(out&.items());
     out&.drop();
@@ -132,6 +128,12 @@ fn format(arg: AstExpr) AstExpr = '{
     out
 }';
 
+#macro 
+fn panic(arg: AstExpr) AstExpr = '{
+    out: List(u8) = list(0, temp()); 
+    @fmt(@prepend_tuple(out&) @[arg]);
+    panic(out&.items());
+}';
 
 // TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
 fn display(i: i64, s: *List(u8)) Unit = {
@@ -243,7 +245,7 @@ fn __string_escapes(raw: Str) Str #fold = {
     carriage_return : u8 : 13.trunc();
     new_line        : u8 : 0x0A;
 
-    out : List(u8) = list(raw.len, libc_allocator);
+    out : List(u8) = list(raw.len, ast_alloc());
     i := 0;
     while(=> i.lt(raw.len)){|
         c := raw[i]; i += 1;
@@ -280,20 +282,18 @@ fn println(msg: bool) Unit = {
 
 fn println(i: i64) Unit = {
     // TODO: static alloc since we know the bound on number of digits
-    mem: List(u8) = list(i.div(10).abs().add(2), libc_allocator);
+    mem: List(u8) = list(i.div(10).abs().add(2), temp());
     i.display(mem&);
     mem&.push_all("\n");
     print(mem&.items());
-    mem&.drop();
 }
 fn println(msg: u8) Unit = println(@as(i64) msg);
 
 fn print(i: i64) Unit = {
     // TODO: static alloc since we know the bound on number of digits
-    mem: List(u8) = list(i.div(10).abs().add(1), libc_allocator);
+    mem: List(u8) = list(i.div(10).abs().add(1), temp());
     i.display(mem&);
     print(mem&.items());
-    mem&.drop();
 }
 
 // TODO: this should return an option. 

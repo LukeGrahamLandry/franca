@@ -1,0 +1,135 @@
+ArenaAlloc :: @struct(
+    parent: Alloc,
+    chunk: *ArenaHeader,
+    start: i64,
+    end: i64,
+);
+
+ArenaHeader :: (@struct(
+    size: i64,
+    prev: ?*ArenaHeader,
+    next: ?*ArenaHeader,
+))!rec;
+
+fn init(parent: Alloc, base_size: i64) ArenaAlloc = {
+    first := new_arena_chunk(parent, base_size, .None);
+    (parent = parent, chunk = first, start = ArenaHeader.size_of(), end = first.size)
+}
+
+fn new_arena_chunk(allocator: Alloc, size: i64, prev: ?*ArenaHeader) *ArenaHeader = {
+    buf := allocator.alloc(u8, size.max(ArenaHeader.size_of())); // TODO: align
+    chunk := ptr_cast_unchecked(From = u8, To = ArenaHeader, ptr = buf.ptr);
+    chunk[] = (size = buf.len, prev = prev, next = .None);
+    chunk
+}
+
+arena_vtable :: @static(AllocVTable);
+:: {
+    arena_vtable[] = (alloc = arena_alloc!fn_ptr, free = arena_free!fn_ptr);
+    
+    ::if_opt(*ArenaHeader, Unit);
+    // Don't try to printf debug in here...
+    arena_alloc :: fn(raw_self: rawptr, size: i64, log_align: u8) rawptr = {
+        return :: @return;
+        self := ArenaAlloc.ptr_from_raw(raw_self);
+        end  := self.start.add(size);
+        
+        if(end.le(self.end)) {|
+            ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = self.chunk);
+            mem := ptr.offset(self.start);
+            self.start = end;
+            return(u8.raw_from_ptr(mem));
+        };
+        
+        if(self.chunk.next) {(next) Unit|
+            self.chunk = next;
+            self.start = ArenaHeader.size_of();
+            self.end = next.size;
+            return(arena_alloc(raw_self, size, log_align));
+        };
+        
+        next_size := size.max(self.chunk.size.mul(2));
+        new := new_arena_chunk(self.parent, next_size, (Some = self.chunk));
+        self.chunk.next = (Some = new);
+        self.chunk = new;
+        self.start = ArenaHeader.size_of();
+        self.end = new.size;
+        
+        arena_alloc(raw_self, size, log_align)
+    };
+    arena_free :: fn(_: rawptr, _: Slice(u8), _: u8) Unit = {
+        // No-op
+    };
+};
+
+ArenaMarker :: @struct(chunk: *ArenaHeader, start: i64);
+fn mark(self: *ArenaAlloc) ArenaMarker = (chunk = self.chunk, start = self.start);
+
+// remember, you can't do this if you acceppted an output allocator as a parameter because they might have passed you the temp allocator. 
+// # Safety: This invalidates any allocations in self before the corresponding call to mark. 
+// Memory is NOT returned to the backing allocator. 
+//fn reset_retaining_capacity(self: *ArenaAlloc, mark: ArenaMarker) Unit = {
+//    todo();
+//}
+
+// # Safety: This invalidates all allocations in self!
+// Memory is NOT returned to the backing allocator. 
+fn reset_retaining_capacity(self: *ArenaAlloc) Unit = {
+    while(=> self.chunk.prev.is_some()) {|
+        self.chunk = self.chunk.prev.unwrap();
+    };
+    self.start = ArenaHeader.size_of();
+    self.end = self.chunk.size;
+}
+
+// Some memory is returned to the backing allocator. 
+// The original capacity is retained and the arena can be reused. 
+// # Safety
+//     - This invalidates all allocations in self!
+fn reset_retaining_original(self: *ArenaAlloc) Unit = {
+    while(=> self.chunk.prev.is_some()) {|
+        prev := self.chunk.prev.unwrap();
+        ptr  := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = self.chunk);
+        buf  := slice(ptr, self.chunk.size);
+        self.parent.dealloc(u8, buf);
+        self.chunk = prev;
+    };
+    self.start = ArenaHeader.size_of();
+    self.end = self.chunk.size;
+}
+
+// Memory is returned to the backing allocator. 
+// # Safety
+//     - This invalidates all allocations in self!
+//     - The arena may not be used again unless you call init again. 
+fn deinit(self: *ArenaAlloc) Unit = {
+    ::if_opt(*ArenaHeader, bool);
+    chunk := self.chunk;
+    dowhile {|
+        prev := chunk.prev;
+        
+        ptr := ptr_cast_unchecked(From = ArenaHeader, To = u8, ptr = chunk);
+        buf := slice(ptr, chunk.size);
+        self.parent.dealloc(u8, buf);
+        
+        if(prev) {(prev)|
+            chunk = prev;
+            true
+        }{| false }
+    };
+    // TODO: I can't represent an empty but reusable state. putting a null pointer in there means trying to use it will segfault. 
+    self[] = ArenaAlloc.zeroed();
+}
+
+fn borrow(self: *ArenaAlloc) Alloc = {
+    self := ArenaAlloc.raw_from_ptr(self);
+    (data = self, vptr = arena_vtable)
+}
+
+thread_local :: static; // TODO
+
+// TODO: reset before emitting exe
+__temp_alloc :: @thread_local(ArenaAlloc);
+:: { __temp_alloc[] = init(page_allocator, 1.shift_left(15)); };
+
+fn temp() Alloc #inline = __temp_alloc.borrow();
