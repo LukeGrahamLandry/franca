@@ -11,6 +11,7 @@ use crate::{
 use codemap::Span;
 use std::{
     cell::RefCell,
+    collections::HashMap,
     hash::Hash,
     mem::{self, transmute},
     ops::{Deref, DerefMut},
@@ -862,8 +863,8 @@ pub struct Program<'p> {
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
     // TODO: this could just be a !builtin, is that better?
     pub save_cstr_t: Option<TypeId>,
-
     pub fat_expr_type: Option<TypeId>,
+    pub primitives: RefCell<HashMap<(TypeId, u16, bool), Vec<Prim>>>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -937,6 +938,7 @@ pub struct IntTypeInfo {
 impl<'p> Program<'p> {
     pub fn new(pool: &'p StringPool<'p>, comptime_arch: TargetArch) -> Self {
         let mut program = Self {
+            primitives: Default::default(),
             fat_expr_type: None,
             ffi_sizes: Default::default(),
             baked: Default::default(),
@@ -1197,6 +1199,36 @@ impl<'p> Program<'p> {
             Expr::StructLiteralP(parts) => parts.bindings.len() as u16,
             _ => 1,
         }
+    }
+
+    pub(crate) fn get_primitives(&self, key: (TypeId, u16, bool)) -> Option<&'p [Prim]> {
+        self.primitives
+            .borrow()
+            .get(&key)
+            .map(|found| unsafe { &*(found.deref() as *const [Prim]) })
+    }
+
+    pub(crate) fn as_primatives(&self, ty: TypeId) -> &'p [Prim] {
+        if ty.is_unit() || ty.is_never() {
+            return &[];
+        }
+        let slots = self.get_info(ty).size_slots;
+        let mut key = (ty, slots, false);
+        if let Some(p) = self.get_primitives(key) {
+            return p;
+        }
+        let types = self.flat_tuple_types(ty);
+        let mut types = types
+            .into_iter()
+            .map(|t| self.prim(t).unwrap_or_else(|| panic!("not prim {}", self.log_type(t))))
+            .collect::<Vec<_>>();
+        self.primitives.borrow_mut().insert(key, types.clone());
+
+        types.insert(0, Prim::P64); // sad
+        key.2 = true;
+        self.primitives.borrow_mut().insert(key, types); // TODO: stupid that i have to do this here
+
+        self.get_primitives(key).unwrap()
     }
 }
 

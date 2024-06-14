@@ -84,7 +84,7 @@ pub fn emit_aarch64<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyl
 
 struct BcToAsm<'z, 'p> {
     compile_ctx_ptr: usize, // TODO: HACK. should really pass this through correctly as an argument. seperate which flat calls really need it.
-    program: &'z mut Program<'p>,
+    program: &'z Program<'p>,
     asm: &'z mut Jitted,
     vars: Vec<Option<SpOffset>>,
     next_slot: SpOffset,
@@ -211,7 +211,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         let sig = self.body.signeture;
         debug_assert!(sig.arg_slots <= 8, "c_call only supports 8 arguments. TODO: pass on stack");
         let mut int_count = sig.arg_slots as u32 - sig.arg_float_mask.count_ones();
-        let slots = if sig.use_special_register_for_indirect_return {
+        let slots = if sig.first_arg_is_indirect_return {
             self.state.stack.push(Val::Increment { reg: 8, offset_bytes: 0 });
             int_count -= 1;
             sig.arg_slots - 1
@@ -430,8 +430,8 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
                 return Ok(tail);
             }
             Bc::Ret0 => return self.emit_return(0, 0),
-            Bc::Ret1(prim) => return self.emit_return(1, prim.float()),
-            Bc::Ret2((a, b)) => return self.emit_return(2, a.float() << 1 | b.float()),
+            Bc::Ret1(prim) => return self.emit_return(1, prim.is_float()),
+            Bc::Ret2((a, b)) => return self.emit_return(2, a.is_float() << 1 | b.is_float()),
             // Note: we do this statically, it wont get actually applied to a register until its needed because loads/stores have an offset immediate.
             Bc::IncPtrBytes { bytes } => {
                 match self.state.stack.last_mut().unwrap() {
@@ -950,7 +950,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         // TODO: this isn't the normal c abi
         // assert!(ret.size_slots <= 8, "indirect c_call only supports 8 returns. TODO: pass on stack");
 
-        let slots = if sig.use_special_register_for_indirect_return {
+        let slots = if sig.first_arg_is_indirect_return {
             sig.arg_slots - 1
         } else {
             sig.arg_slots
@@ -958,7 +958,7 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
         self.stack_to_ccall_reg(slots, sig.arg_float_mask);
         self.spill_abi_stompable();
         // TODO: don't spill!
-        if sig.use_special_register_for_indirect_return {
+        if sig.first_arg_is_indirect_return {
             match self.state.stack.pop().unwrap() {
                 Val::Increment { reg, offset_bytes } => {
                     assert!(reg == sp);

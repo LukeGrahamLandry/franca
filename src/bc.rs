@@ -21,25 +21,25 @@ use crate::{unwrap, Map};
 pub struct BbId(pub u16);
 #[repr(C, i64)]
 #[derive(Clone, Debug, Copy, PartialEq)]
-pub enum Bc {
-    CallDirect { sig: PrimSig, f: FuncId, tail: bool },   // <args:m> -> <ret:n>
-    CallFnPtr { sig: PrimSig },                           // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
-    PushConstant { value: i64, ty: Prim },                // _ -> <v:1>
-    JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 }, // <args:slots> <cond:1> -> !
-    Goto { ip: BbId, slots: u16 },                        // <args:slots> -> !
-    GetNativeFnPtr(FuncId),                               // _ -> <ptr:1>
-    Load { ty: Prim },                                    // <ptr:1> -> <?:n>
-    StorePost { ty: Prim },                               // <?:n> <ptr:1> -> _
-    StorePre { ty: Prim },                                // <ptr:1> <?:n> -> _
-    AddrVar { id: u16 },                                  // _ -> <ptr:1>
-    SaveSsa { id: u16, ty: Prim },                        // <p:1> -> _
-    LoadSsa { id: u16 },                                  // _ -> <p:1>
-    IncPtrBytes { bytes: u16 },                           // <ptr:1> -> <ptr:1>
-    PeekDup(u16),                                         // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
-    CopyBytesToFrom { bytes: u16 },                       // <to_ptr:1> <from_ptr:1> -> _
-    LastUse { id: u16 },                                  // _ -> _
-    Unreachable,                                          // _ -> !
-    GetCompCtx,                                           // _ -> <ptr:1>
+pub enum Bc<'p> {
+    CallDirect { sig: PrimSig<'p>, f: FuncId, tail: bool }, // <args:m> -> <ret:n>
+    CallFnPtr { sig: PrimSig<'p> },                         // <ptr:1> <args:m> -> <ret:n>   |OR| <ptr:1> <ret_ptr:1> <arg_ptr:1> -> _
+    PushConstant { value: i64, ty: Prim },                  // _ -> <v:1>
+    JumpIf { true_ip: BbId, false_ip: BbId, slots: u16 },   // <args:slots> <cond:1> -> !
+    Goto { ip: BbId, slots: u16 },                          // <args:slots> -> !
+    GetNativeFnPtr(FuncId),                                 // _ -> <ptr:1>
+    Load { ty: Prim },                                      // <ptr:1> -> <?:n>
+    StorePost { ty: Prim },                                 // <?:n> <ptr:1> -> _
+    StorePre { ty: Prim },                                  // <ptr:1> <?:n> -> _
+    AddrVar { id: u16 },                                    // _ -> <ptr:1>
+    SaveSsa { id: u16, ty: Prim },                          // <p:1> -> _
+    LoadSsa { id: u16 },                                    // _ -> <p:1>
+    IncPtrBytes { bytes: u16 },                             // <ptr:1> -> <ptr:1>
+    PeekDup(u16),                                           // <x:1> <skip:n> -> <x:1> <skip:n> <x:1>,
+    CopyBytesToFrom { bytes: u16 },                         // <to_ptr:1> <from_ptr:1> -> _
+    LastUse { id: u16 },                                    // _ -> _
+    Unreachable,                                            // _ -> !
+    GetCompCtx,                                             // _ -> <ptr:1>
     NoCompile,
     PushGlobalAddr { id: BakedVarId },
     Snipe(u16),
@@ -51,17 +51,17 @@ pub enum Bc {
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq)]
-pub struct PrimSig {
+pub struct PrimSig<'p> {
+    pub args: &'p [Prim],
     pub arg_float_mask: u32,
     pub ret_float_mask: u32,
     pub arg_slots: u16,
     pub ret_slots: u16,
     pub return_value_bytes: u16,
     pub first_arg_is_indirect_return: bool,
-    pub use_special_register_for_indirect_return: bool,
     pub no_return: bool,
 }
-#[repr(i64)]
+#[repr(u8)]
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Prim {
     I8,
@@ -74,8 +74,8 @@ pub enum Prim {
 }
 
 impl Prim {
-    pub(crate) fn float(self) -> u32 {
-        if self == Prim::F64 {
+    pub(crate) fn is_float(self) -> u32 {
+        if matches!(self, Prim::F64 | Prim::F32) {
             1
         } else {
             0
@@ -85,8 +85,9 @@ impl Prim {
 
 #[repr(C)]
 #[derive(Clone, Debug)]
-pub struct BasicBlock {
-    pub insts: Vec<Bc>,
+pub struct BasicBlock<'p> {
+    pub insts: Vec<Bc<'p>>,
+    pub arg_prims: &'p [Prim],
     pub arg_float_mask: u32,
     pub incoming_jumps: u16,
     pub arg_slots: u16,
@@ -97,7 +98,7 @@ pub struct BasicBlock {
 #[repr(C)]
 #[derive(Clone)]
 pub struct FnBody<'p> {
-    pub blocks: Vec<BasicBlock>,
+    pub blocks: Vec<BasicBlock<'p>>,
     pub vars: Vec<TypeId>,
     pub var_names: Vec<BigOption<Var<'p>>>,
     pub when: ExecStyle,
@@ -108,7 +109,7 @@ pub struct FnBody<'p> {
     pub name: Ident<'p>,
     pub want_log: bool,
     pub is_ssa_var: BitSet, // only used for debugging. bc has enough info for this.
-    pub signeture: PrimSig,
+    pub signeture: PrimSig<'p>,
 }
 
 #[repr(C)]
@@ -305,7 +306,14 @@ pub fn deconstruct_values(
     match &program[ty] {
         TypeInfo::Placeholder => err!("Unfinished type {ty:?}",),
         TypeInfo::Never => err!("invalid type",),
-        TypeInfo::F64 | TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
+        TypeInfo::F64 => {
+            let offset = bytes.i;
+            out.push(unwrap!(bytes.next_i64(), ""));
+            if let Some(offsets) = offsets {
+                offsets.push((Prim::F64, offset as u16));
+            }
+        }
+        TypeInfo::FnPtr { .. } | TypeInfo::Ptr(_) | TypeInfo::VoidPtr => {
             let offset = bytes.i;
             out.push(unwrap!(bytes.next_i64(), ""));
             if let Some(offsets) = offsets {

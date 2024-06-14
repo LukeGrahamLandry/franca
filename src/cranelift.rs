@@ -106,7 +106,7 @@ pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) 
 }
 
 fn emit_cl_inner<'p, M: Module>(
-    program: &mut Program<'p>,
+    program: &Program<'p>,
     cl: &mut JittedCl<M>,
     asm: Option<&mut Jitted>,
     body: &FnBody<'p>,
@@ -140,8 +140,10 @@ pub(crate) fn emit_cl_intrinsic<'p, M: Module>(program: &mut Program<'p>, cl: &m
     let mut body = empty_fn_body(program, f, ExecStyle::Aot)?;
     body.func = f;
     let arg = program[f].finished_arg.unwrap();
+    let arg_prims = program.as_primatives(arg);
     let arg = program.get_info(arg);
     body.blocks.push(BasicBlock {
+        arg_prims,
         insts: vec![Bc::CallDirect {
             f,
             tail: true,
@@ -202,7 +204,7 @@ impl JittedCl<JITModule> {
 
 struct Emit<'z, 'p, M: Module> {
     compile_ctx_ptr: usize, // TODO: HACK. should really pass this through correctly as an argument.
-    program: &'z mut Program<'p>,
+    program: &'z Program<'p>,
     asm: Option<&'z mut Jitted>, // TODO: kinda hack. other side should be able to do too
     cl: &'z mut JittedCl<M>,
     body: &'z FnBody<'p>,
@@ -277,8 +279,13 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         for (i, block) in self.body.blocks.iter().enumerate() {
             self.blocks.push(builder.create_block());
             if i != 0 {
-                for _ in 0..block.arg_slots {
-                    builder.append_block_param(*self.blocks.last().unwrap(), I64);
+                for p in block.arg_prims {
+                    let cl_ty = match p {
+                        Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::P64 => I64,
+                        Prim::F64 => F64,
+                        Prim::F32 => F32,
+                    };
+                    builder.append_block_param(*self.blocks.last().unwrap(), cl_ty);
                 }
             }
         }
@@ -311,7 +318,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         if b == 0 {
             let sig = self.body.signeture;
             debug_assert_eq!(sig.arg_slots, block.arg_slots);
-            self.cast_ret_from_float(builder, sig.arg_slots, sig.arg_float_mask);
         }
 
         for inst in &block.insts {
@@ -327,8 +333,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     self.stack.push(v);
                 }
                 Bc::CallDirect { f, tail, sig } => {
-                    self.cast_args_to_float(builder, sig.arg_slots, sig.arg_float_mask);
-
                     let args = &self.stack[self.stack.len() - sig.arg_slots as usize..self.stack.len()];
                     if let Some(&emit) = self.program[f].body.cranelift_emit() {
                         let emit: CfEmit = unsafe { mem::transmute(emit) };
@@ -345,7 +349,6 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                         } else {
                             self.stack.push(v);
                             debug_assert_eq!(sig.ret_slots, 1);
-                            self.cast_ret_from_float(builder, sig.ret_slots, sig.ret_float_mask);
                             if tail {
                                 builder.ins().return_(&[v]);
                                 break;
@@ -421,11 +424,9 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     for v in ret_val {
                         self.stack.push(*v);
                     }
-                    self.cast_ret_from_float(builder, ret_val.len() as u16, sig.ret_float_mask);
                 }
                 Bc::CallFnPtr { sig, .. } => {
                     let cl_sig = builder.import_signature(self.make_sig(sig));
-                    self.cast_args_to_float(builder, sig.arg_slots, sig.arg_float_mask);
                     let first_arg = self.stack.len() - sig.arg_slots as usize;
                     let callee = self.stack[first_arg - 1];
                     let args = &self.stack[first_arg..self.stack.len()];
@@ -439,9 +440,18 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     for v in ret_val {
                         self.stack.push(*v);
                     }
-                    self.cast_ret_from_float(builder, ret_val.len() as u16, sig.ret_float_mask);
                 }
-                Bc::PushConstant { value, .. } => self.stack.push(builder.ins().iconst(I64, value)),
+                Bc::PushConstant { value, ty } => match ty {
+                    Prim::P64 | Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 => self.stack.push(builder.ins().iconst(I64, value)),
+                    Prim::F64 => {
+                        let v = builder.ins().iconst(I64, value);
+                        self.stack.push(builder.ins().bitcast(F64, MemFlags::new(), v));
+                    }
+                    Prim::F32 => {
+                        let v = builder.ins().iconst(I32, value);
+                        self.stack.push(builder.ins().bitcast(F32, MemFlags::new(), v));
+                    }
+                },
                 Bc::PushGlobalAddr { id } => match self.program.baked.get(id).0 {
                     BakedVar::Bytes(bytes) => {
                         let id: DataId = Into::<Res<_>>::into(self.cl.module.declare_anonymous_data(false, false).map_err(wrap))?;
@@ -480,11 +490,11 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     break;
                 }
                 Bc::Ret1(prim) => {
-                    self.emit_return(builder, 1, prim.float());
+                    self.emit_return(builder, 1);
                     break;
                 }
                 Bc::Ret2((a, b)) => {
-                    self.emit_return(builder, 2, a.float() << 1 | b.float());
+                    self.emit_return(builder, 2);
                     break;
                 }
                 Bc::GetNativeFnPtr(f) => {
@@ -505,12 +515,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = match ty {
                         Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().uextend(I64, v),
                         Prim::P64 | Prim::I64 => v,
-                        Prim::F64 => builder.ins().bitcast(I64, MemFlags::new(), v),
-                        Prim::F32 => {
-                            // note: cast->extend, NOT promote->cast
-                            let v = builder.ins().bitcast(I32, MemFlags::new(), v);
-                            builder.ins().uextend(I64, v)
-                        }
+                        Prim::F64 | Prim::F32 => v,
                     };
                     self.stack.push(v);
                 }
@@ -519,8 +524,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = self.stack.pop().unwrap();
                     let v = match ty {
                         Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
-                        Prim::F32 => builder.ins().ireduce(I32, v), // everything is stored as i64 on the v-stack, so just store the low bits
-                        Prim::P64 | Prim::I64 | Prim::F64 => v,
+                        Prim::F32 | Prim::P64 | Prim::I64 | Prim::F64 => v,
                     };
                     builder.ins().store(MemFlags::new(), v, addr, 0);
                 }
@@ -528,8 +532,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
                     let v = self.stack.pop().unwrap();
                     let v = match ty {
                         Prim::I8 | Prim::I16 | Prim::I32 => builder.ins().ireduce(primitive(ty), v),
-                        Prim::F32 => builder.ins().ireduce(I32, v),
-                        Prim::P64 | Prim::I64 | Prim::F64 => v,
+                        Prim::F32 | Prim::P64 | Prim::I64 | Prim::F64 => v,
                     };
                     let addr = self.stack.pop().unwrap();
                     builder.ins().store(MemFlags::new(), v, addr, 0);
@@ -580,7 +583,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         for i in 0..sign.arg_slots as usize {
             let value_type = if is_float(i, sign.arg_slots, sign.arg_float_mask) { F64 } else { I64 };
             // TODO: sign extend once I use small int types? but really caller should always do it I think.
-            let purpose = if sign.use_special_register_for_indirect_return && i == 0 {
+            let purpose = if sign.first_arg_is_indirect_return && i == 0 {
                 // TODO: a test that fails if you don't do this
                 ArgumentPurpose::StructReturn
             } else {
@@ -605,30 +608,7 @@ impl<'z, 'p, M: Module> Emit<'z, 'p, M> {
         sig
     }
 
-    // TODO: #ct
-    fn cast_args_to_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
-        // TODO: this is super dumb. I should really just track types through the whole thing properly.
-        for slot_index in 0..slots as usize {
-            let s = self.stack.len() - (slots as usize) + slot_index;
-            if is_float(slot_index, slots, float_mask) {
-                self.stack[s] = builder.ins().bitcast(F64, MemFlags::new(), self.stack[s]);
-            }
-        }
-    }
-
-    fn cast_ret_from_float(&mut self, builder: &mut FunctionBuilder, slots: u16, float_mask: u32) {
-        // TODO: this is super dumb. I should really just track types through the whole thing properly.
-        debug_assert!(slots <= self.stack.len() as u16);
-        for slot_index in 0..slots as usize {
-            let s = self.stack.len() - (slots as usize) + slot_index;
-            if is_float(slot_index, slots, float_mask) {
-                self.stack[s] = builder.ins().bitcast(I64, MemFlags::new(), self.stack[s]);
-            }
-        }
-    }
-
-    fn emit_return(&mut self, builder: &mut FunctionBuilder, count: u16, float: u32) {
-        self.cast_args_to_float(builder, count, float);
+    fn emit_return(&mut self, builder: &mut FunctionBuilder, count: u16) {
         let args = &self.stack[self.stack.len() - count as usize..self.stack.len()];
         builder.ins().return_(args);
         pops(&mut self.stack, count as usize);
@@ -730,19 +710,9 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
         builder.ins().bitcast(I64, MemFlags::new(), v[0])
     }),
     ("fn cast(_: f32) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        // TODO: HACK because I always store ints and tell cranelift im bit casting up to f64 before a call.
-        //       so it thinks the arg is an f64 but we know the high bits are 0 and the low is the f32 we want.
-        let v = builder.ins().bitcast(I64, MemFlags::new(), v[0]);
-        let v = builder.ins().ireduce(I32, v);
-        let v = builder.ins().bitcast(F32, MemFlags::new(), v);
-        builder.ins().fpromote(F64, v)
+        builder.ins().fpromote(F64, v[0])
     }),
     ("fn cast(_: f64) f32;", |builder: &mut FunctionBuilder, v: &[Value]| {
-        let v = builder.ins().fdemote(F32, v[0]);
-        // TODO: HACK because I always store ints and tell cranelift im bit casting up from f64 after a call.
-        //       so it needs to think this is returning an f64.
-        let v = builder.ins().bitcast(I32, MemFlags::new(), v);
-        let v = builder.ins().uextend(I64, v);
-        builder.ins().bitcast(F64, MemFlags::new(), v)
+        builder.ins().fdemote(F32, v[0])
     }),
 ];

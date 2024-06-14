@@ -678,7 +678,7 @@ fn sane_int_size(bits: i64) -> bool {
     matches!(bits, 8 | 16 | 32 | 64 | 128)
 }
 
-impl Debug for PrimSig {
+impl<'p> Debug for PrimSig<'p> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let render = |f: &mut Formatter, slots: u16, float_mask: u32| -> fmt::Result {
             write!(f, "(")?;

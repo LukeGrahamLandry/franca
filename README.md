@@ -11,6 +11,8 @@
 - lazy analysis, functions/constants that are statically unreachable may contain invalid code (like zig)
 - nonlocal returns from inline lambdas (like kotlin/ruby)
 - manual memory management with explicit allocators (like zig)
+- use c abi functions/structs with no overhead
+- ships with [sokol](https://github.com/floooh/sokol) bindings so its not a research exercise if you just want to put a triangle on the screen.
 
 ## Backends
 

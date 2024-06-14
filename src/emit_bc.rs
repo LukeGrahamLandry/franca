@@ -92,10 +92,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
     }
 
-    fn bind_args(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>) -> Res<'p, ()> {
+    fn bind_args(&mut self, result: &mut FnBody<'p>, pattern: &Pattern<'p>) -> Res<'p, &'p [Prim]> {
         let arguments = pattern.flatten();
+        let arity = arguments.len() as u16;
 
+        let arg_ty = self.program[result.func].finished_ty().unwrap().arg;
         let mut pushed = if result.signeture.first_arg_is_indirect_return { 1 } else { 0 };
+        let mut prim_args = if self.program.get_primitives((arg_ty, arity, false)).is_some() {
+            None
+        } else {
+            Some(vec![])
+        };
         // reversed because they're on the stack like [0, 1, 2]
         for (name, ty, kind) in arguments.into_iter().rev() {
             // TODO:? probably fine, i jsut set to const in closure capture but then shouldn't be adding to vars below.
@@ -108,6 +115,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 continue;
             } else if info.pass_by_ref {
                 pushed += 1;
+                if let Some(args) = &mut prim_args {
+                    args.push(Prim::P64);
+                }
                 // TODO: callee make copy if it wants to modify
                 result.save_ssa_var()
             } else {
@@ -117,9 +127,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     0 => {}
                     1 => {
                         let ty = self.program.prim(ty).unwrap();
+                        pushed += 1;
+                        if let Some(args) = &mut prim_args {
+                            args.push(ty);
+                        }
                         result.addr_var(id);
                         result.push(Bc::StorePost { ty });
-                        pushed += 1;
                     }
                     2 => {
                         let types = self.program.flat_tuple_types(ty);
@@ -127,16 +140,18 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             self.program.get_info(types[0]).stride_bytes as usize,
                             self.program.get_info(types[1]).align_bytes as usize,
                         );
+                        let p0 = self.program.prim(types[0]).unwrap();
+                        let p1 = self.program.prim(types[1]).unwrap();
                         result.addr_var(id);
                         result.inc_ptr_bytes(offset_2 as u16);
-                        result.push(Bc::StorePost {
-                            ty: self.program.prim(types[1]).unwrap(),
-                        });
+                        result.push(Bc::StorePost { ty: p1 });
                         result.addr_var(id);
-                        result.push(Bc::StorePost {
-                            ty: self.program.prim(types[0]).unwrap(),
-                        });
+                        result.push(Bc::StorePost { ty: p0 });
                         pushed += 2;
+                        if let Some(args) = &mut prim_args {
+                            args.push(p1); //reverse cause we reverse at the end
+                            args.push(p0);
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -151,8 +166,24 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         }
 
         assert_eq!(pushed, result.signeture.arg_slots);
+        if let Some(mut args) = prim_args {
+            args.reverse(); // sigh
+            let mut prims = self.program.primitives.borrow_mut();
+            debug_assert!(result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
+            prims.insert((arg_ty, arity, false), args.clone());
+            args.insert(0, Prim::P64); // sad
+            debug_assert!(!result.signeture.first_arg_is_indirect_return || (pushed as usize == args.len()));
+            prims.insert((arg_ty, arity, true), args);
+        }
 
-        Ok(())
+        Ok(self
+            .program
+            .get_primitives((arg_ty, arity, result.signeture.first_arg_is_indirect_return))
+            .unwrap())
+    }
+
+    fn get_primatives(&mut self, ty: TypeId) -> &'p [Prim] {
+        self.program.as_primatives(ty)
     }
 
     fn compile_for_arg(&mut self, result: &mut FnBody<'p>, arg: &FatExpr<'p>, arity: usize) -> Res<'p, bool> {
@@ -302,8 +333,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             return Ok(());
         };
 
-        let entry_block = result.push_block(result.signeture.arg_slots, result.signeture.arg_float_mask);
-        self.bind_args(result, &func.arg)?;
+        let entry_block = result.push_block(result.signeture.arg_slots, result.signeture.arg_float_mask, &[]);
+        let entry_block_sig = self.bind_args(result, &func.arg)?;
+        result.blocks[entry_block.0 as usize].arg_prims = entry_block_sig;
         // We represent the indirect return argument as the left-most thing on the stack,
         // so after popping all the args, its at the top and we can emit the thing normally.
         let result_location = if result.signeture.first_arg_is_indirect_return {
@@ -311,7 +343,14 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         } else {
             PushStack
         };
-        let return_block = result.push_block(result.signeture.ret_slots, result.signeture.ret_float_mask);
+        // Note: this is different from the body expr type because of early returns.
+        let ret = self.program[f].finished_ret.unwrap();
+        let prims = if result.signeture.first_arg_is_indirect_return {
+            &[]
+        } else {
+            self.get_primatives(ret)
+        };
+        let return_block = result.push_block(result.signeture.ret_slots, result.signeture.ret_float_mask, prims);
 
         result.current_block = entry_block;
 
@@ -332,8 +371,6 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         self.locals.pop().unwrap();
         assert!(self.locals.is_empty());
 
-        // Note: this is different from the body expr type because of early returns.
-        let ret = self.program[f].finished_ret.unwrap();
         if !ret.is_never() {
             let slots = self.program.slot_count(ret);
             let op = match slots {
@@ -597,9 +634,9 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 if let BigOption::Some(ret_var) = ret_label {
                     let entry_block = result.current_block;
                     let return_block = match result_location {
-                        PushStack => result.push_block(out.size_slots, out.float_mask),
-                        ResAddr => result.push_block(0, 0),
-                        Discard => result.push_block(0, 0),
+                        PushStack => result.push_block(out.size_slots, out.float_mask, self.get_primatives(expr.ty)),
+                        ResAddr => result.push_block_empty(),
+                        Discard => result.push_block_empty(),
                     };
                     let mut ret = ReturnAddr {
                         block: return_block,
@@ -943,19 +980,24 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         let (if_true, if_false) = (&parts[1], &parts[2]);
 
         let out = self.program.get_info(if_true.ty);
-        debug_assert!(out.size_slots < 8 || result_location != PushStack); // now its the callers problem to deal with this case
+        debug_assert!(out.size_slots < 4 || result_location != PushStack); // now its the callers problem to deal with this case
 
         let branch_block = result.current_block;
-        let true_ip = result.push_block(0, 0);
+        let true_ip = result.push_block_empty();
         self.compile_expr(result, if_true, result_location, can_tail)?;
         let end_true_block = result.current_block;
-        let false_ip = result.push_block(0, 0);
+        let false_ip = result.push_block_empty();
         self.compile_expr(result, if_false, result_location, can_tail)?;
         let end_false_block = result.current_block;
 
         let block_slots = if result_location == PushStack { out.size_slots } else { 0 };
         let block_floats = if result_location == PushStack { out.float_mask } else { 0 };
-        let ip = result.push_block(block_slots, block_floats);
+        let prims = if result_location == PushStack {
+            self.get_primatives(if_true.ty)
+        } else {
+            &[]
+        };
+        let ip = result.push_block(block_slots, block_floats, prims);
         result.push_to(branch_block, Bc::JumpIf { true_ip, false_ip, slots: 0 });
         result.push_to(end_true_block, Bc::Goto { ip, slots: block_slots });
         // TODO: hack
@@ -977,7 +1019,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         debug_assert_eq!(arg.ty, TypeId::unit);
 
         let prev_block = result.current_block;
-        let start_body_block = result.push_block(0, 0);
+        let start_body_block = result.push_block_empty();
         result.current_block = start_body_block;
         result.push_to(
             prev_block,
@@ -1244,8 +1286,24 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
 }
 
 impl<'p> FnBody<'p> {
-    fn push_block(&mut self, arg_slots: u16, arg_float_mask: u32) -> BbId {
+    fn push_block_empty(&mut self) -> BbId {
         self.blocks.push(BasicBlock {
+            arg_prims: &[],
+            insts: vec![],
+            arg_slots: 0,
+            arg_float_mask: 0,
+            incoming_jumps: 0,
+            clock: self.clock,
+            height: 0,
+        });
+        let b = BbId(self.blocks.len() as u16 - 1);
+        self.current_block = b;
+        b
+    }
+
+    fn push_block(&mut self, arg_slots: u16, arg_float_mask: u32, arg_prims: &'p [Prim]) -> BbId {
+        self.blocks.push(BasicBlock {
+            arg_prims,
             insts: vec![],
             arg_slots,
             arg_float_mask,
@@ -1264,7 +1322,7 @@ impl<'p> FnBody<'p> {
     }
 
     #[track_caller]
-    fn push(&mut self, inst: Bc) {
+    fn push(&mut self, inst: Bc<'p>) {
         self.push_to(self.current_block, inst);
     }
 
@@ -1290,7 +1348,7 @@ impl<'p> FnBody<'p> {
     }
 
     #[track_caller]
-    fn push_to(&mut self, b: BbId, inst: Bc) {
+    fn push_to(&mut self, b: BbId, inst: Bc<'p>) {
         self.blocks[b.0 as usize].insts.push(inst);
     }
 
@@ -1301,18 +1359,18 @@ impl<'p> FnBody<'p> {
     }
 }
 
-pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig> {
+pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
     let (arg, ret) = program.get_infos(f_ty);
 
     let has_indirect_ret = ret.size_slots > 2;
 
     let mut sig = PrimSig {
+        args: &[],
         arg_slots: arg.size_slots,
         arg_float_mask: arg.float_mask,
         ret_slots: ret.size_slots,
         ret_float_mask: ret.float_mask,
         first_arg_is_indirect_return: has_indirect_ret,
-        use_special_register_for_indirect_return: has_indirect_ret,
         no_return: f_ty.ret.is_never(),
         return_value_bytes: ret.stride_bytes,
     };
@@ -1327,11 +1385,13 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
         sig.arg_slots += 1;
     }
 
+    let mut args = vec![];
     // sad copy paste from compile_for_arg
     if arg.pass_by_ref {
         if f_ty.arity == 1 {
             sig.arg_slots -= program.get_info(f_ty.arg).size_slots;
             sig.arg_slots += 1;
+            args.push(Prim::P64);
         } else if let Some(types) = program.tuple_types(f_ty.arg) {
             if !types.iter().all(|t| !program.get_info(*t).pass_by_ref) {
                 for ty in types {
@@ -1343,13 +1403,23 @@ pub fn prim_sig<'p>(program: &Program<'p>, f_ty: FnType, cc: CallConv) -> Res<'p
                             sig.arg_float_mask == 0,
                             "TODO: shift float mask correctly to account for passing by reference"
                         );
+                        args.push(Prim::P64);
+                    } else {
+                        for p in program.as_primatives(ty) {
+                            args.push(*p);
+                        }
                     }
                 }
+            } else {
+                todo!()
             }
         } else {
             // if arity == 1 ??
             sig.arg_slots = 1;
+            args.push(Prim::P64);
         }
+    } else {
+        sig.args = program.as_primatives(f_ty.arg);
     }
 
     Ok(sig)

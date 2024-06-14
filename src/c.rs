@@ -23,7 +23,7 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
     let name = comp.program.pool.get(comp.program[f].name);
     let ty = comp.program[f].finished_ty().unwrap();
     let sig = prim_sig(comp.program, ty, comp.program[f].cc.unwrap()).unwrap();
-    if sig.use_special_register_for_indirect_return {
+    if sig.first_arg_is_indirect_return {
         ret_sizes.set(sig.return_value_bytes as usize);
     }
 
@@ -41,9 +41,6 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
         .unwrap();
     }
     if use_arg_names {
-        if sig.first_arg_is_indirect_return && !sig.use_special_register_for_indirect_return {
-            write!(out, "void *_ret_ptr,").unwrap();
-        }
         for b in comp.program[f].arg.bindings.iter() {
             let ty = b.ty.unwrap();
             if ty.is_unit() {
@@ -59,7 +56,7 @@ fn declare(comp: &Compile, out: &mut String, f: FuncId, use_name: bool, use_arg_
             }
         }
     } else {
-        let first = if sig.use_special_register_for_indirect_return { 1 } else { 0 };
+        let first = if sig.first_arg_is_indirect_return { 1 } else { 0 };
         for i in first..sig.arg_slots as usize {
             write!(out, "{} _arg_{i},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
         }
@@ -361,7 +358,7 @@ struct CProgram {
 
 struct Emit<'z, 'p> {
     result: &'z mut CProgram,
-    program: &'z mut Program<'p>,
+    program: &'z Program<'p>,
     body: &'z FnBody<'p>,
     code: String,
     blocks_done: BitSet,
@@ -383,7 +380,7 @@ impl<'z, 'p> Emit<'z, 'p> {
         let block = &self.body.blocks[b];
 
         if b == 0 {
-            if self.body.signeture.use_special_register_for_indirect_return {
+            if self.body.signeture.first_arg_is_indirect_return {
                 writeln!(self.code, "    Ret{} _temp_return;", self.body.signeture.return_value_bytes).unwrap();
                 writeln!(self.code, "    void *_arg_0 = &_temp_return;").unwrap();
             }
@@ -433,7 +430,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     self.do_c_call(sig, |s| {
                         let callee = s.stack.pop().unwrap();
                         write!(s.code, "(({}(*)(", ret_spec(sig)).unwrap();
-                        let start = if sig.use_special_register_for_indirect_return { 1 } else { 0 };
+                        let start = if sig.first_arg_is_indirect_return { 1 } else { 0 };
 
                         for i in start..sig.arg_slots as usize {
                             write!(s.code, "{},", ty_spec(is_float(i, sig.arg_slots, sig.arg_float_mask))).unwrap();
@@ -479,7 +476,7 @@ impl<'z, 'p> Emit<'z, 'p> {
                     break;
                 }
                 Bc::Ret0 => {
-                    if self.body.signeture.use_special_register_for_indirect_return {
+                    if self.body.signeture.first_arg_is_indirect_return {
                         writeln!(self.code, "    return _temp_return;").unwrap();
                     } else {
                         writeln!(self.code, "    return;").unwrap();
@@ -573,7 +570,7 @@ impl<'z, 'p> Emit<'z, 'p> {
             1 => write!(self.code, "    _{ret_var} = (void*)").unwrap(),
             2 => write!(self.code, "    {{ {} tmp = ", ret_spec(sig)).unwrap(),
             _ => {
-                if sig.use_special_register_for_indirect_return {
+                if sig.first_arg_is_indirect_return {
                     self.result.ret_sizes.set(sig.return_value_bytes as usize);
                     write!(self.code, "    {{ {} tmp = ", ret_spec(sig)).unwrap();
                 } else {
@@ -591,7 +588,7 @@ impl<'z, 'p> Emit<'z, 'p> {
 
         if !args.is_empty() {
             let mut aaa = args.iter().enumerate();
-            if sig.use_special_register_for_indirect_return {
+            if sig.first_arg_is_indirect_return {
                 retptr = Some(aaa.next().unwrap().1.clone());
             }
 
@@ -699,7 +696,7 @@ impl std::fmt::Display for Val {
 }
 
 fn ret_spec(sig: PrimSig) -> Cow<'static, str> {
-    if sig.use_special_register_for_indirect_return {
+    if sig.first_arg_is_indirect_return {
         return format!("Ret{}", sig.return_value_bytes).into();
     }
     match sig.ret_slots {
