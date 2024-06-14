@@ -120,6 +120,7 @@ pub struct Field<'p> {
     pub ty: TypeId,
     pub default: BigOption<Values>,
     pub byte_offset: usize,
+    pub kind: VarType,
 }
 
 #[repr(C)]
@@ -1018,7 +1019,7 @@ impl<'p> Program<'p> {
                         types
                             .iter()
                             .enumerate()
-                            .map(|(i, ty)| Ok((*ty, self.pool.intern(&format!("_{i}")), None))),
+                            .map(|(i, ty)| Ok((*ty, self.pool.intern(&format!("_{i}")), None, VarType::Var))),
                         true,
                     )
                     .unwrap();
@@ -1029,17 +1030,18 @@ impl<'p> Program<'p> {
 
     pub(crate) fn make_struct(
         &self,
-        parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>)>>,
+        parts: impl Iterator<Item = Res<'p, (TypeId, Ident<'p>, Option<Values>, VarType)>>,
         is_tuple: bool,
     ) -> Res<'p, TypeInfo<'p>> {
         let mut fields = vec![];
         for p in parts {
-            let (ty, name, default) = p?;
+            let (ty, name, default, kind) = p?;
             fields.push(Field {
                 name,
                 ty,
                 default: default.into(),
                 byte_offset: 99999999999,
+                kind,
             });
         }
 

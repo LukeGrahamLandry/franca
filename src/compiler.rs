@@ -218,6 +218,26 @@ impl<'a, 'p> Compile<'a, 'p> {
                 expr.ty = ty;
                 self.compile_expr(expr, Some(ty))
             }
+            TypeInfo::Struct { fields, .. } => {
+                // TODO: deny leading dot with inferred type because that only makes sense for enums so we can give a better error message here.
+
+                let field = fields.iter().find(|f| f.name == name);
+                let field = unwrap!(
+                    field,
+                    "{} is not a field of struct {ty:?}: {}\nexpected: {:?}",
+                    self.pool.get(name),
+                    self.program.log_type(ty),
+                    fields.iter().map(|f| self.pool.get(f.name)).collect::<Vec<_>>()
+                );
+                assert_eq!(field.kind, VarType::Const, 
+                    "Field {} is not constant on struct {ty:?} {:?}. \nDid you mean to access a field on an instance of the type instead of the type itself?",
+                    self.pool.get(name),
+                    self.program.log_type(ty)
+                );
+                let value = unwrap2!(field.default.clone(), "unreachable. constant fields have value");
+                expr.set(value, field.ty);
+                Ok(field.ty)
+            }
             _ => err!("no contextual fields for type {ty:?} {}", self.program.log_type(ty)),
         }
     }
@@ -2651,7 +2671,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             .bindings
             .iter()
             .map(|binding| {
-                assert_ne!(binding.kind, VarType::Const, "todo");
+                let name = unwrap!(binding.name.ident(), "field name");
+                if binding.kind == VarType::Const {
+                    assert!(binding.default.is_some(), "constant field {} must have a value.", self.pool.get(name));
+                }
                 let ty = unwrap!(binding.ty.ty(), "field type not inferred");
                 let default = if let BigOption::Some(expr) = binding.default.clone() {
                     // TODO: no clone
@@ -2659,7 +2682,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 } else {
                     None
                 };
-                Ok((ty, unwrap!(binding.name.ident(), "field name"), default))
+                Ok((ty, name, default, binding.kind))
             })
             .collect();
         self.program.make_struct(parts.into_iter(), false)
