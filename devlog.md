@@ -1,3 +1,87 @@
+I'm not sure i trust qbe, like ok i want to return two ints.
+
+```
+type :pair = { l, l }
+export function :pair $get_two() {
+@start
+    %out =l alloc8 16
+    %snd =l add %out, 8
+    storel 123, %out
+    storel 456, %snd
+	ret %out
+}
+```
+
+generates this:
+
+```
+.text
+.balign 4
+.globl _get_two
+_get_two:
+	stp	x29, x30, [sp, -32]!
+	mov	x29, sp
+	mov	x1, #8
+	add	x0, x29, #16
+	add	x1, x0, x1
+	add	x2, x29, #16
+	mov	x0, #123
+	str	x0, [x2]
+	mov	x0, #456
+	str	x0, [x1]
+	mov	x1, #8
+	add	x0, x29, #16
+	add	x0, x0, x1
+	ldr	x1, [x0]
+	mov	x2, #0
+	add	x0, x29, #16
+	add	x0, x0, x2
+	ldr	x0, [x0]
+	ldp	x29, x30, [sp], 32
+	ret
+/* end function get_two */
+```
+
+and in my language,
+
+```
+fn get_two() Ty(i64, i64) #log_asm = (123, 456);
+```
+
+with my current garbage asm where i do absolutly no optimisations, you get this
+
+```
+=== Asm for Fn2352: get_two ===
+	stp	x29, x30, [sp]
+	mov	x29, sp
+	sub	sp, sp, #0
+	mov	x0, #123                        ; =0x7b
+	mov	x1, #456                        ; =0x1c8
+	mov	sp, x29
+	ldp	x29, x30, [sp]
+	add	sp, sp, #16
+	ret
+===
+```
+
+and the obvious correct that clang gives for this
+
+```
+struct pair { long a; long b;};
+struct pair get_pair() {
+    return (struct pair) {123, 456};
+}
+```
+
+is
+
+```
+get_pair:                                 // @get_pair
+  mov     w0, #123                        // =0x7b
+  mov     w1, #456                        // =0x1c8
+  ret
+```
+
 ## (Jun 11/12)
 
 > we're at 15404 loc .rs

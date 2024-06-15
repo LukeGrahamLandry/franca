@@ -1,0 +1,87 @@
+fn StaticBitSet(const capacity: i64) Type = {
+    count :: capacity.add(63).div(64);
+    Self  :: @struct(bits: Array(i64, count));
+    
+    fn empty() Self = Self.zeroed();
+    
+    fn get(self: *Self, i: i64) bool = {
+        assert(i.lt(capacity), "OOB");
+        index := i.div(64);
+        bit   := i.mod(64);
+        self.bits&[index].bit_and(1.shift_left(bit)).ne(0)
+    }
+    
+    fn set(self: *Self, i: i64) Unit = {
+        assert(i.lt(capacity), "OOB");
+        index := i.div(64);
+        bit   := i.mod(64);
+        self.bits&[index] = self.bits&[index].bit_or(1.shift_left(bit));
+    }
+    
+    fn clear(self: *Self) Unit = {
+        self[] = empty();
+    }
+    
+    Self
+}
+
+DynamicBitSet :: @struct(bits: List(i64));
+
+fn empty(a: Alloc) DynamicBitSet = (bits = list(a));
+
+fn get(self: *DynamicBitSet, i: i64) bool = {
+    if(i.ge(self.bits.len.mul(64)), => false) {|
+        index := i.div(64);
+        bit   := i.mod(64);
+        self.bits&[index].bit_and(1.shift_left(bit)).ne(0)
+    }
+}
+
+fn set(self: *DynamicBitSet, i: i64) Unit = {
+    cap := self.bits.len.mul(64);
+    if(i.ge(cap), => self.reserve(i.sub(cap));
+    index := i.div(64);
+    bit   := i.mod(64);
+    self.bits&[index] = self.bits&[index].bit_or(1.shift_left(bit));
+}
+
+fn reserve(self: *DynamicBitSet, extra: i64) Unit = {
+    while(=> extra.gt(64)) {|
+        self.bits&.push(0); 
+        extra -= 64;
+    };
+    self.bits&.push(0);  
+}
+
+fn clear(self: *DynamicBitSet) Unit = {
+    self.bits&.clear();
+}
+
+BitSet :: @tagged(
+    Small: StaticBitSet(DynamicBitSet.size_of().mul(8)),
+    Big: DynamicBitSet,
+);
+:: assert_eq(BitSet.size_of(), DynamicBitSet.size_of().add(i64.size_of()));
+
+fn empty() BitSet = (Small = empty());
+
+fn get(self: *BitSet, i: i64) bool = @match(self) {
+    (fn Small(s) => s.get(i));
+    (fn Big(s) => s.get(i));
+};
+
+fn set(self: *BitSet, i: i64, a: Alloc) Unit = @match(self) {
+    (fn Small(s) => {
+        cap := self.bits.len.mul(64);
+        if(i.lt(cap), => s.set(i)) {|
+            self[] = (Big = self.bits&.slice().clone(a));
+            self.Big.set(i);
+        };
+    });
+    (fn Big(s) => s.set(i));
+};
+
+fn clear(self: *BitSet) Unit = @match(self) {
+    (fn Small(s) => s.clear());
+    (fn Big(s) => s.clear());
+};

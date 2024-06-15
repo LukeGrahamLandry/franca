@@ -22,35 +22,49 @@ fn emit_qbe(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = {
 }
 
 // TODO: better error mwssage if you use @enum instead of @tagged. -- Jun 14
-QbeVal :: @tagged(
-    Var: @struct(id: i64, ty: Prim),
-    Lit: @struct(value: i64, ty: Prim),
+QbeVal :: @struct(
+    ty: Prim,
+    data: @tagged(
+        Var: i64,
+        Lit: i64,
+    ),
 );
 
 EmitQbe :: @struct(
     comp: CompCtx,
     out: BucketArray(u8),
     current: BbId,
+    next_var: i64 = 0,
     const Val := QbeVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
 fn setup(self: *EmitQbe, body: *FnBody, vars_out: *List(EmitQbe.Val)) Unit = {
+    self.next_var = 0;
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
     @println("There are % vars", vars.len);
     enumerate(vars) {i, ty|
-        meta := {self.comp.vtable.get_type_meta}(self.comp.data, ty[]);
-        vars_out.push((Var = (id = i, ty = .P64)));
-        init := @format("   %v% =l alloc8 %\n", "%", i, @as(i64) meta.stride_bytes.zext()) temp(); // uhg % was a bad choice. 
-        // TODO: this copy is dumb. reserve enough up front and then @fmt into the bucket array. 
-        //       the whole point is to avoid copies. 
-        self.out&.push_all(init.items());
+        meta := {self.comp.vtable.get_type_meta}(self.comp.data, ty[]); // TODO: im not getting the right values. unless i add extra padding to the struct. so its using registers? 
+        v := self.get_var(.P64);
+        vars_out.push(v);
+        self.out&.reserve(30); 
+        @fmt(self.out&.current(), "   % =l alloc8 %\n", v, @as(i64) meta.stride_bytes.zext()); // uhg % was a bad choice. 
     };
-    println(self.out.buckets[0].items());
+    println(self.out&.current().items());
 }
 
-fn inst_call(self: *EmitQbe, sig: PrimSig, f: FuncId, tail: bool) Slice(EmitQbe.Val) = {
+fn inst_call(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitQbe.Val) = {
+    if(sig.first_arg_is_indirect_return) {|
+        ::ptr_utils(QbeVal);
+        // TODO
+        ret := args[0];
+        args.ptr = args.ptr.offset(1);
+        args.len -= 1;
+    };
+    assert_eq(args.len, sig.args.len);
+    println(self.out&.current().items());
     println("call");
+    // %r =w call $puts(l $str)
     todo()
 }
 
@@ -58,7 +72,7 @@ fn inst_trap(self: *EmitQbe) Unit = {
     todo()
 }
 
-fn inst_call_ptr(self: *EmitQbe, sig: PrimSig, ptr: EmitQbe.Val) Slice(EmitQbe.Val) = {
+fn inst_call_ptr(self: *EmitQbe, args: Slice(QbeVal), sig: PrimSig, ptr: EmitQbe.Val) Slice(EmitQbe.Val) = {
     todo()
 }
 
@@ -70,16 +84,32 @@ fn inst_literal(self: *EmitQbe, value: i64, ty: Prim) EmitQbe.Val = {
     todo()
 }
 
+// TODO: need to sign extend sometimes. 
 fn inst_load(self: *EmitQbe, addr: EmitQbe.Val, ty: Prim) EmitQbe.Val = {
-    todo()
+    value := self.get_var(ty);
+    
+    // Prim :: @enum(I8, I16, I32, F64, F32, P64);
+    inst := @switch(ty) {
+        @case(.I8) => "loadub";
+        @case(.I16) => "loaduh";
+        @case(.I32) => "loaduw";
+        @case(.I64) => "loadl";
+        @case(.F64) => "loadd";
+        @case(.F32) => "loads";
+        @case(.P64) => "loadl";
+    };
+    
+    self.out&.reserve(30);
+    @fmt(self.out&.current(), "   % =% % %\n", value, ty.type_char_var(), inst, addr); 
+    value
 }
 
-fn inst_store(self: *EmitQbe, addr: EmitQbe.Val, value: EmitQbe.Val, ty: Prim) EmitQbe.Val = {
+fn inst_store(self: *EmitQbe, addr: EmitQbe.Val, value: EmitQbe.Val, ty: Prim) Unit = {
     println("store");
     todo()
 }
 
-fn inst_copy(self: *EmitQbe, from: EmitQbe.Val, to: EmitQbe.Val, bytes: u16) EmitQbe.Val = {
+fn inst_copy(self: *EmitQbe, from: EmitQbe.Val, to: EmitQbe.Val, bytes: u16) Unit = {
     todo()
 }
 
@@ -88,9 +118,11 @@ fn inst_func_ref(self: *EmitQbe, fid: FuncId) EmitQbe.Val = {
 }
 
 fn inst_global(self: *EmitQbe, id: BakedVarId) EmitQbe.Val = {
-    println("global");
     {self.comp.vtable.debug_log_baked_constant}(self.comp.data, id);
-    todo()
+    v := self.get_var(.P64);
+    self.out&.reserve(30);
+    @fmt(self.out&.current(), "   % =l todo global %\n", v, @as(i64) id.id.zext()); 
+    v
 }
 
 fn inst_jump_if(self: *EmitQbe, cond: EmitQbe.Val, true: BbId, false: BbId, args: Slice(EmitQbe.Val)) Unit = {
@@ -114,6 +146,49 @@ fn move_to_block(self: *EmitQbe, block: *BasicBlock, ip: BbId) Slice(EmitQbe.Val
         todo();
     };
     
-    
     args.items()
 }
+
+fn get_var(self: *EmitQbe, ty: Prim) QbeVal = {
+    v: QbeVal = (ty = .P64, data = (Var = self.next_var));
+    self.next_var += 1;
+    v
+}
+
+fn display(self: QbeVal, out: *List(u8)) Unit = {
+    @match(self.data) {
+        (fn Var(i) Unit => { @fmt(out, "%v%", "%", i); });  
+        (fn Lit(i) Unit => i.display(out));
+    }
+}
+
+#redirect(Ty(i64, i64), bool) fn eq(a: Prim, b: Prim) bool;
+
+// TODO: these are super clunky, you want to have 'or' in switch cases. 
+fn type_char(ty: Prim) Str = @switch(ty) {
+    @case(.I8) => "b";
+    @case(.I16) => "h";
+    @case(.I32) => "w";
+    @case(.I64) => "l";
+    @case(.F64) => "d";
+    @case(.F32) => "s";
+    @case(.P64) => "l";
+};
+fn type_char_sign(ty: Prim) Str = @switch(ty) {
+    @case(.I8) => "ub";
+    @case(.I16) => "uh";
+    @case(.I32) => "w";
+    @case(.I64) => "l";
+    @case(.F64) => "d";
+    @case(.F32) => "s";
+    @case(.P64) => "l";
+};
+fn type_char_var(ty: Prim) Str = @switch(ty) {
+    @case(.I8) => "w";
+    @case(.I16) => "w"; // small types aren't real, they get extended
+    @case(.I32) => "w";
+    @case(.I64) => "l";
+    @case(.F64) => "d";
+    @case(.F32) => "s";
+    @case(.P64) => "l";
+};

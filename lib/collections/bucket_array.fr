@@ -9,13 +9,12 @@
 /// TODO: will probably want a version that makes the opposite trade off eventually. 
 fn BucketArray(const T: Type) Type = {
     // TODO: buckets should probably be stored in a linked list but I can't do self referential types yet :( -- May 28
-    const Self = @struct(buckets: List(List(T)), len: i64, b: i64, bucket_size: i64, gpa: Alloc);
-    // TODO: use self.b as index of current bucket and then have fn clear to reuse space. 
+    const Self = @struct(buckets: List(List(T)), len: i64, b: i64, bucket_size: i64, gpa: Alloc, i: i64);
     // TODO: should have an unmanaged version of a list so that you store the allocator once in the BucketArray and pass it in to each call. 
     // TODO: have push_within_capacity for when you want to assert that it doesn't reallocate. 
     
     fn init(bucket_size: i64, gpa: Alloc) Self = { 
-        self: Self = (buckets = list(4, gpa), len = 0, b = 0, bucket_size = bucket_size, gpa = gpa);
+        self: Self = (buckets = list(4, gpa), len = 0, b = 0, bucket_size = bucket_size, gpa = gpa, i = 0);
         self.buckets&.push(@as(List(T)) list(bucket_size, self.gpa));
         self
     }
@@ -24,13 +23,16 @@ fn BucketArray(const T: Type) Type = {
     
     /// Ensures there is enough space for <extra> contiguous elements. 
     fn reserve(self: *Self, extra: i64) Unit = {
-        bucket: *List(T) = self.buckets&.last().unwrap();
+        bucket: *List(T) = self.current();
         
         total := bucket.len.add(extra);
         old_cap := bucket.maybe_uninit.len;
         if(lt(old_cap, total)) {|
-            cap := extra.max(self.bucket_size);
-            self.buckets&.push(@as(List(T)) list(cap, self.gpa));
+            self.i += 1;
+            if(self.i.eq(self.buckets.len)) {|
+                cap := extra.max(self.bucket_size);
+                self.buckets&.push(@as(List(T)) list(cap, self.gpa));
+            };
         };
     }
     
@@ -38,7 +40,7 @@ fn BucketArray(const T: Type) Type = {
     fn push(self: *Self, v: T) *T = {
         reserve(self, 1);
         self.len += 1;
-        bucket := self.buckets.last().unwrap();
+        bucket := self.current();
         bucket.push(v);
         bucket.last().unwrap()
     }
@@ -47,17 +49,21 @@ fn BucketArray(const T: Type) Type = {
     fn push_all(self: *Self, new: Slice(T)) Slice(T) = {
         reserve(self, new.len);
         self.len += new.len;
-        bucket := self.buckets.last().unwrap();
+        bucket := self.current();
         bucket.push_all(new);
         ::?Slice(T);
         bucket.items().slice_last(new.len).unwrap()
     }
     
-    /// The returned slice is stable (ot can be held until drop is called on the collection).
-    fn push_all(self: *Self, owned: *Self) Slice(T) = {
-        mem := self.push_all(owned.items());
-        owned.drop();
-        mem
+    // This can be used to write directly into it after calling fn reserve(). 
+    fn current(self: *Self) *List(T) = 
+        self.buckets.index(self.i);
+    
+    // TODO: have a version that recursively drops? 
+    // TODO: rename clear_retaining_capacity? or is that too annoying to type. 
+    fn clear(self: *Self) Unit = {
+        each(self.buckets, fn(b) => b.clear());
+        self.i = 0;
     }
     
     fn drop(self: *Self) Unit = {
@@ -65,10 +71,13 @@ fn BucketArray(const T: Type) Type = {
     }
     
     fn for(self: *Self, const f: @Fn(s: Slice(T)) Unit) Unit = {
-        each(self.buckets) { bucket |
+        range(0, self.i.add(1)) {i|
+            bucket := self.buckets[i]&;
             f(bucket.items());
         };
     }
     
     Self
 }
+
+fn current();

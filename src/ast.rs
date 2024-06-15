@@ -90,6 +90,7 @@ pub enum TypeInfo<'p> {
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Hash, Eq, Debug, Default)]
 pub struct TypeMeta {
+    pub _pad: i64, // TODO: suck! forcing rust to not try to pass it in registers?
     pub float_mask: u32,
     pub size_slots: u16,
     pub stride_bytes: u16,
@@ -103,6 +104,7 @@ impl TypeMeta {
     fn new(size_slots: u16, align_bytes: u16, float_mask: u32, contains_pointers: bool, stride_bytes: u16, pass_by_ref: bool) -> Self {
         debug_assert_eq!(stride_bytes % align_bytes, 0);
         Self {
+            _pad: 0,
             size_slots,
             align_bytes,
             stride_bytes,
@@ -1769,7 +1771,7 @@ macro_rules! tagged_index {
 
 // Make sure these tag numbers are all different!
 tagged_index!(TypeId, 31, u32);
-tagged_index!(FuncId, 30, u32);
+tagged_index!(FuncId, 30, u32); // must match driver_api.fr
 tagged_index!(ScopeId, 29, u32);
 tagged_index!(OverloadSetId, 28, u32);
 tagged_index!(LabelId, 27, u32);

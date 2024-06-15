@@ -1736,7 +1736,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 self.update_cc(f)?;
                 self.flush_callees(f)?;
                 self.flush_cpu_instruction_cache();
-                let ptr = self.aarch64.get_fn(f).unwrap();
+                let ptr = unwrap!(self.aarch64.get_fn(f), "ICE: fn not compiled: {f:?} {}", self.pool.get(self.program[f].name));
                 let comp_ctx = matches!(self.program[f].cc.unwrap(), CallConv::CCallRegCt);
                 let f_ty = self.program[f].finished_ty().unwrap();
                 let values = ffi::c::call(self, ptr as usize, f_ty, args, comp_ctx)?;

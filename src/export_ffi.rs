@@ -7,7 +7,7 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{to_values, BakedVarId, FnBody, Values};
+use crate::bc::{to_values, BakedVar, BakedVarId, FnBody, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
@@ -208,6 +208,8 @@ pub struct ImportVTable {
     emit_bc: for<'p> extern "C" fn(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>>,
     get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
+    get_baked: extern "C" fn(compile: &Compile, id: BakedVarId) -> BakedVar,
+    debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
 }
 
 #[repr(C)]
@@ -240,7 +242,17 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     emit_bc,
     get_type_meta,
     debug_log_baked_constant,
+    get_baked,
+    debug_log_bc,
 };
+
+extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
+    println!("{}", body.log(c.program))
+}
+
+extern "C" fn get_baked(compile: &Compile, id: BakedVarId) -> BakedVar {
+    compile.program.baked.get(id).0
+}
 
 extern "C" fn debug_log_baked_constant(compile: &Compile, id: BakedVarId) {
     println!("{:?}", compile.program.baked.get(id))

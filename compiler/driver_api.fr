@@ -58,6 +58,8 @@ ImportVTable :: @struct(
     emit_bc: @FnPtr(c: Compiler, f: FuncId, when: ExecStyle) CRes(FnBody),
     get_type_meta: @FnPtr(c: Compiler, ty: Type) TypeMeta,
     debug_log_baked_constant: @FnPtr(c: Compiler, id: BakedVarId) Unit,
+    get_baked: @FnPtr(c: Compiler, id: BakedVarId) BakedVar,  // TODO: should do without the copy,
+    debug_log_bc: @FnPtr(c: Compiler, body: *FnBody) Unit,
 );
 
 // TODO: depending on layout is jail. Vec isn't repr(C)
@@ -326,7 +328,8 @@ PrimSig :: @struct(
     no_return: bool,
 );
 
-Prim :: @enum(I8, I16, I32, F64, F32, P64);
+// TODO: make the other enum varient builtin so you can use it and still override eq. because my order independence doesn't really work. 
+Prim :: @enum(i64) (I8, I16, I32, I64, F64, F32, P64);
 
 BasicBlock :: @struct(
     insts: RsVec(Bc),
@@ -353,11 +356,11 @@ FnBody :: @struct(
     clock: u16,
     name: Symbol,
     want_log: bool,
-    is_ssa_var: BitSet, // only used for debugging. bc has enough info for this.
+    is_ssa_var: RsBitSet, // only used for debugging. bc has enough info for this.
     signeture: PrimSig,
 );
 
-BitSet :: @tagged(
+RsBitSet :: @tagged(
     Small: Array(usize, 2),
     Big: RsVec(usize),
 );
@@ -374,6 +377,7 @@ BakedVar :: @tagged(
 );
 
 TypeMeta :: @struct(
+    _pad: i64,
     float_mask: u32,
     size_slots: u16,
     stride_bytes: u16,
@@ -381,3 +385,10 @@ TypeMeta :: @struct(
     contains_pointers: bool,
     pass_by_ref: bool,
 );
+
+fn to_index(f: FuncId) u32 = {
+    i := ptr_cast_unchecked(From = FuncId, To = u32, ptr = f&)[];
+    magic_offset :: 30;  // must match ast.rs
+    mask: u32 : 1.shift_left(magic_offset).bit_not().trunc();
+    i.bit_and(mask)
+}

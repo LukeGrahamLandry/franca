@@ -308,6 +308,7 @@ pub fn find_std_lib() -> bool {
 
 pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     println!("ERROR");
+    println!("{}", e.trace);
 
     println!("Internal: {}", e.internal_loc.unwrap());
     if let CErr::Diagnostic(diagnostic) = &e.reason {
@@ -327,8 +328,6 @@ pub fn log_err<'p>(interp: &Compile<'_, 'p>, e: CompileError<'p>) {
     } else {
         println!("{}", e.reason.log(interp.program, interp.pool));
     }
-
-    println!("{}", e.trace);
 }
 
 fn emit_diagnostic(codemap: &CodeMap, diagnostic: &[Diagnostic]) {
