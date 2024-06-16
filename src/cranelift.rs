@@ -657,76 +657,76 @@ macro_rules! fcmp {
 
 pub type CfEmit = fn(&mut FunctionBuilder, &[Value]) -> Value;
 
-// TODO: still emit these as real functions if you take a pointer to one.
+// TODO: argument names have to match llvm/basic.fr SUCK -- Jun 16
 pub const BUILTINS: &[(&str, CfEmit)] = &[
-    ("fn add(_: i64, __: i64) i64;", inst!(iadd)),
-    ("fn sub(_: i64, __: i64) i64;", inst!(isub)),
-    ("fn mul(_: i64, __: i64) i64;", inst!(imul)),
-    ("fn div(_: i64, __: i64) i64;", inst!(sdiv)),
-    ("fn eq(_: i64, __: i64) bool;", icmp!(Equal)),
-    ("fn ne(_: i64, __: i64) bool;", icmp!(NotEqual)),
-    ("fn lt(_: i64, __: i64) bool;", icmp!(SignedLessThan)),
-    ("fn gt(_: i64, __: i64) bool;", icmp!(SignedGreaterThan)),
-    ("fn le(_: i64, __: i64) bool;", icmp!(SignedLessThanOrEqual)),
-    ("fn ge(_: i64, __: i64) bool;", icmp!(SignedGreaterThanOrEqual)),
-    ("fn add(_: f64, __: f64) f64;", inst!(fadd)),
-    ("fn sub(_: f64, __: f64) f64;", inst!(fsub)),
-    ("fn mul(_: f64, __: f64) f64;", inst!(fmul)),
-    ("fn div(_: f64, __: f64) f64;", inst!(fdiv)),
-    ("fn eq(_: f64, __: f64) bool;", fcmp!(Equal)),
-    ("fn ne(_: f64, __: f64) bool;", fcmp!(NotEqual)),
-    ("fn lt(_: f64, __: f64) bool;", fcmp!(LessThan)),
-    ("fn gt(_: f64, __: f64) bool;", fcmp!(GreaterThan)),
-    ("fn le(_: f64, __: f64) bool;", fcmp!(LessThanOrEqual)),
-    ("fn ge(_: f64, __: f64) bool;", fcmp!(GreaterThanOrEqual)),
-    ("fn bit_or(_: i64, __: i64) i64;", inst!(bor)),
-    ("fn bit_and(_: i64, __: i64) i64;", inst!(band)),
-    ("fn shift_left(_: i64, __: i64) i64;", inst!(ishl)),
-    ("fn offset(_: rawptr, bytes: i64) rawptr;", inst!(iadd)),
-    ("fn bit_not(_: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn add(a: i64, b: i64) i64;", inst!(iadd)),
+    ("fn sub(a: i64, b: i64) i64;", inst!(isub)),
+    ("fn mul(a: i64, b: i64) i64;", inst!(imul)),
+    ("fn div(a: i64, b: i64) i64;", inst!(sdiv)),
+    ("fn eq(a: i64, b: i64) bool;", icmp!(Equal)),
+    ("fn ne(a: i64, b: i64) bool;", icmp!(NotEqual)),
+    ("fn lt(a: i64, b: i64) bool;", icmp!(SignedLessThan)),
+    ("fn gt(a: i64, b: i64) bool;", icmp!(SignedGreaterThan)),
+    ("fn le(a: i64, b: i64) bool;", icmp!(SignedLessThanOrEqual)),
+    ("fn ge(a: i64, b: i64) bool;", icmp!(SignedGreaterThanOrEqual)),
+    ("fn add(a: f64, b: f64) f64;", inst!(fadd)),
+    ("fn sub(a: f64, b: f64) f64;", inst!(fsub)),
+    ("fn mul(a: f64, b: f64) f64;", inst!(fmul)),
+    ("fn div(a: f64, b: f64) f64;", inst!(fdiv)),
+    ("fn eq(a: f64, b: f64) bool;", fcmp!(Equal)),
+    ("fn ne(a: f64, b: f64) bool;", fcmp!(NotEqual)),
+    ("fn lt(a: f64, b: f64) bool;", fcmp!(LessThan)),
+    ("fn gt(a: f64, b: f64) bool;", fcmp!(GreaterThan)),
+    ("fn le(a: f64, b: f64) bool;", fcmp!(LessThanOrEqual)),
+    ("fn ge(a: f64, b: f64) bool;", fcmp!(GreaterThanOrEqual)),
+    ("fn bit_or(a: i64, b: i64) i64;", inst!(bor)),
+    ("fn bit_and(a: i64, b: i64) i64;", inst!(band)),
+    ("fn shift_left(a: i64, b: i64) i64;", inst!(ishl)),
+    ("fn offset(a: rawptr, bytes: i64) rawptr;", inst!(iadd)),
+    ("fn bit_not(a: i64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bnot(v[0])
     }),
     // it seems this matches what i do.
     // https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/isa/aarch64/inst/emit.rs#L2183
-    ("fn int(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn int(v: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_to_sint_sat(I64, v[0])
     }),
-    ("fn typeid_to_int(_: Type) i64;", Z_EXT_64),
-    ("fn float(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn typeid_to_int(v: Type) i64;", Z_EXT_64),
+    ("fn float(v: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fcvt_from_sint(F64, v[0])
     }),
-    ("fn bitcast(_: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn bitcast(v: i64) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(F64, MemFlags::new(), v[0])
     }),
-    ("fn bitcast(_: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn bitcast(v: f64) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().bitcast(I64, MemFlags::new(), v[0])
     }),
-    ("fn cast(_: f32) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn cast(v: f32) f64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fpromote(F64, v[0])
     }),
-    ("fn cast(_: f64) f32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn cast(v: f64) f32;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().fdemote(F32, v[0])
     }),
-    ("fn zext(_: u32) u64;", Z_EXT_64),
-    ("fn zext(_: u8) u64;", Z_EXT_64),
-    ("fn zext(_: u16) u64;", Z_EXT_64),
-    ("fn zext(_: u8) u32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn zext(v: u32) u64;", Z_EXT_64),
+    ("fn zext(v: u8) u64;", Z_EXT_64),
+    ("fn zext(v: u16) u64;", Z_EXT_64),
+    ("fn zext(v: u8) u32;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().uextend(I32, v[0])
     }),
-    ("fn intcast(_: i64) i32;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn intcast(v: i64) i32;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().ireduce(I32, v[0])
     }),
-    ("fn intcast(_: i32) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
+    ("fn intcast(v: i32) i64;", |builder: &mut FunctionBuilder, v: &[Value]| {
         builder.ins().sextend(I64, v[0])
     }),
-    ("fn trunc(_: u64) u8;", TRUNC_8),
-    ("fn trunc(_: u32) u8;", TRUNC_8),
-    ("fn trunc(_: i64) u8;", TRUNC_8),
-    ("fn trunc(_: u64) u32;", TRUNC_32),
-    ("fn trunc(_: i64) u32;", TRUNC_32),
-    ("fn sext(_: i32) i64;", S_EXT_64),
-    ("fn sext(_: i16) i64;", S_EXT_64),
-    ("fn sext(_: i8) i64;", S_EXT_64),
+    ("fn trunc(v: u64) u8;", TRUNC_8),
+    ("fn trunc(v: u32) u8;", TRUNC_8),
+    ("fn trunc(v: i64) u8;", TRUNC_8),
+    ("fn trunc(v: u64) u32;", TRUNC_32),
+    ("fn trunc(v: i64) u32;", TRUNC_32),
+    ("fn sext(v: i32) i64;", S_EXT_64),
+    ("fn sext(v: i16) i64;", S_EXT_64),
+    ("fn sext(v: i8) i64;", S_EXT_64),
 ];
 
 const S_EXT_64: CfEmit = |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().sextend(I64, v[0]);

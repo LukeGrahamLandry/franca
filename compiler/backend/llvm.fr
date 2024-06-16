@@ -33,12 +33,21 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = 
         
         body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
         if(body.blocks.len.eq(0)){|
+            success := gen.backend&.emit_special(comp, func.body&, func, body&); 
+            {comp.vtable.debug_log_bc}(comp.data, body&);
+            //assert(success, "failed to emit speciai function"); // TODO
             // TODO: handle import
             continue();
         };
         {comp.vtable.debug_log_bc}(comp.data, body&);
         gen.body = body&;
-        gen.backend&.define_func(body&);
+        gen.backend.out&.push_all("define ");
+        name := @format("F%", body.func.to_index()) temp();
+        gen.backend&.write_header(body&, name.items()) {arg_index|
+            s := @format("%arg%", "%", arg_index) temp();
+            s.items()
+        };
+        gen.backend.out&.current().push_all("{\n");
         gen&.emit_current_function();
         gen.backend.out&.current().push_all("}\n");
     };
@@ -46,6 +55,67 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = 
     // TODO: if alloc != temp { temp.reset(mark ?
     
     gen.backend.out
+}
+
+fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc: *FnBody) bool = {
+    return :: @return;
+    @match(body) {
+        (fn Normal(_) => { panic("ICE: empty body but expr"); });
+        (fn Merged(parts) => { 
+            each(parts[].items()) {check: *FuncImpl| 
+                if(self.emit_special(comp, check, func, bc), => return(true));
+            };
+        });
+        (fn DynamicImport(name)=> { 
+            // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
+            import_name := {comp.vtable.get_string}(comp.data, name[]);
+            self.out&.push_all("declare ");
+            self.write_header(bc, import_name) {arg_index|
+                args := func.arg.bindings.items();
+                arg := args[arg_index].name.Var.name;
+                arg := {comp.vtable.get_string}(comp.data, arg);
+                arg := @format("%%", "%", arg) temp();
+                arg.items()
+            };
+            self.out&.push_all(";\n");
+            
+            self.out&.push_all("define ");
+            name := @format("F%", bc.func.to_index()) temp();
+            values: List(LlvmVal) = list(temp());
+            self.write_header(bc, name.items()) {arg_index|
+                ty := bc.signeture.args[arg_index]; // TODO: indirect ret
+                values&.push((ty = ty, id = arg_index));
+                s := @format("%v%", "%", arg_index) temp();
+                s.items()
+            };
+            self.out&.current().reserve(50);
+            self.out&.current().push_all("{\n");
+            ret := self.inst_call(values.items(), bc.signeture) {|
+                @fmt(self.out&.current(), "@%", import_name);
+            };
+            self.inst_return(ret);
+            self.out&.current().push_all("}\n");
+            
+            return(true);
+        });
+        (fn LlvmIr(code) => { 
+            ir := {comp.vtable.get_string}(comp.data, code[]);
+            self.out&.push_all("define ");
+            name := @format("F%", bc.func.to_index()) temp();
+            self.write_header(bc, name.items()) {arg_index|
+                args := func.arg.bindings.items();
+                arg := args[arg_index].name.Var.name;
+                arg := {comp.vtable.get_string}(comp.data, arg);
+                arg := @format("%%", "%", arg) temp();
+                arg.items()
+            };
+            @fmt(self.out&.current(), "{\n%}\n", ir);
+            return(true);
+        });
+        // TODO: JittedAarch64 as inline assembly.
+        @default fn() Unit => return(false);
+    };
+    false
 }
 
 // TODO: better error mwssage if you use @enum instead of @tagged. -- Jun 14
@@ -62,11 +132,10 @@ EmitLlvm :: @struct(
     const Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
-fn define_func(self: *EmitLlvm, body: *FnBody) Unit = {
+fn write_header(self: *EmitLlvm, body: *FnBody, name: Str, const get_arg_name: @Fn(idx: i64) Str) Unit = {
     ::if_opt(Prim, Unit);
 
     sig := body.signeture&;
-    self.out&.push_all("define ");
     self.out&.reserve(50);
     if(sig.ret1) {fst: Prim|
         if(sig.ret2) {snd: Prim| // two
@@ -77,20 +146,21 @@ fn define_func(self: *EmitLlvm, body: *FnBody) Unit = {
     }{| // void or indirect
         self.out&.current().push_all("void");
     };
-    @fmt(self.out&.current(), " @F%(", body.func.to_index());
+    @fmt(self.out&.current(), " @%(", name);
     
+    // TODO: don't have two callsites for get_arg_name
     shift := if(sig.first_arg_is_indirect_return) {|
-        @fmt(self.out&.current(), " ptr %arg0,", "%");
+        @fmt(self.out&.current(), " ptr %,", get_arg_name(0));
         1
     }{| 0 };
     
     enumerate(sig.args) {i, ty|
         self.out&.reserve(20);
         i := i.add(shift);
-        @fmt(self.out&.current(), "% %arg%,", ty[].llvm_type(), "%", i); 
+        @fmt(self.out&.current(), "% %,", ty[].llvm_type(), get_arg_name(i)); 
     };
     self.pop_trailing_comma();
-    self.out&.current().push_all("){\n");
+    self.out&.current().push_all(")");
 }
 
 fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
