@@ -335,7 +335,12 @@ unsafe extern "C" fn franca_emit_c<'p>(c: &mut Compile<'_, 'p>, fns: *const [Fun
 }
 
 unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()> {
-    c.compile(f, when)
+    let res = c.compile(f, when);
+    if let Err(e) = &res {
+        log_err(c, *e.clone());
+    }
+
+    res
 }
 
 unsafe extern "C" fn get_jitted_ptr<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8> {
@@ -480,7 +485,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // This a null terminated packed string, useful for ffi with old c functions.
     // Currently it doesn't reallocate because all symbols are null terminated but that might change in future. --Apr, 10
     ("#fold fn c_str(s: Symbol) CStr", symbol_to_cstr as *const u8),
-    ("#fold fn int(s: Symbol) i64", symbol_to_int as *const u8), // TODO: this should be a noop
     (
         "fn resolve_backtrace_symbol(addr: *i64, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,

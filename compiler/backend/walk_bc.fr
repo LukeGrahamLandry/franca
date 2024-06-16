@@ -38,13 +38,13 @@ fn CodeGen(const B: Type) Type = {
         body: *FnBody,
         vars: List(B.Val),
         stack: List(B.Val),
-        blocks_done: StaticBitSet(MAX_BLOCKS) = empty(),
+        blocks_done: BitSet = empty(),
+        funcs_done: BitSet = empty(),
+        constants_needed: BitSet = empty(),
     );
     
     fn emit_current_function(self: *Self) Unit = {
         s := self.body.blocks.items();
-        println(s.len);
-        {self.comp.vtable.debug_log_bc}(self.comp.data, self.body);
         assert(s.len.lt(MAX_BLOCKS), "TODO: dynamic bitset");
         self.backend&.setup(self.body, self.vars&);
         self.walk_block((id = 0.trunc()));
@@ -57,14 +57,14 @@ fn CodeGen(const B: Type) Type = {
         // TODO: you cant call pop unless its been instantiated but it cant be instantiated if the type doesn't exist.
         :: ?B.Val; ::?Slice(B.Val);
         index: i64 = b.id.zext();
-        block := self.body.blocks.items()[index]&;
-        assert(self.stack.len.ge(block.arg_prims.len), "stack missing block args");
-        args := self.backend&.move_to_block(block, b);
-        self.stack&.push_all(args);
         break :: @return;
         if(self.blocks_done&.get(index), => break());
-        self.blocks_done&.set(index);
+        self.blocks_done&.set(index, temp());
         
+        block := self.body.blocks.items()[index]&;
+        args := self.backend&.move_to_block(block, b);
+        assert(args.len.ge(block.arg_prims.len), "missing block args");
+        self.stack&.push_all(args);
         for(block.insts.items()){ inst |
             @match(inst){
                 (fn Nop() => ());

@@ -1,3 +1,6 @@
+// TODO: have a way of marking ones that should be imported instead of emitted so the driver program could do incremental compilation stuff. 
+// TODO: move the top level loop to walk_bc because its probably the same on all backends. 
+
 fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = {
     s: EmitLlvm = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
     gen: CodeGen(EmitLlvm) = (
@@ -8,17 +11,39 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = 
         stack = list(20, temp()),
     );
     
-    for(fns){fid|
-        gen.backend.out&.clear();
-        body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
-        gen.body = body&;
-        gen&.emit_current_function();
-        println("======================");
-        for(gen.backend.out&){bucket|
-            println(bucket);
+    pending: List(FuncId) = fns.clone(temp());
+    
+    while(=> pending.len.ne(0)){|
+        continue :: @return;
+        fid := pending&.pop().unwrap();
+        if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
+        gen.funcs_done&.set(fid.to_index().zext(), temp());
+        
+        func := {comp.vtable.get_function}(comp.data, fid);
+        for(func.callees.items()){c|
+            if(not(gen.funcs_done&.get(c.to_index().zext()))){|
+                pending&.push(c);
+            };
         };
-        println("======================");
+        for(func.mutual_callees.items()){c|
+            if(not(gen.funcs_done&.get(c.to_index().zext()))){|
+                pending&.push(c);
+            };
+        };
+        
+        body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
+        if(body.blocks.len.eq(0)){|
+            // TODO: handle import
+            continue();
+        };
+        {comp.vtable.debug_log_bc}(comp.data, body&);
+        gen.body = body&;
+        gen.backend&.define_func(body&);
+        gen&.emit_current_function();
+        gen.backend.out&.current().push_all("}\n");
     };
+    
+    // TODO: if alloc != temp { temp.reset(mark ?
     
     gen.backend.out
 }
@@ -37,8 +62,39 @@ EmitLlvm :: @struct(
     const Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
+fn define_func(self: *EmitLlvm, body: *FnBody) Unit = {
+    ::if_opt(Prim, Unit);
+
+    sig := body.signeture&;
+    self.out&.push_all("define ");
+    self.out&.reserve(50);
+    if(sig.ret1) {fst: Prim|
+        if(sig.ret2) {snd: Prim| // two
+            @fmt(self.out&.current(), "%", llvm_pair_type(fst, snd));
+        }{| // one
+            @fmt(self.out&.current(), "%", fst.llvm_type());
+        };
+    }{| // void or indirect
+        self.out&.current().push_all("void");
+    };
+    @fmt(self.out&.current(), " @F%(", body.func.to_index());
+    
+    shift := if(sig.first_arg_is_indirect_return) {|
+        @fmt(self.out&.current(), " ptr %arg0,", "%");
+        1
+    }{| 0 };
+    
+    enumerate(sig.args) {i, ty|
+        self.out&.reserve(20);
+        i := i.add(shift);
+        @fmt(self.out&.current(), "% %arg%,", ty[].llvm_type(), "%", i); 
+    };
+    self.pop_trailing_comma();
+    self.out&.current().push_all("){\n");
+}
+
 fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
-    self.out&.push_all("%entry:\n");
+    self.out&.push_all("entry:\n");
     self.next_var = 0;
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
@@ -52,19 +108,35 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
     };
     // TODO: use phi nodes cause this is stupid but that's such a pain in the ass. 
     // I use these for block arguments
+    // TODO: max(blocks[..].args, sig.arg_slots) so don't bother emitting text for functions that don't need that many. 
     range(0, 10) {i|
         self.out&.reserve(30); 
         @fmt(self.out&.current(), "   %a% = alloca i64\n", "%", i); // uhg % was a bad choice. 
     };
-    println(self.out&.current().items());
+    shift := if(body.signeture.first_arg_is_indirect_return) {|
+        @fmt(self.out&.current(), " store ptr %arg0, ptr %a0\n", "%", "%");
+        1
+    }{| 0 };
+    enumerate(body.signeture.args) {i, ty|
+        self.out&.reserve(20);
+        i := i.add(shift);
+        // TODO: ty.llvm_type() error says it wants the raw type but found enum ptr when it should say wants the enum type
+        @fmt(self.out&.current(), "   store % %arg% , ptr %a%\n", ty[].llvm_type(), "%", i, "%", i); 
+    };
+    self.out&.push_all("   br label %b0\n"); 
 }
 
 // clang puts the sret first, so
 fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitLlvm.Val) = {
+    self.inst_call(args, sig) {|
+        @fmt(self.out&.current(), "@F%", f.to_index());
+    }
+}
+
+fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call: @Fn() Unit) Slice(EmitLlvm.Val) = {
     self.out&.reserve(30);
     
     out_vals: List(LlvmVal) = list(temp());
-    ::if_opt(Prim, Unit);
     if(sig.ret1) {fst: Prim|
         if(sig.ret2) {snd: Prim| // two
             out_vals&.push(self.get_var(fst));
@@ -79,8 +151,11 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tai
     }{| // void or indirect
         self.out&.current().push_all("   call void ");
     };
+    maybe_struct_out := self.next_var.sub(1);
     
-    @fmt(self.out&.current(), "@F%(", f.to_index());
+    do_call();
+    
+    self.out&.push_all("(");
     shift := if(sig.first_arg_is_indirect_return) {|
         @fmt(self.out&.current(), " ptr %,", args[0]);
         1
@@ -91,6 +166,8 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tai
         ty := sig.args[i];
         v := args[i.add(shift)];
         self.out&.reserve(30);
+        ::assert_eq(Prim);
+        assert_eq(ty, v.ty);
         @fmt(self.out&.current(), " % %,", ty.llvm_type(), v);
     };
     self.pop_trailing_comma();
@@ -99,11 +176,10 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tai
     if(sig.ret2) {_| // two
         v1 := out_vals[0];
         v2 := out_vals[1];
-        both_id := self.next_var.sub(1);
         self.out&.reserve(30);
         p := llvm_pair_type(v1.ty, v2.ty);
-        @fmt(self.out&.current(), "   % = extractvalue % %v%, 0\n", v1, p, "%", self.next_var);
-        @fmt(self.out&.current(), "   % = extractvalue % %v%, 1\n", v2, p, "%", self.next_var);
+        @fmt(self.out&.current(), "   % = extractvalue % %v%, 0\n", v1, p, "%", maybe_struct_out);
+        @fmt(self.out&.current(), "   % = extractvalue % %v%, 1\n", v2, p, "%", maybe_struct_out);
     };
     
     out_vals.items()
@@ -119,12 +195,14 @@ fn pop_trailing_comma(self: *EmitLlvm) Unit = {
 }
 
 fn inst_trap(self: *EmitLlvm) Unit = {
-    self.out&.push_all("   call void @llvm.trap()\n");
+    // i think trap makes it crash instead of ub and it seems you need unreachable for it to believe the block is finished. 
+    self.out&.push_all("   call void @llvm.trap()\n   unreachable\n");
 }
 
 fn inst_call_ptr(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, ptr: EmitLlvm.Val) Slice(EmitLlvm.Val) = {
-    println("ptr");
-    todo()
+    self.inst_call(args, sig) {|
+        @fmt(self.out&.current(), "%", ptr);
+    }
 }
 
 fn inst_offset(self: *EmitLlvm, ptr: EmitLlvm.Val, bytes: u16) EmitLlvm.Val = {
@@ -134,7 +212,7 @@ fn inst_offset(self: *EmitLlvm, ptr: EmitLlvm.Val, bytes: u16) EmitLlvm.Val = {
     self.out&.reserve(30);
     @fmt(self.out&.current(), "   % = ptrtoint ptr % to i64\n", temp, ptr); 
     @fmt(self.out&.current(), "   % = add i64 %, %\n", new, temp, @as(i64) bytes.zext()); 
-    @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", done, ptr); 
+    @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", done, new); 
     done
 }
 
@@ -146,7 +224,8 @@ fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
         @fmt(self.out&.current(), "   % = todo float\n", v); 
     } {|
         // TODO: better error message if you forget an argument
-        @fmt(self.out&.current(), "   % = % %\n", v, ty.llvm_type(), value); 
+        // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
+        @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
     };
     v
 }
@@ -175,10 +254,11 @@ fn inst_func_ref(self: *EmitLlvm, fid: FuncId) EmitLlvm.Val = {
 }
 
 fn inst_global(self: *EmitLlvm, id: BakedVarId) EmitLlvm.Val = {
-    {self.comp.vtable.debug_log_baked_constant}(self.comp.data, id);
+    //{self.comp.vtable.debug_log_baked_constant}(self.comp.data, id);
     v := self.get_var(.P64);
     self.out&.reserve(30);
-    @fmt(self.out&.current(), "   % = ptr @g%\n", v, @as(i64) id.id.zext()); 
+    // TODO: LlvmVal should be a @tagged(Local, Global) so we dont give it extra work to do
+    @fmt(self.out&.current(), "   % = call ptr @llvm.ssa.copy(ptr @g%)\n", v, @as(i64) id.id.zext()); 
     v
 }
 
@@ -202,13 +282,17 @@ fn inst_jump(self: *EmitLlvm, always: BbId, args: Slice(EmitLlvm.Val)) Unit = {
 fn inst_return(self: *EmitLlvm, args: Slice(EmitLlvm.Val)) Unit = {
     @switch(args.len){
         @case(0) => {
-            self.out&.current().push_all("   ret void");
+            self.out&.current().push_all("   ret void\n");
         };
         @case(1) => {
-            @fmt(self.out&.current(), "   ret % %", args[0].ty.llvm_type(), args[0]); 
+            @fmt(self.out&.current(), "   ret % %\n", args[0].ty.llvm_type(), args[0]); 
         };
         @case(2) => {
-            @fmt(self.out&.current(), "   ret { %, % } { % %, % % }", args[0].ty.llvm_type(), args[1].ty.llvm_type(), args[0].ty.llvm_type(), args[0], args[1].ty.llvm_type(), args[1]); 
+            self.next_var += 2;
+            pair := llvm_pair_type(args[0].ty, args[1].ty);
+            @fmt(self.out&.current(), "   %v% = insertvalue % undef, % %, 0\n", "%", self.next_var.sub(2), pair, args[0].ty.llvm_type(), args[0]); 
+            @fmt(self.out&.current(), "   %v% = insertvalue % %v%, % %, 1\n", "%", self.next_var.sub(1), pair, "%", self.next_var.sub(2), args[1].ty.llvm_type(), args[1]); 
+            @fmt(self.out&.current(), "   ret % %v%\n", pair, "%", self.next_var.sub(1)); 
         };
         @default fn(_: i64) => {
             unreachable();
@@ -218,7 +302,7 @@ fn inst_return(self: *EmitLlvm, args: Slice(EmitLlvm.Val)) Unit = {
 
 fn move_to_block(self: *EmitLlvm, block: *BasicBlock, ip: BbId) Slice(EmitLlvm.Val) = {
     self.out&.reserve(20);
-    @fmt(self.out&.current(), "%b%:\n", "%", @as(i64) ip.id.zext()); 
+    @fmt(self.out&.current(), "b%:\n", @as(i64) ip.id.zext()); 
         
     self.current = ip;
     args: List(EmitLlvm.Val) = list(block.arg_prims.len, temp());
@@ -233,13 +317,17 @@ fn move_to_block(self: *EmitLlvm, block: *BasicBlock, ip: BbId) Slice(EmitLlvm.V
 }
 
 fn get_var(self: *EmitLlvm, ty: Prim) LlvmVal = {
-    v: LlvmVal = (ty = .P64, id = self.next_var);
+    v: LlvmVal = (ty = ty, id = self.next_var);
     self.next_var += 1;
     v
 }
 
 fn display(self: LlvmVal, out: *List(u8)) Unit = {
     @fmt(out, "%v%", "%", self.id);
+}
+// TODO: this should be automatic from enum names
+fn display(self: Prim, out: *List(u8)) Unit = {
+    self.llvm_type().display(out);
 }
 
 // TODO: these are super clunky, you want to have 'or' in switch cases. 

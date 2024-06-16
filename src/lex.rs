@@ -145,7 +145,8 @@ impl<'a, 'p> Lexer<'a, 'p> {
             return prev;
         }
 
-        todo!("untested"); // i guess i always happen to peek first in the parser.
+        // todo!("untested"); // i guess i always happen to peek first in the parser.
+        self.do_next()
     }
 
     fn do_next(&mut self) -> Token<'p> {

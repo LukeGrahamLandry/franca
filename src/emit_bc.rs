@@ -241,7 +241,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             _pushed += 1;
                             result.push(Bc::PushConstant {
                                 value: value.bytes().as_ptr() as i64,
-                                ty: Prim::I64,
+                                ty: Prim::P64,
                             });
                             continue;
                         }
@@ -375,8 +375,17 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
         if !ret.is_never() {
             let slots = self.program.slot_count(ret);
             let op = match slots {
-                1 => Bc::Ret1(self.program.prim(ret).unwrap()),
-                2 => Bc::Ret2(self.program.prim_pair(ret)?),
+                1 => {
+                    let a = self.program.prim(ret).unwrap();
+                    debug_assert_eq!(BigOption::Some(a), result.signeture.ret1);
+                    Bc::Ret1(a)
+                }
+                2 => {
+                    let (a, b) = self.program.prim_pair(ret)?;
+                    debug_assert_eq!(BigOption::Some(a), result.signeture.ret1);
+                    debug_assert_eq!(BigOption::Some(b), result.signeture.ret2);
+                    Bc::Ret2((a, b))
+                }
                 _ => Bc::Ret0, // void or indirect return
             };
 
@@ -770,7 +779,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                             let ptr = value.bytes().as_ptr();
                             result.push(Bc::PushConstant {
                                 value: ptr as i64,
-                                ty: Prim::I64,
+                                ty: Prim::P64,
                             });
 
                             result.push(Bc::CopyBytesToFrom {
@@ -834,7 +843,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                                 result.inc_ptr_bytes(8); // Note: backwards!
                                 result.push(Bc::StorePost { ty: Prim::I64 });
                                 result.push(Bc::PeekDup(1));
-                                result.push(Bc::StorePost { ty: Prim::I64 });
+                                result.push(Bc::StorePost { ty: Prim::P64 });
                                 result.pop(1)
                             }
                             Discard => result.pop(2),
@@ -897,7 +906,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         result.push(Bc::GetNativeFnPtr(f));
                         match result_location {
                             PushStack => {}
-                            ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
+                            ResAddr => result.push(Bc::StorePre { ty: Prim::P64 }),
                             Discard => result.push(Bc::Snipe(0)),
                         };
                     }
@@ -912,6 +921,12 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         // Now I have to not mess up the stack, tell the backend somehow.
                         match result_location {
                             PushStack => {
+                                // for ty in self.program.flat_tuple_types(expr.ty) {
+                                //     result.push(Bc::PushConstant {
+                                //         value: 0,
+                                //         ty: self.program.prim(ty).unwrap(),
+                                //     });
+                                // }
                                 let slots = self.slot_count(expr.ty);
                                 for _ in 0..slots {
                                     result.push(Bc::PushConstant { value: 0, ty: Prim::I64 });
@@ -934,7 +949,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 result.inc_ptr_bytes(*bytes as u16);
                 match result_location {
                     PushStack => {}
-                    ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
+                    ResAddr => result.push(Bc::StorePre { ty: Prim::P64 }),
                     Discard => result.push(Bc::Snipe(0)),
                 }
             }
@@ -965,7 +980,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
         match result_location {
             PushStack => {}
-            ResAddr => result.push(Bc::StorePre { ty: Prim::I64 }),
+            ResAddr => result.push(Bc::StorePre { ty: Prim::P64 }),
             Discard => result.push(Bc::Snipe(0)),
         }
 
@@ -1351,9 +1366,9 @@ impl<'p> FnBody<'p> {
     }
 
     fn save_ssa_var(&mut self) -> u16 {
-        let id = self.add_var(TypeId::i64());
+        let id = self.add_var(TypeId::voidptr);
         self.is_ssa_var.set(id as usize);
-        self.push(Bc::SaveSsa { id, ty: Prim::I64 });
+        self.push(Bc::SaveSsa { id, ty: Prim::P64 });
         id
     }
 

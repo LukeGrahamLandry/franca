@@ -24,25 +24,34 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     };
     
     src := temp().read_to_string("main.fr");
-    comp := vtable.new_with_src(src.items(), .Aarch64);
+    comp := vtable.new_with_src(src.items(), .Cranelift);
     my_vtable: ExportVTable = (
         resolve_comptime_import = (Some = resolve_comptime_import!fn_ptr),
     );
     data: UserData = (vtable = vtable);
+
     {vtable.give_vtable}(comp, my_vtable&, UserData.raw_from_ptr(data&));
     
     sym_test := {vtable.intern_string}(comp, "test");
     tests := {vtable.get_fns_with_tag}(comp, sym_test);
+
     for(tests) {fid|
         res := {vtable.compile_func}(comp, fid, .Jit).unwrap();
         ptr := {vtable.get_jitted_ptr}(comp, fid).unwrap();
         {vtable.make_jitted_exec}(comp);
         f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
+        println("a");
         f();
+        println("b");
     };
     println(tests.len);
     
     ir_text := emit_llvm((data = comp, vtable = vtable), temp(), tests);
+    out := open_temp_file();
+    for(ir_text&){bucket|
+        out.fd&.write(bucket);
+    };
+    @println("Write llvm ir to %", out&.s_name());
     
     exit(0);
     

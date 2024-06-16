@@ -1,3 +1,8 @@
+- empty block. oh but also same label twice. switched to the block before checking if already did that one.
+- they have pair struct literals but only for constants so you have to painfully insertelement to return a pair.
+
+## distrust qbe
+
 I'm not sure i trust qbe, like ok i want to return two ints.
 
 ```
