@@ -155,8 +155,15 @@ impl Baked {
         BakedVarId(vals.len() as u32 - 1)
     }
 
-    pub(crate) fn set(&self, id: BakedVarId, val: BakedVar) {
+    pub(crate) fn set(&self, id: BakedVarId, mut val: BakedVar) {
         let mut vals = self.values.borrow_mut();
+        if let BakedVar::Bytes(b) = &val {
+            if b.len() == 8 {
+                // TODO: creepy endianness but its fine for now.
+                let v = i64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]); //fuck
+                val = BakedVar::Num(v);
+            }
+        }
         vals[id.0 as usize].0 = val;
     }
 

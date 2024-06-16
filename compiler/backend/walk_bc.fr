@@ -41,6 +41,8 @@ fn CodeGen(const B: Type) Type = {
         blocks_done: BitSet = empty(),
         funcs_done: BitSet = empty(),
         constants_needed: BitSet = empty(),
+        max_const_id: i64 = 0,
+        pending: List(FuncId),
     );
     
     fn emit_current_function(self: *Self) Unit = {
@@ -105,6 +107,7 @@ fn CodeGen(const B: Type) Type = {
                     self.stack&.push(v);
                 });
                 (fn PushGlobalAddr(id) => {
+                    self.add_constant(id);
                     v := self.backend&.inst_global(id);
                     self.stack&.push(v);
                 });
@@ -197,7 +200,36 @@ fn CodeGen(const B: Type) Type = {
             };
         };
     }
+    
+    // TODO: super dumb that i have to walk twice. 
+    fn add_constant(self: *Self, id: BakedVarId) Unit = {
+        return :: @return;
+        index: i64 = id.id.zext();
+        if(self.constants_needed&.get(index), => return());
+        
+        self.constants_needed&.set(index, temp());
+        self.max_const_id = self.max_const_id.max(index);
+        value := {self.comp.vtable.get_baked}(self.comp.data, id);
+        
+        @match(value&) {
+            (fn FnPtr(f) => self.pending&.push(f[]));
+            (fn AddrOf(v) => self.add_constant(v[]));
+            (fn VoidPtrArray(parts) => {
+                for(parts[].items()){id|
+                    inner := {self.comp.vtable.get_baked}(self.comp.data, id);
+                    inner_i: i64 = id.id.zext();
+                    @match(inner&) {
+                        (fn Bytes(bytes) => self.add_constant(id));
+                        (fn FnPtr(f) => self.pending&.push(f[]));
+                        (fn AddrOf(v) => self.add_constant(v[]));
+                        @default => ();
+                    };
+                };
+            });
+            @default => ();
+        }
+    }
+
 
     Self
 }
-    

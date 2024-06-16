@@ -803,7 +803,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.program[f].finished_ret = BigOption::Some(ret_ty);
             self.program[f].ret = LazyType::Finished(ret_ty);
         }
-
+        
         // UNSURE. It offended me to see recursing ptr::drop_in_place in the profiler if im leaking all the memory anyway.
         // the right answer is not clone in the first place but maybe you want to allow recovering from errors
         // im not really sure.  -- Jun 12
@@ -814,6 +814,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let func = &self.program[f];
         self.type_check_arg(ret_ty, func.finished_ret.unwrap(), "bad return value")?;
         self.pop_state(state);
+        
+        
 
         Ok(ret_ty)
     }
@@ -912,29 +914,43 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ret_label = LabelId::from_index(self.next_label);
         self.next_label += 1;
         let FuncImpl::Normal(body) = &func.body else { unreachable!() };
-        expr_out.expr = Expr::Block {
-            body: vec![FatStmt {
-                stmt: Stmt::DeclVarPattern {
-                    binding: pattern,
-                    value: mem::take(arg_expr),
-                },
-                annotations: vec![],
-                loc,
-            }],
-            result: Box::new(body.clone()),
-            ret_label: BigOption::Some(ret_label),
-            hoisted_constants: false, // TODO
-        };
-        let mut mapping = Map::<Var, Var>::default();
-        mapping.insert(old_ret_var, new_ret_var);
-        // println!("renumber ret: {} to {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
-        self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
-
+        let may_have_early_return = !matches!(body.expr, Expr::Value { .. });
+        // the second case would be sufficient for correctness but this is so common (if(_,!,!), loop(!), etc) that it makes me less sad. 
+        if arg_expr.is_raw_unit() {
+            // TODO: if !may_have_early_return, should be able to just inline the value but it doesnt work!
+            //       similarly i cant have ret_label:None so im clearly wrong. its `not callable` in overloading.rs. trying to call the cond of an if??
+            //       -- Jun 16
+            expr_out.expr = Expr::Block {
+                body: vec![],
+                result: Box::new(body.clone()),
+                ret_label: BigOption::Some(ret_label),
+                hoisted_constants: false, // TODO
+            };
+        } else {
+            expr_out.expr = Expr::Block {
+                body: vec![FatStmt {
+                    stmt: Stmt::DeclVarPattern {
+                        binding: pattern,
+                        value: mem::take(arg_expr),
+                    },
+                    annotations: vec![],
+                    loc,
+                }],
+                result: Box::new(body.clone()),
+                ret_label: BigOption::Some(ret_label),
+                hoisted_constants: false, // TODO
+            };
+        }
         self.currently_inlining.retain(|check| *check != f);
-
-        let value = to_values(self.program, ret_label)?;
-        self.save_const(new_ret_var, Expr::Value { value }, label_ty, loc)?;
-
+        if may_have_early_return {
+            let mut mapping = Map::<Var, Var>::default();
+            mapping.insert(old_ret_var, new_ret_var);
+            // println!("renumber ret: {} to {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
+            self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
+            let value = to_values(self.program, ret_label)?;
+            self.save_const(new_ret_var, Expr::Value { value }, label_ty, loc)?;
+        }
+        
         let res = self.compile_expr(expr_out, hint.into())?;
         if hint.is_none() {
             self.program[f].finished_ret = BigOption::Some(res);
@@ -1049,7 +1065,6 @@ impl<'a, 'p> Compile<'a, 'p> {
             Stmt::DeclVarPattern { binding, value } => {
                 if value.is_raw_unit() {
                     stmt.stmt = Stmt::Noop;
-
                     return Ok(());
                 }
                 let arguments = binding.flatten();
@@ -2513,6 +2528,8 @@ impl<'a, 'p> Compile<'a, 'p> {
         let cond = self.compile_expr(&mut parts[0], Some(TypeId::bool()))?;
         self.type_check_arg(cond, TypeId::bool(), "bool cond")?;
 
+        // TODO: this mostly can't happen anymore because you use the if function and params dont get forwarded like that. 
+        //       should allow promoting things to constants. 
         // If its constant, don't even bother emitting the other branch
         // TODO: option to toggle this off for testing.
         if let Some(val) = parts[0].as_const() {
@@ -2949,6 +2966,14 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ty = self.program.func_type(fid);
             f_expr.set((fid.as_raw()).into(), ty);
             arg_expr.done = true; // this saves a lot of the recursing.
+            // TODO: this should work but breaks a size check in from_values -- Jun 16 :FUCKED 
+            // if !deny_inline && arg_expr.is_raw_unit() {
+            //     if let FuncImpl::Normal(FatExpr {
+            //         expr: Expr::Value { value }, ..
+            //     }) = &self.program[fid].body {
+            //         expr.expr = Expr::Value { value: value.clone() }
+            //     }
+            // }
             Ok(res)
         }
     }

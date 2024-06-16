@@ -37,7 +37,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.adjust_call(arg, id)?;
                     Some(id)
                 } else {
-                    err!("not callable",)
+                    err!("not callable {:?} {}", value, self.program.log_type(f_ty))
                 }
             }
             &mut Expr::WipFunc(id) => {

@@ -1,7 +1,8 @@
 // TODO: have a way of marking ones that should be imported instead of emitted so the driver program could do incremental compilation stuff. 
 // TODO: move the top level loop to walk_bc because its probably the same on all backends. 
+// note: marking the mangled constants/functions as 'private' gives it permisson to remove them if all uses are inlined
 
-fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = {
+fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: bool) BucketArray(u8) = {
     s: EmitLlvm = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
     gen: CodeGen(EmitLlvm) = (
         comp = comp,
@@ -9,39 +10,43 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = 
         body = zeroed(*FnBody), // EVIL
         vars = list(20, temp()),
         stack = list(20, temp()),
+        pending = fns.clone(temp()),
     );
     
-    pending: List(FuncId) = fns.clone(temp());
+    gen.backend.out&.push_all("""
+    target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+    target triple = "arm64-apple-macosx13.0.0"
+    """);
     
-    while(=> pending.len.ne(0)){|
+    while(=> gen.pending.len.ne(0)){|
         continue :: @return;
-        fid := pending&.pop().unwrap();
+        fid := gen.pending&.pop().unwrap();
         if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
         gen.funcs_done&.set(fid.to_index().zext(), temp());
         
         func := {comp.vtable.get_function}(comp.data, fid);
         for(func.callees.items()){c|
             if(not(gen.funcs_done&.get(c.to_index().zext()))){|
-                pending&.push(c);
+                gen.pending&.push(c);
             };
         };
         for(func.mutual_callees.items()){c|
             if(not(gen.funcs_done&.get(c.to_index().zext()))){|
-                pending&.push(c);
+                gen.pending&.push(c);
             };
         };
         
         body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(comp, func.body&, func, body&); 
-            {comp.vtable.debug_log_bc}(comp.data, body&);
+            //{comp.vtable.debug_log_bc}(comp.data, body&);
             //assert(success, "failed to emit speciai function"); // TODO
             // TODO: handle import
             continue();
         };
-        {comp.vtable.debug_log_bc}(comp.data, body&);
+        //{comp.vtable.debug_log_bc}(comp.data, body&);
         gen.body = body&;
-        gen.backend.out&.push_all("define ");
+        gen.backend.out&.push_all("define private ");
         name := @format("F%", body.func.to_index()) temp();
         gen.backend&.write_header(body&, name.items()) {arg_index|
             s := @format("%arg%", "%", arg_index) temp();
@@ -52,9 +57,85 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId)) BucketArray(u8) = 
         gen.backend.out&.current().push_all("}\n");
     };
     
-    // TODO: if alloc != temp { temp.reset(mark ?
+    range(0, gen.max_const_id.add(1)) {i|
+        if(gen.constants_needed&.get(i)){|
+            gen.backend&.emit_constant(comp, (id = i.trunc()));
+        };
+    };    
+    
+    if (test_runner_main) {|
+        gen.backend.out&.push_all("define i64 @main(){\n");
+        i := 1;
+        for (fns) {f|
+            func := {comp.vtable.get_function}(comp.data, f);
+            // note: this only works because Unit has a fixed typeid value
+            if (func.finished_arg.unwrap().eq(Unit)) {|
+                @fmt(gen.backend.out&.current(), "   call void @F%()\n", f.to_index());
+            } {| // else
+                @fmt(gen.backend.out&.current(), "   %% = call i64 @F%(i64 0)\n", "%", i, f.to_index());
+                i += 1;
+            };
+        };
+        gen.backend.out&.push_all("ret i64 0\n}\n");
+    };
+
+    // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
     
     gen.backend.out
+}
+
+fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) Unit = {
+    value := {comp.vtable.get_baked}(comp.data, id);
+    index: i64 = id.id.zext();
+    
+    @match(value&) {
+        (fn Zeros(_) => { panic("TODO: zeroed constant"); });
+        (fn Bytes(bytes) => {
+            // TODO: emit string as characters if they're in a sane range. 
+            @fmt(self.out&.current(), "@g% = private global [% x i8] [", index, bytes.len);
+            for(bytes[].items()) {b|
+                @fmt(self.out&.current(), " i8 %,", @as(i64) b.zext());
+            };
+            self.pop_trailing_comma();
+            self.out&.push_all("]\n");
+        });
+        (fn FnPtr(f) => {
+            @fmt(self.out&.current(), "@g% = private global ptr @F%\n", index, f[].to_index());
+            // TODO: make sure we emitted the function. 
+        });
+        (fn AddrOf(id) => {
+            i: i64 = id.id.zext();
+            @fmt(self.out&.current(), "@g% = private global ptr @g%\n", index, i);
+        });
+        (fn VoidPtrArray(parts) => {
+            @fmt(self.out&.current(), "@g% = private global [% x ptr] [", index, parts.len);
+            for(parts[].items()){id|
+                inner := {comp.vtable.get_baked}(comp.data, id);
+                @match(inner&) {
+                    (fn Zeros(_) => { panic("TODO: zeroed constant"); });
+                    (fn Bytes(bytes) => {
+                        panic("TODO: bytes in VoidPtrArray");
+                    });
+                    (fn FnPtr(f) => {
+                        @fmt(self.out&.current(), "ptr @F%,", f[].to_index());
+                        // TODO: make sure we emitted the function. 
+                    });
+                    (fn AddrOf(id) => {
+                        @fmt(self.out&.current(), "ptr @g%,", @as(i64) id.id.zext());
+                    });
+                    (fn VoidPtrArray(parts) => { panic("frontend should flatten constant VoidPtrArray"); });
+                    (fn Num(v) => {
+                        @fmt(self.out&.current(), "ptr inttoptr (i64 % to ptr),", v[]);
+                    });
+                };
+            };
+            self.pop_trailing_comma();
+            self.out&.push_all("]\n");
+        });
+        (fn Num(v) => {
+            @fmt(self.out&.current(), "@g% = private global i64 %\n", index, v[]);
+        });
+    }
 }
 
 fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc: *FnBody) bool = {
@@ -79,7 +160,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             };
             self.out&.push_all(";\n");
             
-            self.out&.push_all("define ");
+            self.out&.push_all("define private ");
             name := @format("F%", bc.func.to_index()) temp();
             values: List(LlvmVal) = list(temp());
             self.write_header(bc, name.items()) {arg_index|
@@ -100,7 +181,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
         });
         (fn LlvmIr(code) => { 
             ir := {comp.vtable.get_string}(comp.data, code[]);
-            self.out&.push_all("define ");
+            self.out&.push_all("define private ");
             name := @format("F%", bc.func.to_index()) temp();
             self.write_header(bc, name.items()) {arg_index|
                 args := func.arg.bindings.items();
@@ -168,7 +249,6 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
     self.next_var = 0;
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
     vars := body.vars.items();
-    @println("There are % vars", vars.len);
     enumerate(vars) {i, ty|
         meta := {self.comp.vtable.get_type_meta}(self.comp.data, ty[]); // TODO: im not getting the right values. unless i add extra padding to the struct. so its using registers? 
         v := self.get_var(.P64);
@@ -177,9 +257,12 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
         @fmt(self.out&.current(), "   % = alloca i8, i32 %, align %\n", v, @as(i64) meta.stride_bytes.zext(), @as(i64) meta.align_bytes.zext()); // uhg % was a bad choice. 
     };
     // TODO: use phi nodes cause this is stupid but that's such a pain in the ass. 
-    // I use these for block arguments
-    // TODO: max(blocks[..].args, sig.arg_slots) so don't bother emitting text for functions that don't need that many. 
-    range(0, 10) {i|
+    // I use these for block arguments. 
+    max_args := 0;
+    each(body.blocks.items()){b|
+        max_args = max_args.max(b.arg_prims.len);
+    };
+    range(0, max_args) {i|
         self.out&.reserve(30); 
         @fmt(self.out&.current(), "   %a% = alloca i64\n", "%", i); // uhg % was a bad choice. 
     };
@@ -315,20 +398,24 @@ fn inst_store(self: *EmitLlvm, addr: EmitLlvm.Val, value: EmitLlvm.Val, ty: Prim
 
 fn inst_copy(self: *EmitLlvm, from: EmitLlvm.Val, to: EmitLlvm.Val, bytes: u16) Unit = {
     self.out&.reserve(30);
-    @fmt(self.out&.current(), "   call void @llvm.memcpy.p0.p0.i32(ptr %, ptr %, i32 %)\n", to, from, @as(i64) bytes.zext()); 
+    @fmt(self.out&.current(), "   call void @llvm.memcpy.p0.p0.i32(ptr %, ptr %, i32 %, i1 false)\n", to, from, @as(i64) bytes.zext()); 
 }
 
 fn inst_func_ref(self: *EmitLlvm, fid: FuncId) EmitLlvm.Val = {
-    println("f");
-    todo()
+    v := self.get_var(.P64);
+    self.out&.reserve(30);
+    temp := self.get_var(.P64);
+    @fmt(self.out&.current(), "   % = ptrtoint ptr @F% to i64\n", temp, fid.to_index()); 
+    @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, temp); 
+    v
 }
 
 fn inst_global(self: *EmitLlvm, id: BakedVarId) EmitLlvm.Val = {
-    //{self.comp.vtable.debug_log_baked_constant}(self.comp.data, id);
     v := self.get_var(.P64);
     self.out&.reserve(30);
-    // TODO: LlvmVal should be a @tagged(Local, Global) so we dont give it extra work to do
-    @fmt(self.out&.current(), "   % = call ptr @llvm.ssa.copy(ptr @g%)\n", v, @as(i64) id.id.zext()); 
+    temp := self.get_var(.P64);
+    @fmt(self.out&.current(), "   % = ptrtoint ptr @g% to i64\n", temp, @as(i64) id.id.zext()); 
+    @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, temp); 
     v
 }
 
