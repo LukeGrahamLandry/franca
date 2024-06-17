@@ -105,10 +105,12 @@ pub struct FnBody<'p> {
     pub when: ExecStyle,
     pub func: FuncId,
     pub current_block: BbId,
+    // TODO: this should be moved to EmitBc
     pub inlined_return_addr: Map<LabelId, ReturnAddr>, // only used during emit_bc.
     pub clock: u16,
     pub name: Ident<'p>,
     pub want_log: bool,
+    // TODO: this should be moved to EmitBc
     pub is_ssa_var: BitSet, // only used for debugging. bc has enough info for this.
     pub signeture: PrimSig<'p>,
 }

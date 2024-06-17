@@ -4,7 +4,10 @@ TARGET: Backend : .Aarch64;
 #include_std("compiler/backend/walk_bc.fr");
 
 fn driver(vtable: *ImportVTable) Unit #export = {
-    _comp := run_sequential(vtable);
+    println("=== Aarch64 Jit ===");
+    run_jit(vtable, .Aarch64);
+    println("=== Cranelift Jit ===");
+    run_jit(vtable, .Cranelift);
     __temp_alloc.reset_retaining_capacity();
     // TODO: see if it breaks if you run new ones in thier own namespaces in the same compiler instance as ^ 
     
@@ -41,11 +44,112 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     set_colour(250, 150, 200);
     println("ALL EXAMPLES PASSED!");
     unset_colour();
+    
+    run_llvm(vtable);
 }
 
-fn run_sequential(vtable: *ImportVTable) Compiler = {
-    mem_start := {vtable.get_mem_mark}();
+fn run_jit(vtable: *ImportVTable, kind: Backend) Unit = {
+    comp := {vtable.init_compiler}(kind);
+    c: CompCtx = (data = comp, vtable = vtable);  // TODO: can't inline the arg without an extra @as, because it thinks you're passing named args. 
+    load_lang_tests(c);
+    run_sequential(c) {c, tests|
+        for(tests) {fid|
+            {c.vtable.compile_func}(c.data, fid, .Jit).unwrap();
+            ptr := {c.vtable.get_jitted_ptr}(c.data, fid).unwrap();
+            {c.vtable.make_jitted_exec}(c.data);
+            f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
+            f();
+        };
+    };
+}
+
+// TODO: this is a dumb way to do this, when they're failing, ReportCrash pegs a core. 
+fn run_llvm(vtable: *ImportVTable) Unit = {
+    println("=== Llvm Aot ===");
+    comp := {vtable.init_compiler}(.Aarch64);
+    c: CompCtx = (data = comp, vtable = vtable);
+    load_lang_tests(c);
+    run_sequential(c) {c, tests|
+        ir_text := emit_llvm(c, temp(), tests, true);
+        out := open_temp_file();
+        for(ir_text&){bucket|
+            out.fd&.write(bucket);
+        };
+        @println("Write llvm ir to %", out&.s_name());
+        
+        args: List(Str) = list(temp());
+        args&.push("-x");
+        args&.push("ir");
+        //args&.push("-O2");
+        args&.push(out&.s_name());
+        success := run_cmd_blocking(CLANG_PATH, args.items()); 
+        assert(success, "opt failed");
+        
+        args: List(Str) = list(temp());
+        success := run_cmd_blocking("a.out", args.items()); 
+        assert(success, "test failed");
+        
+        out.remove();
+    };
+}
+
+fn run_sequential(c: CompCtx, const inner_run: @Fn(c: CompCtx, fns: Slice(FuncId)) Unit) Unit = {
+    run :: fn(ff: Slice(FuncId)) bool => {
+        s__ := fork_and_catch(temp(), => inner_run(c, ff));
+        //if (not(s__._0)) {|
+        //    println(s__._1.items());
+        //    println(s__._2.items());
+        //};
+        s__._0
+    };
     start := timestamp();
+    
+    sym_test := {c.vtable.intern_string}(c.data, "test");
+    tests := {c.vtable.get_fns_with_tag}(c.data, sym_test);
+    
+    chunk_size :: 10;
+    failing: List(FuncId) = list(temp());
+    i := 0;
+    while(=> i.lt(tests.len)) {|
+        end := i.add(chunk_size).min(tests.len);
+        fns := tests.slice(i, end);
+        i += chunk_size;
+        if(run(fns)) {|
+            set_colour(0, 200, 0);  
+            for(fns){fid|
+                name := {c.vtable.get_string}(c.data, {c.vtable.get_function_name}(c.data, fid));
+                @print("%, ", name);
+            };
+            unset_colour();
+        }{|
+            failing&.push_all(fns);
+        };
+    };
+    
+    fails := 0;
+    for(failing.items()) {fid|
+        s: Slice(FuncId) = (ptr = fid&, len = 1);
+        if(run(s), => set_colour(0, 200, 0)){|
+            fails += 1;
+            set_colour(250, 0, 0);
+        };
+        name := {c.vtable.get_string}(c.data, {c.vtable.get_function_name}(c.data, fid));
+        @print("%, ", name);
+        unset_colour();
+    };
+    
+    end := timestamp();
+    
+    set_colour(250, 150, 200);
+    if(fails.eq(0)) {|
+        @println( "\nPASSED ALL % tests. % ms.", tests.len, end.sub(start));
+    } {|
+        @println("\nFailed %/% tests.", fails, tests.len);
+    };
+    unset_colour();
+}
+
+fn load_lang_tests(comp: CompCtx) Unit = {
     path := "tests".maybe_borrow_cstr(temp());
     found: List(List(u8)) = list(20, temp()); // LEAK
     walk_directory(path) {entry|
@@ -56,9 +160,8 @@ fn run_sequential(vtable: *ImportVTable) Compiler = {
         };
     };
     
-    comp := {vtable.init_compiler}(.Aarch64);
-    file := {vtable.add_file}(comp, "lib", "#include_std(\"core.fr\");");
-    all_stmts := {vtable.parse_stmts}(comp, file).unwrap();
+    file := {comp.vtable.add_file}(comp.data, "lib", "#include_std(\"core.fr\");");
+    all_stmts := {comp.vtable.parse_stmts}(comp.data, file).unwrap();
     ::List(FatStmtHack);
     all_stmts := all_stmts.clone(temp());
     
@@ -67,53 +170,11 @@ fn run_sequential(vtable: *ImportVTable) Compiler = {
         if(not(name.items().ends_with(".fr")), => continue());
         
         src := temp().read_to_string(name.items());
-        file := {vtable.add_file}(comp, name.items(), src.items());
-        stmts := {vtable.parse_stmts}(comp, file).unwrap();
+        file := {comp.vtable.add_file}(comp.data, name.items(), src.items());
+        stmts := {comp.vtable.parse_stmts}(comp.data, file).unwrap();
         all_stmts&.push_all(stmts);
     };
-    {vtable.make_and_resolve_and_compile_top_level}(comp, all_stmts.items()).unwrap();
-    
-    
-    len := run_tests(vtable, comp);
-    end := timestamp();
-    mem_end := {vtable.get_mem_mark}();
-    
-    set_colour(250, 150, 200);
-    @println(
-        "ALL TESTS PASSED! % files. % tests. % ms. % KB.",
-        found.len,
-        len,
-        end.sub(start),
-        mem_end.sub(mem_start).div(1024)
-    );
-    unset_colour();
-    
-    sym_test := {vtable.intern_string}(comp, "test_llvm");
-    tests := {vtable.get_fns_with_tag}(comp, sym_test);
-    ir_text := emit_llvm((data = comp, vtable = vtable), temp(), tests, true);
-    out := open_temp_file();
-    for(ir_text&){bucket|
-        out.fd&.write(bucket);
-    };
-    @println("Write llvm ir to %", out&.s_name());
-    @println("first test is F%", tests[0].to_index());
-    
-    args: List(Str) = list(temp());
-    args&.push("-x");
-    args&.push("ir");
-    args&.push("-O2");
-    args&.push(out&.s_name());
-    success := run_cmd_blocking(CLANG_PATH, args.items()); 
-    assert(success, "opt failed");
-    
-    args: List(Str) = list(temp());
-    success := run_cmd_blocking("a.out", args.items()); 
-    assert(success, "test failed");
-    
-    out.remove();
-    
-    
-    comp
+    {comp.vtable.make_and_resolve_and_compile_top_level}(comp.data, all_stmts.items()).unwrap();
 }
 
 fn run_tests(vtable: *ImportVTable, comp: Compiler) i64 = {

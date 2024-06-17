@@ -60,7 +60,7 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
         inlined_return_addr: Default::default(),
         want_log: f.has_tag(Flag::Log_Bc),
         clock: 0,
-        signeture: prim_sig(program, f.finished_ty().unwrap(), f.cc.unwrap())?,
+        signeture: prim_sig(program, unwrap!(f.finished_ty(), "ICE: fn type not ready"), f.cc.unwrap())?,
     })
 }
 

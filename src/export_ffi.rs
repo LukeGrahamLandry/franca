@@ -298,6 +298,9 @@ unsafe extern "C" fn franca_init_compiler(comptime_arch: TargetArch) -> *const C
     if cfg!(not(target_arch = "aarch64")) && comptime_arch == TargetArch::Aarch64 {
         panic!("aarch64 jit is not supported on this architecture"); // TODO: return error instead.
     }
+    if cfg!(not(feature = "cranelift")) && comptime_arch == TargetArch::Cranelift {
+        panic!("cranelift is not supported by this build of the compiler"); // TODO: return error instead.
+    }
 
     let pool = Box::leak(Box::new(StringPool::default()));
     let program = Box::leak(Box::new(Program::new(pool, comptime_arch)));

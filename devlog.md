@@ -1,5 +1,6 @@
 - empty block. oh but also same label twice. switched to the block before checking if already did that one.
 - they have pair struct literals but only for constants so you have to painfully insertelement to return a pair.
+- all the ones where it was just silently crashing was because i forgot to do tailcalls and was just trapping because emitter was supposed to have returned
 
 ## distrust qbe
 

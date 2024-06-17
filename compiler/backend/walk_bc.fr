@@ -82,15 +82,22 @@ fn CodeGen(const B: Type) Type = {
                     panic("AOT bytecode should not use GetCompCtx");
                 });
                 (fn CallDirect(call) => { //  f, tail, sig
+                    self.pending&.push(call.f); // TODO: callees list from compiler should make this redundant but im afraid.
+                    
                     arg_count: i64 = call.sig.arg_slots.zext();
                     args := self.stack.items().slice_last(arg_count).unwrap();
                     ret := self.backend&.inst_call(args, call.sig, call.f, call.tail);
                     self.stack.len -= arg_count;
-                    self.stack&.push_all(ret);
-                    if(call.tail.or(call.sig.no_return)){|
+                    if(call.sig.no_return){|
                         self.backend&.inst_trap();
                         break();
                     };
+                    if(call.tail){|
+                        // TODO: do this properly
+                        self.backend&.inst_return(ret);
+                        break();
+                    };
+                    self.stack&.push_all(ret);
                 });
                 (fn CallFnPtr(call) => {
                     // TODO: better error message if you don't put the type annotation here. 
@@ -146,6 +153,7 @@ fn CodeGen(const B: Type) Type = {
                     break();
                 });
                 (fn GetNativeFnPtr(f) => {
+                    self.pending&.push(f); // TODO: callees list from compiler should make this redundant but im afraid
                     v := self.backend&.inst_func_ref(f);
                     self.stack&.push(v);
                 });

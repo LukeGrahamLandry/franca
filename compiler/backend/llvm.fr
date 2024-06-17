@@ -1,5 +1,9 @@
 // TODO: have a way of marking ones that should be imported instead of emitted so the driver program could do incremental compilation stuff. 
 // TODO: move the top level loop to walk_bc because its probably the same on all backends. 
+// TODO: not reserving enough
+// TODO: implement !asm with Module-Level Inline Assembly
+// TODO: int_from_rawptr, etc isn't a noop on this backend which is a massive pain
+
 // note: marking the mangled constants/functions as 'private' gives it permisson to remove them if all uses are inlined
 
 fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: bool) BucketArray(u8) = {
@@ -13,6 +17,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: 
         pending = fns.clone(temp()),
     );
     
+    // TODO: how the hell am i supposed to know these numbers without just compiling a c program with clang. 
     gen.backend.out&.push_all("""
     target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
     target triple = "arm64-apple-macosx13.0.0"
@@ -23,6 +28,9 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: 
         fid := gen.pending&.pop().unwrap();
         if(gen.funcs_done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
         gen.funcs_done&.set(fid.to_index().zext(), temp());
+        
+        // Note: compile before checking callees!
+        {comp.vtable.compile_func}(comp.data, fid, .Aot).unwrap(); 
         
         func := {comp.vtable.get_function}(comp.data, fid);
         for(func.callees.items()){c|
@@ -39,7 +47,9 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: 
         body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(comp, func.body&, func, body&); 
-            //{comp.vtable.debug_log_bc}(comp.data, body&);
+            if (not(success)){|
+                {comp.vtable.debug_log_bc}(comp.data, body&);
+            };
             //assert(success, "failed to emit speciai function"); // TODO
             // TODO: handle import
             continue();
@@ -324,6 +334,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call:
         @fmt(self.out&.current(), " % %,", ty.llvm_type(), v);
     };
     self.pop_trailing_comma();
+    
     self.out&.current().push_all(")\n");
     
     if(sig.ret2) {_| // two
@@ -369,16 +380,36 @@ fn inst_offset(self: *EmitLlvm, ptr: EmitLlvm.Val, bytes: u16) EmitLlvm.Val = {
     done
 }
 
+fn fmt_hex(value: i64) Str = {
+    out := "0x".clone(temp());
+    mask: i64 : 0x000000000000000F.bitcast();
+    range(0, 16) {i|
+        c := 2.shift_left(15.sub(i));
+        digit := value.div(c).bit_and(mask);
+        ::if(u8);
+        d := if(digit.lt(10), => "0".ascii().add(digit.trunc()), => "A".ascii().add(digit.sub(10).trunc())); 
+        out&.push(d);
+    };
+    
+    out.items()
+}
+
 fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
     v := self.get_var(ty);
     self.out&.current().reserve(20);
     float := ty.eq(.F64).or(ty.eq(.F32));
-    if(float){|
-        @fmt(self.out&.current(), "   % = todo float\n", v); 
+    if(ty.eq(.F64)){|
+        h := fmt_hex(value);
+        @fmt(self.out&.current(), "   % = fadd double %, 0.0\n", v, h); 
     } {|
-        // TODO: better error message if you forget an argument
-        // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
-        @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
+        if(ty.eq(.F32)){|
+            h := fmt_hex(value);
+            @fmt(self.out&.current(), "   % = fadd float %, 0.0\n", v, h); 
+        } {|
+            // TODO: better error message if you forget an argument
+            // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
+            @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
+        };
     };
     v
 }
@@ -493,8 +524,8 @@ fn llvm_type(ty: Prim) Str = @switch(ty) {
     @case(.I16) => "i16";
     @case(.I32) => "i32";
     @case(.I64) => "i64";
-    @case(.F64) => "f64";
-    @case(.F32) => "f32";
+    @case(.F64) => "double";
+    @case(.F32) => "float";
     @case(.P64) => "ptr";
 };
 
