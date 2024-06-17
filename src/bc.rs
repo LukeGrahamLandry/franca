@@ -7,7 +7,7 @@ use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use crate::ast::{LabelId, Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
-use crate::BitSet;
+use crate::{assert_eq, BitSet};
 use crate::{
     ast::{FuncId, TypeId},
     compiler::{ExecStyle, Res},
@@ -105,8 +105,6 @@ pub struct FnBody<'p> {
     pub when: ExecStyle,
     pub func: FuncId,
     pub current_block: BbId,
-    // TODO: this should be moved to EmitBc
-    pub inlined_return_addr: Map<LabelId, ReturnAddr>, // only used during emit_bc.
     pub clock: u16,
     pub name: Ident<'p>,
     pub want_log: bool,
@@ -279,7 +277,7 @@ pub fn to_values<'p, T: InterpSend<'p>>(program: &mut Program<'p>, mut t: T) -> 
 }
 
 pub fn from_values<'p, T: InterpSend<'p>>(program: &Program<'p>, mut t: Values) -> Res<'p, T> {
-    debug_assert_eq!(t.bytes().len(), mem::size_of::<T>());
+    assert_eq!(t.bytes().len(), mem::size_of::<T>(), "from_values {t:?}");
     let mut i = 0;
     let ty = T::get_type(program);
     zero_padding(program, ty, t.bytes_mut(), &mut i)?;
@@ -363,20 +361,22 @@ pub fn deconstruct_values(
         &TypeInfo::Array { inner, len } => {
             let inner_align = program.get_info(inner).align_bytes;
             for _ in 0..len {
-                bytes.align_to(inner_align as usize);
+                debug_assert_eq!(bytes.i % inner_align as usize, 0);
                 deconstruct_values(program, inner, bytes, out, offsets)?;
             }
         }
         TypeInfo::Struct { fields, layout_done, .. } => {
             assert!(*layout_done);
             let mut prev = 0;
+            let size = program.get_info(ty).stride_bytes;
+            let start = bytes.i;
             for t in fields {
                 assert!(prev <= t.byte_offset);
                 bytes.i = t.byte_offset;
                 deconstruct_values(program, t.ty, bytes, out, offsets)?;
                 prev = t.byte_offset;
             }
-            bytes.align_to(program.get_info(ty).align_bytes as usize); // eat trailing stride padding
+            bytes.i = start + size as usize; // eat trailing stride padding
         }
         TypeInfo::Tagged { .. } => todo!("tagged {}", program.log_type(ty)),
         &TypeInfo::Enum { raw, .. } => deconstruct_values(program, raw, bytes, out, offsets)?,
@@ -568,12 +568,6 @@ impl WriteBytes {
         debug_assert_eq!(self.0.len() % 8, 0);
         for v in v.to_le_bytes() {
             self.0.push(v)
-        }
-    }
-
-    pub fn align_to(&mut self, v: usize) {
-        while self.0.len() % v != 0 {
-            self.push_u8(0);
         }
     }
 }

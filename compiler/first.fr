@@ -24,7 +24,7 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     };
     
     src := temp().read_to_string("main.fr");
-    comp := vtable.new_with_src(src.items(), .Cranelift);
+    comp := vtable.new_with_src(src.items(), .Aarch64);
     my_vtable: ExportVTable = (
         resolve_comptime_import = (Some = resolve_comptime_import!fn_ptr),
     );
@@ -46,43 +46,44 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     };
     println(tests.len);
     
-    ir_text := emit_llvm((data = comp, vtable = vtable), temp(), tests, true);
-    out := open_temp_file();
-    for(ir_text&){bucket|
-        out.fd&.write(bucket);
-    };
-    @println("Write llvm ir to %", out&.s_name());
+    // TODO: this needs to work!
+    //ir_text := emit_llvm((data = comp, vtable = vtable), temp(), tests, .TestRunnerMain);
+    //out := open_temp_file();
+    //for(ir_text&){bucket|
+    //    out.fd&.write(bucket);
+    //};
+    //@println("Write llvm ir to %", out&.s_name());
+    //exit(0);
     
-    exit(0);
-    
-    rust_bindings := render_functions(vtable, comp, tests, temp());
-    
-    
+    save_exports_as_dylib(vtable);
+}
+
+fn save_exports_as_dylib(vtable: *ImportVTable) Unit = {
     driver_src := temp().read_to_string("first.fr");
     comp := vtable.new_with_src(driver_src.items(), .Aarch64);
-    driver_sym := {vtable.intern_string}(comp, "driver");
-    f := {vtable.find_unique_func}(comp, driver_sym).unwrap();
-    c_src := {vtable.emit_c}(comp, (f)!slice, false).unwrap();
+    export_sym := {vtable.intern_string}(comp, "export");
+    exports := {vtable.get_fns_with_tag}(comp, export_sym);
+    
+    ir := emit_llvm((data = comp, vtable = vtable), temp(), exports, .ExportWithNames);
     
     // Note: remember to truncate if you stop using a temp file!
-    c_file := open_temp_file();
-    c_file.fd&.write(c_src);
+    file := open_temp_file();
+    for (ir&) { bucket |
+        file.fd&.write(bucket);
+    };
     
     args: List(Str) = list(temp());
-    // TODO: this can't be a real constant because then you can't take its address. should be able to do `some_constant&`. 
-    hack_ignore_warning_args := clang_hack_ignore_warning_args;
-    args&.push_all(hack_ignore_warning_args&.slice());
     args&.push("-dynamiclib");
     args&.push("-o");
-    args&.push("target/a.o");
+    args&.push("target/libfranca.dylib");
     
     // don't check the file extension of source files that follow. 
     args&.push("-x"); 
-    args&.push("c"); 
-    args&.push(c_file&.s_name());
-    ::display_slice(Str);
+    args&.push("ir"); 
+    args&.push(file&.s_name());
     @println("%", args.items());
     run_cmd_blocking(CLANG_PATH, args.items()); // TODO: wait for it to be dones
-    c_file.remove();
+    file.remove();
 }
 
+::display_slice(Str);

@@ -1,12 +1,29 @@
+//! https://llvm.org/docs/LangRef.html
+
 // TODO: have a way of marking ones that should be imported instead of emitted so the driver program could do incremental compilation stuff. 
 // TODO: move the top level loop to walk_bc because its probably the same on all backends. 
 // TODO: not reserving enough
 // TODO: implement !asm with Module-Level Inline Assembly
 // TODO: int_from_rawptr, etc isn't a noop on this backend which is a massive pain
 
-// note: marking the mangled constants/functions as 'private' gives it permisson to remove them if all uses are inlined
 
-fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: bool) BucketArray(u8) = {
+// All the functions we emit are name-mangled based on thier funcid, so you can't call them from the outside.
+// We also mark them as 'private' to give llvm permisson to remove them if all uses are inlined.
+// If you want to just pass the resultant ir to clang, tell us how entry points should be exposed. 
+ProgramEntry :: @enum(i64) (
+    // do nothing, let the caller deal with it
+    GiveMeTheCodeAndGiveItToMeRaw,  
+    // create a main function that calls all the <fns>
+    TestRunnerMain,  
+    // create named wrappers for all the <fns>. if one of them is called "main", that will be the program entry point.
+    // it is an error to have a name collission. 
+    ExportWithNames, 
+);
+
+// TODO: really need to fix this
+#redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
+
+fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8) = {
     s: EmitLlvm = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
     gen: CodeGen(EmitLlvm) = (
         comp = comp,
@@ -62,6 +79,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: 
             s := @format("%arg%", "%", arg_index) temp();
             s.items()
         };
+        // @println("emit %", {comp.vtable.get_string}(comp.data, func.name));
         gen.backend.out&.current().push_all("{\n");
         gen&.emit_current_function();
         gen.backend.out&.current().push_all("}\n");
@@ -73,22 +91,28 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), test_runner_main: 
         };
     };    
     
-    if (test_runner_main) {|
-        gen.backend.out&.push_all("define i64 @main(){\n");
-        i := 1;
-        for (fns) {f|
-            func := {comp.vtable.get_function}(comp.data, f);
-            // note: this only works because Unit has a fixed typeid value
-            if (func.finished_arg.unwrap().eq(Unit)) {|
-                @fmt(gen.backend.out&.current(), "   call void @F%()\n", f.to_index());
-            } {| // else
-                @fmt(gen.backend.out&.current(), "   %% = call i64 @F%(i64 0)\n", "%", i, f.to_index());
-                i += 1;
+    @switch(entry) {
+        @case(.TestRunnerMain) => {
+            gen.backend.out&.push_all("define i64 @main(){\n");
+            i := 1;
+            for (fns) {f|
+                func := {comp.vtable.get_function}(comp.data, f);
+                // note: this only works because Unit has a fixed typeid value
+                if (func.finished_arg.unwrap().eq(Unit)) {|
+                    @fmt(gen.backend.out&.current(), "   call void @F%()\n", f.to_index());
+                } {| // else
+                    @fmt(gen.backend.out&.current(), "   %% = call i64 @F%(i64 0)\n", "%", i, f.to_index());
+                    i += 1;
+                };
             };
+            gen.backend.out&.push_all("ret i64 0\n}\n");
         };
-        gen.backend.out&.push_all("ret i64 0\n}\n");
+        @case(.GiveMeTheCodeAndGiveItToMeRaw) => ();
+        @case(.ExportWithNames) => {
+            panic("not yet implemented: ProgramEntry.ExportWithNames");
+        };
     };
-
+    
     // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
     
     gen.backend.out
@@ -241,6 +265,9 @@ fn write_header(self: *EmitLlvm, body: *FnBody, name: Str, const get_arg_name: @
     
     // TODO: don't have two callsites for get_arg_name
     shift := if(sig.first_arg_is_indirect_return) {|
+        size: i64 = sig.return_value_bytes.zext();
+        // TODO: this breaks large_struct_ret_return (Expected (6097727888 == 1)) but i need to do it to be able to call c functions. 
+        // @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, get_arg_name(0));
         @fmt(self.out&.current(), " ptr %,", get_arg_name(0));
         1
     }{| 0 };
@@ -330,7 +357,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call:
         v := args[i.add(shift)];
         self.out&.reserve(30);
         ::assert_eq(Prim);
-        assert_eq(ty, v.ty);
+        //assert_eq(ty, v.ty); // TODO
         @fmt(self.out&.current(), " % %,", ty.llvm_type(), v);
     };
     self.pop_trailing_comma();
@@ -378,20 +405,6 @@ fn inst_offset(self: *EmitLlvm, ptr: EmitLlvm.Val, bytes: u16) EmitLlvm.Val = {
     @fmt(self.out&.current(), "   % = add i64 %, %\n", new, temp, @as(i64) bytes.zext()); 
     @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", done, new); 
     done
-}
-
-fn fmt_hex(value: i64) Str = {
-    out := "0x".clone(temp());
-    mask: i64 : 0x000000000000000F.bitcast();
-    range(0, 16) {i|
-        c := 2.shift_left(15.sub(i));
-        digit := value.div(c).bit_and(mask);
-        ::if(u8);
-        d := if(digit.lt(10), => "0".ascii().add(digit.trunc()), => "A".ascii().add(digit.sub(10).trunc())); 
-        out&.push(d);
-    };
-    
-    out.items()
 }
 
 fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {

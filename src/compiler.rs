@@ -77,7 +77,7 @@ pub struct Compile<'a, 'p> {
     pub scopes: Vec<Scope<'p>>,
     pub parsing: ParseTasks<'p>,
     pub next_label: usize,
-    pub wip_stack: Vec<(FuncId, ExecStyle)>,
+    pub wip_stack: Vec<(Option<FuncId>, ExecStyle)>,
     #[cfg(feature = "cranelift")]
     pub cranelift: crate::cranelift::JittedCl<cranelift_jit::JITModule>,
     pub make_slice_t: Option<FuncId>,
@@ -472,7 +472,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         // TODO: need to recurse on the mutual_callees somewhere. this is just a hack.
         //       need ensure_compiled, compile, and like really_super_compile.
         for c in self.program[f].mutual_callees.clone() {
-            let wip = (c, ExecStyle::Jit);
+            let wip = (Some(c), ExecStyle::Jit);
             self.wip_stack.push(wip);
             self.ensure_compiled_force(f, ExecStyle::Jit)?;
             self.compile_asm_no_rec(c, ExecStyle::Jit)?;
@@ -612,7 +612,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
         self.program[f].set_flag(EnsuredCompiled, true);
         let func = &self.program[f];
-        let wip = (f, when);
+        let wip = (Some(f), when);
         self.wip_stack.push(wip);
         debug_assert!(func.get_flag(NotEvilUninit));
         self.ensure_resolved_body(f)?;
@@ -851,12 +851,14 @@ impl<'a, 'p> Compile<'a, 'p> {
         //     self.pool.get(self.program[f].name)
         // )
         let wip = self.wip_stack.last().unwrap().0;
-        let callees = if !self.currently_compiling.contains(&f) {
-            &mut self.program[wip].callees
-        } else {
-            &mut self.program[wip].mutual_callees
-        };
-        add_unique(callees, f);
+        if let Some(wip) = wip {
+            let callees = if !self.currently_compiling.contains(&f) {
+                &mut self.program[wip].callees
+            } else {
+                &mut self.program[wip].mutual_callees
+            };
+            add_unique(callees, f);
+        }
         //else {
         //     add_unique(&mut self.aarch64.pending_indirect, f); // HACK
         //                                                        // println!("not adding callee currently_compiling {f:?} {}", self.pool.get(self.program[f].name));
@@ -1557,6 +1559,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         ty
                     }
                     Flag::Const_Eval => {
+                        self.wip_stack.push((None, ExecStyle::Jit));  // :PushConstFnCtx
                         let res = self.compile_expr(arg, requested)?;
                         let ty = res;
                         let arg = *mem::take(arg);
@@ -1567,6 +1570,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             self.immediate_eval_expr(arg, ty)?
                         };
                         expr.set(value.clone(), ty);
+                        assert!(self.wip_stack.pop().unwrap().0.is_none());
                         ty
                     }
                     Flag::Tag => {
@@ -1610,7 +1614,20 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::From_Bit_Literal => {
                         let int = unwrap!(self.bit_literal(expr), "not int");
                         let ty = self.program.intern_type(TypeInfo::Int(int.0));
-                        expr.set(int.1.into(), ty);
+                        let mut values = int.1.into();
+                        // this fixed a size check in from_values
+                        match &mut values {
+                            Values::Big(_) => todo!(),
+                            Values::Small(_, len) => {
+                                match int.0.bit_count {
+                                    8 => *len = 1,
+                                    16 =>* len = 2,
+                                    32 => *len = 4,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        expr.set(values, ty);
                         ty
                     }
                     Flag::Uninitialized => {
@@ -2397,11 +2414,18 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(func_id)
     }
 
-    // Here we're not in the context of a specific function so the caller has to pass in the constants in the environment.
+    // :PushConstFnCtx 
+    // make sure things that get called at compile time don't get added to the call-graph. 
+    // this allows aot backends to just blindly walk the call-graph and not emit loads of garbage empty functions,
+    // for things that returned types or added to overload sets. extra important because they might use Bc::GetCompCtx, which can't be compiled. 
+    // this is special because of check_quick_eval, so we're not always in the context of a new function that will be thrown away after the expression is finished. 
+    // -- Jun 17
     pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
+        self.wip_stack.push((None, ExecStyle::Jit)); // :PushConstFnCtx
         self.program.finish_layout(ret_ty)?;
         unsafe { STATS.const_eval_node += 1 };
         if let Some(values) = self.check_quick_eval(&mut e, ret_ty)? {
+            assert!(self.wip_stack.pop().unwrap().0.is_none());
             return Ok(values);
         }
         let func_id = self.make_lit_function(e, ret_ty)?;
@@ -2410,6 +2434,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             self.compile_expr(&mut stolen_body, Some(ret_ty)).unwrap();
             if let Some(values) = self.check_quick_eval(&mut stolen_body, ret_ty)? {
                 self.discard(func_id);
+                assert!(self.wip_stack.pop().unwrap().0.is_none());
                 return Ok(values);
             }
             self.program[func_id].body = FuncImpl::Normal(stolen_body);
@@ -2426,6 +2451,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let res = self.run(func_id, Values::unit());
         self.discard(func_id);
+        assert!(self.wip_stack.pop().unwrap().0.is_none());
         res
     }
 
@@ -2966,14 +2992,19 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ty = self.program.func_type(fid);
             f_expr.set((fid.as_raw()).into(), ty);
             arg_expr.done = true; // this saves a lot of the recursing.
-            // TODO: this should work but breaks a size check in from_values -- Jun 16 :FUCKED 
-            // if !deny_inline && arg_expr.is_raw_unit() {
-            //     if let FuncImpl::Normal(FatExpr {
-            //         expr: Expr::Value { value }, ..
-            //     }) = &self.program[fid].body {
-            //         expr.expr = Expr::Value { value: value.clone() }
-            //     }
-            // }
+            
+            // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
+            if !deny_inline && arg_expr.is_raw_unit() {
+                if let FuncImpl::Normal(FatExpr {
+                    expr: Expr::Value { value }, ty: prev_ty, ..
+                }) = &self.program[fid].body {
+                    // self.type_check_arg(*prev_ty, res, "inline const expr fn")?;
+                    expr.expr = Expr::Value { value: value.clone() };
+                    expr.ty = *prev_ty;
+                    return Ok(*prev_ty);
+                }
+            }
+            
             Ok(res)
         }
     }

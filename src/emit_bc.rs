@@ -28,6 +28,7 @@ struct EmitBc<'z, 'p: 'z> {
     last_loc: Option<Span>,
     locals: Vec<Vec<u16>>,
     var_lookup: Map<Var<'p>, u16>,
+    inlined_return_addr: Map<LabelId, ReturnAddr>,
 }
 
 pub extern "C" fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
@@ -57,7 +58,6 @@ pub fn empty_fn_body<'p>(program: &Program<'p>, func: FuncId, when: ExecStyle) -
         blocks: vec![],
         name: f.name,
         current_block: BbId(0),
-        inlined_return_addr: Default::default(),
         want_log: f.has_tag(Flag::Log_Bc),
         clock: 0,
         signeture: prim_sig(program, unwrap!(f.finished_ty(), "ICE: fn type not ready"), f.cc.unwrap())?,
@@ -72,6 +72,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             program,
             locals: vec![],
             var_lookup: Default::default(),
+            inlined_return_addr: Default::default(),
         }
     }
 
@@ -608,7 +609,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     let return_from: LabelId = from_values(self.program, unwrap!(f.as_const(), ""))?;
                     // result_location is the result of the ret() expression, which is Never and we don't care.
                     let ret = unwrap!(
-                        result.inlined_return_addr.get_mut(&return_from),
+                        self.inlined_return_addr.get_mut(&return_from),
                         "missing return label. forgot '=>' on function?"
                     );
                     ret.used = true;
@@ -664,7 +665,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         ret.store_res_ssa_inst = BigOption::Some((entry_block, index));
                     }
 
-                    let prev = result.inlined_return_addr.insert(*ret_var, ret);
+                    let prev = self.inlined_return_addr.insert(*ret_var, ret);
                     assert!(prev.is_none());
 
                     for stmt in body {
@@ -672,7 +673,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     }
                     self.compile_expr(result, value, result_location, can_tail)?;
 
-                    let ret = result.inlined_return_addr.remove(ret_var).unwrap();
+                    let ret = self.inlined_return_addr.remove(ret_var).unwrap();
                     if result.blocks[return_block.0 as usize].incoming_jumps > 0 {
                         debug_assert!(ret.used);
                         let slots = result.blocks[return_block.0 as usize].arg_slots;

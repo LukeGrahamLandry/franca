@@ -131,3 +131,34 @@ fn fork_and_catch(alloc: Alloc, const f: @Fn() Unit) Ty(bool, List(u8), List(u8)
 
     (status.eq(0.intcast()), outs, errs)
 }
+
+fn render_callgraph(comp: CompCtx, entry_points: Slice(FuncId), out_a: Alloc) List(u8) = {
+    out: List(u8) = list(out_a);
+    pending: List(FuncId) = entry_points.clone(temp());
+    done: BitSet = empty();
+    while(=> pending.len.ne(0)){|
+        continue :: @return;
+        fid := pending&.pop().unwrap();
+        if(done&.get(fid.to_index().zext()), => continue()); // might have been added multiple times
+        done&.set(fid.to_index().zext(), temp());
+        
+        // Note: compile before checking callees!
+        {comp.vtable.compile_func}(comp.data, fid, .Aot).unwrap();
+        func := {comp.vtable.get_function}(comp.data, fid);
+        @fmt(out&, "\n[%]\n   - ", {comp.vtable.get_string}(comp.data, func.name));
+        
+        callee :: fn(c: FuncId) Unit => {
+            func := {comp.vtable.get_function}(comp.data, c);
+            @fmt(out&, "%, ", {comp.vtable.get_string}(comp.data, func.name));
+            if(not(done&.get(c.to_index().zext()))){|
+                pending&.push(c);
+            };
+        
+        };
+        
+        for(func.callees.items(), callee);
+        out&.push_all("\n   - ");
+        for(func.mutual_callees.items(), callee);
+    };
+    out
+}
