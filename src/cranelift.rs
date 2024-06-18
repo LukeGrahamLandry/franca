@@ -727,6 +727,8 @@ pub const BUILTINS: &[(&str, CfEmit)] = &[
     ("fn sext(v: i32) i64;", S_EXT_64),
     ("fn sext(v: i16) i64;", S_EXT_64),
     ("fn sext(v: i8) i64;", S_EXT_64),
+    ("fn int_from_rawptr(ptr: rawptr) i64;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
+    ("fn rawptr_from_int(ptr: i64) rawptr;", |_: &mut FunctionBuilder, v: &[Value]| v[0]),
 ];
 
 const S_EXT_64: CfEmit = |builder: &mut FunctionBuilder, v: &[Value]| builder.ins().sextend(I64, v[0]);

@@ -4,8 +4,7 @@
 // TODO: move the top level loop to walk_bc because its probably the same on all backends. 
 // TODO: not reserving enough
 // TODO: implement !asm with Module-Level Inline Assembly
-// TODO: int_from_rawptr, etc isn't a noop on this backend which is a massive pain
-
+// TODO: only specfiy ccc if you take a pointer to the function? you want to use one that allows tail calls otherwise. 
 
 // All the functions we emit are name-mangled based on thier funcid, so you can't call them from the outside.
 // We also mark them as 'private' to give llvm permisson to remove them if all uses are inlined.
@@ -60,8 +59,12 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
                 gen.pending&.push(c);
             };
         };
-        
         body := {comp.vtable.emit_bc}(comp.data, fid, .Aot).unwrap();
+
+        index: i64 = fid.to_index().zext();
+        real_name := {gen.backend.comp.vtable.get_string}(gen.backend.comp.data, func.name);
+        @fmt(gen.backend.out&.current(), ";F%: %\n", index, real_name);
+        //{comp.vtable.debug_log_bc}(comp.data, body&);
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(comp, func.body&, func, body&); 
             if (not(success)){|
@@ -71,9 +74,8 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
             // TODO: handle import
             continue();
         };
-        //{comp.vtable.debug_log_bc}(comp.data, body&);
         gen.body = body&;
-        gen.backend.out&.push_all("define private ");
+        gen.backend.out&.push_all("define private ccc ");
         name := @format("F%", body.func.to_index()) temp();
         gen.backend&.write_header(body&, name.items()) {arg_index|
             s := @format("%arg%", "%", arg_index) temp();
@@ -93,7 +95,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
     
     @switch(entry) {
         @case(.TestRunnerMain) => {
-            gen.backend.out&.push_all("define i64 @main(){\n");
+            gen.backend.out&.push_all("define ccc i64 @main(){\n");
             i := 1;
             for (fns) {f|
                 func := {comp.vtable.get_function}(comp.data, f);
@@ -109,13 +111,37 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         };
         @case(.GiveMeTheCodeAndGiveItToMeRaw) => ();
         @case(.ExportWithNames) => {
-            panic("not yet implemented: ProgramEntry.ExportWithNames");
+            for(fns){fid|
+                gen.backend&.write_export_bounce(fid);
+            };
         };
     };
     
     // TODO: if alloc != temp { temp.reset(mark ? no but that wouldn't catch if they derived a new one from temp
     
     gen.backend.out
+}
+
+// TODO: copy-paste from DynamicImport but reversed so its a pain. 
+fn write_export_bounce(self: *EmitLlvm, fid: FuncId) Unit = {
+    values: List(LlvmVal) = list(temp());
+    func := {self.comp.vtable.get_function}(self.comp.data, fid);
+    import_name := {self.comp.vtable.get_string}(self.comp.data, func.name);
+    self.out&.push_all("define ccc ");
+    // TODO: recompiling just to get the sig is fucking deranged. rust side has a function for this. -- Jun 17
+    bc := {self.comp.vtable.emit_bc}(self.comp.data, fid, .Aot).unwrap();
+    self.write_header(bc&, import_name) {arg_index|
+        ty := bc.signeture.args[arg_index]; // TODO: indirect ret
+        values&.push((ty = ty, id = arg_index));
+        s := @format("%v%", "%", arg_index) temp();
+        s.items()
+    };
+    self.out&.push_all("{\n");
+    ret := self.inst_call(values.items(), bc.signeture) {|
+        @fmt(self.out&.current(), "@F%", bc.func.to_index());
+    };
+    self.inst_return(ret);
+    self.out&.current().push_all("}\n");
 }
 
 fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) Unit = {
@@ -181,10 +207,10 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
                 if(self.emit_special(comp, check, func, bc), => return(true));
             };
         });
-        (fn DynamicImport(name)=> { 
+        (fn DynamicImport(name) => { 
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
             import_name := {comp.vtable.get_string}(comp.data, name[]);
-            self.out&.push_all("declare ");
+            self.out&.push_all("declare ccc ");
             self.write_header(bc, import_name) {arg_index|
                 args := func.arg.bindings.items();
                 arg := args[arg_index].name.Var.name;
@@ -194,7 +220,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             };
             self.out&.push_all(";\n");
             
-            self.out&.push_all("define private ");
+            self.out&.push_all("define private ccc ");
             name := @format("F%", bc.func.to_index()) temp();
             values: List(LlvmVal) = list(temp());
             self.write_header(bc, name.items()) {arg_index|
@@ -215,7 +241,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
         });
         (fn LlvmIr(code) => { 
             ir := {comp.vtable.get_string}(comp.data, code[]);
-            self.out&.push_all("define private ");
+            self.out&.push_all("define private ccc ");
             name := @format("F%", bc.func.to_index()) temp();
             self.write_header(bc, name.items()) {arg_index|
                 args := func.arg.bindings.items();
@@ -266,9 +292,8 @@ fn write_header(self: *EmitLlvm, body: *FnBody, name: Str, const get_arg_name: @
     // TODO: don't have two callsites for get_arg_name
     shift := if(sig.first_arg_is_indirect_return) {|
         size: i64 = sig.return_value_bytes.zext();
-        // TODO: this breaks large_struct_ret_return (Expected (6097727888 == 1)) but i need to do it to be able to call c functions. 
-        // @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, get_arg_name(0));
-        @fmt(self.out&.current(), " ptr %,", get_arg_name(0));
+        // note: when calling through function pointers, you need to put the sret attribute there as well (large_struct_ret_return tests this).
+        @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, get_arg_name(0));
         1
     }{| 0 };
     
@@ -316,7 +341,6 @@ fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
     self.out&.push_all("   br label %b0\n"); 
 }
 
-// clang puts the sret first, so
 fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tail: bool) Slice(EmitLlvm.Val) = {
     self.inst_call(args, sig) {|
         @fmt(self.out&.current(), "@F%", f.to_index());
@@ -347,7 +371,9 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call:
     
     self.out&.push_all("(");
     shift := if(sig.first_arg_is_indirect_return) {|
-        @fmt(self.out&.current(), " ptr %,", args[0]);
+        size: i64 = sig.return_value_bytes.zext();
+        // note: the sret must match the declaration! not doing this breaks large_struct_ret_return and compiler driver dylib ffi. 
+        @fmt(self.out&.current(), " ptr sret([% x i8]) %,", size, args[0]);
         1
     }{| 0 };
     assert_eq(args.len, sig.args.len.add(shift));
