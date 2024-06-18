@@ -137,33 +137,33 @@ pub struct BakedVarId(pub u32);
 pub enum BakedVar {
     Zeros { bytes: usize },
     Bytes(Vec<u8>),
-    Num(i64),
+    VoidPtrArray(Vec<BakedEntry>),
+}
+
+#[repr(C, i64)]
+#[derive(Debug, Clone)]
+pub enum BakedEntry {
+    Num(i64, Prim),
     FnPtr(FuncId),
     AddrOf(BakedVarId),
-    VoidPtrArray(Vec<BakedVarId>),
 }
+
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct Baked {
     pub values: RefCell<Vec<(BakedVar, *const u8)>>,
+    pub lookup: RefCell<Map<(usize, TypeId), BakedVarId>>,
 }
 
 impl Baked {
-    pub(crate) fn reserve(&self, ptr: *const u8) -> BakedVarId {
+    fn reserve(&self, ptr: *const u8) -> BakedVarId {
         let mut vals = self.values.borrow_mut();
         vals.push((BakedVar::Bytes(vec![]), ptr));
         BakedVarId(vals.len() as u32 - 1)
     }
 
-    pub(crate) fn set(&self, id: BakedVarId, mut val: BakedVar) {
+    fn set(&self, id: BakedVarId, val: BakedVar) {
         let mut vals = self.values.borrow_mut();
-        if let BakedVar::Bytes(b) = &val {
-            if b.len() == 8 {
-                // TODO: creepy endianness but its fine for now.
-                let v = i64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]); //fuck
-                val = BakedVar::Num(v);
-            }
-        }
         vals[id.0 as usize].0 = val;
     }
 
@@ -172,8 +172,12 @@ impl Baked {
         v[id.0 as usize].clone()
     }
 
-    pub(crate) fn make(&self, val: BakedVar, ptr: *const u8) -> BakedVarId {
+    pub(crate) fn make(&self, val: BakedVar, ptr: *const u8, ty: TypeId) -> BakedVarId {
         let id = self.reserve(ptr);
+        if !ptr.is_null() && !ty.is_unknown() {
+            let prev = self.lookup.borrow_mut().insert((ptr as usize, ty), id);
+            debug_assert!(prev.is_none());
+        }
         self.set(id, val);
         id
     }
@@ -472,7 +476,7 @@ pub fn zero_padding(program: &Program, ty: TypeId, bytes: &mut [u8], i: &mut usi
     Ok(())
 }
 
-fn int_from_bytes(bytes: &[u8]) -> i64 {
+pub fn int_from_bytes(bytes: &[u8]) -> i64 {
     debug_assert_eq!(bytes.len(), 8);
     i64::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
 }

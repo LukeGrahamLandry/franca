@@ -7,8 +7,9 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{to_values, BakedVar, BakedVarId, FnBody, Values};
+use crate::bc::{to_values, BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
+use crate::emit_bc::prim_sig;
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
 use crate::logging::{unwrap, PoolLog};
@@ -210,6 +211,7 @@ pub struct ImportVTable {
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
     get_baked: extern "C" fn(compile: &Compile, id: BakedVarId) -> BakedVar,
     debug_log_bc: for<'p> extern "C" fn(c: &Compile<'_, 'p>, body: &FnBody<'p>),
+    prim_sig: for<'p> extern "C" fn(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>>,
 }
 
 #[repr(C)]
@@ -244,7 +246,12 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     debug_log_baked_constant,
     get_baked,
     debug_log_bc,
+    prim_sig: franca_prim_sig,
 };
+
+extern "C" fn franca_prim_sig<'p>(c: &Compile<'_, 'p>, f_ty: FnType, cc: CallConv) -> Res<'p, PrimSig<'p>> {
+    prim_sig(c.program, f_ty, cc)
+}
 
 extern "C" fn debug_log_bc<'p>(c: &Compile<'_, 'p>, body: &FnBody<'p>) {
     println!("{}", body.log(c.program))
@@ -654,7 +661,7 @@ extern "C-unwind" fn tag_value<'p>(comp: &mut Compile<'_, 'p>, enum_ty: TypeId, 
         ))
     });
     let index = cases.iter().position(|f| f.0 == name);
-    let index = hope(|| Ok(unwrap!(index, "bad case name id={}", name.0)));
+    let index = hope(|| Ok(unwrap!(index, "bad case name id={} {}", name.0, comp.pool.get(name))));
     index as i64
 }
 

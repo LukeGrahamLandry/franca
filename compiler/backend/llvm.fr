@@ -87,9 +87,11 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         gen.backend.out&.current().push_all("}\n");
     };
     
+    constants := 0;
     range(0, gen.max_const_id.add(1)) {i|
         if(gen.constants_needed&.get(i)){|
             gen.backend&.emit_constant(comp, (id = i.trunc()));
+            constants += 1;
         };
     };    
     
@@ -159,41 +161,25 @@ fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) Unit = {
             self.pop_trailing_comma();
             self.out&.push_all("]\n");
         });
-        (fn FnPtr(f) => {
-            @fmt(self.out&.current(), "@g% = private global ptr @F%\n", index, f[].to_index());
-            // TODO: make sure we emitted the function. 
-        });
-        (fn AddrOf(id) => {
-            i: i64 = id.id.zext();
-            @fmt(self.out&.current(), "@g% = private global ptr @g%\n", index, i);
-        });
         (fn VoidPtrArray(parts) => {
             @fmt(self.out&.current(), "@g% = private global [% x ptr] [", index, parts.len);
-            for(parts[].items()){id|
-                inner := {comp.vtable.get_baked}(comp.data, id);
-                @match(inner&) {
-                    (fn Zeros(_) => { panic("TODO: zeroed constant"); });
-                    (fn Bytes(bytes) => {
-                        panic("TODO: bytes in VoidPtrArray");
-                    });
+            for(parts[].items()){inner|
+                @match(inner) {
                     (fn FnPtr(f) => {
-                        @fmt(self.out&.current(), "ptr @F%,", f[].to_index());
+                        @fmt(self.out&.current(), "ptr @F%,", f.to_index());
                         // TODO: make sure we emitted the function. 
                     });
                     (fn AddrOf(id) => {
                         @fmt(self.out&.current(), "ptr @g%,", @as(i64) id.id.zext());
                     });
-                    (fn VoidPtrArray(parts) => { panic("frontend should flatten constant VoidPtrArray"); });
                     (fn Num(v) => {
-                        @fmt(self.out&.current(), "ptr inttoptr (i64 % to ptr),", v[]);
+                        // TODO: small prims
+                        @fmt(self.out&.current(), "ptr inttoptr (i64 % to ptr),", v.value);
                     });
                 };
             };
             self.pop_trailing_comma();
             self.out&.push_all("]\n");
-        });
-        (fn Num(v) => {
-            @fmt(self.out&.current(), "@g% = private global i64 %\n", index, v[]);
         });
     }
 }
@@ -436,7 +422,7 @@ fn inst_offset(self: *EmitLlvm, ptr: EmitLlvm.Val, bytes: u16) EmitLlvm.Val = {
 fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
     v := self.get_var(ty);
     self.out&.current().reserve(20);
-    float := ty.eq(.F64).or(ty.eq(.F32));
+    // TODO: use @switch here. 
     if(ty.eq(.F64)){|
         h := fmt_hex(value);
         @fmt(self.out&.current(), "   % = fadd double %, 0.0\n", v, h); 
@@ -445,9 +431,14 @@ fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
             h := fmt_hex(value);
             @fmt(self.out&.current(), "   % = fadd float %, 0.0\n", v, h); 
         } {|
-            // TODO: better error message if you forget an argument
-            // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
-            @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
+            if(ty.eq(.P64)) {|
+                assert_eq(value, 0); // a literal pointer that isn't null doesn't make sense for AOT.
+                @fmt(self.out&.current(), "   % = inttoptr i64 % to ptr\n", v, value); 
+            } {|
+                // TODO: better error message if you forget an argument
+                // TODO: just track constants myself in Val? you can't just assign to a constsant int. 
+                @fmt(self.out&.current(), "   % = add % %, 0\n", v, ty.llvm_type(), value); 
+            }
         };
     };
     v

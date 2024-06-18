@@ -8,7 +8,7 @@
 //       currently each unique character constant emits a function. im sure llvm will inline it but its still dumb to make it waste its time on that.
 use crate::{
     ast::{CallConv, Flag, FuncId, FuncImpl, Program, TypeId, TypeInfo},
-    bc::{is_float, BakedVar, Bc, FnBody, Prim, PrimSig},
+    bc::{is_float, BakedEntry, BakedVar, Bc, FnBody, Prim, PrimSig},
     compiler::{Compile, ExecStyle, Res},
     emit_bc::{emit_bc, prim_sig},
     err,
@@ -255,49 +255,24 @@ pub fn emit_c<'p>(comp: &mut Compile<'_, 'p>, functions: Vec<FuncId>, test_runne
                 constants.remove(constants.len() - 1); // comma
                 writeln!(constants, "}};").unwrap();
             }
-            &BakedVar::FnPtr(f) => {
-                drop(v);
-                writeln!(constants, "    static void* _const{i} = (void*) &_FN{};", f.as_index()).unwrap();
-                forward_declare(comp, &mut out, f);
-                comp.compile(f, ExecStyle::Aot)?;
-                emit(comp, &mut out, f)?;
-            }
-            BakedVar::AddrOf(id) => {
-                writeln!(constants, "    static const void* _const{i} = (void*) &_const{};", id.0).unwrap();
-            }
             BakedVar::VoidPtrArray(parts) => {
                 let parts = parts.clone();
                 drop(v);
                 writeln!(constants, "    static void *_const{i}[{}] = {{", parts.len()).unwrap();
                 for p in parts {
-                    let v = comp.program.baked.values.borrow();
-                    match v[p.0 as usize].0 {
-                        BakedVar::Zeros { .. } => todo!(),
-                        BakedVar::Bytes(ref b) => {
-                            if b.len() == 8 {
-                                let v = u64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]); //fuck
-                                write!(constants, "(void*){v},").unwrap()
-                            } else {
-                                todo!("{b:?}")
-                            }
-                        }
-                        BakedVar::Num(v) => write!(constants, "(void*){v},").unwrap(),
-                        BakedVar::FnPtr(f) => {
+                    match p {
+                        BakedEntry::Num(v, _) => write!(constants, "(void*){v},").unwrap(),
+                        BakedEntry::FnPtr(f) => {
                             write!(constants, "(void*)&_FN{},", f.as_index()).unwrap();
-                            drop(v);
                             forward_declare(comp, &mut out, f);
                             comp.compile(f, ExecStyle::Aot)?;
                             emit(comp, &mut out, f)?;
                         }
-                        BakedVar::AddrOf(v) => write!(constants, "(void*)&_const{},", v.0).unwrap(),
-                        BakedVar::VoidPtrArray(_) => todo!(),
+                        BakedEntry::AddrOf(v) => write!(constants, "(void*)&_const{},", v.0).unwrap(),
                     }
                 }
                 constants.remove(constants.len() - 1); // comma
                 writeln!(constants, "}};").unwrap();
-            }
-            BakedVar::Num(v) => {
-                writeln!(constants, "    static void* _const{i} = (void*) {v};").unwrap();
             }
         }
         i += 1;

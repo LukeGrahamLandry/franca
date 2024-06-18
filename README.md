@@ -49,6 +49,7 @@ there must be proportional terrible things or I'm probably just lying.
 - I don't care about being easy to learn. I want it to be fun. Rust is fun.
 - Stuff's unsafe, deal with it, simply don't make a mistake. i.e. `fn main() = { let a: *i64 = 123.int_to_ptr(); println(a[]);` will compile, run, and (probably) crash.
 - I don't care about fallibile memory allocation
+- It's a little heavy on the punctuation.
 - (TEMP?) there are no arithmetic operators, if you want to add, just call the function add.
 - (TEMP) completely incomprehensible error messages.
 - (TEMP) no caching. every time you run a program, you recompile the standard library for comptime. (...but its so fast it doesn't matter yet).

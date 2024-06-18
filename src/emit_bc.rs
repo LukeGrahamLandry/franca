@@ -735,14 +735,26 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
 
                 let want_emit_by_memcpy = value.bytes().len() > 16;
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
-                    // TODO: this is dumb because a slice becomes a pointer to a slice.
-                    let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
-                    result.push(Bc::PushGlobalAddr { id });
-                    let info = self.program.get_info(expr.ty);
-                    match result_location {
-                        PushStack => self.load(result, expr.ty), // TODO: non %8
-                        ResAddr => result.push(Bc::CopyBytesToFrom { bytes: info.stride_bytes }),
-                        Discard => unreachable!(),
+                    if result_location == PushStack || !want_emit_by_memcpy {
+                        let mut out = vec![];
+                        emit_relocatable_constant_body(expr.ty, value, self.program, &self.asm.dispatch, &mut out)?;
+                        for part in out {
+                            match part {
+                                // TODO: now you can't have non-i64 in top level constant struct -- Jun 18
+                                BakedEntry::Num(value, ty) => result.push(Bc::PushConstant { value, ty }),
+                                BakedEntry::FnPtr(f) => result.push(Bc::GetNativeFnPtr(f)),
+                                BakedEntry::AddrOf(id) => result.push(Bc::PushGlobalAddr { id }),
+                            }
+                        }
+                        if result_location == ResAddr {
+                            self.store_pre(result, expr.ty)
+                        }
+                    } else {
+                        assert!(result_location == ResAddr);
+                        let id = emit_relocatable_constant(expr.ty, value, self.program, &self.asm.dispatch)?;
+                        result.push(Bc::PushGlobalAddr { id });
+                        let info = self.program.get_info(expr.ty);
+                        result.push(Bc::CopyBytesToFrom { bytes: info.stride_bytes })
                     }
                     return Ok(());
                 }
@@ -1183,20 +1195,56 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
     let raw = program.raw_type(ty);
     let jit_ptr = value.bytes().as_ptr();
 
+    if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
+        return Ok(*cached);
+    }
+
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
     if !program.get_info(raw).contains_pointers {
-        return Ok(program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr));
+        return Ok(program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr, ty));
+    }
+
+    let mut out = vec![];
+    emit_relocatable_constant_body(ty, value, program, dispatch, &mut out)?;
+    Ok(program.baked.make(BakedVar::VoidPtrArray(out), jit_ptr, ty))
+}
+
+// TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
+// TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
+fn emit_relocatable_constant_body<'p>(
+    ty: TypeId,
+    value: &Values,
+    program: &Program<'p>,
+    dispatch: &[*const u8],
+    out: &mut Vec<BakedEntry>,
+) -> Res<'p, ()> {
+    let raw = program.raw_type(ty);
+    let jit_ptr = value.bytes().as_ptr();
+
+    // if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
+    //     return Ok(*cached);
+    // }
+
+    // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
+    if !program.get_info(raw).contains_pointers {
+        for n in value.bytes().chunks(8) {
+            // TODO: small prims
+            out.push(BakedEntry::Num(int_from_bytes(n), Prim::I64))
+        }
+
+        return Ok(());
     }
 
     match &program[raw] {
-        TypeInfo::FnPtr { ty, .. } => {
+        TypeInfo::FnPtr { ty: f_ty, .. } => {
             // TODO: this is sad and slow.
             let want: i64 = from_values(program, value.clone())?;
             for (i, check) in dispatch.iter().enumerate() {
                 if *check as i64 == want {
                     let f = FuncId::from_index(i);
-                    assert_eq!(*ty, program[f].finished_ty().unwrap());
-                    return Ok(program.baked.make(BakedVar::FnPtr(f), jit_ptr));
+                    assert_eq!(*f_ty, program[f].finished_ty().unwrap());
+                    out.push(BakedEntry::FnPtr(f));
+                    return Ok(());
                 }
             }
             err!("function not found",)
@@ -1213,7 +1261,8 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
             let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
             let inner_value = Values::many(data.to_vec());
             let value = emit_relocatable_constant(inner, &inner_value, program, dispatch)?;
-            Ok(program.baked.make(BakedVar::AddrOf(value), jit_ptr))
+            out.push(BakedEntry::AddrOf(value));
+            Ok(())
         }
         TypeInfo::Struct { fields, .. } => {
             if fields.len() == 2 && fields[0].name == Flag::Ptr.ident() && fields[1].name == Flag::Len.ident() {
@@ -1225,41 +1274,34 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
                 let len = len as usize;
                 if len == 0 {
                     // an empty slice can have a null data ptr i guess.
-                    let ptr = program.baked.make(BakedVar::Num(0), null());
-                    let len = program.baked.make(BakedVar::Num(0), null());
-                    return Ok(program.baked.make(BakedVar::VoidPtrArray(vec![ptr, len]), jit_ptr));
+                    out.push(BakedEntry::Num(0, Prim::P64));
+                    out.push(BakedEntry::Num(0, Prim::I64));
+                    return Ok(());
                 }
 
                 let inner = program.unptr_ty(fields[0].ty).unwrap();
                 let inner_info = program.get_info(inner);
                 assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
                 let bytes = len * inner_info.stride_bytes as usize;
-                let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) }.to_vec();
+                let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
+
+                let mut indirect = vec![];
 
                 let value = if inner_info.contains_pointers {
-                    let mut ptrs = vec![];
-
                     let stride = inner_info.stride_bytes as usize;
                     for i in 0..len {
                         let v = data[i * stride..(i + 1) * stride].to_vec();
-                        let id = emit_relocatable_constant(inner, &Values::many(v), program, dispatch)?;
-                        match program.baked.get(id).0 {
-                            BakedVar::Zeros { .. } | BakedVar::Bytes(_) => todo!(),
-                            BakedVar::Num(_) => ptrs.push(id),
-                            BakedVar::FnPtr(_) => ptrs.push(id),
-                            BakedVar::AddrOf(_) => ptrs.push(id),
-                            BakedVar::VoidPtrArray(parts) => ptrs.extend(parts),
-                        }
+                        emit_relocatable_constant_body(inner, &Values::many(v), program, dispatch, &mut indirect)?;
                     }
 
-                    program.baked.make(BakedVar::VoidPtrArray(ptrs), null())
+                    program.baked.make(BakedVar::VoidPtrArray(indirect), null(), TypeId::unknown)
                 } else {
-                    program.baked.make(BakedVar::Bytes(data.to_vec()), null())
+                    program.baked.make(BakedVar::Bytes(data.to_vec()), null(), TypeId::unknown)
                 };
 
-                let addr = program.baked.make(BakedVar::AddrOf(value), null());
-                let len = program.baked.make(BakedVar::Num(len as i64), null());
-                Ok(program.baked.make(BakedVar::VoidPtrArray(vec![addr, len]), jit_ptr))
+                out.push(BakedEntry::AddrOf(value));
+                out.push(BakedEntry::Num(len as i64, Prim::I64));
+                Ok(())
             } else if ty == program.save_cstr_t.unwrap() {
                 assert_eq!(value.bytes().len(), 8);
                 let ptr: i64 = from_values(program, value.clone())?;
@@ -1273,23 +1315,18 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
                 }
                 bytes.push(0);
 
-                let value = program.baked.make(BakedVar::Bytes(bytes), null());
-                let addr = program.baked.make(BakedVar::AddrOf(value), jit_ptr);
-                Ok(addr)
+                let value = program.baked.make(BakedVar::Bytes(bytes), null(), TypeId::unknown);
+                out.push(BakedEntry::AddrOf(value));
+                Ok(())
             } else {
-                let mut ptrs = vec![];
+                // If its not a slice, just do all the fields.
                 for f in fields {
                     let info = program.get_info(f.ty);
                     assert_eq!(info.stride_bytes % 8, 0, "TODO");
                     let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
-                    let field = emit_relocatable_constant(f.ty, &Values::many(v), program, dispatch)?;
-                    if let BakedVar::VoidPtrArray(parts) = program.baked.get(field).0 {
-                        ptrs.extend(parts);
-                    } else {
-                        ptrs.push(field);
-                    }
+                    emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out)?;
                 }
-                return Ok(program.baked.make(BakedVar::VoidPtrArray(ptrs), jit_ptr));
+                return Ok(());
             }
         }
         TypeInfo::Tagged { cases } => {
@@ -1297,18 +1334,23 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
             assert!(cases.len() > tag, "invalid constant tagged union");
             if !program.get_info(cases[tag].1).contains_pointers {
                 // it happens that this varient is easy.
-                let value = program.baked.make(BakedVar::Bytes(value.bytes().to_vec()), jit_ptr);
-                Ok(value)
+                for n in value.bytes().chunks(8) {
+                    // TODO: small prims
+                    out.push(BakedEntry::Num(int_from_bytes(n), Prim::I64))
+                }
+
+                Ok(())
             } else {
                 println!("{:?}", program.pool.get(cases[tag].0));
                 err!("TODO: pointers in constant tagged union: {}", program.log_type(ty))
             }
         }
-        TypeInfo::Enum { raw, .. } => emit_relocatable_constant(*raw, value, program, dispatch),
+        TypeInfo::Enum { raw, .. } => unreachable!(),
         TypeInfo::VoidPtr => {
             if value.bytes().iter().all(|b| *b == 0) {
                 // You're allowed to have a constant null pointer (like for global allocator interface instances).
-                Ok(program.baked.make(BakedVar::Num(0), null()))
+                out.push(BakedEntry::Num(0, Prim::P64));
+                Ok(())
             } else {
                 err!("You can't have a void pointer as a constant. The compiler can't tell how many bytes to put in the final executable.",)
             }

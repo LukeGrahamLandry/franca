@@ -2414,12 +2414,6 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(func_id)
     }
 
-    // :PushConstFnCtx 
-    // make sure things that get called at compile time don't get added to the call-graph. 
-    // this allows aot backends to just blindly walk the call-graph and not emit loads of garbage empty functions,
-    // for things that returned types or added to overload sets. extra important because they might use Bc::GetCompCtx, which can't be compiled. 
-    // this is special because of check_quick_eval, so we're not always in the context of a new function that will be thrown away after the expression is finished. 
-    // -- Jun 17
     pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
         self.wip_stack.push((None, ExecStyle::Jit)); // :PushConstFnCtx
         self.program.finish_layout(ret_ty)?;

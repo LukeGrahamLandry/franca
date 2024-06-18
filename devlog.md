@@ -1,8 +1,24 @@
+## give up and use llvm (Jun 15/16/17)
+
 - empty block. oh but also same label twice. switched to the block before checking if already did that one.
 - they have pair struct literals but only for constants so you have to painfully insertelement to return a pair.
 - all the ones where it was just silently crashing was because i forgot to do tailcalls and was just trapping because emitter was supposed to have returned
 
-## distrust qbe
+// :PushConstFnCtx
+// make sure things that get called at compile time don't get added to the call-graph.
+// this allows aot backends to just blindly walk the call-graph and not emit loads of garbage empty functions,
+// for things that returned types or added to overload sets. extra important because they might use Bc::GetCompCtx, which can't be compiled.
+// this is special because of check_quick_eval, so we're not always in the context of a new function that will be thrown away after the expression is finished.
+
+- sret needs to be added to the callsite too, not just the declaration, which is fair enough.
+  I think it only matters for calling through function pointers.
+  clang does it for both tho so playing it safe.
+  can see the problem in the debugger becuase it was doing `blr x8`
+- dont emit const slice as load of ptr to slice. ~2700 -> ~1200 emitted constant definitions for compiler/first.fr
+  that broke please_be_the_same which has a comment "sketch allignment, its fine if you break this test when emitting exes",
+  so... thats a win i guess.
+
+## distrust qbe (Jun 15)
 
 I'm not sure i trust qbe, like ok i want to return two ints.
 
