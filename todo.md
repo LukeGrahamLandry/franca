@@ -6,6 +6,8 @@
 - clear temp alloc when emitting for AOT
 - have an overload set that types can add to when they have special constant emit rules instead of the current hardcoded thing.
 - bake_relocatable_value overloads are not compiled lazily. all are done when compiling for AOT even if the type isn't needed.
+- test that struct padding is zeroed before emitting comptime data and before being used as a key to cache const args instantiations.
+- bake_relocatable_value for List, Alloc, Fd. Also make Slice not compiler builtin.
 
 ## regressions
 

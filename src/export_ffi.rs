@@ -7,9 +7,9 @@ use crate::ast::{
     garbage_loc, CallConv, Expr, FatExpr, FatStmt, Flag, FnFlag, FnType, Func, FuncId, IntTypeInfo, LazyType, OverloadSetId, Pattern, Program,
     ScopeId, TargetArch, TypeId, TypeInfo, TypeMeta, WalkAst,
 };
-use crate::bc::{to_values, BakedVar, BakedVarId, FnBody, PrimSig, Values};
+use crate::bc::{to_values, BakedEntry, BakedVar, BakedVarId, FnBody, PrimSig, Values};
 use crate::compiler::{Compile, CompileError, ExecStyle, Res, Unquote, EXPECT_ERR_DEPTH};
-use crate::emit_bc::prim_sig;
+use crate::emit_bc::{emit_relocatable_constant_body, prim_sig};
 use crate::ffi::InterpSend;
 use crate::lex::Lexer;
 use crate::logging::{unwrap, PoolLog};
@@ -560,7 +560,26 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn get_compiler_vtable() *ImportVTable", get_compiler_vtable as *const u8),
     ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
     ("fn __save_bake_os(os: OverloadSet) Unit", save_bake_os as *const u8),
+    (
+        "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type) Slice(BakedEntry)",
+        dyn_bake_relocatable_value as *const u8,
+    ),
+    ("fn get_meta(t: Type) TypeMeta", get_meta as *const u8),
 ];
+
+extern "C-unwind" fn dyn_bake_relocatable_value(comp: &mut Compile, bytes: &[u8], ty: TypeId) -> *const [BakedEntry] {
+    debug_assert_eq!(comp.program.get_info(ty).stride_bytes as usize, bytes.len());
+    let mut out = vec![];
+    emit_relocatable_constant_body(ty, &Values::from_bytes(bytes), comp.program, &comp.aarch64.dispatch, &mut out).unwrap();
+    out.leak() as *const [BakedEntry]
+}
+
+// TODO: make an easy way to write these from the language.
+//       where you translate the versions that require *ImportVTable.
+// TODO: write size_of in terms of this.
+extern "C-unwind" fn get_meta(comp: &mut Compile, ty: TypeId) -> TypeMeta {
+    comp.program.get_info(ty)
+}
 
 extern "C-unwind" fn save_bake_os(comp: &mut Compile, os: OverloadSetId) {
     comp.program.bake_os = Some(os);

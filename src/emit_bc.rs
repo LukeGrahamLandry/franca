@@ -9,7 +9,6 @@
 #![allow(clippy::wrong_self_convention)]
 
 use codemap::Span;
-use std::mem::transmute;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 
@@ -1242,7 +1241,7 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
 
 // TODO: deduplicate small constant strings. they get stored in Values inline so can't be fixed by baked.lookup
 // TODO: make sure baked.lookup actually ever helps. might need to add checks in more places.
-fn emit_relocatable_constant_body<'p>(
+pub fn emit_relocatable_constant_body<'p>(
     ty: TypeId,
     value: &Values,
     program: &Program<'p>,
@@ -1276,7 +1275,7 @@ fn emit_relocatable_constant_body<'p>(
 
     match &program[raw] {
         TypeInfo::FnPtr { ty: f_ty, .. } => {
-            // TODO: this is sad and slow.
+            // TODO: store function pointers in a hash map as they're created instead? :SLOW
             let want: i64 = from_values(program, value.clone())?;
             for (i, check) in dispatch.iter().enumerate() {
                 if *check as i64 == want {
@@ -1291,9 +1290,6 @@ fn emit_relocatable_constant_body<'p>(
         &TypeInfo::Ptr(inner) => {
             let inner_info = program.get_info(inner);
             let bytes = inner_info.stride_bytes as usize;
-
-            // TODO: CStr needs special handling...
-
             // load the pointer and recurse.
             // TODO: deduplicate!
             let ptr: i64 = from_values(program, value.clone())?;
@@ -1304,54 +1300,14 @@ fn emit_relocatable_constant_body<'p>(
             Ok(())
         }
         TypeInfo::Struct { fields, .. } => {
-            // TODO: use bake_relocatable_value overload for this.
-            if fields.len() == 2 && fields[0].name == Flag::Ptr.ident() && fields[1].name == Flag::Len.ident() {
-                // TODO: actually construct the slice type from unptr_ty(ptr) and check that its the same.
-                // TODO: really you want to let types overload a function to do this,
-                //       because List doesn't really want to keep its uninitialized memory.
-                let (ptr, len): (i64, i64) = from_values(program, value.clone())?;
-
-                let len = len as usize;
-                if len == 0 {
-                    // an empty slice can have a null data ptr i guess.
-                    out.push(BakedEntry::Num(0, Prim::P64));
-                    out.push(BakedEntry::Num(0, Prim::I64));
-                    return Ok(());
-                }
-
-                let inner = program.unptr_ty(fields[0].ty).unwrap();
-                let inner_info = program.get_info(inner);
-                assert_eq!(ptr % inner_info.align_bytes as i64, 0, "miss-aligned constant pointer. ");
-                let bytes = len * inner_info.stride_bytes as usize;
-                let data = unsafe { &*slice_from_raw_parts(ptr as *const u8, bytes) };
-
-                let mut indirect = vec![];
-
-                let value = if inner_info.contains_pointers {
-                    let stride = inner_info.stride_bytes as usize;
-                    for i in 0..len {
-                        let v = data[i * stride..(i + 1) * stride].to_vec();
-                        emit_relocatable_constant_body(inner, &Values::many(v), program, dispatch, &mut indirect)?;
-                    }
-
-                    program.baked.make(BakedVar::VoidPtrArray(indirect), null(), TypeId::unknown)
-                } else {
-                    program.baked.make(BakedVar::Bytes(data.to_vec()), null(), TypeId::unknown)
-                };
-
-                out.push(BakedEntry::AddrOf(value));
-                out.push(BakedEntry::Num(len as i64, Prim::I64));
-                Ok(())
-            } else {
-                // If its not a slice, just do all the fields.
-                for f in fields {
-                    let info = program.get_info(f.ty);
-                    assert_eq!(info.stride_bytes % 8, 0, "TODO");
-                    let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
-                    emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out)?;
-                }
-                Ok(())
+            // If its not a slice, just do all the fields.
+            for f in fields {
+                let info = program.get_info(f.ty);
+                assert_eq!(info.stride_bytes % 8, 0, "TODO");
+                let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
+                emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out)?;
             }
+            Ok(())
         }
         TypeInfo::Tagged { cases } => {
             let tag = unsafe { *(value.bytes().as_ptr() as *const usize) };

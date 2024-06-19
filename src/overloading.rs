@@ -100,14 +100,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         overloads.ready.retain(|o| o.arity == arity);
         if let Expr::StructLiteralP(pattern) = &mut arg.expr {
             self.prune_overloads_by_named_args(&mut overloads, pattern)?;
-
-            // TODO: my named args test doesn't work without this
-            if overloads.ready.len() == 1 {
-                let id = overloads.ready[0].func;
-                self.adjust_call(arg, id)?;
-                return Ok(id);
-            }
-            todo!("not tested. below assumes arg is tuple")
+            assert!(overloads.ready.len() == 1 || arity == 1, "not tested. below assumes arg is tuple")
         }
 
         if overloads.ready.len() == 1 {
@@ -117,7 +110,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         }
 
         if overloads.ready.is_empty() {
-            err!("No overload found for {i:?}: {}", self.pool.get(name));
+            err!("No overload found for {i:?}: {}. try adding a type hint", self.pool.get(name));
         }
 
         let original = overloads.clone();
