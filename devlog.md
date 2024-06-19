@@ -1,3 +1,9 @@
+## parsing (Jun 18)
+
+- self hosted math ops parsing and ast logging.
+- sometimes convert struct types to arrays when large and all same types.
+  should do more stress tests for weird generated code, like my swift parser generator problem.
+
 ## give up and use llvm (Jun 15/16/17)
 
 - empty block. oh but also same label twice. switched to the block before checking if already did that one.

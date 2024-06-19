@@ -148,32 +148,32 @@ impl<'a, 'p> Parser<'a, 'p> {
         };
 
         p.start_subexpr();
-        let expr = p.parse_expr()?;
+        let expr = p.parse_expr(true)?;
         let _ = p.end_subexpr();
         debug_assert!(p.spans.is_empty(), "leaked parse loc context");
 
         Ok(expr)
     }
 
-    fn parse_expr(&mut self) -> Res<'p, FatExpr<'p>> {
+    fn parse_expr(&mut self, allow_trailing: bool) -> Res<'p, FatExpr<'p>> {
         match self.peek() {
-            Star => self.prefix_operator(Star, Flag::Operator_Star_Prefix),
-            Question => self.prefix_operator(Question, Flag::Operator_Question_Prefix),
+            Star => self.prefix_operator(Star, Flag::Operator_Star_Prefix, allow_trailing),
+            Question => self.prefix_operator(Question, Flag::Operator_Question_Prefix, allow_trailing),
             // UpArrow => self.prefix_operator(UpArrow, Flag::Operator_Up_Arrow_Prefix),
             // Amp => self.prefix_operator(Amp, Flag::Operator_Ampersand_Prefix),
             _ => {
-                let prefix = self.parse_expr_inner()?;
-                self.maybe_parse_suffix(prefix)
+                let prefix = self.parse_expr_inner(allow_trailing)?;
+                self.maybe_parse_suffix(prefix, allow_trailing)
             }
         }
     }
 
-    fn prefix_operator(&mut self, tok: TokenType, op: Flag) -> Res<'p, FatExpr<'p>> {
+    fn prefix_operator(&mut self, tok: TokenType, op: Flag, allow_trailing: bool) -> Res<'p, FatExpr<'p>> {
         self.eat(tok)?;
         self.start_subexpr();
         self.start_subexpr();
         let ptr = self.expr(Expr::GetNamed(op.ident()));
-        let inner = self.parse_expr()?;
+        let inner = self.parse_expr(allow_trailing)?;
         Ok(self.expr(Expr::Call(Box::new(ptr), Box::new(inner))))
     }
 
@@ -211,7 +211,7 @@ impl<'a, 'p> Parser<'a, 'p> {
 
         let ret = if !cant_start_return_expression(self.peek()) {
             debug_assert!(!disallow_return);
-            LazyType::PendingEval(self.parse_expr()?)
+            LazyType::PendingEval(self.parse_expr(true)?)
         } else {
             LazyType::Infer
         };
@@ -230,7 +230,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn parse_expr_inner(&mut self) -> Res<'p, FatExpr<'p>> {
+    fn parse_expr_inner(&mut self, allow_trailing: bool) -> Res<'p, FatExpr<'p>> {
         match self.peek() {
             // TODO: use no body as type expr?
             // Optional name, require body, optional (args).
@@ -254,7 +254,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let e = Expr::GetParsed(i);
                     self.expr(e)
                 } else {
-                    self.parse_expr()?
+                    self.parse_expr(true)?
                 };
 
                 // TODO: if you dont do this, you could have basically no contention on the pool if lex/parse/compile were all on seperate threads. -- Apr 26
@@ -267,7 +267,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             FatRightArrow => {
                 self.start_subexpr();
                 let loc = self.eat(FatRightArrow)?;
-                let body = self.parse_expr()?;
+                let body = self.parse_expr(allow_trailing)?;
 
                 let name = self.anon_fn_name(&body);
 
@@ -323,7 +323,20 @@ impl<'a, 'p> Parser<'a, 'p> {
             Symbol(i) => {
                 self.start_subexpr();
                 self.pop();
-                Ok(self.expr(Expr::GetNamed(i)))
+
+                let can_start_quick_expr = |t: TokenType| matches!(t, Symbol(_) | At | Quoted { .. } | Number(_) | BinaryNum { .. });
+                if allow_trailing && can_start_quick_expr(self.peek()) {
+                    self.start_subexpr();
+                    let f = self.expr(Expr::GetNamed(i));
+                    let first_arg = self.parse_expr(false)?;
+                    if self.peek() != TokenType::LeftSquiggle {
+                        return Err(self.expected("expected trailing lambda after quick expression. like <ident> <expr> { <args> | <body> }"));
+                    }
+                    let call = self.expr_call(f, first_arg);
+                    Ok(call)
+                } else {
+                    Ok(self.expr(Expr::GetNamed(i)))
+                }
             }
             // TODO: maybe its wrong to both putting everything in the pool
             Quoted { s, escapes } => {
@@ -360,13 +373,13 @@ impl<'a, 'p> Parser<'a, 'p> {
                     }
                     TokenType::LeftParen => {
                         self.eat(LeftParen)?;
-                        let res = self.parse_expr()?;
+                        let res = self.parse_expr(true)?;
                         self.eat(RightParen)?;
                         res
                     }
                     LeftSquare => {
                         self.eat(LeftSquare)?;
-                        let e = self.parse_expr()?;
+                        let e = self.parse_expr(true)?;
                         self.eat(RightSquare)?;
                         return Ok(self.expr(Expr::SuffixMacro(Flag::Unquote.ident(), Box::new(e))));
                     }
@@ -376,9 +389,6 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let arg = if self.peek() == TokenType::LeftParen {
                     Box::new(self.parse_tuple()?)
                 } else {
-                    // TODO: its a bit fragile with the threads stuff now?
-                    //        hangs if you forget this so unwrap and that thread crashes.
-                    //        cause its not waiting on a mutex, just the counter never goes up. -- Apr 28
                     self.start_subexpr();
                     Box::new(self.raw_unit())
                 };
@@ -389,7 +399,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         self.start_subexpr();
                         Box::new(self.raw_unit())
                     }
-                    _ => Box::new(self.parse_expr()?),
+                    _ => Box::new(self.parse_expr(true)?),
                 };
                 Ok(self.expr(Expr::PrefixMacro {
                     handler: Box::new(handler),
@@ -408,14 +418,14 @@ impl<'a, 'p> Parser<'a, 'p> {
             Quote => {
                 self.start_subexpr();
                 self.eat(Quote)?;
-                let e = self.parse_expr()?;
+                let e = self.parse_expr(true)?;
                 self.eat(Quote)?;
                 Ok(self.expr(Expr::SuffixMacro(Flag::Quote.ident(), Box::new(e))))
             }
             DoubleColon => {
                 self.start_subexpr();
                 self.eat(DoubleColon)?;
-                let e = self.parse_expr()?;
+                let e = self.parse_expr(allow_trailing)?;
                 Ok(self.expr(Expr::SuffixMacro(Flag::Const_Eval.ident(), Box::new(e))))
             }
             Bang => {
@@ -425,7 +435,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
     }
 
-    fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>) -> Res<'p, FatExpr<'p>> {
+    fn maybe_parse_suffix(&mut self, mut prefix: FatExpr<'p>, allow_trailing: bool) -> Res<'p, FatExpr<'p>> {
         loop {
             prefix = match self.peek() {
                 LeftParen => {
@@ -437,6 +447,9 @@ impl<'a, 'p> Parser<'a, 'p> {
                     return Err(self.error_next(String::from("token '$' is reserved")));
                 }
                 LeftSquiggle => {
+                    if !allow_trailing {
+                        return Ok(prefix);
+                    }
                     self.start_subexpr();
                     self.pop(); // {
                     let loc = self.next_span();
@@ -483,7 +496,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 LeftSquare => {
                     self.start_subexpr();
                     self.eat(LeftSquare)?;
-                    let index = self.parse_expr()?;
+                    let index = self.parse_expr(true)?;
                     self.eat(RightSquare)?;
                     self.bin_named_macro(Flag::Operator_Index, prefix, index)
                 }
@@ -505,7 +518,7 @@ impl<'a, 'p> Parser<'a, 'p> {
         }
         let mut args: Vec<FatExpr<'p>> = vec![];
         loop {
-            args.push(self.parse_expr()?);
+            args.push(self.parse_expr(true)?);
             match self.peek() {
                 Comma => {
                     self.eat(Comma)?;
@@ -525,7 +538,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                             LazyType::Infer
                         } else {
                             // we're in a function header and that was a type
-                            LazyType::PendingEval(self.parse_expr()?)
+                            LazyType::PendingEval(self.parse_expr(true)?)
                         }
                     } else {
                         // It's gonna be Name = Value like for @enum(T) S or named arguments
@@ -535,7 +548,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                         return Err(self.expected("Ident before ':'/'=' in argument pattern"));
                     };
                     let default = if self.maybe(Equals) {
-                        BigOption::Some(self.parse_expr()?)
+                        BigOption::Some(self.parse_expr(true)?)
                     } else {
                         BigOption::None
                     };
@@ -622,7 +635,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     let e = Expr::GetParsed(i);
                     Some(self.expr(e))
                 } else {
-                    Some(self.parse_expr()?)
+                    Some(self.parse_expr(true)?)
                 }
             }
             FatRightArrow => return Err(self.expected("'=' for fn body. fn stmt cannot reference parent scope so cannot use '=>'.")),
@@ -653,7 +666,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 let s = match self.peek() {
                     Equals => {
                         self.eat(Equals)?;
-                        let value = self.parse_expr()?;
+                        let value = self.parse_expr(true)?;
                         // interestinly, its fine without requiring this semicolon. it was like that for a while and there was only one place it was missing.
                         self.eat(Semicolon)?;
                         Stmt::DeclNamed { name, ty, value, kind }
@@ -666,7 +679,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     }
                     LeftArrow => {
                         self.eat(LeftArrow)?;
-                        let mut call = self.parse_expr()?;
+                        let mut call = self.parse_expr(true)?;
                         self.start_subexpr();
                         let mut arg = Pattern::empty(*self.spans.last().unwrap());
                         arg.bindings.push(Binding {
@@ -731,7 +744,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 DoubleColon => {
                     self.pop();
                     self.pop();
-                    let value = self.parse_expr()?;
+                    let value = self.parse_expr(true)?;
                     self.eat(Semicolon)?;
                     Stmt::DeclNamed {
                         name,
@@ -745,7 +758,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                     self.pop();
                     let ty = match self.peek() {
                         Colon | Equals => LazyType::Infer,
-                        _ => LazyType::PendingEval(self.parse_expr()?),
+                        _ => LazyType::PendingEval(self.parse_expr(true)?),
                     };
 
                     let kind = match self.peek() {
@@ -760,17 +773,17 @@ impl<'a, 'p> Parser<'a, 'p> {
                             self.error_next("binding requires a value (use unsafe '()!uninitilized' if thats what you really want)".to_string())
                         );
                     }
-                    let value = self.parse_expr()?;
+                    let value = self.parse_expr(true)?;
                     self.eat(Semicolon)?;
                     Stmt::DeclNamed { name, ty, value, kind }
                 }
                 _ => {
-                    let e = self.parse_expr()?;
+                    let e = self.parse_expr(true)?;
                     self.after_expr_stmt(e)?
                 }
             },
             _ => {
-                let e = self.parse_expr()?;
+                let e = self.parse_expr(true)?;
                 self.after_expr_stmt(e)?
             }
         };
@@ -781,13 +794,13 @@ impl<'a, 'p> Parser<'a, 'p> {
         let s = match self.peek() {
             Equals => {
                 self.pop();
-                let value = self.parse_expr()?;
+                let value = self.parse_expr(true)?;
                 Stmt::Set { place: e, value }
             }
             EqOp(op) => {
                 self.pop();
                 self.start_subexpr();
-                let target = self.parse_expr()?;
+                let target = self.parse_expr(true)?;
                 let e = self.bin_named_macro(op, e, target);
                 Stmt::Eval(e)
             }
@@ -878,14 +891,14 @@ impl<'a, 'p> Parser<'a, 'p> {
             if self.peek() == Equals && allow_default {
                 LazyType::Infer
             } else {
-                LazyType::PendingEval(self.parse_expr()?)
+                LazyType::PendingEval(self.parse_expr(true)?)
             }
         } else {
             LazyType::Infer
         };
         let default = if allow_default && Equals == self.peek() {
             self.pop();
-            BigOption::Some(self.parse_expr()?)
+            BigOption::Some(self.parse_expr(true)?)
         } else {
             BigOption::None
         };

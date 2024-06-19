@@ -76,7 +76,6 @@ fn main() {
     let mut do_60fps_ = false;
     let mut path = None;
     let mut args = env::args();
-    let mut exe_path = None;
     let mut c = false;
     let mut run_with_clang = false;
     let mut sanitize = false;
@@ -119,7 +118,6 @@ fn main() {
                     println!("{}", get_include_std("libc").unwrap());
                 }
                 "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats, --c, --run-clang"),
-                "exe" => exe_path = Some(args.next().expect("--exe <output_filepath>")),
                 // TODO: need to have a -o flag so you can seperate logging of compile time execution from output c source code.
                 "c" => {
                     c = true;
@@ -274,23 +272,9 @@ fn main() {
                 log_err(&comp, *e);
                 exit(1);
             }
-            #[cfg(feature = "cranelift")]
-            if let Some(output) = exe_path {
-                let obj = franca::cranelift::emit_cl_exe(&mut comp, f).unwrap();
-                log_time();
 
-                let bytes = obj.emit().unwrap();
-                fs::write(output, bytes).unwrap();
-            } else {
-                log_time();
-                run_one(&mut comp, f);
-            }
-
-            #[cfg(not(feature = "cranelift"))]
-            {
-                log_time();
-                run_one(&mut comp, f);
-            }
+            log_time();
+            run_one(&mut comp, f);
         }
         if stats {
             println!("{:#?}", unsafe { STATS.clone() });
@@ -401,11 +385,12 @@ fn forked_swallow_passes(arch: TargetArch) {
     let mut failed = 0;
     let mut failing: Vec<FuncId> = vec![];
     for fns in tests.chunks(10) {
-        let (success, _, _) = fork_and_catch(|| {
+        // let (success, _, _) = fork_and_catch(|| {
             for f in fns {
                 run_one(&mut comp, *f);
             }
-        });
+        // });
+        let success = true;
         if success {
             let names = fns
                 .iter()

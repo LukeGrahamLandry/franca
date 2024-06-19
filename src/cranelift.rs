@@ -22,15 +22,14 @@ use cranelift::{
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, Linkage, Module, ModuleError};
-use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 use types::{F32, I16};
 
 use crate::{
-    ast::{CallConv, Flag, FuncId, FuncImpl, Program},
+    ast::{Flag, FuncId, FuncImpl, Program},
     bc::{BakedVar, BasicBlock, Bc, FnBody, Prim, PrimSig},
     bc_to_asm::Jitted,
     compiler::{CErr, Compile, CompileError, ExecStyle, Res},
-    emit_bc::{emit_bc, empty_fn_body},
+    emit_bc::empty_fn_body,
     err, extend_options,
     logging::make_err,
     pops, unwrap, BitSet,
@@ -42,62 +41,6 @@ pub struct JittedCl<M: Module> {
     // can't just use funcs[i].is_some because it might just be a forward declaration.
     funcs_done: BitSet,
     pending: Vec<FuncId>,
-}
-
-pub fn emit_cl_exe<'p>(comp: &mut Compile<'_, 'p>, f: FuncId) -> Res<'p, ObjectProduct> {
-    let isa = cranelift_native::builder().unwrap();
-    let mut flags = settings::builder();
-    flags.set("preserve_frame_pointers", "true").unwrap();
-    flags.set("unwind_info", "false").unwrap();
-    // flags.set("enable_pinned_reg", "true").unwrap();
-
-    // TODO: want to let comptime control settings...
-    flags.set("opt_level", "speed").unwrap();
-    let isa = isa.finish(Flags::new(flags));
-
-    let calls = cranelift_module::default_libcall_names();
-    let builder = ObjectBuilder::new(isa.unwrap(), "program", calls).unwrap();
-
-    let module = ObjectModule::new(builder);
-    let mut m = JittedCl {
-        module,
-        funcs: vec![],
-        funcs_done: BitSet::empty(),
-        pending: vec![],
-    };
-
-    fn emit<'p>(comp: &mut Compile<'_, 'p>, m: &mut JittedCl<ObjectModule>, f: FuncId) -> Res<'p, ()> {
-        for callee in comp.program[f].callees.clone() {
-            emit(comp, m, callee)?;
-        }
-        // TODO: mutual callees
-
-        if comp.program[f].has_tag(Flag::Ct) {
-            return Ok(()); // TODO: why am i trying to call Unique?
-        }
-        if m.funcs_done.get(f.as_index()) {
-            return Ok(());
-        }
-
-        println!("do {}", comp.program.pool.get(comp.program[f].name));
-        if comp.program[f].body.cranelift_emit().is_some() {
-            crate::cranelift::emit_cl_intrinsic(comp.program, m, f)?;
-        } else if let FuncImpl::Normal(_) = comp.program[f].body {
-            if comp.program[f].cc.unwrap() != CallConv::Inline {
-                let body = emit_bc(comp, f, ExecStyle::Aot)?;
-                emit_cl_inner(comp.program, m, None, &body, f, 0)?;
-            }
-        } else if comp.program[f].body.comptime_addr().is_some() {
-            let body = emit_bc(comp, f, ExecStyle::Aot)?;
-            emit_cl_inner(comp.program, m, None, &body, f, 0)?;
-        }
-        m.funcs_done.set(f.as_index());
-
-        Ok(())
-    }
-    emit(comp, &mut m, f)?;
-
-    Ok(m.module.finish())
 }
 
 pub fn emit_cl<'p>(compile: &mut Compile<'_, 'p>, body: &FnBody<'p>, f: FuncId) -> Res<'p, ()> {

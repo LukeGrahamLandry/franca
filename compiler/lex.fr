@@ -8,7 +8,7 @@ TokenType :: @tagged(
     Symbol: Symbol,
     Quoted: @struct(s: A, escapes: bool),
     Qualifier: VarType,
-    Op: Operator, EqOp: Operator,
+    Op: Operator, 
     Error: LexErr, Eof,
     // Bit count means leading zeros are observable.
     BinaryNum: @struct(bit_count: u8, value: u64),
@@ -17,7 +17,8 @@ TokenType :: @tagged(
     Amp, Question, Pipe, Equals, 
     Fn, Const,
 );
-Operator :: @enum(Plus, Minus, Star, Slash, Less, Greater, Bang);
+
+Operator :: @enum(i64) (Plus, Minus, Star, Slash, Less, Greater, Bang, PlusEq, MinusEq, StarEq, SlashEq, LessEq, GreaterEq, BangEq, EqEq);
 LexErr :: @tagged(
     Unexpected: i64,
     UnterminatedStr,
@@ -60,20 +61,21 @@ fn pop(self: *Lexer) *Token = {
         @case("{".ascii()) => self.one(.LeftSquiggle);
         @case("}".ascii()) => self.one(.RightSquiggle);
         @case(",".ascii()) => self.one(.Comma);
-        @case("+".ascii()) => self.pair("=".ascii(), (Op = .Plus), (EqOp = .Plus));
-        @case("-".ascii()) => self.pair("=".ascii(), (Op = .Minus), (EqOp = .Minus));
-        @case("*".ascii()) => self.pair("=".ascii(), (Op = .Star), (EqOp = .Star));
-        @case("/".ascii()) => self.pair("=".ascii(), (Op = .Slash), (EqOp = .Slash));
-        @case("<".ascii()) => self.pair("=".ascii(), (Op = .Less), (EqOp = .Less));
-        @case(">".ascii()) => self.pair("=".ascii(), (Op = .Greater), (EqOp = .Greater));
-        @case("!".ascii()) => self.pair("=".ascii(), (Op = .Bang), (EqOp = .Bang));
+        @case("+".ascii()) => self.pair("=".ascii(), (Op = .Plus), (Op = .PlusEq));
+        @case("-".ascii()) => self.pair("=".ascii(), (Op = .Minus), (Op = .MinusEq));
+        @case("*".ascii()) => self.pair("=".ascii(), (Op = .Star), (Op = .StarEq));
+        @case("/".ascii()) => self.pair("=".ascii(), (Op = .Slash), (Op = .SlashEq));
+        @case("<".ascii()) => self.pair("=".ascii(), (Op = .Less), (Op = .LessEq));
+        @case(">".ascii()) => self.pair("=".ascii(), (Op = .Greater), (Op = .GreaterEq));
+        @case("!".ascii()) => self.pair("=".ascii(), (Op = .Bang), (Op = .BangEq));
+        @case("=".ascii()) => self.pair("=".ascii(), .Equals, (Op = .EqEq));
         @case("@".ascii()) => self.one(.At);
         @case("&".ascii()) => self.one(.Amp);
         @case("#".ascii()) => self.one(.Hash);
         @case("?".ascii()) => self.one(.Question);
         @case("'".ascii()) => self.one(.SingleQuote);
         @case("|".ascii()) => self.one(.Pipe);
-        @case("[".ascii()) => self.one(.LeftSquare);
+        @case("[".ascii()) => self.pair("]".ascii(), .LeftSquare, .DoubleSquare);
         @case("]".ascii()) => self.one(.RightSquare);
         @case("\"".ascii()) => self.lex_string();
         @case("0".ascii()) => {
@@ -95,7 +97,7 @@ fn lex_string(self: *Lexer) Unit = {
     err :: @return;
     is_multiline := self.peek_c(1).eq("\"".ascii()).and(=> self.peek_c(2).eq("\"".ascii()));
     escapes := false;
-    text := if(is_multiline){|
+    text := if is_multiline {|
         self.current += 2;
         dowhile {|
             self.current += 1;
@@ -154,7 +156,7 @@ fn lex_hex(self: *Lexer) Unit = {
     total := 0;
     
     ret :: @return;
-    if(not(self.peek_c().is_hex_digit())) {|
+    if not(self.peek_c().is_hex_digit()) {|
         self.error((Unexpected = self.peek_c().zext()));
         ret();
     };
@@ -163,7 +165,7 @@ fn lex_hex(self: *Lexer) Unit = {
     dowhile {|
         total *= 16;
         bits += 4;
-        if(bits.gt(64)) {|
+        if bits.gt(64) {|
             self.error(.TooManyBits);
             ret();
         };
@@ -189,7 +191,7 @@ fn lex_bin(self: *Lexer) Unit = {
     
     ret :: @return;
     c := self.peek_c();
-    if(c.ne("0".ascii()).and(c.ne("1".ascii()))) {|
+    if c.ne("0".ascii()).and(c.ne("1".ascii())) {|
         self.error((Unexpected = self.peek_c().zext()));
         ret();
     };
@@ -198,7 +200,7 @@ fn lex_bin(self: *Lexer) Unit = {
     dowhile {|
         total *= 2;
         bits += 1;
-        if(bits.gt(64)) {|
+        if bits.gt(64) {|
             self.error(.TooManyBits);
             ret();
         };
@@ -253,19 +255,19 @@ fn one(self: *Lexer, type: TokenType) Unit = {
 
 fn eat_white_space_hit_end(self: *Lexer) bool = {
     break :: @return;
-    if(self.current.ge(self.src.len)) {|
+    if self.current.ge(self.src.len) {|
         self.start = self.current;
         self.put_token(.Eof);
         break(true);
     };
     loop {|
         continue :: @return;
-        if(self.peek_c().is_whitespace()) {|
+        if self.peek_c().is_whitespace() {|
             self.current += 1;
             continue();
         };
         
-        if(self.peek_c().eq("/".ascii())){|
+        if self.peek_c().eq("/".ascii()) {|
             @switch(self.peek_c(1)) {
                 @case("/".ascii()) => { // single line
                     dowhile {|

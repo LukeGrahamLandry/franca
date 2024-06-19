@@ -426,7 +426,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 #[cfg(not(feature = "cranelift"))]
                 let aarch = true;
 
-                if aarch {
+                if aarch && when == ExecStyle::Jit {
                     let res = emit_aarch64(self, f, when, &body);
                     self.tag_err(res)?;
                 }
@@ -540,7 +540,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         let result = self.tag_err(result);
         if let Ok(result) = &result {
-            assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}", self.program.log_type(ty.ret));
+            assert_eq!(result.bytes().len(), expected_ret_bytes as usize, "{}\n{}", self.program.log_type(ty.ret), self.program[f].body.log(self.pool));
             self.pop_state(state2);
         }
         // println!("Done {f:?} {}", self.pool.get(self.program[f].name),);
@@ -2740,7 +2740,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             }
             Expr::PtrOffset { .. } => unreachable!("compiled twice?"),
             &mut Expr::GetNamed(n) => err!(CErr::UndeclaredIdent(n)),
-            e => ice!("TODO: other `place=e;` --"),
+            _ => ice!("TODO: other `place=e;` --"),
         }
     }
 
@@ -2988,7 +2988,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             arg_expr.done = true; // this saves a lot of the recursing.
             
             // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
-            if !deny_inline && arg_expr.is_raw_unit() {
+            if !deny_inline && arg_expr.is_raw_unit() && !self.program.get_info(res).contains_pointers {
                 if let FuncImpl::Normal(FatExpr {
                     expr: Expr::Value { value }, ty: prev_ty, ..
                 }) = &self.program[fid].body {

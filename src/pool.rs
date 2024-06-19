@@ -31,8 +31,8 @@ impl Debug for Ident<'_> {
 struct Ptr<T: ?Sized>(*const T);
 
 pub struct StringPool<'pool> {
-    lookup: SyncUnsafeCell<Map<Ptr<str>, Ident<'pool>>>,
-    values: SyncUnsafeCell<Vec<Ptr<str>>>,
+    lookup: SyncUnsafeCell<Map<Ptr<[u8]>, Ident<'pool>>>,
+    values: SyncUnsafeCell<Vec<Ptr<[u8]>>>,
     constants: SyncUnsafeCell<ConstantData>,
 }
 
@@ -46,6 +46,10 @@ impl<'pool> StringPool<'pool> {
     }
 
     pub fn get(&self, i: Ident) -> &'pool str {
+        unsafe { &*(self.get_bytes(i) as *const [u8] as *const str) }
+    }
+
+    pub fn get_bytes(&self, i: Ident) -> &'pool [u8] {
         let v = unsafe { &*self.values.get() };
         // # Safety
         // Strings are not removed from the pool until its dropped.
@@ -62,16 +66,17 @@ impl<'pool> StringPool<'pool> {
     }
 
     pub fn intern(&self, s: &str) -> Ident<'pool> {
-        let temp: *const str = s;
-        let temp = temp as *mut str;
+        self.intern_bytes(s.as_bytes())
+    }
 
+    pub fn intern_bytes(&self, s: &[u8]) -> Ident<'pool> {
         let lookup = unsafe { &mut *self.lookup.get() };
-        if let Some(i) = lookup.get(&Ptr(temp)) {
+        if let Some(i) = lookup.get(&Ptr(s)) {
             return *i;
         }
 
-        let consts = unsafe { &mut *self.constants.get() }; // we already have the lock.
-        let alloc = Ptr(consts.push_str_zero_term(s));
+        let consts = unsafe { &mut *self.constants.get() };
+        let alloc = Ptr(consts.push_bytes_zero_term(s));
 
         let values = unsafe { &mut *self.values.get() };
         let i = Ident(values.len() as u32, PhantomData);
@@ -141,10 +146,10 @@ impl ConstantData {
         unsafe { &*slice_from_raw_parts(ptr as *const i64, i.len()) }
     }
 
-    pub fn push_str_zero_term(&mut self, s: &str) -> *const str {
-        let ptr = self.push_bytes(s.as_bytes()).as_ptr();
+    pub fn push_bytes_zero_term(&mut self, s: &[u8]) -> *const [u8] {
+        let ptr = self.push_bytes(s).as_ptr();
         self.push_bytes(&[0]);
-        unsafe { std::str::from_utf8_unchecked(&*slice_from_raw_parts(ptr, s.len())) }
+        slice_from_raw_parts(ptr, s.len())
     }
 
     pub fn push_bytes(&mut self, s: &[u8]) -> *const [u8] {

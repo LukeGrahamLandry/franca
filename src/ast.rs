@@ -1015,6 +1015,17 @@ impl<'p> Program<'p> {
             0 => TypeId::unit,
             1 => types[0],
             _ => {
+                // TODO: always
+                if types.len() > 50 {
+                    let first = types[0];
+                    if types.iter().all(|t| *t == first) {
+                        return self.intern_type(TypeInfo::Array {
+                            inner: first,
+                            len: types.len() as u32,
+                        });
+                    }
+                }
+
                 // TODO: dont allocate the string a billion times
                 let info = self
                     .make_struct(
@@ -1315,6 +1326,7 @@ impl<'p> Program<'p> {
         match &self[ty] {
             TypeInfo::Struct { fields, .. } => Some(fields.iter().map(|f| f.ty).collect()),
             &TypeInfo::Named(ty, _) => self.tuple_types(ty),
+            TypeInfo::Array { inner, len } => Some(vec![*inner; *len as usize]),
             _ => None,
         }
     }

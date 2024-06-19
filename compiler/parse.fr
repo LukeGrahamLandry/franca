@@ -8,7 +8,6 @@ Parser :: @struct(lex: Lexer, tasks: *List(ParseTask), alloc: Alloc, last: Token
 ParseErr :: @struct(span: Span, msg: Str);
 Prec :: @enum(i64) (
     None,
-    TypeModifier,
     Equality,
     Comparison,
     AddSub,
@@ -18,24 +17,47 @@ Prec :: @enum(i64) (
 );
 ParseRes :: Result(FatExpr, ParseErr);
 
-// TODO: non-existant field name for @tagged is a panic because its in a mut_replace. 
 fn parse_expr(self: *Parser, id: i64) ParseRes = {
+    todo();
+}
+
+// TODO: non-existant field name for @tagged is a panic because its in a mut_replace. 
+fn parse_expr(self: *Parser, prec: Prec) ParseRes = {
+    return :: @return;
     self.lex&.peek();
     // TODO: can't access field on rvalue. 
     // TODO: you can't return a pair at comptime if its not a pair of ints. (u32, u32) gives back 16 bytes from ffi::c and then compiler::jit crashes on it for being the wrong size. 
-    self.parse_prefix()
+    e := @try(self.parse_prefix(prec)) return;
+    self.parse_infix(e, prec)
 }
 
-fn parse_prefix(self: *Parser) ParseRes = {
+fn parse_prefix(self: *Parser, prec: Prec) ParseRes = {
     return :: @return;
+    loc := self.last.span;
     @match(self.peek()) {
         (fn Op(op) => {
-            todo();
+            f := @switch(op) {
+                @case(.Minus) => Flag.neg;
+                @case(.Bang) => Flag.not;
+                // TODO: don't require the arg or have better error message. -- Jun 18
+                @default fn(_: Operator) Flag => {
+                    @report_error("expected begin expression found non-prefix operator %", "") (return, self.last.span);
+                    Flag.unreachable_hack()
+                };
+            };
+            loc := self.last.span;
+            self.pop();
+            rhs := @try(self.parse_expr(Prec.Neg)) return;
+            f := self.box(self.get_named(f, loc));
+            arg := self.box(rhs);
+            call := self.expr((Call = (f = f, arg = arg)), loc);
+            return(self.parse_infix(call, prec));
         });
         (fn LeftSquiggle() => {
             todo();
         });
         (fn LeftParen() => {
+            // we're a prefix, so this is NOT a call. 
             todo();
         });
         (fn At() => @match(self.pop()) {
@@ -59,7 +81,7 @@ fn parse_prefix(self: *Parser) ParseRes = {
             todo();
         });
         (fn Amp() => {
-            todo();
+            @report_error("'&' is not a prefix operator. if you meant to take the address of a variable, use it as a suffix.%", "") (return, self.last.span);
         });
         (fn Question() => {
             todo();
@@ -71,7 +93,10 @@ fn parse_prefix(self: *Parser) ParseRes = {
             todo();
         });
         (fn Number(n) => {
-            todo();
+            e := self.expr((Value = (Small = (n, 8.trunc()))), loc);
+            e.ty = i64;
+            self.pop();
+            return(Ok = e);
         });
         (fn BinaryNum(n) => {
             todo();
@@ -80,10 +105,19 @@ fn parse_prefix(self: *Parser) ParseRes = {
             todo();
         });
         (fn Quoted(s) => {
-            todo();
+            e := self.expr((String = s.s), loc);
+            if s.escapes {|
+                f := self.box(self.get_named(.__String_Escapes, loc));
+                e = self.expr((Call = (f = f, arg = self.box(e))), loc);
+            };
+            
+            self.pop();
+            return(Ok = e);
         });
         (fn Symbol(name) => {
-            @report_error("An identifier! %", self.lex.pool.get(name)) (return, self.last.span);
+            e := self.expr((GetNamed = name), loc);
+            self.pop();
+            return(Ok = e);
         });
         @default => {
             @report_error("Expected begin expression %", 1) (return, self.last.span);
@@ -96,35 +130,113 @@ fn parse_infix(self: *Parser, prev: FatExpr, prec: Prec) ParseRes = {
     return :: @return;
     @match(self.peek()) {
         (fn Op(op) => {
-            todo();
-        });
-        (fn EqOp(op) => {
-            todo();
+            // TODO: destructuring: `prec, name := @switch ...`
+            next := @switch(op) {
+                @case(.Plus) => (Prec.AddSub, Flag.add);
+                @case(.Minus) => (Prec.AddSub, Flag.sub);
+                @case(.Star) => (Prec.MulDiv, Flag.mul);
+                @case(.Slash) => (Prec.MulDiv, Flag.div);
+                @case(.Less) => (Prec.Comparison, Flag.lt);
+                @case(.Greater) => (Prec.Comparison, Flag.gt);
+                @case(.LessEq) => (Prec.Comparison, Flag.le);
+                @case(.GreaterEq) => (Prec.Comparison, Flag.ge);
+                @case(.BangEq) => (Prec.Equality, Flag.ne);
+                @case(.EqEq) => (Prec.Equality, Flag.eq);
+                @case(.Bang) => {
+                    self.pop();
+                    // next token should be symbol. make SuffixMacro. return(parse_infix())
+                    todo()
+                };
+                @default fn(_: Operator) => {
+                    // update assignment operator. hopefully we're in a statement and that will handle it.
+                    return(Ok = prev);
+                    unreachable()
+                };
+            };
+            if(prec.lt(next._0)) {|
+                self.pop();
+                loc := self.last.span;
+                rhs := @try(self.parse_expr(next._0)) return;
+                f := self.box(self.get_named(next._1, loc));
+                arg := self.box(self.pair(prev, rhs, loc));
+                call := self.expr((Call = (f = f, arg = arg)), loc);
+                return(self.parse_infix(call, prec)); // TODO: tail
+            }{|
+                return(Ok = prev);  
+            };
         });
         (fn LeftParen() => {
+            // We're an infix, so this is a call, not a free-standing tuple/struct. 
             todo();
         });
         (fn Dot() => {
-            todo();
-        });
-        (fn Bang() => {
             todo();
         });
         (fn LeftSquiggle() => {
             todo();
         });
         (fn DoubleSquare() => {
-            todo();
+            self.pop();
+            e := self.bang(.deref, prev, self.last.span);
+            return(self.parse_infix(e, prec)); // TODO: tail
         });
         (fn Amp() => {
-            todo();
+            self.pop();
+            e := self.bang(.addr, prev, self.last.span);
+            return(self.parse_infix(e, prec)); // TODO: tail
         });
         (fn LeftSquare() => {
-            todo();
+            loc := self.last.span;
+            self.pop();
+            index := @try(self.parse_expr(Prec.None)) return;
+            
+            closing := self.pop();
+            // TODO: have a less ass shorthand for this. 
+            @match(closing) {
+                (fn RightSquare() => ());
+                @default => {
+                    @report_error("expected ']' after index expression %", "") (return, self.last.span);
+                    unreachable()
+                };
+            };
+            
+            e := self.bin_named_macro(Flag.operator_index, prev, index, loc);
+            return(self.parse_infix(e, prec)); // TODO: tail
         });
-        @default => return(prev);
+        @default fn()Unit => return(Ok = prev);
     };
     ParseRes.unreachable_hack()
+}
+
+fn get_named(self: *Parser, name: Flag, loc: Span) FatExpr = {
+    sym: Symbol = symbol_from_id((@as(i64) name).trunc());
+    self.expr((GetNamed = sym), loc)
+}
+
+fn bang(self: *Parser, name: Flag, arg: FatExpr, loc: Span) FatExpr = {
+    sym: Symbol = symbol_from_id((@as(i64) name).trunc());
+    self.expr((SuffixMacro = (name = sym, arg = self.box(arg))), loc)
+}
+
+fn bin_named_macro(self: *Parser, name: Flag, arg: FatExpr, target: FatExpr, loc: Span) FatExpr = {
+    handler := self.box(self.get_named(name, loc));
+    self.expr((PrefixMacro = (handler = handler, arg = self.box(arg), target = self.box(target))), loc)
+}
+
+fn expr(self: *Parser, e: Expr, loc: Span) FatExpr = 
+    (expr = e, loc = loc, ty = UnknownType, done = false);
+
+fn box(self: *Parser, e: FatExpr) *FatExpr = {
+    out := self.alloc.alloc(FatExpr, 1);
+    out.ptr[] = e;
+    out.ptr
+}
+
+fn pair(self: *Parser, lhs: FatExpr, rhs: FatExpr, loc: Span) FatExpr = {
+    out := self.alloc.alloc(FatExpr, 2);
+    out[0] = lhs;
+    out[1] = rhs;
+    self.expr((Tuple = (cap = 2, ptr = out.ptr, len = 2)), loc)
 }
 
 fn pop(self: *Parser) TokenType = {
@@ -149,22 +261,51 @@ fn peek(self: *Parser) TokenType = {
     }';
     result
 }
-//(Ok = (expr = (GetNamed = (id = 0.trunc())), loc = fuck, ty = UnknownType, done = true))
+
+// TODO: you need from_residual so you can have it work when different ok types but the same error type. 
+// TOOD: this doesn't even have to be a macro cause i have non-local returns... if i had better polymorphism. 
+#macro fn try(maybe: FatExpr, ret: FatExpr) FatExpr = '{
+    m := @[maybe];
+    if(m&.is_err(), => @[ret](m));
+    m.unwrap()
+}';
 
 #test fn parser_doesnt_crash() = {
     pool: StringPool = init(temp());
+    enumerate (::get_enum_names(Flag)) {i, name|
+        pool&.insert_owned(name[]);
+    };
+    
     codemap: CodeMap = init(temp());
-    src := "a + 1";
-    span := codemap&.add_file("name", src);
-    tasks: List(ParseTask) = list(temp());
-    ctx: Parser = (lex = init(pool&, span, src), tasks = tasks&, alloc = temp(), last = Token.zeroed());
-    tasks&.push((Pending = (src = src, span = span)));
-    res := ctx&.parse_expr(0);
-    @match(res) {
-        (fn Ok(t) => println("parsed!"));
-        (fn Err(e) Unit => @println("err! %", e.msg));
+    src := (
+        "a + 1;", 
+        "a[] + b[] * c;",
+        "a[] * c + b[];",
+        "-a + b;",
+        "a + -b == c[123];",
+        "a - -b > -c&[] != !true;",
+        "a <= c == b >= d;",
+        "hello&;",
+    )!slice;
+    for (src) {src|
+        span := codemap&.add_file("name", src);
+        tasks: List(ParseTask) = list(temp());
+        ctx: Parser = (lex = init(pool&, span, src), tasks = tasks&, alloc = temp(), last = Token.zeroed());
+        tasks&.push((Pending = (src = src, span = span)));
+        res := ctx&.parse_expr(Prec.None);
+        @match(res) {
+            (fn Ok(t) => {
+                out: List(u8) = list(temp());
+                t&.log(pool&, out&, 0);
+                println(out.items());
+                println(codemap&.source_slice(t.loc));
+            });
+            (fn Err(e) Unit => @println("err! %", e.msg));
+        };
     };
 }
 
 fn int(self: Prec) i64 = @as(i64) self;
 ::Ord(Prec);
+
+#redirect(Ty(i64, i64), bool) fn eq(a: Operator, b: Operator) bool;

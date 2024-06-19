@@ -544,7 +544,12 @@ impl<'z, 'p> BcToAsm<'z, 'p> {
 
     // TODO: refactor this. its a problem that im afraid of it! -- May 8
     fn stack_to_ccall_reg(&mut self, types: &[Prim]) {
-        debug_assert!(self.state.stack.len() >= types.len());
+        debug_assert!(
+            self.state.stack.len() >= types.len(),
+            "found {} things but wanted {:?}",
+            self.state.stack.len(),
+            types
+        );
         let mut next_int = 0;
         let mut next_float = 0;
 

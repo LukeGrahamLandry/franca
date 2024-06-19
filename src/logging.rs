@@ -232,7 +232,7 @@ impl<'p> Program<'p> {
         for info in &self.types {
             if let &TypeInfo::Named(ty, name) = info {
                 if let TypeInfo::Tagged { cases, .. } = &self[ty] {
-                    writeln!(out, "const {} = Unique$ @tagged(", self.pool.get(name),).unwrap();
+                    writeln!(out, "const {} = @tagged(", self.pool.get(name),).unwrap();
                     for (name, mut ty) in cases {
                         if let &TypeInfo::Named(inner, _) = &self[ty] {
                             // Not unique, name is probably just name of the case.
@@ -242,7 +242,7 @@ impl<'p> Program<'p> {
                     }
                     out += ");\n"
                 } else {
-                    writeln!(out, "const {} = Unique({});", self.pool.get(name), self.log_type(ty)).unwrap();
+                    writeln!(out, "const {} = ({});", self.pool.get(name), self.log_type(ty)).unwrap();
                 }
             }
         }

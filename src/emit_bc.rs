@@ -706,16 +706,29 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
             }
             Expr::Tuple(values) => {
                 debug_assert!(values.len() > 1, "no trivial tuples: {:?}", values);
-                let TypeInfo::Struct { fields, layout_done, .. } = &self.program[self.program.raw_type(expr.ty)] else {
-                    err!("Expr::Tuple should have struct type",)
-                };
-                assert!(*layout_done);
-                for (value, f) in values.iter().zip(fields.iter()) {
-                    if result_location == ResAddr {
-                        result.push(Bc::PeekDup(0));
-                        result.inc_ptr_bytes(f.byte_offset as u16);
+                match &self.program[self.program.raw_type(expr.ty)] {
+                    TypeInfo::Struct { fields, layout_done, .. } => {
+                        assert!(*layout_done);
+                        for (value, f) in values.iter().zip(fields.iter()) {
+                            if result_location == ResAddr {
+                                result.push(Bc::PeekDup(0));
+                                result.inc_ptr_bytes(f.byte_offset as u16);
+                            }
+                            self.compile_expr(result, value, result_location, false)?;
+                        }
                     }
-                    self.compile_expr(result, value, result_location, false)?;
+                    &TypeInfo::Array { inner, len } => {
+                        assert_eq!(values.len(), len as usize);
+                        let element_size = self.program.get_info(inner).stride_bytes;
+                        for value in values {
+                            if result_location == ResAddr {
+                                result.inc_ptr_bytes(element_size);
+                                result.push(Bc::PeekDup(0));
+                            }
+                            self.compile_expr(result, value, result_location, false)?;
+                        }
+                    }
+                    _ => err!("Expr::Tuple should have struct type",),
                 }
 
                 if result_location == ResAddr {
@@ -1195,8 +1208,19 @@ fn emit_relocatable_constant<'p>(ty: TypeId, value: &Values, program: &Program<'
     let raw = program.raw_type(ty);
     let jit_ptr = value.bytes().as_ptr();
 
+    // TODO: you want to do this for strings, so need to do it below where slices are handled,
+    //       but also i need to know which were constant and can be deduplicated.
+    //       cause what if they wanted a mutable byte array.
+    //       need @static to be different from @comptime_var or @constant
+    // let i = program.pool.intern_bytes(value.bytes());
+    // let jit_ptr = program.pool.get(i).as_ptr();
+
     if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
         return Ok(*cached);
+    }
+
+    if value.bytes().iter().all(|b| *b == 0) {
+        return Ok(program.baked.make(BakedVar::Zeros(value.bytes().len()), jit_ptr, ty));
     }
 
     // Eventually we'll recurse to something with no pointers. ie Str -> [u8; n]
@@ -1219,7 +1243,6 @@ fn emit_relocatable_constant_body<'p>(
     out: &mut Vec<BakedEntry>,
 ) -> Res<'p, ()> {
     let raw = program.raw_type(ty);
-    let jit_ptr = value.bytes().as_ptr();
 
     // if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
     //     return Ok(*cached);
@@ -1345,7 +1368,7 @@ fn emit_relocatable_constant_body<'p>(
                 err!("TODO: pointers in constant tagged union: {}", program.log_type(ty))
             }
         }
-        TypeInfo::Enum { raw, .. } => unreachable!(),
+        TypeInfo::Enum { .. } => unreachable!(),
         TypeInfo::VoidPtr => {
             if value.bytes().iter().all(|b| *b == 0) {
                 // You're allowed to have a constant null pointer (like for global allocator interface instances).

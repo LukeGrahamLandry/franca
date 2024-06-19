@@ -198,6 +198,7 @@ fn mix<'p, A: InterpSend<'p>, B: InterpSend<'p>>(extra: u128) -> u128 {
 
 pub mod c {
     use crate::bc::to_values;
+    use crate::bc::Prim;
     use crate::bc::Values;
     use crate::compiler::Compile;
     use crate::compiler::Res;
@@ -253,9 +254,14 @@ pub mod c {
                 _ => err!("bad byte size",),
             }
         } else if ret.size_slots == 2 {
-            // TODO: floats!
+            let (f, s) = program.program.prim_pair(f_ty.ret).unwrap();
             let r = arg8ret2(ptr, args.as_mut_ptr());
-            to_values(program.program, (r.fst, r.snd))
+            // TODO: floats!
+            match (f, s) {
+                (Prim::I64 | Prim::P64, Prim::I64 | Prim::P64) => to_values(program.program, (r.fst, r.snd)),
+                (Prim::I32, Prim::I32) => to_values(program.program, (r.fst as u32, r.snd as u32)),
+                _ => todo!(),
+            }
         } else {
             let _: i64 = unsafe { bounce(ptr, args.as_mut_ptr()) };
             let mem = indirect_ret.unwrap();

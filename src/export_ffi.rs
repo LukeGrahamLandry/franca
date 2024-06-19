@@ -557,7 +557,13 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
     ("fn __compiler_save_fatexpr_type(t: Type) Unit;", compiler_save_fatexpr_type as *const u8),
+    ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
+    ("fn get_compiler_vtable() *ImportVTable", get_compiler_vtable as *const u8),
 ];
+
+extern "C-unwind" fn get_compiler_vtable(_: &mut Compile) -> *const ImportVTable {
+    addr_of!(IMPORT_VTABLE)
+}
 
 extern "C-unwind" fn compiler_save_fatexpr_type(compiler: &mut Compile, f: TypeId) {
     compiler.program.fat_expr_type = Some(f);
@@ -739,8 +745,16 @@ extern "C-unwind" fn symbol_to_cstr(program: &mut &mut Program, symbol: i64) -> 
     })
 }
 
-extern "C-unwind" fn symbol_to_int(_: &mut &mut Program, symbol: u32) -> i64 {
-    symbol as i64
+extern "C-unwind" fn symbol_to_str<'p>(program: &mut &mut Program<'p>, symbol: i64) -> &'p str {
+    let symbol = symbol as u32;
+    hope(|| {
+        let symbol = program
+            .pool
+            .upcast(symbol) // TODO: return an error instead.
+            .unwrap_or_else(|| program.pool.intern(&format!("invalid symbol {symbol}")));
+        let s = program.pool.get(symbol);
+        Ok(s)
+    })
 }
 
 /// This must be kept in sync with the definition in unwind.fr!

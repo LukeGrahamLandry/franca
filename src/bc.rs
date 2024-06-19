@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::mem;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
-use crate::ast::{LabelId, Program, TypeInfo, Var};
+use crate::ast::{Program, TypeInfo, Var};
 use crate::emit_bc::ResultLoc;
 use crate::pool::Ident;
 use crate::{assert_eq, BitSet};
@@ -135,7 +135,7 @@ pub struct BakedVarId(pub u32);
 #[repr(C, i64)]
 #[derive(Debug, Clone)]
 pub enum BakedVar {
-    Zeros { bytes: usize },
+    Zeros(usize),
     Bytes(Vec<u8>),
     VoidPtrArray(Vec<BakedEntry>),
 }
