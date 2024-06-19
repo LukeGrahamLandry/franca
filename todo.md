@@ -5,6 +5,7 @@
 - sign extend
 - clear temp alloc when emitting for AOT
 - have an overload set that types can add to when they have special constant emit rules instead of the current hardcoded thing.
+- bake_relocatable_value overloads are not compiled lazily. all are done when compiling for AOT even if the type isn't needed.
 
 ## regressions
 

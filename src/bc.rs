@@ -141,7 +141,7 @@ pub enum BakedVar {
 }
 
 #[repr(C, i64)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum BakedEntry {
     Num(i64, Prim),
     FnPtr(FuncId),

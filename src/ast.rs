@@ -1,6 +1,6 @@
 //! High level representation of a Franca program. Macros operate on these types.
 use crate::{
-    bc::{Baked, Prim, Values},
+    bc::{Baked, BakedEntry, Prim, Values},
     compiler::{CErr, Compile, Res},
     err,
     export_ffi::BigOption,
@@ -864,10 +864,10 @@ pub struct Program<'p> {
     finished_layout_deep: BitSet,
     pub baked: Baked,
     pub inferred_type_names: Vec<Option<Ident<'p>>>,
-    // TODO: this could just be a !builtin, is that better?
-    pub save_cstr_t: Option<TypeId>,
     pub fat_expr_type: Option<TypeId>,
+    pub bake_os: Option<OverloadSetId>,
     pub primitives: RefCell<HashMap<(TypeId, u16, bool, bool), Vec<Prim>>>,
+    pub custom_bake_constant: HashMap<TypeId, unsafe extern "C" fn(*const ()) -> *const [BakedEntry]>,
 }
 
 impl_index_imm!(Program<'p>, TypeId, TypeInfo<'p>, types);
@@ -981,7 +981,8 @@ impl<'p> Program<'p> {
             const_bound_memo: Default::default(),
             types_extra: Default::default(),
             inferred_type_names: vec![],
-            save_cstr_t: None,
+            bake_os: None,
+            custom_bake_constant: Default::default(),
         };
 
         for (i, ty) in program.types.iter().enumerate() {
@@ -1713,6 +1714,7 @@ pub enum Flag {
     Struct,
     Tagged,
     Enum,
+    Bake_Relocatable_Value,
     _Reserved_Count_,
 }
 

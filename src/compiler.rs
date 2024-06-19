@@ -10,7 +10,7 @@ use core::slice;
 use std::ffi::CString;
 use std::fmt::Write;
 use std::hash::Hash;
-use std::mem::{self};
+use std::mem::{self, transmute};
 use std::ops::DerefMut;
 use std::ptr;
 use std::sync::atomic::AtomicIsize;
@@ -267,8 +267,44 @@ impl<'a, 'p> Compile<'a, 'p> {
             _ => err!("unknown macro invocation {:?} while bootstrapping", name),
         }
     }
-}
-impl<'a, 'p> Compile<'a, 'p> {
+
+    // :bake_relocatable_value
+    pub(crate) fn check_for_new_aot_bake_overloads(&mut self) -> Res<'p, ()> {
+        let os = self.program.bake_os.expect("cannot aot during bootstrapping.");
+        let prev = self.program[os].ready.len();
+        self.compute_new_overloads(os, Some(1));
+        // TODO: this will miss them if someone caused new things to resolve outside this function.
+        //       so if you ever call bake_relocatable_value manually. :FUCKED -- Jun 19
+        let current = self.program[os].ready.len();
+        let new = self.program[os].ready[prev..current].to_vec();
+        for f in new {
+            let args = &self.program[f.func].arg.bindings;
+            if args.len() != 1 {
+                continue;
+            }
+            let ret = self.program[f.func].finished_ret.unwrap();
+            let TypeInfo::Struct { fields, .. } = &self.program[ret] else {
+                continue;
+            };
+            // TODO: make sure its actually a Slice(BakedEntry)
+            if fields.len() != 2 {
+                continue;
+            }
+
+            let first = args[0].ty.unwrap();
+            let TypeInfo::Ptr(ty) = self.program[first] else { continue };
+            // TODO: you really want to do the compile lazily, so you only do it when you actually try to emit a type that needs it. 
+            //       but EmitBc doesn't have mutable access to the compiler so its painful.
+            //       but this is cripplingly stupid with the current model of eh fuck it just load all the code in the universe every time. 
+            //       especially once i overload it for things in generics, currently slices are a magic special case.    -- Jun 19  :SLOW
+            self.compile(f.func, ExecStyle::Jit)?;
+            let f = unwrap!(self.aarch64.get_fn(f.func), "failed to compile function");
+            let prev = self.program.custom_bake_constant.insert(ty, unsafe { transmute(f) });
+            assert!(prev.is_none(), "conflicting overload for bake AOT constant");
+        }
+        Ok(())
+    }
+
     #[track_caller]
     pub fn log_trace(&self) -> String {
         let mut out = String::new();
@@ -426,7 +462,8 @@ impl<'a, 'p> Compile<'a, 'p> {
                 #[cfg(not(feature = "cranelift"))]
                 let aarch = true;
 
-                if aarch && when == ExecStyle::Jit {
+                // && when == ExecStyle::Jit // TODO!!! this breaks llvm... which is odd. 
+                if aarch {
                     let res = emit_aarch64(self, f, when, &body);
                     self.tag_err(res)?;
                 }
@@ -525,7 +562,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         debug_assert_eq!(addr as usize % 4, 0);
 
         debugln_call!(
-            "Call {f:?} {} 0x{:x};      callees={:?}",
+            "Call {f:?} {} {};      callees={:?}",
             self.pool.get(self.program[f].name),
             addr as usize,
             self.program[f].callees

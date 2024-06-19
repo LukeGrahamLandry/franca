@@ -9,6 +9,7 @@
 #![allow(clippy::wrong_self_convention)]
 
 use codemap::Span;
+use std::mem::transmute;
 use std::ops::Deref;
 use std::ptr::{null, slice_from_raw_parts};
 
@@ -31,7 +32,12 @@ struct EmitBc<'z, 'p: 'z> {
     inlined_return_addr: Map<LabelId, ReturnAddr>,
 }
 
-pub extern "C" fn emit_bc<'p>(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
+pub extern "C" fn emit_bc<'p>(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>> {
+    if when == ExecStyle::Aot {
+        // :bake_relocatable_value
+        compile.check_for_new_aot_bake_overloads()?;
+    }
+
     let mut emit = EmitBc::new(compile.program, &compile.aarch64);
 
     let body = emit.compile_inner(f, when)?;
@@ -747,6 +753,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                 }
 
                 let want_emit_by_memcpy = value.bytes().len() > 16;
+                // TODO: you probably want to allow people to overload bake_relocatable_value even if !contains_pointers, but also there's no point. -- Jun 19
                 if result.when == ExecStyle::Aot && (self.program.get_info(expr.ty).contains_pointers || want_emit_by_memcpy) {
                     if result_location == PushStack || !want_emit_by_memcpy {
                         let mut out = vec![];
@@ -1242,6 +1249,15 @@ fn emit_relocatable_constant_body<'p>(
     dispatch: &[*const u8],
     out: &mut Vec<BakedEntry>,
 ) -> Res<'p, ()> {
+    // :bake_relocatable_value
+    if let Some(&f) = program.custom_bake_constant.get(&ty) {
+        unsafe {
+            let values = f(value.bytes().as_ptr() as *const ());
+            out.extend(&*values);
+        }
+        return Ok(());
+    }
+
     let raw = program.raw_type(ty);
 
     // if let Some(cached) = program.baked.lookup.borrow().get(&(jit_ptr as usize, ty)) {
@@ -1288,6 +1304,7 @@ fn emit_relocatable_constant_body<'p>(
             Ok(())
         }
         TypeInfo::Struct { fields, .. } => {
+            // TODO: use bake_relocatable_value overload for this.
             if fields.len() == 2 && fields[0].name == Flag::Ptr.ident() && fields[1].name == Flag::Len.ident() {
                 // TODO: actually construct the slice type from unptr_ty(ptr) and check that its the same.
                 // TODO: really you want to let types overload a function to do this,
@@ -1325,22 +1342,6 @@ fn emit_relocatable_constant_body<'p>(
                 out.push(BakedEntry::AddrOf(value));
                 out.push(BakedEntry::Num(len as i64, Prim::I64));
                 Ok(())
-            } else if ty == program.save_cstr_t.unwrap() {
-                assert_eq!(value.bytes().len(), 8);
-                let ptr: i64 = from_values(program, value.clone())?;
-                let mut ptr = ptr as *const u8;
-                let mut bytes = vec![];
-                unsafe {
-                    while *ptr != 0 {
-                        bytes.push(*ptr);
-                        ptr = ptr.offset(1);
-                    }
-                }
-                bytes.push(0);
-
-                let value = program.baked.make(BakedVar::Bytes(bytes), null(), TypeId::unknown);
-                out.push(BakedEntry::AddrOf(value));
-                Ok(())
             } else {
                 // If its not a slice, just do all the fields.
                 for f in fields {
@@ -1349,7 +1350,7 @@ fn emit_relocatable_constant_body<'p>(
                     let v = value.bytes()[f.byte_offset..f.byte_offset + info.stride_bytes as usize].to_vec();
                     emit_relocatable_constant_body(f.ty, &Values::many(v), program, dispatch, out)?;
                 }
-                return Ok(());
+                Ok(())
             }
         }
         TypeInfo::Tagged { cases } => {

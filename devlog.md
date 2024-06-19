@@ -1,6 +1,14 @@
+## (Jun 19)
+
+- have an overload set for changing how constants get baked so don't need a special case `__save_cstr_t`
+  to tell the compiler that it needs to walk until the null terminator when deciding what to put in the aot exe.
+  TODO: should have slices and lists use that too. lists don't need to keep thier unused capacity
+  and should change thier allocator maybe? (its a problem if something tries to call free on readonly memory).
+
 ## parsing (Jun 18)
 
 - self hosted math ops parsing and ast logging.
+- allow `for x {| .. }` without the extra brackets
 - sometimes convert struct types to arrays when large and all same types.
   should do more stress tests for weird generated code, like my swift parser generator problem.
 

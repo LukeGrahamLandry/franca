@@ -206,7 +206,7 @@ pub struct ImportVTable {
     get_function_name: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> Ident<'p>,
     comptime_arch: unsafe extern "C" fn() -> (i64, i64),
     get_mem_mark: unsafe extern "C" fn() -> usize,
-    emit_bc: for<'p> extern "C" fn(compile: &Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>>,
+    emit_bc: for<'p> extern "C" fn(compile: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> Res<'p, FnBody<'p>>,
     get_type_meta: extern "C" fn(compile: &Compile, ty: TypeId) -> TypeMeta,
     debug_log_baked_constant: extern "C" fn(compile: &Compile, id: BakedVarId),
     get_baked: extern "C" fn(compile: &Compile, id: BakedVarId) -> BakedVar,
@@ -510,7 +510,6 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
     ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
-    ("fn __save_cstr_t(T: Type) Unit", save_cstr_t as *const u8),
     ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
@@ -559,7 +558,18 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("fn __compiler_save_fatexpr_type(t: Type) Unit;", compiler_save_fatexpr_type as *const u8),
     ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
     ("fn get_compiler_vtable() *ImportVTable", get_compiler_vtable as *const u8),
+    ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
+    ("fn __save_bake_os(os: OverloadSet) Unit", save_bake_os as *const u8),
 ];
+
+extern "C-unwind" fn save_bake_os(comp: &mut Compile, os: OverloadSetId) {
+    comp.program.bake_os = Some(os);
+}
+
+// TODO: version of this that allows caching? but have to think more about when you're allowed to deduplicate.
+extern "C-unwind" fn bake_value(comp: &mut Compile, v: BakedVar) -> BakedVarId {
+    comp.program.baked.make(v, null(), TypeId::unknown)
+}
 
 extern "C-unwind" fn get_compiler_vtable(_: &mut Compile) -> *const ImportVTable {
     addr_of!(IMPORT_VTABLE)
@@ -570,9 +580,6 @@ extern "C-unwind" fn compiler_save_fatexpr_type(compiler: &mut Compile, f: TypeI
 }
 extern "C-unwind" fn save_slice_t(compiler: &mut Compile, f: FuncId) {
     compiler.make_slice_t = Some(f);
-}
-extern "C-unwind" fn save_cstr_t(compiler: &mut Compile, t: TypeId) {
-    compiler.program.save_cstr_t = Some(t);
 }
 
 extern "C-unwind" fn get_size_of(compiler: &mut Compile, ty: TypeId) -> i64 {

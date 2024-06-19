@@ -4,8 +4,64 @@ State :: @struct(
     x: f64,
     y: f64,
     dx: f64,
-    dy: f64
+    dy: f64,
+    // TODO: not all fields have default values! :FUCKED
+    world: World = (),
 );
+
+World :: @struct(
+    farm: List(Planted),
+    shelves: List(Shelf),
+    shops: List(Shop),
+    requests: List(CropType),
+    player: Player,
+    money: i64 = 20,
+    timer: i64 = 60,
+    farm_area: Rect,
+);
+
+Player :: @struct(pos: Pos, inventory: ?Object = .None, dx: f64 = 0.0, dy: f64 = 0.0);
+Growth :: @enum(Seed, Ready);
+CropType :: @enum(Tomato, Potato, Acorn, Tree);
+Crop :: @struct(ty: CropType, age: Growth);
+Planted :: @struct(pos: Pos, drought: f64 = 0.0, crop: Crop);
+Object :: @tagged(
+    crop: Crop,
+    Scarecrow,
+    Sprinkler,
+    Fertalizer,
+    CrowBaton,
+    Shelf,
+    Wall,
+);
+Shelf :: @struct(
+    pos: Pos, 
+    holding: ?Object = .None,
+    crow_hp: i64 = 0,
+    scarecrow: bool = false,
+);
+Shop :: @struct(
+    pos: Pos,
+    price: i64 = 0,
+    item: ?Object = .None,
+);
+
+allocator :: libc_allocator;
+
+fn load_default_world(self: *World) Unit = {
+    self.player =  (pos = (x = 50.0, y = 50.0));
+    self.shelves = list(allocator);
+    range(0, 5) {i|
+        self.shelves&.push((pos = (x = i.float().mul(75.0).add(350.0), y = 200.0)));
+    };
+    self.shops = list(allocator);
+    range(0, 2) {x|
+        range(0, 5) {y|
+            self.shops&.push((pos = (x = x.float().mul(75.0).add(175.0), y = y.float().mul(75.0).add(300.0))));
+        };
+    };
+    self.farm_area = (pos = (x = 350.0, y = 300.0), w = 500.0, h = 300.0);
+}
 
 do_init :: fn(userdata: rawptr) Unit = {
     state := State.ptr_from_raw(userdata);
@@ -27,15 +83,42 @@ do_init :: fn(userdata: rawptr) Unit = {
     sdtx_setup(desc&);
     
     desc := SgPipelineDesc.zeroed();
+    // This makes transperency work
+    colour := desc.colors&[0]&;
+    // TODO: struct update sytax. colour.blend = (enabled = true, src_factor_rgb = .SRC_ALPHA, dst_factor_rgb = .ONE_MINUS_SRC_ALPHA, ..)
+    colour.blend.enabled = true;
+    colour.blend.src_factor_rgb = .SRC_ALPHA;
+    colour.blend.dst_factor_rgb = .ONE_MINUS_SRC_ALPHA;
+    // I think you need this if you do z index stuff and it doesn't work without it. 
+    // For now the player is the only non-opaque thing so its easy to just draw things in the right order. 
+    //desc.alpha_to_coverage_enabled = true;
+    //desc.depth.write_enabled = true;
+    //desc.depth.compare = .LESS_EQUAL;
+    
     state.pipe = sgl_make_pipeline(desc&);
     state.pass_action.colors&[0].load_action = .CLEAR;
-    state.pass_action.colors&[0].clear_value.r = 1.0.cast();
+    state.pass_action.colors&[0].clear_value = (r = 0.3.cast(), g = 0.3.cast(), b = 0.3.cast(), a = 1.0.cast());
+    
+    state.world&.load_default_world();
     
     state.x = 0.0;
     state.y = 0.0;
     state.dx = 0.2;
     state.dy = 0.2;
 };
+
+Colour :: @struct(r: i64, g: i64, b: i64, a := 255);
+Pos :: @struct(x: f64, y: f64);
+red: Colour : (r = 255, g = 0, b = 0);
+green: Colour : (r = 0, g = 255, b = 0);
+blue: Colour : (r = 0, g = 0, b = 255);
+yellow: Colour : (r = 250, g = 250, b = 0);
+brown: Colour : (r = 150, g = 70, b = 20);
+light_brown: Colour : (r = 180, g = 110, b = 70);
+black_transparent: Colour : (r = 0, g = 0, b = 0, a = 100);
+
+Rect :: @struct(pos: Pos, w: f64, h: f64);
+base_size :: 50.0;
 
 do_render :: fn(userdata: rawptr) Unit = {
     state := State.ptr_from_raw(userdata);
@@ -50,18 +133,18 @@ do_render :: fn(userdata: rawptr) Unit = {
     sdtx_pos(state.x.cast(), state.y.cast());
     sdtx_puts("hello world".maybe_borrow_cstr(temp()));
     
-    
     sgl_begin_quads();
     
-    fn draw_square(x: f64, y: f64, size: f64) Unit = {
+    fn draw(area: Rect, colour: Colour) Unit = {
+        sgl_c4b(colour.r.trunc(), colour.g.trunc(), colour.b.trunc(), colour.a.trunc());
+        
         w := sapp_width().intcast().float();
         h := sapp_height().intcast().float();
-        half_size := size.div(2.0);
         
-        x1 := x.sub(half_size).div(w).sub(1.0).cast();
-        x2 := x.add(half_size).div(w).sub(1.0).cast();
-        y1 := y.sub(half_size).div(h.neg()).add(1.0).cast();
-        y2 := y.add(half_size).div(h.neg()).add(1.0).cast();
+        x1 := area.pos.x.sub(0.0).div(w).sub(1.0).cast();
+        x2 := area.pos.x.add(area.w).div(w).sub(1.0).cast();
+        y1 := area.pos.y.sub(0.0).div(h.neg()).add(1.0).cast();
+        y2 := area.pos.y.add(area.h).div(h.neg()).add(1.0).cast();
         
         sgl_v2f(x1, y1);
         sgl_v2f(x2, y1);
@@ -69,10 +152,35 @@ do_render :: fn(userdata: rawptr) Unit = {
         sgl_v2f(x1, y2);
     }
     
+    fn draw_square(x: f64, y: f64, size: f64, colour: Colour) Unit = 
+        draw(@as(Rect) (pos = (x = x, y = y), w = size, h = size), colour);
+    
+    
+    // TODO
+    //fn draw_object(ty: Object, pos: Pos) Unit = {
+    //    @match(ty) {
+    //    }
+    //}
+    
     sgl_load_identity();
-    draw_square(100.0, 100.0, 20.0);
-    draw_square(200.0, 200.0, 20.0);
-    draw_square(0.0, 0.0, 20.0);
+    draw_square(100.0, 100.0, 20.0, yellow);
+    draw_square(200.0, 200.0, 20.0, green);
+    draw_square(0.0, 0.0, 20.0, blue);
+    
+    state.world.farm_area.draw(light_brown);
+    each state.world.shelves {obj|
+        draw_square(obj.pos.x, obj.pos.y, base_size, brown);
+    };
+    each state.world.shops {obj|
+        draw_square(obj.pos.x, obj.pos.y, base_size, light_brown);
+    };
+    
+    fn draw(player: *Player) Unit = {
+        draw_square(player.pos.x, player.pos.y, base_size, black_transparent);
+    }
+    
+    state.world.player&.draw();
+    
     
     sgl_end();
     
@@ -121,6 +229,7 @@ fn main() Unit = {
     desc.user_data = State.raw_from_ptr(state&);
     // TODO: I can't decide if this would be creepy as an auto cast.
     desc.logger.func = (@resolve(@type desc.logger.func) slog_func)!fn_ptr;
+    desc.window_title = "Arstotzkan Farmer 4".maybe_borrow_cstr(temp());
     sapp_run(desc&);
 }
 
@@ -144,7 +253,7 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     
     is_x86 := (@as(i64)arch_os._0).eq(@as(i64) Arch.X86_64);
     //if(not(is_x86), => print_stacktrace_on_panic()); // TODO: this doesn't work! the function doesn't exist when trying to compile driver even if we don't call it
-        
+    
     resolve_comptime_import :: fn(userdata: rawptr, comp: Compiler, f: FuncId, lib_name: Symbol, fn_name: Symbol) ?rawptr = {
         userdata := UserData.ptr_from_raw(userdata);
         // TODO: can't call @println here?? oh it doesnt like when no %s?
