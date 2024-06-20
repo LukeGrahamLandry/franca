@@ -22,6 +22,7 @@ ProgramEntry :: @enum(i64) (
 // TODO: really need to fix this
 #redirect(Ty(i64, i64), bool) fn eq(a: ProgramEntry, b: ProgramEntry) bool;
 
+// TODO: they need to pass target arch for !asm functions. 
 fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntry) BucketArray(u8) = {
     s: EmitLlvm = (comp = comp, out = init(1024, alloc), current = BbId.zeroed());
     gen: CodeGen(EmitLlvm) = (
@@ -64,14 +65,17 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         index: i64 = fid.to_index().zext();
         real_name := {gen.backend.comp.vtable.get_string}(gen.backend.comp.data, func.name);
         @fmt(gen.backend.out&.current(), ";F%: %\n", index, real_name);
-        //{comp.vtable.debug_log_bc}(comp.data, body&);
+        
         if(body.blocks.len.eq(0)){|
             success := gen.backend&.emit_special(comp, func.body&, func, body&); 
+            if (not(success)){|
+                // TODO: pass in the arch
+                success = gen.backend&.emit_special_asm(comp, func.body&, func, body&, Arch.Aarch64); 
+            };
             if (not(success)){|
                 {comp.vtable.debug_log_bc}(comp.data, body&);
             };
             //assert(success, "failed to emit speciai function"); // TODO
-            // TODO: handle import
             continue();
         };
         gen.body = body&;
@@ -200,15 +204,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
         (fn DynamicImport(name) => { 
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
             import_name := {comp.vtable.get_string}(comp.data, name[]);
-            self.out&.push_all("declare ccc ");
-            self.write_header(bc, import_name) {arg_index|
-                args := func.arg.bindings.items();
-                arg := args[arg_index].name.Var.name; // TODO: why don't I need special indirect return handling here.?
-                arg := {comp.vtable.get_string}(comp.data, arg);
-                arg := @format("%%", "%", arg) temp();
-                arg.items()
-            };
-            self.out&.push_all(";\n");
+            self.forward_declare(bc, false, import_name);
             
             self.out&.push_all("define private ccc ");
             name := @format("F%", bc.func.to_index()) temp();
@@ -253,7 +249,41 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             @fmt(self.out&.current(), "{\n%}\n", ir);
             return(true);
         });
-        // TODO: JittedAarch64 as inline assembly.
+        @default fn() Unit => return(false);
+    };
+    false
+}
+
+fn forward_declare(self: *EmitLlvm, bc: *FnBody, private: bool, name: Str) Unit = {
+    self.out&.push_all("declare ccc ");
+    if private {|
+        self.out&.push_all("private ");
+    };
+    self.write_header(bc, name) {arg_index| (@format("%v%", "%", arg_index) temp()).items() };
+    self.out&.push_all(";\n");
+}
+
+fn emit_special_asm(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc: *FnBody, arch: Arch) bool = {
+    return :: @return;
+    @match(body) {
+        (fn Merged(parts) => { 
+            each(parts[].items()) {check: *FuncImpl| 
+                if(self.emit_special_asm(comp, check, func, bc, arch), => return(true));
+            };
+        });
+        (fn JittedAarch64(code) => { 
+            if(arch.ne(Arch.Aarch64), => { return(false); });
+            name := @format("F%", bc.func.to_index()) temp();
+            self.forward_declare(bc, false, name.items());
+            
+            @fmt(self.out&.current(), "module asm \"_F%:\"\n", bc.func.to_index());
+            for code.items() {inst|
+                v := @as(i64) inst.zext();
+                @fmt(self.out&.current(), "module asm \".word %\"\n", v);
+            };
+            
+            return(true);
+        });
         @default fn() Unit => return(false);
     };
     false
@@ -433,16 +463,26 @@ fn inst_offset(self: *EmitLlvm, ptr: EmitLlvm.Val, bytes: u16) EmitLlvm.Val = {
     done
 }
 
+MAX_I64 :: 1.shift_left(32).sub(1);
+
 fn inst_literal(self: *EmitLlvm, value: i64, ty: Prim) EmitLlvm.Val = {
     v := self.get_var(ty);
     self.out&.current().reserve(20);
     // TODO: use @switch here. 
     if(ty.eq(.F64)){|
+        // for f64, llvm wants the bits as hex. 
         h := fmt_hex(value);
         @fmt(self.out&.current(), "   % = fadd double %, 0.0\n", v, h); 
     } {|
         if(ty.eq(.F32)){|
-            panic("TODO: f32 llvm const needs to use fewer bits");
+            // for f32, llvm wants an f64 as hex that happens to be exactly representable as f32. 
+            // but we store it as an f32 on the bottom with the high bits zeroed. 
+            assert(value.lt(MAX_I64), "ICE: too many bits for f32");
+            value: u32 = value.trunc();    // the bits we want to load
+            value: f32 = value.bitcast();  // the number we want to load
+            value: f64 = value.cast();     // the same numerical value
+            value: i64 = value.bitcast();  // the bits we need to give llvm
+            // TODO: does it change if you try to print here??????
             h := fmt_hex(value);
             @fmt(self.out&.current(), "   % = fadd float %, 0.0\n", v, h); 
         } {|

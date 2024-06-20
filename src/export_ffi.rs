@@ -407,14 +407,6 @@ unsafe extern "C" fn get_function_name<'p>(c: &mut Compile<'_, 'p>, f: FuncId) -
 // TODO: use the right int types
 // TODO: parse header files for signatures, but that doesn't help when you want to call it at comptime so need the address.
 pub const LIBC: &[(&str, *const u8)] = &[
-    // #[cfg(target_arch = "aarch64")]
-    // ("fn __clear_cache(beg: rawptr, beg: rawptr) Unit", __clear_cache as *const u8),
-
-    // #[cfg(target_os = "macos")]
-    // ("fn _NSGetArgc() *i64", _NSGetArgc as *const u8), // TODO: i32
-    // #[cfg(target_os = "macos")]
-    // ("fn _NSGetArgv() **CStr", _NSGetArgv as *const u8),
-    ("fn get_errno() i64", get_errno as *const u8),
     ("fn temp_start_raw_terminal(fd: Fd) Unit", start_raw as *const u8),
     ("fn temp_end_raw_terminal(fd: Fd) Unit", end_raw as *const u8),
 ];
@@ -834,10 +826,6 @@ extern "C-unwind" fn function_name<'p>(program: &mut &mut Program<'p>, f: FuncId
 
 extern "C-unwind" fn index_to_func_id(_: &mut &mut Program, f: usize) -> FuncId {
     FuncId::from_index(f)
-}
-
-extern "C-unwind" fn get_errno() -> i32 {
-    io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 extern "C-unwind" fn make_int_type(program: &mut &mut Program<'_>, bit_count: i64, signed: bool) -> TypeId {
