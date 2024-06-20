@@ -99,6 +99,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         @case(.TestRunnerMain) => {
             gen.backend.out&.push_all("define ccc i64 @main(){\n");
             i := 1;
+            // TODO: warn if fns has duplicates
             for (fns) {f|
                 func := {comp.vtable.get_function}(comp.data, f);
                 // note: this only works because Unit has a fixed typeid value
@@ -113,6 +114,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         };
         @case(.GiveMeTheCodeAndGiveItToMeRaw) => ();
         @case(.ExportWithNames) => {
+            // TODO: warn if fns has duplicates
             for(fns){fid|
                 gen.backend&.write_export_bounce(fid);
             };
@@ -201,7 +203,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             self.out&.push_all("declare ccc ");
             self.write_header(bc, import_name) {arg_index|
                 args := func.arg.bindings.items();
-                arg := args[arg_index].name.Var.name;
+                arg := args[arg_index].name.Var.name; // TODO: why don't I need special indirect return handling here.?
                 arg := {comp.vtable.get_string}(comp.data, arg);
                 arg := @format("%%", "%", arg) temp();
                 arg.items()
@@ -212,7 +214,18 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             name := @format("F%", bc.func.to_index()) temp();
             values: List(LlvmVal) = list(temp());
             self.write_header(bc, name.items()) {arg_index|
-                ty := bc.signeture.args[arg_index]; // TODO: indirect ret
+                ::if(Prim);
+                // TODO: format this better. 
+                ty: Prim = if(bc.signeture.first_arg_is_indirect_return){|
+                    // TODO: only sokol tests this 
+                    if arg_index.eq(0) {|
+                        Prim.P64
+                    }{|
+                        bc.signeture.args[arg_index.sub(1)]
+                    }
+                }{|
+                    bc.signeture.args[arg_index]
+                };
                 values&.push((ty = ty, id = arg_index));
                 s := @format("%v%", "%", arg_index) temp();
                 s.items()
@@ -224,7 +237,6 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             };
             self.inst_return(ret);
             self.out&.current().push_all("}\n");
-            
             return(true);
         });
         (fn LlvmIr(code) => { 

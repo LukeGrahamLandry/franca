@@ -319,29 +319,41 @@ fn driver(vtable: *ImportVTable) Unit #export = {
     main_sym := {vtable.intern_string}(comp, "main");
     main_f := {vtable.find_unique_func}(comp, main_sym).unwrap();
     {vtable.compile_func}(comp, main_f, .Jit).unwrap();
+
+    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
+    {vtable.make_jitted_exec}(comp);
+    f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
+    //f();
+    //print_stacktrace_on_panic();
     
-    /* 
-    c := {vtable.emit_c}(comp, (main_f)!slice, false).unwrap();
+    ir_text := emit_llvm((data = comp, vtable = vtable), temp(), (main_f)!slice, .ExportWithNames);
+    out := open_temp_file();
+    for(ir_text&){bucket|
+        out.fd&.write(bucket);
+    };
+    @println("Write llvm ir to %", out&.s_name());
+
     c_file := open_temp_file();
-    c_file.fd&.write(c);
+    c_file.fd&.write(SOKOL_C);
+    // TODO: compile static sokol once and just link against it. 
+    //       currently if i comment out the whole main and just print hello world, it saves 0.050 / 1.000 seconds 
+    //       vs  0.238 without linking sokol, which is still slow as fuck.
+    //       so the whole time is it compiling sokol from scratch. 
+    //       tho just jit hello world like that is still 0.079, which... isn't fast.
+    //       the hello world example is 0.028 so i guess its 40 ms to compile this meta program? no down to 0.060 if you don't emit llvm ir (which involes recompiling bytecode). 
     args := macos_args.clone(temp());
     args&.push_all(common_args);
     args&.push(c_file&.s_name());
-    warnings := clang_hack_ignore_warning_args;
-    args&.push_all(warnings&.slice());
-    
-    ::display_slice(Str);
-    @println("building sokol dylib for runtime: %", args.items());
+    args&.push_all(("-x", "ir", out&.s_name(), "-o", "farm.out")!slice);    
+    //args&.push("-O2");
+    @println("building aot exe: %", args.items());
     success := run_cmd_blocking(CLANG_PATH, args.items());
     assert(success, "clang failed");
     
     c_file.remove(); // TODO: defer
-    */
-    
-    
-    ptr := {vtable.get_jitted_ptr}(comp, main_f).unwrap();
-    {vtable.make_jitted_exec}(comp);
-    f := assume_types_fn(Arg = Unit, Ret = Unit, ptr = ptr);
-    f();
+    out.remove(); // TODO: defer
     
 }
+
+#include_std("compiler/backend/llvm.fr");
+#include_std("compiler/backend/walk_bc.fr");
