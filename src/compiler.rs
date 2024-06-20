@@ -162,7 +162,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let value = to_values(self.program, expect)?;
         let f = self.as_literal(unwrap!(self.make_slice_t, "slice type not ready!"), loc)?;
         // f.ty = ty; // TODO: it doesn't compile the function if the type here is FuncId?
-        let a = FatExpr::synthetic_ty(Expr::Value { value }, loc, TypeId::ty);
+        let a = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, loc, TypeId::ty);
         let s_ty = FatExpr::synthetic(Expr::Call(Box::new(f), Box::new(a)), loc);
         self.immediate_eval_expr_known(s_ty)
     }
@@ -987,7 +987,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             // println!("renumber ret: {} to {}", old_ret_var.log(self.pool), new_ret_var.log(self.pool));
             self.program.next_var = expr_out.renumber_vars(self.program.next_var, &mut mapping, self); // Note: not renumbering on the function. didn't need to clone it.
             let value = to_values(self.program, ret_label)?;
-            self.save_const(new_ret_var, Expr::Value { value }, label_ty, loc)?;
+            self.save_const(new_ret_var, Expr::Value { value, coerced: true }, label_ty, loc)?;
         }
         
         let res = self.compile_expr(expr_out, hint.into())?;
@@ -1269,7 +1269,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     pub fn find_const(&mut self, name: Var<'p>) -> Res<'p, Option<(Values, TypeId)>> {
         if let Some(s) = self[name.scope].constants.get(&name) {
             if let Some(known) = s.1.ty() {
-                if let Expr::Value { value } = &s.0.expr {
+                if let Expr::Value { value, .. } = &s.0.expr {
                     let ty = s.0.ty;
                     debug_assert!(!ty.is_unknown());
                     debug_assert_eq!(ty, known);
@@ -1337,7 +1337,7 @@ impl<'a, 'p> Compile<'a, 'p> {
     #[track_caller]
     pub fn func_expr(&mut self, id: FuncId) -> (Expr<'p>, TypeId) {
         if self.program[id].finished_ret.is_some() {
-            (Expr::Value { value: (id.as_raw()).into() }, self.program.func_type(id))
+            (Expr::Value { value: (id.as_raw()).into(), coerced: true }, self.program.func_type(id))
         } else {
             (Expr::WipFunc(id), FuncId::get_or_create_type(self.program))
         }
@@ -1392,8 +1392,9 @@ impl<'a, 'p> Compile<'a, 'p> {
 
         expr.ty = res;
         if !old.is_unknown() {
+            // TODO: make work with new coercion
             // TODO: cant just assert_eq because it does change for rawptr.
-            self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
+            // self.type_check_arg(expr.ty, old, "sanity ICE old_expr")?;
         }
 
         Ok(res)
@@ -1516,8 +1517,17 @@ impl<'a, 'p> Compile<'a, 'p> {
                     self.compile_expr(expr, requested)?
                 } else if let Some((value, ty)) = self.find_const(*var)? {
                     expr.set(value.clone(), ty);
+                    if let Some(req) = requested {
+                        if ty != req {
+                            let Expr::Value { value, coerced } = &mut expr.expr else{ unreachable!() };
+                            assert!(!*coerced, "const mismatch. {} vs {} but already coerced", self.program.log_type(expr.ty), self.program.log_type(req));
+                            self.coerce_constant(value, ty, req)?;
+                            *coerced = true;
+                            expr.ty = req;
+                        }
+                    }
                     expr.done = true;
-                    ty
+                    expr.ty
                 } else {
                     let var = *var;
                     where_the_fuck_am_i(self, expr.loc);
@@ -1525,8 +1535,16 @@ impl<'a, 'p> Compile<'a, 'p> {
                 }
             }
             Expr::GetNamed(name) => err!("Undeclared Ident {}", self.pool.get(*name)), //err!(CErr::UndeclaredIdent(*name)),
-            Expr::Value { .. } => {
-                debug_assert!(!expr.ty.is_unknown(), "Value expr must have type");
+            Expr::Value { value, coerced } => {
+                debug_assert!(!prev_ty.is_unknown(), "Value expr must have type");
+                if let Some(req) = requested {
+                    if prev_ty != req {
+                        assert!(!*coerced, "const mismatch. {} vs {} but already coerced", self.program.log_type(expr.ty), self.program.log_type(req));
+                        self.coerce_constant(value, prev_ty, req)?;
+                        *coerced = true;
+                        expr.ty = req;
+                    }
+                }
                 expr.done = true;
                 expr.ty
             }
@@ -1565,7 +1583,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                             let arg = FatExpr::synthetic(Expr::SuffixMacro(Flag::Slice.ident(), arg), loc);
                             let f = self.program.find_unique_func(Flag::Unquote_Macro_Apply_Placeholders.ident()).unwrap(); // TODO
                             let _ = self.infer_types(f)?.unwrap();
-                            let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into() }, loc, self.program.func_type(f));
+                            let f = FatExpr::synthetic_ty(Expr::Value { value: (f.as_raw()).into(), coerced: true }, loc, self.program.func_type(f));
                             *expr = FatExpr::synthetic_ty(Expr::Call(Box::new(f), Box::new(arg)), loc, ty);
                             self.compile_expr(expr, requested)?
                         }
@@ -1600,7 +1618,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                         let res = self.compile_expr(arg, requested)?;
                         let ty = res;
                         let arg = *mem::take(arg);
-                        let value = if let Expr::Value { value } = arg.expr {
+                        let value = if let Expr::Value { value, .. } = arg.expr {
                             value
                         } else {
                             // TODO: its a bit silly that i have to specifiy the type since the first thing it does is compile it
@@ -1928,7 +1946,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Poison => ice!("POISON",),
             Expr::WipFunc(_) => return Ok(None),
             Expr::Cast(_) => unreachable!("@as puts type"),
-            Expr::Value { value } => unreachable!("{value:?} requires type"),
+            Expr::Value { value, .. } => unreachable!("{value:?} requires type"),
             Expr::Call(f, arg) => {
                 if let Expr::GetVar(i) = f.deref_mut().deref_mut() {
                     if i.kind == VarType::Const {
@@ -1995,7 +2013,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 match self.compile_expr(handler, Some(TypeId::overload_set)) {
                     Ok(_) => {
                         // TODO: allow Fn and FnPtr as well.
-                        let os: OverloadSetId = if let Expr::Value { value } = &handler.expr {
+                        let os: OverloadSetId = if let Expr::Value { value, .. } = &handler.expr {
                             from_values(self.program, value.clone())?
                         } else {
                             self.immediate_eval_expr_known(*handler.clone())?
@@ -2062,7 +2080,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     Flag::If => return Ok(None),
                     Flag::As => {
                         // TODO: sad day
-                        if let Expr::Value { value } = &mut arg.expr {
+                        if let Expr::Value { value, .. } = &mut arg.expr {
                             let ty = unwrap!(self.program.tuple_types(arg.ty), "TODO: non-trivial pattern matching");
                             assert_eq!(ty[0], TypeId::ty, "@as expected type");
                             let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
@@ -2070,10 +2088,11 @@ impl<'a, 'p> Compile<'a, 'p> {
                             assert!(ty.len() == 2);
                             let rest_ty = ty[1];
                             let parts = vec![
-                                FatExpr::synthetic_ty(Expr::Value { value: ty_val }, arg.loc, TypeId::ty),
+                                FatExpr::synthetic_ty(Expr::Value { value: ty_val, coerced: true }, arg.loc, TypeId::ty),
                                 FatExpr::synthetic_ty(
                                     Expr::Value {
-                                        value: Values::many(reader.bytes[reader.i..].to_vec()),
+                                        value: Values::many(reader.bytes[reader.i..].to_vec()), 
+                                        coerced: true
                                     },
                                     arg.loc,
                                     rest_ty,
@@ -2124,7 +2143,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         let ty = T::get_or_create_type(self.program);
         self.program.finish_layout_deep(ty)?;
         let value = to_values(self.program, t)?;
-        let mut e = FatExpr::synthetic_ty(Expr::Value { value }, loc, ty);
+        let mut e = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, loc, ty);
         e.done = true;
         Ok(e)
     }
@@ -2377,7 +2396,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             Expr::Call(f, arg) => {
                 // !slice and !addr can't be const evaled!
                 if !matches!(arg.expr, Expr::SuffixMacro(_, _)) {
-                    let val_ty = if let Expr::Value { value } = &f.expr {
+                    let val_ty = if let Expr::Value { value, .. } = &f.expr {
                         Some((value.clone(), f.ty))
                     } else if let Expr::GetVar(var) = f.expr {
                         self.find_const(var)?
@@ -2451,6 +2470,7 @@ impl<'a, 'p> Compile<'a, 'p> {
         Ok(func_id)
     }
 
+    // TODO: coerce_constant?
     pub fn immediate_eval_expr(&mut self, mut e: FatExpr<'p>, ret_ty: TypeId) -> Res<'p, Values> {
         self.wip_stack.push((None, ExecStyle::Jit)); // :PushConstFnCtx
         self.program.finish_layout(ret_ty)?;
@@ -2484,6 +2504,132 @@ impl<'a, 'p> Compile<'a, 'p> {
         self.discard(func_id);
         assert!(self.wip_stack.pop().unwrap().0.is_none());
         res
+    }
+    
+    // TODO: you can never do this to a constant directly in case its aliased once i have const ptrs. 
+    fn coerce_constant(&mut self, value: &mut Values, current: TypeId, requested: TypeId) -> Res<'p, ()> {
+        if current == requested {
+            return Ok(());
+        }
+        
+        fn int_value(value: &Values, int: IntTypeInfo) -> Res<'static, i128> {
+            // TODO: handle signged/unsigned correctly. test!
+            let ptr = value.bytes().as_ptr();
+            debug_assert_eq!(ptr as usize % value.len(), 0, "Unaligned constant pointer.");
+            let i = unsafe {
+                if int.signed {
+                    match value.len() {
+                        1 => *(ptr as *const i8) as i128,
+                        2 => *(ptr as *const i16) as i128,
+                        4 => *(ptr as *const i32) as i128,
+                        8 => *(ptr as *const i64) as i128,
+                        _ => err!("bad int size",),
+                    }
+                } else {
+                    match value.len() {
+                        1 => *ptr as i128,
+                        2 => *(ptr as *const u16) as i128,
+                        4 => *(ptr as *const u32) as i128,
+                        8 => *(ptr as *const u64) as i128,
+                        _ => err!("bad int size",),
+                    }
+                }
+            };
+            
+            let (min, max) = range(int);
+            debug_assert!(i <= max && i >= min, "tried to coerce but value out of bounds for FROM type!?!?!!?");
+            Ok(i)
+        }
+        
+        // this currently works but probably only loosly overlaps with being correct because its nap time. 
+        fn adjust_int_length(value: &mut Values, int: IntTypeInfo) {
+            let Values::Small(value, byte_count) = value else {unreachable!("big value for int {value:?}")};
+            let mut want_byte_count = (int.bit_count as u8 + 7) / 8;
+            if want_byte_count * 8 != int.bit_count as u8 {
+                // weird ints are stored dumby currently 
+                want_byte_count = 8;
+            }
+            let mut i = *byte_count;
+            while *byte_count > want_byte_count {
+                *byte_count -= 1;
+                if int.signed {
+                    debug_assert_eq!(*value & (255 << i), 255);
+                } else {
+                    debug_assert_eq!(*value & (255 << i), 0);
+                }
+                i -= 1;
+            }
+            let mut i = *byte_count;
+            while *byte_count < want_byte_count {
+                *byte_count += 1;
+                i += 1;
+                if int.signed {
+                    debug_assert_eq!(*value & (255 << i), 255);
+                } else {
+                    debug_assert_eq!(*value & (255 << i), 0);
+                }
+            }
+        }
+        
+        fn range(int: IntTypeInfo) -> (i128, i128) {
+            if int.signed {
+                // TODO: UB on i1. 
+                let max = (1i128 << (int.bit_count - 1)) - 1;
+                (-max, max)
+            } else {
+                (0, (1i128 << int.bit_count) - 1)
+            }
+        }
+        
+        
+        #[allow(clippy::single_match)]
+        match (&self.program[current], &self.program[requested]) {
+            (TypeInfo::Int(have), TypeInfo::Int(requested)) => {
+                let (min, max) = range(*requested);
+                let v = int_value(value, *have)?; // TODO: sign
+                if v <= max && v >= min {
+                    // adjust_int_length(value, *requested);
+                    return Ok(())
+                }
+            }
+            (TypeInfo::Int(have), TypeInfo::F32) => {
+                let max = (1i128 << f32::MANTISSA_DIGITS) - 1;
+                let min = -max; // TODO: is that true? 
+                let i = int_value(value, *have)?;
+                if i <= max && i >= min {
+                    *value = to_values(self.program, i as f32)?;
+                    return Ok(());
+                }
+            }
+            (TypeInfo::Int(have), TypeInfo::F64) => {
+                let max = (1i128 << f64::MANTISSA_DIGITS) - 1;
+                let min = -max; // TODO: is that true? 
+                let i = int_value(value, *have)?;
+                if i <= max && i >= min {
+                    *value = to_values(self.program, i as f64)?;
+                    return Ok(());
+                }
+            }
+            // TODO: require that its in the float range too
+            (TypeInfo::F64, TypeInfo::Int(requested)) => {
+                let r = *requested;
+                let v: f64 = from_values(self.program, value.clone())?;
+                if v == v.floor() {
+                    let (min, max) = range(r);
+                    let v = v as i128;
+                    if v <= max && v >= min {
+                        *value = to_values(self.program, v as i64)?; // TODO: rightn umer of bits
+                        adjust_int_length(value, r);
+                        
+                        return Ok(());
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        // println!("err: Tried to coerce {} to {}", self.program.log_type(current), self.program.log_type(requested));
+        err!(CErr::TypeCheck(current, requested, "coerce_constant"))
     }
 
     pub(crate) fn add_func(&mut self, func: Func<'p>) -> Res<'p, FuncId> {
@@ -3027,10 +3173,10 @@ impl<'a, 'p> Compile<'a, 'p> {
             // this fixes functions with all const args the reduce to just a value emitting useless calls to like get the number 65 or whatever if you do ascii("A"). 
             if !deny_inline && arg_expr.is_raw_unit() && !self.program.get_info(res).contains_pointers {
                 if let FuncImpl::Normal(FatExpr {
-                    expr: Expr::Value { value }, ty: prev_ty, ..
+                    expr: Expr::Value { value, .. }, ty: prev_ty, ..
                 }) = &self.program[fid].body {
                     // self.type_check_arg(*prev_ty, res, "inline const expr fn")?;
-                    expr.expr = Expr::Value { value: value.clone() };
+                    expr.expr = Expr::Value { value: value.clone(), coerced: true };
                     expr.ty = *prev_ty;
                     return Ok(*prev_ty);
                 }
@@ -3064,7 +3210,7 @@ impl<'a, 'p> Compile<'a, 'p> {
             let ty = unwrap!(self.program.tuple_types(arg_expr.ty), "TODO: non-trivial pattern matching");
             check_len(ty.len())?;
             match &arg_expr.expr {
-                Expr::Value { value } => {
+                Expr::Value { value, .. } => {
                     // TODO: this is super dumb but better than what I did before. -- May 3 -- May 24
                     let values = value;
                     let mut parts = Vec::with_capacity(values.bytes().len());
@@ -3072,7 +3218,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                     let mut reader = ReadBytes { bytes: value.bytes(), i: 0 };
                     for ty in ty {
                         let taken = chop_prefix(self.program, ty, &mut reader)?;
-                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken }, arg_expr.loc, ty))
+                        parts.push(FatExpr::synthetic_ty(Expr::Value { value: taken, coerced: true }, arg_expr.loc, ty))
                     }
                     assert_eq!(reader.bytes.len(), reader.i, "TODO: nontrivial pattern matching");
                     arg_expr.expr = Expr::Tuple(parts);
@@ -3247,7 +3393,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 err!("arg needs name (unreachable?)",)
             };
             let ty = arg_expr.ty;
-            let Expr::Value { value } = arg_expr.expr.clone() else { unreachable!() };
+            let Expr::Value { value, .. } = arg_expr.expr.clone() else { unreachable!() };
             self.bind_const_arg(new_fid, name, value, ty, arg_expr.loc)?;
             self.set_literal(arg_expr, ())?;
 
@@ -3281,7 +3427,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                 let Name::Var(name) = b.name else {
                     err!("arg needs name (unreachable?)",)
                 };
-                let Expr::Value { value } = arg_exprs[i].clone().expr else {
+                let Expr::Value { value, .. } = arg_exprs[i].clone().expr else {
                     unreachable!()
                 };
                 if !is_generic {
@@ -3441,7 +3587,7 @@ impl<'a, 'p> Compile<'a, 'p> {
                                 err!("Missing required field {}", self.pool.get(field.name));
                             };
 
-                            let expr = FatExpr::synthetic_ty(Expr::Value { value }, pattern.loc, field.ty);
+                            let expr = FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, pattern.loc, field.ty);
                             // TODO: HACK. emit_bc expects them in order
                             pattern.bindings.insert(
                                 i,
@@ -3655,7 +3801,7 @@ impl<'a, 'p> Compile<'a, 'p> {
 
     #[track_caller]
     fn save_const_values(&mut self, name: Var<'p>, value: Values, final_ty: TypeId, loc: Span) -> Res<'p, ()> {
-        self.save_const(name, Expr::Value { value }, final_ty, loc)
+        self.save_const(name, Expr::Value { value, coerced: true }, final_ty, loc)
     }
 
     pub fn bit_literal(&self, expr: &FatExpr<'p>) -> Option<(IntTypeInfo, i64)> {

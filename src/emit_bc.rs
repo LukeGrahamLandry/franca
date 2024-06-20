@@ -240,7 +240,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                         }
                     }
 
-                    if let Expr::Value { value } = &val.expr {
+                    if let Expr::Value { value, .. } = &val.expr {
                         // TODO: factor out aot handling from main value handling so can use here too. -- Jun 3
                         if result.when == ExecStyle::Jit {
                             // TODO: this gets super bad if the callee isn't properly copying it because they'll be nmodifying something we think is constant
@@ -746,7 +746,7 @@ impl<'z, 'p: 'z> EmitBc<'z, 'p> {
                     var.log(self.program.pool)
                 )
             }
-            Expr::Value { value } => {
+            Expr::Value { value, .. } => {
                 if result_location == Discard {
                     return Ok(());
                 }

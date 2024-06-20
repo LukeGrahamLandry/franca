@@ -348,7 +348,14 @@ pub fn make_toplevel<'p>(pool: &StringPool<'p>, user_span: Span, stmts: Vec<FatS
     let body = Some(FatExpr::synthetic(
         Expr::Block {
             body: stmts,
-            result: Box::new(FatExpr::synthetic_ty(Expr::Value { value: Values::unit() }, user_span, TypeId::unit)),
+            result: Box::new(FatExpr::synthetic_ty(
+                Expr::Value {
+                    value: Values::unit(),
+                    coerced: true,
+                },
+                user_span,
+                TypeId::unit,
+            )),
             ret_label: BigOption::None,
             hoisted_constants: false,
         },

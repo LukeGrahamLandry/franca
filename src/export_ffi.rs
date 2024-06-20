@@ -981,7 +981,7 @@ extern "C-unwind" fn literal_ast<'p>(compile: &Compile<'_, 'p>, ty: TypeId, ptr:
     let value = Values::many(value.to_vec());
     // TODO: zero_padding
     let loc = compile.last_loc.unwrap_or_else(garbage_loc); // TODO: caller should pass it in?
-    FatExpr::synthetic_ty(Expr::Value { value }, loc, ty)
+    FatExpr::synthetic_ty(Expr::Value { value, coerced: true }, loc, ty)
 }
 
 extern "C-unwind" fn type_check_arg(compile: &Compile, found: TypeId, expected: TypeId) -> bool {
@@ -1211,7 +1211,7 @@ extern "C-unwind" fn resolve_os<'p>(comp: &mut Compile<'_, 'p>, f_ty: FatExpr<'p
     // It might have been a function pointer type. this lets you do `thing.field = (@resolve(@type thing.field) overloadset)!fnptr`
     let ty = comp.program.intern_type(TypeInfo::Fn(f_ty));
     return_from_ffi(comp);
-    FatExpr::synthetic_ty(Expr::Value { value: val }, loc, ty)
+    FatExpr::synthetic_ty(Expr::Value { value: val, coerced: true }, loc, ty)
 }
 
 extern "C-unwind" fn make_fn_type<'p>(compile: &mut Compile<'_, 'p>, arg: &mut FatExpr<'p>, ret: FatExpr<'p>) -> Res<'p, FnType> {

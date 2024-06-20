@@ -253,6 +253,10 @@ impl Values {
     pub fn is_unit(&self) -> bool {
         self.bytes().is_empty()
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.bytes().len()
+    }
 }
 
 impl From<Value> for Values {

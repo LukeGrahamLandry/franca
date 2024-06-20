@@ -159,6 +159,7 @@ ffi_builtin_type!(LabelId, TypeId::label, "LabelId");
 ffi_builtin_type!(FuncId, TypeId::func, "FuncId");
 ffi_builtin_type!(bool, TypeId::bool(), "bool");
 ffi_builtin_type!(f64, TypeId::f64(), "f64");
+ffi_builtin_type!(f32, TypeId::f32(), "f32");
 ffi_builtin_type!((), TypeId::unit, "Unit");
 
 impl<'p, A: InterpSend<'p>, B: InterpSend<'p>> InterpSend<'p> for (A, B) {

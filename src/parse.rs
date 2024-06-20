@@ -286,7 +286,10 @@ impl<'a, 'p> Parser<'a, 'p> {
             Number(f) => {
                 self.start_subexpr();
                 self.pop();
-                let mut e = self.expr(Expr::Value { value: Values::one(f) });
+                let mut e = self.expr(Expr::Value {
+                    value: Values::one(f),
+                    coerced: false,
+                });
                 e.ty = TypeId::i64();
                 Ok(e)
             }
@@ -295,6 +298,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.pop();
                 let mut e = self.expr(Expr::Value {
                     value: (f.to_bits() as i64).into(),
+                    coerced: false,
                 });
                 e.ty = TypeId::f64();
                 Ok(e)
@@ -310,10 +314,14 @@ impl<'a, 'p> Parser<'a, 'p> {
                 self.start_subexpr();
                 self.pop();
                 let v = i64::from_le_bytes((value).to_le_bytes());
-                let mut v = self.expr(Expr::Value { value: (v).into() });
+                let mut v = self.expr(Expr::Value {
+                    value: (v).into(),
+                    coerced: false,
+                });
                 v.ty = TypeId::i64();
                 let mut bits = self.expr(Expr::Value {
                     value: (bit_count as i64).into(),
+                    coerced: false,
                 });
                 bits.ty = TypeId::i64();
                 let pair = self.expr(Expr::Tuple(vec![bits, v]));
@@ -991,7 +999,10 @@ impl<'a, 'p> Parser<'a, 'p> {
     }
 
     fn raw_unit(&mut self) -> FatExpr<'p> {
-        let mut e = self.expr(Expr::Value { value: Values::unit() });
+        let mut e = self.expr(Expr::Value {
+            value: Values::unit(),
+            coerced: false,
+        });
         e.ty = TypeId::unit;
         e
     }
@@ -1093,7 +1104,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 return self.expr(Expr::Call(Box::new(f), Box::new(arg)));
             }
             // Parser flattened empty tuples.
-            Expr::Value { ref value } => {
+            Expr::Value { ref value, .. } => {
                 if value.is_unit() {
                     return self.expr(Expr::Call(Box::new(f), first));
                 }
@@ -1111,7 +1122,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             match &mut old_arg.expr {
                 Expr::Tuple(parts) => parts.push(callback),
                 // Parser flattened empty tuples.
-                Expr::Value { value } => {
+                Expr::Value { value, .. } => {
                     if value.is_unit() {
                         old_arg.expr = callback.expr;
                     } else {

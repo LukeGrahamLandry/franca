@@ -160,6 +160,7 @@ pub enum Expr<'p> {
     Poison,
     Value {
         value: Values,
+        coerced: bool,
     },
     WipFunc(FuncId),
     Call(Box<FatExpr<'p>>, Box<FatExpr<'p>>),
@@ -400,7 +401,7 @@ impl<'p> FatExpr<'p> {
 
     // TODO: this is weak! should replace with is_const then immediate_eval_expr.
     pub(crate) fn as_const(&self) -> Option<Values> {
-        if let Expr::Value { value } = &self.expr {
+        if let Expr::Value { value, .. } = &self.expr {
             Some(value.clone())
         } else {
             None
@@ -433,7 +434,7 @@ pub struct FatExpr<'p> {
 impl<'p> FatExpr<'p> {
     pub(crate) fn set(&mut self, value: Values, ty: TypeId) {
         debug_assert!(!ty.is_unknown());
-        self.expr = Expr::Value { value };
+        self.expr = Expr::Value { value, coerced: false };
         self.ty = ty;
         self.done = true;
     }
