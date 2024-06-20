@@ -1839,8 +1839,4 @@ impl<'p> FuncImpl<'p> {
     pub(crate) fn comptime_addr(&self) -> Option<&usize> {
         func_impl_getter!(self, ComptimeAddr)
     }
-
-    pub(crate) fn c_source(&self) -> Option<&Ident<'p>> {
-        func_impl_getter!(self, CSource)
-    }
 }

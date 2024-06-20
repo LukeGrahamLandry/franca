@@ -81,7 +81,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
         gen.body = body&;
         gen.backend.out&.push_all("define private ccc ");
         name := @format("F%", body.func.to_index()) temp();
-        gen.backend&.write_header(body&, name.items()) {arg_index|
+        gen.backend&.write_header(body.signeture, name.items()) {arg_index|
             s := @format("%arg%", "%", arg_index) temp();
             s.items()
         };
@@ -136,17 +136,21 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) Unit = {
     func := {self.comp.vtable.get_function}(self.comp.data, fid);
     import_name := {self.comp.vtable.get_string}(self.comp.data, func.name);
     self.out&.push_all("define ccc ");
-    // TODO: recompiling just to get the sig is fucking deranged. rust side has a function for this. -- Jun 17
+    //cc := func.cc.unwrap();
+    //f_ty: FnType = (arg = func.finished_arg.unwrap(), ret = func.finished_ret.unwrap(), arity = func.arg.bindings.len.trunc());
+    //sig := {self.comp.vtable.prim_sig}(self.comp.data, f_ty, cc).unwrap(); 
+    // // TODO: recompiling just to get the sig is fucking deranged. rust side has a function for this. -- Jun 17
     bc := {self.comp.vtable.emit_bc}(self.comp.data, fid, .Aot).unwrap();
-    self.write_header(bc&, import_name) {arg_index|
-        ty := bc.signeture.args[arg_index]; // TODO: indirect ret
+    sig := bc.signeture;
+    self.write_header(sig, import_name) {arg_index|
+        ty :=sig.args[arg_index]; // TODO: indirect ret
         values&.push((ty = ty, id = arg_index));
         s := @format("%v%", "%", arg_index) temp();
         s.items()
     };
     self.out&.push_all("{\n");
-    ret := self.inst_call(values.items(), bc.signeture) {|
-        @fmt(self.out&.current(), "@F%", bc.func.to_index());
+    ret := self.inst_call(values.items(), sig) {|
+        @fmt(self.out&.current(), "@F%", fid.to_index());
     };
     self.inst_return(ret);
     self.out&.current().push_all("}\n");
@@ -204,12 +208,12 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
         (fn DynamicImport(name) => { 
             // TODO: do i need to hackily do the same for ComptimeAddr and hope for the best? ideally the forntend would handle that instead. 
             import_name := {comp.vtable.get_string}(comp.data, name[]);
-            self.forward_declare(bc, false, import_name);
+            self.forward_declare(bc.signeture, false, import_name);
             
             self.out&.push_all("define private ccc ");
             name := @format("F%", bc.func.to_index()) temp();
             values: List(LlvmVal) = list(temp());
-            self.write_header(bc, name.items()) {arg_index|
+            self.write_header(bc.signeture, name.items()) {arg_index|
                 ::if(Prim);
                 // TODO: format this better. 
                 ty: Prim = if(bc.signeture.first_arg_is_indirect_return){|
@@ -239,7 +243,7 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             ir := {comp.vtable.get_string}(comp.data, code[]);
             self.out&.push_all("define private ccc ");
             name := @format("F%", bc.func.to_index()) temp();
-            self.write_header(bc, name.items()) {arg_index|
+            self.write_header(bc.signeture, name.items()) {arg_index|
                 args := func.arg.bindings.items();
                 arg := args[arg_index].name.Var.name;
                 arg := {comp.vtable.get_string}(comp.data, arg);
@@ -254,12 +258,12 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
     false
 }
 
-fn forward_declare(self: *EmitLlvm, bc: *FnBody, private: bool, name: Str) Unit = {
+fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) Unit = {
     self.out&.push_all("declare ccc ");
     if private {|
         self.out&.push_all("private ");
     };
-    self.write_header(bc, name) {arg_index| (@format("%v%", "%", arg_index) temp()).items() };
+    self.write_header(sig, name) {arg_index| (@format("%v%", "%", arg_index) temp()).items() };
     self.out&.push_all(";\n");
 }
 
@@ -274,7 +278,7 @@ fn emit_special_asm(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func
         (fn JittedAarch64(code) => { 
             if(arch.ne(Arch.Aarch64), => { return(false); });
             name := @format("F%", bc.func.to_index()) temp();
-            self.forward_declare(bc, false, name.items());
+            self.forward_declare(bc.signeture, false, name.items());
             
             @fmt(self.out&.current(), "module asm \"_F%:\"\n", bc.func.to_index());
             for code.items() {inst|
@@ -303,10 +307,9 @@ EmitLlvm :: @struct(
     const Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
-fn write_header(self: *EmitLlvm, body: *FnBody, name: Str, const get_arg_name: @Fn(idx: i64) Str) Unit = {
+fn write_header(self: *EmitLlvm, sig: PrimSig, name: Str, const get_arg_name: @Fn(idx: i64) Str) Unit = {
     ::if_opt(Prim, Unit);
-
-    sig := body.signeture&;
+    
     self.out&.reserve(50);
     if(sig.ret1) {fst: Prim|
         if(sig.ret2) {snd: Prim| // two

@@ -76,11 +76,7 @@ fn main() {
     let mut do_60fps_ = false;
     let mut path = None;
     let mut args = env::args();
-    let mut c = false;
-    let mut run_with_clang = false;
-    let mut sanitize = false;
-    let mut test_c = false;
-    let mut clang_o2 = false;
+
     let mut driver_path = None;
     args.next().unwrap(); // exe path
 
@@ -117,27 +113,8 @@ fn main() {
                     println!("{}", get_include_std("compiler").unwrap());
                     println!("{}", get_include_std("libc").unwrap());
                 }
-                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats, --c, --run-clang"),
-                // TODO: need to have a -o flag so you can seperate logging of compile time execution from output c source code.
-                "c" => {
-                    c = true;
-                    assert!(cfg!(feature = "c-backend"));
-                }
-                "run-clang" => {
-                    run_with_clang = true;
-                    assert!(cfg!(feature = "c-backend"));
-                }
-                "san" => {
-                    sanitize = true;
-                    assert!(cfg!(feature = "c-backend"));
-                }
-                "test-c" => {
-                    test_c = true;
-                    assert!(cfg!(feature = "c-backend"));
-                }
-                "optimize=fast" => {
-                    clang_o2 = true;
-                }
+                "help" => panic!("--no-fork, --64fps, --cranelift, --aarch64, --log_export_ffi, --stats"),
+
                 "driver-dylib" => {
                     let path = args.next().expect("path to driver dylib");
                     assert!(!path.starts_with("--"), "you probably didn't mean to start a filepath with '--'?");
@@ -170,25 +147,11 @@ fn main() {
             return;
         }
     }
-
-    if c && !run_with_clang {
-        print!("/*");
-    }
-    if sanitize {
-        assert!(run_with_clang);
-    }
-
     if no_fork {
         panic!("--no-fork is no longer built in to the compiler");
     }
     if do_60fps_ {
         do_60fps(arch);
-        return;
-    }
-
-    #[cfg(feature = "c-backend")]
-    if test_c {
-        run_c_tests(arch, sanitize);
         return;
     }
 
@@ -211,41 +174,6 @@ fn main() {
             log_err(&comp, *e);
             exit(1);
         });
-
-        #[cfg(feature = "c-backend")]
-        if c || run_with_clang {
-            let (fns, test_runner) = if comp.export.is_empty() {
-                let name = comp.program.pool.intern("main");
-                if let Some(f) = comp.program.find_unique_func(name) {
-                    (vec![f], false)
-                } else {
-                    (comp.tests.clone(), true)
-                }
-            } else {
-                (comp.export.clone(), false)
-            };
-            match franca::c::emit_c(&mut comp, fns, test_runner) {
-                franca::export_ffi::BigResult::Ok(s) => {
-                    log_time();
-                    if run_with_clang {
-                        fs::write("./target/temp.c", s).unwrap();
-                        run_clang_on_temp_c(sanitize, clang_o2);
-                    } else {
-                        println!("*/{}", s);
-                    }
-
-                    if stats {
-                        println!("/*{:#?}*/", unsafe { STATS.clone() });
-                    }
-                    exit(0);
-                }
-                franca::export_ffi::BigResult::Err(e) => {
-                    log_err(&comp, *e);
-                    eprintln!("failed");
-                    exit(1);
-                }
-            }
-        }
 
         if let Some(f) = comp.program.find_unique_func(comp.pool.intern("driver")) {
             let val = to_values(comp.program, &IMPORT_VTABLE as *const ImportVTable as i64).unwrap();
@@ -290,85 +218,6 @@ fn main() {
     }
 }
 
-fn run_clang_on_temp_c(sanitize: bool, o2: bool) {
-    let start = timestamp();
-    let mut cmd = Command::new("clang");
-    let mut cmd = cmd.args([
-        "target/temp.c",
-        "-Wno-int-to-void-pointer-cast",
-        "-Wno-void-pointer-to-int-cast",
-        "-o",
-        "target/a.out",
-        "-Wno-incompatible-library-redeclaration",
-        "-Wno-int-conversion",
-        "-Wno-pointer-sign",
-        "-Wno-return-type", // TODO: this one would be helpful! but need to emit _Noreturn for functions returning Never
-        "-Wno-incompatible-function-pointer-types", // TODO: this ones probably often helpful, should fix it in the generated code. also UB san complains.
-    ]);
-
-    if o2 {
-        cmd = cmd.args(["-O2"]);
-    }
-    if sanitize {
-        cmd = cmd.args(["-fsanitize=undefined", "-fsanitize=address", "-g"]);
-    }
-    let res = cmd.status().unwrap();
-    let end = timestamp();
-    let seconds = end - start;
-    println!("clang finished in {seconds:.3} seconds.");
-    assert!(res.success());
-    let res = Command::new("./target/a.out").status().unwrap();
-    assert!(res.success());
-}
-
-#[cfg(feature = "c-backend")]
-fn run_c_tests(arch: TargetArch, sanitize: bool) {
-    let pool = Box::leak(Box::<StringPool>::default());
-    let mut program = Program::new(pool, arch);
-    let mut comp = Compile::new(pool, &mut program);
-
-    let files = collect_test_files();
-    load_all_toplevel(&mut comp, &files).unwrap_or_else(|e| {
-        log_err(&comp, *e);
-        exit(1);
-    });
-
-    let tests = comp.tests.clone();
-    let mut failed = 0;
-    for f in &tests {
-        // comp.compile(*f, ExecStyle::Jit).unwrap_or_else(|e| {
-        //     log_err(&comp, *e);
-        //     exit(1);
-        // });
-        let (pass, _, _) = fork_and_catch(|| {
-            let src = franca::c::emit_c(&mut comp, vec![*f], true).unwrap_or_else(|e| {
-                log_err(&comp, *e);
-                exit(1);
-            });
-            fs::write("target/temp.c", src).unwrap();
-            run_clang_on_temp_c(sanitize, false);
-        });
-        if pass {
-            set_colour(0, 255, 0);
-        } else {
-            failed += 1;
-            set_colour(255, 0, 0);
-        }
-        println!("{}", comp.pool.get(comp.program[*f].name));
-        unset_colour();
-    }
-    if failed == 0 {
-        println!("passed all {} tests.", tests.len());
-    } else {
-        println!("failed {}/{} tests.", failed, tests.len());
-    }
-
-    mem::forget(comp);
-    mem::forget(program);
-
-    // println!("{:#?}", unsafe { &STATS });
-}
-
 fn forked_swallow_passes(arch: TargetArch) {
     let pool = Box::leak(Box::<StringPool>::default());
     let mut program = Program::new(pool, arch);
@@ -386,9 +235,9 @@ fn forked_swallow_passes(arch: TargetArch) {
     let mut failing: Vec<FuncId> = vec![];
     for fns in tests.chunks(10) {
         // let (success, _, _) = fork_and_catch(|| {
-            for f in fns {
-                run_one(&mut comp, *f);
-            }
+        for f in fns {
+            run_one(&mut comp, *f);
+        }
         // });
         let success = true;
         if success {

@@ -193,7 +193,7 @@ pub struct ImportVTable {
     // TODO: i want the meta program to be tracking these instead.
     get_fns_with_tag: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, tag: Ident<'p>) -> *const [FuncId],
     // TODO: you can't just give it the slice from get_exports/tests because that will alias the vec that might grow, but the idea is this will go away soon anyway.
-    emit_c: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str>,
+    emit_c: i64, // todo: remove
     compile_func: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()>,
     get_jitted_ptr: for<'p> unsafe extern "C" fn(c: &mut Compile<'_, 'p>, f: FuncId) -> BigCErr<'p, *const u8>,
     get_function: for<'p> unsafe extern "C" fn(c: &mut Compile<'p, '_>, f: FuncId) -> *const Func<'p>,
@@ -228,7 +228,7 @@ pub static IMPORT_VTABLE: ImportVTable = ImportVTable {
     init_compiler: franca_init_compiler,
     find_unqiue_func: franca_find_unique_fn,
     get_fns_with_tag,
-    emit_c: franca_emit_c,
+    emit_c: 0,
     compile_func: franca_compile_func,
     get_jitted_ptr,
     get_function: franca_get_function,
@@ -330,18 +330,6 @@ unsafe extern "C" fn get_fns_with_tag(c: &mut Compile, tag: Ident) -> *const [Fu
     println!("scanned {} fns", c.program.funcs.len());
 
     found.leak() as *const [FuncId]
-}
-unsafe extern "C" fn franca_emit_c<'p>(c: &mut Compile<'_, 'p>, fns: *const [FuncId], add_test_runner: bool) -> Res<'p, *const str> {
-    #[cfg(feature = "c-backend")]
-    {
-        return crate::c::emit_c(c, (*fns).to_vec(), add_test_runner).map_ok(|s| s.leak() as *const str);
-    }
-
-    #[cfg(not(feature = "c-backend"))]
-    {
-        // TODO: this should be an error but its annoying to make them with indirect return cause can't use the macro
-        panic!("not compiled with c backend")
-    }
 }
 
 unsafe extern "C" fn franca_compile_func<'p>(c: &mut Compile<'_, 'p>, f: FuncId, when: ExecStyle) -> BigCErr<'p, ()> {
