@@ -175,7 +175,7 @@ impl<'p> Program<'p> {
                     }
                     TypeInfo::Label(e) => format!("Label({})", self.log_type(*e)),
 
-                    TypeInfo::Unit => "Unit".to_owned(),
+                    TypeInfo::Unit => "void".to_owned(),
                     TypeInfo::VoidPtr => "rawptr".to_owned(),
                     TypeInfo::Int(int) => {
                         format!("{}{}", if int.signed { "i" } else { "u" }, int.bit_count)

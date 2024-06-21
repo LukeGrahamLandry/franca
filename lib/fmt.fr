@@ -2,7 +2,7 @@
 //     - be able to declare fn display for anything with a write method. really I want my old @impl syntax. 
 //     - derive fn display for structs based on fields. 
 
-fn println(msg: Str) Unit = {
+fn println(msg: Str) void = {
     print(msg);
     
     // TODO: extra syscall is sad
@@ -10,25 +10,26 @@ fn println(msg: Str) Unit = {
     print(@as(Str) (ptr = new_line&, len=1));
 }
 
-fn print(msg: Str) Unit = {
+fn print(msg: Str) void = {
     STD_OUT: Fd : (fd = 1.intcast());
     written := write(STD_OUT, msg.ptr, @as(usize) msg.len);
     // TODO: confusing dependency
     //assert_eq(msg.len, written.unwrap());
     // TODO: check errno. loop if not all written. 
 }
+
 // REMEMBER, you can't just open with flags .Write and then call this, it wont truncate the file!
-fn write(fd: *Fd, bytes: Slice(u8)) Unit = {
+fn write(fd: *Fd, bytes: Slice(u8)) void = {
     written := write(fd[], bytes.ptr, bytes.len).unwrap();
     // TOOD: loop if not all written
 }
 
-fn write(self: *List(u8), bytes: Str) Unit = self.push_all(bytes);
-fn display(self: Str, writer: *List(u8)) Unit = writer.write(self);
+fn write(self: *List(u8), bytes: Str) void = self.push_all(bytes);
+fn display(self: Str, writer: *List(u8)) void = writer.write(self);
 
 /// @fmt(Writer, fmt_spec_str, ...Args)
 /// Currently display is only implemented with 'Writer' being *List$u8 (TODO: need better generics). 
-/// 'Args' can be any types that have fn display(Self, Writer) Unit;
+/// 'Args' can be any types that have fn display(Self, Writer) void;
 /// 'fmt_spec_str' must be a const string value. '%' characters will be replaced (like printf, you just don't need the type hint).
 // TODO: double '%%' to actually put a literal '%' 
 #macro 
@@ -50,7 +51,7 @@ fn fmt(arg: AstExpr) AstExpr = {
     actions: List(AstExpr) = list(count, ast_alloc());  // TODO: with_capacity_exact or shrink_to_fit at the end or have AstExpr.Tuple expose that its a Vec not a Slice 
     
     // TODO: reserve space for known length args. 
-    emit :: fn(msg: AstExpr) Unit => {
+    emit :: fn(msg: AstExpr) void => {
         action: FatExpr = 'display(@[msg], @[writer])';
         actions&.push(action);
     };
@@ -77,8 +78,8 @@ fn concat(arg: AstExpr, rt_alloc: AstExpr) AstExpr = {
         join_list: List(u8) = list(@[rt_alloc]);
         @[{
             args.enumerate(fn(i, param) => {  // TODO: zip iterators 
-                // TODO: having () in the cast instead of lit(Unit) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
-                action := '@as(Unit) push_all(join_list&, @as(Str) @[param[]])';
+                // TODO: having () in the cast instead of lit(void) stopped working when I changed some things to use the infallible imm_eval_known which is weird -- Apr 21 
+                action := '@as(void) push_all(join_list&, @as(Str) @[param[]])';
                 actions&.push(action);
             });
             
@@ -134,7 +135,7 @@ fn panic(arg: AstExpr) AstExpr = '{
 }';
 
 // TODO: use fn display to implement fn str instead of fn str allocating. rn this leaks. 
-fn display(i: i64, s: *List(u8)) Unit = {
+fn display(i: i64, s: *List(u8)) void = {
     if(i.lt(0)) {|
         push(s, "-".ascii());
         i.neg().display(s);
@@ -150,27 +151,27 @@ fn display(i: i64, s: *List(u8)) Unit = {
     };
 }
 
-fn display(self: bool, writer: *List(u8)) Unit = display(self.str(), writer);
+fn display(self: bool, writer: *List(u8)) void = display(self.str(), writer);
 
-fn display(self: Type, writer: *List(u8)) Unit = {
+fn display(self: Type, writer: *List(u8)) void = {
     display("TODO: display type", writer);
 }
 
-fn display(self: Symbol, writer: *List(u8)) Unit = {
+fn display(self: Symbol, writer: *List(u8)) void = {
     // TODO: !!!! don't use c str! but need to have less sketchy tuple abi. 
     display(self.c_str(), writer);
 }
 
 // You probably don't want to be calling this often, it has to iterate the string to get the length. 
-fn display(self: CStr, writer: *List(u8)) Unit = {
+fn display(self: CStr, writer: *List(u8)) void = {
     self.for {c|
         writer.push(c);
     };
 }
 
-fn display(self: Unit, writer: *List(u8)) Unit = display("()", writer);
+fn display(self: void, writer: *List(u8)) void = display("()", writer);
 
-fn display(self: f64, writer: *List(u8)) Unit = {
+fn display(self: f64, writer: *List(u8)) void = {
     // TODO: if you try to inline this into the macro call, it crashes trying to compile in fn fmt. 
     //       bus error. works on cranelift tho which is fun. 
     //       works if you call self.int here and then also inline it so its a problem with adding it as a callee?
@@ -179,7 +180,7 @@ fn display(self: f64, writer: *List(u8)) Unit = {
     @fmt(writer, "%", value); // TODO: higher precision rendering
 }
 
-fn println(self: CStr) Unit = @println("%", self);
+fn println(self: CStr) void = @println("%", self);
 
 ::if(Str);
 fn str(self: bool) Str = if(self, fn()Str = "true", fn()Str = "false");
@@ -195,9 +196,9 @@ fn str(self: bool) Str = if(self, fn()Str = "true", fn()Str = "false");
 /// Not bounds checked
 fn index(self: CStr, i: i64) *u8 = offset_bytes(self.ptr, i);
 fn get(self: CStr, i: i64) u8 = self.index(i)[];
-fn set(self: CStr, i: i64, v: u8) Unit = self.index(i).store(v);
+fn set(self: CStr, i: i64, v: u8) void = self.index(i).store(v);
 
-fn for(self: CStr, const f: @Fn(c: u8) Unit) Unit = {
+fn for(self: CStr, const f: @Fn(c: u8) void) void = {
     ::ptr_utils(u8);
     
     dowhile {|
@@ -273,21 +274,21 @@ fn __string_escapes(raw: Str) Str #fold = {
     out.items() // LEAK
 }
 
-fn println(msg: bool) Unit = {
+fn println(msg: bool) void = {
     let msg = (msg, =>"true", =>"false")!if;
     println(msg);
 }
 
-fn println(i: i64) Unit = {
+fn println(i: i64) void = {
     // TODO: static alloc since we know the bound on number of digits
     mem: List(u8) = list(i.div(10).abs().add(2), temp());
     i.display(mem&);
     mem&.push_all("\n");
     print(mem&.items());
 }
-fn println(msg: u8) Unit = println(@as(i64) msg);
+fn println(msg: u8) void = println(@as(i64) msg);
 
-fn print(i: i64) Unit = {
+fn print(i: i64) void = {
     // TODO: static alloc since we know the bound on number of digits
     mem: List(u8) = list(i.div(10).abs().add(1), temp());
     i.display(mem&);
@@ -372,11 +373,11 @@ fn is_ascii_alpha(c: u8) bool =
         .or(=> c.eq("_".ascii()));
 
 
-#redirect(i64, Unit) fn println(a: u64) Unit; // TODO: WRONG. sign
-fn println(a: u32) Unit = println(@as(i64) a.zext()); 
-#redirect(Ty(i64, *List(u8)), Unit) fn display(a: u64, out: *List(u8)) Unit; // TODO: WRONG. sign
-fn display(a: u32, out: *List(u8)) Unit = display(@as(i64) a.zext(), out); 
-fn display(a: i32, out: *List(u8)) Unit = display(@as(i64) a.zext(), out);  // TODO: WRONG. sign.
+#redirect(i64, void) fn println(a: u64) void; // TODO: WRONG. sign
+fn println(a: u32) void = println(@as(i64) a.zext()); 
+#redirect(Ty(i64, *List(u8)), void) fn display(a: u64, out: *List(u8)) void; // TODO: WRONG. sign
+fn display(a: u32, out: *List(u8)) void = display(@as(i64) a.zext(), out); 
+fn display(a: i32, out: *List(u8)) void = display(@as(i64) a.zext(), out);  // TODO: WRONG. sign.
 
 fn fmt_hex(value: i64) Str = {
     out := "0x".clone(temp());

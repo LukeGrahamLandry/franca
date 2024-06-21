@@ -106,8 +106,8 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
             // TODO: warn if fns has duplicates
             for (fns) {f|
                 func := {comp.vtable.get_function}(comp.data, f);
-                // note: this only works because Unit has a fixed typeid value
-                if (func.finished_arg.unwrap().eq(Unit)) {|
+                // note: this only works because void has a fixed typeid value
+                if (func.finished_arg.unwrap().eq(void)) {|
                     @fmt(gen.backend.out&.current(), "   call void @F%()\n", f.to_index());
                 } {| // else
                     @fmt(gen.backend.out&.current(), "   %% = call i64 @F%(i64 0)\n", "%", i, f.to_index());
@@ -131,7 +131,7 @@ fn emit_llvm(comp: CompCtx, alloc: Alloc, fns: Slice(FuncId), entry: ProgramEntr
 }
 
 // TODO: copy-paste from DynamicImport but reversed so its a pain. 
-fn write_export_bounce(self: *EmitLlvm, fid: FuncId) Unit = {
+fn write_export_bounce(self: *EmitLlvm, fid: FuncId) void = {
     values: List(LlvmVal) = list(temp());
     func := {self.comp.vtable.get_function}(self.comp.data, fid);
     import_name := {self.comp.vtable.get_string}(self.comp.data, func.name);
@@ -156,7 +156,7 @@ fn write_export_bounce(self: *EmitLlvm, fid: FuncId) Unit = {
     self.out&.current().push_all("}\n");
 }
 
-fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) Unit = {
+fn emit_constant(self: *EmitLlvm, comp: CompCtx, id: BakedVarId) void = {
     value := {comp.vtable.get_baked}(comp.data, id);
     index: i64 = id.id.zext();
     
@@ -253,12 +253,12 @@ fn emit_special(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func, bc
             @fmt(self.out&.current(), "{\n%}\n", ir);
             return(true);
         });
-        @default fn() Unit => return(false);
+        @default fn() void => return(false);
     };
     false
 }
 
-fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) Unit = {
+fn forward_declare(self: *EmitLlvm, sig: PrimSig, private: bool, name: Str) void = {
     self.out&.push_all("declare ccc ");
     if private {|
         self.out&.push_all("private ");
@@ -288,7 +288,7 @@ fn emit_special_asm(self: *EmitLlvm, comp: CompCtx, body: *FuncImpl, func: *Func
             
             return(true);
         });
-        @default fn() Unit => return(false);
+        @default fn() void => return(false);
     };
     false
 }
@@ -307,8 +307,8 @@ EmitLlvm :: @struct(
     const Val := LlvmVal, // TODO: const can't be first (doesn't parse).  -- Jun 14
 );
 
-fn write_header(self: *EmitLlvm, sig: PrimSig, name: Str, const get_arg_name: @Fn(idx: i64) Str) Unit = {
-    ::if_opt(Prim, Unit);
+fn write_header(self: *EmitLlvm, sig: PrimSig, name: Str, const get_arg_name: @Fn(idx: i64) Str) void = {
+    ::if_opt(Prim, void);
     
     self.out&.reserve(50);
     if(sig.ret1) {fst: Prim|
@@ -339,7 +339,7 @@ fn write_header(self: *EmitLlvm, sig: PrimSig, name: Str, const get_arg_name: @F
     self.out&.current().push_all(")");
 }
 
-fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) Unit = {
+fn setup(self: *EmitLlvm, body: *FnBody, vars_out: *List(EmitLlvm.Val)) void = {
     self.out&.push_all("entry:\n");
     self.next_var = 0;
     // TODO: waste for ssa vars, they just get set to the value. -- Jun 14
@@ -380,7 +380,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, f: FuncId, tai
     }
 }
 
-fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call: @Fn() Unit) Slice(EmitLlvm.Val) = {
+fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call: @Fn() void) Slice(EmitLlvm.Val) = {
     self.out&.reserve(30);
     
     out_vals: List(LlvmVal) = list(temp());
@@ -435,7 +435,7 @@ fn inst_call(self: *EmitLlvm, args: Slice(LlvmVal), sig: PrimSig, const do_call:
     out_vals.items()
 }
 
-fn pop_trailing_comma(self: *EmitLlvm) Unit = {
+fn pop_trailing_comma(self: *EmitLlvm) void = {
     // they don't allow trailing comma because they hate us personally 
     if(self.out&.current().items().ends_with(",")) {|
         // TODO: access fields on lvalues. `self.out&.current().len += 1` should work
@@ -444,7 +444,7 @@ fn pop_trailing_comma(self: *EmitLlvm) Unit = {
     };
 }
 
-fn inst_trap(self: *EmitLlvm) Unit = {
+fn inst_trap(self: *EmitLlvm) void = {
     // i think trap makes it crash instead of ub and it seems you need unreachable for it to believe the block is finished. 
     self.out&.push_all("   call void @llvm.trap()\n   unreachable\n");
 }
@@ -510,12 +510,12 @@ fn inst_load(self: *EmitLlvm, addr: EmitLlvm.Val, ty: Prim) EmitLlvm.Val = {
     value
 }
 
-fn inst_store(self: *EmitLlvm, addr: EmitLlvm.Val, value: EmitLlvm.Val, ty: Prim) Unit = {
+fn inst_store(self: *EmitLlvm, addr: EmitLlvm.Val, value: EmitLlvm.Val, ty: Prim) void = {
     self.out&.reserve(30);
     @fmt(self.out&.current(), "   store % %, ptr %\n", ty.llvm_type(), value, addr); 
 }
 
-fn inst_copy(self: *EmitLlvm, from: EmitLlvm.Val, to: EmitLlvm.Val, bytes: u16) Unit = {
+fn inst_copy(self: *EmitLlvm, from: EmitLlvm.Val, to: EmitLlvm.Val, bytes: u16) void = {
     self.out&.reserve(30);
     @fmt(self.out&.current(), "   call void @llvm.memcpy.p0.p0.i32(ptr %, ptr %, i32 %, i1 false)\n", to, from, @as(i64) bytes.zext()); 
 }
@@ -538,7 +538,7 @@ fn inst_global(self: *EmitLlvm, id: BakedVarId) EmitLlvm.Val = {
     v
 }
 
-fn inst_jump_if(self: *EmitLlvm, cond: EmitLlvm.Val, true: BbId, false: BbId, args: Slice(EmitLlvm.Val)) Unit = {
+fn inst_jump_if(self: *EmitLlvm, cond: EmitLlvm.Val, true: BbId, false: BbId, args: Slice(EmitLlvm.Val)) void = {
     assert(args.len.eq(0), "i dont use this yet");
     self.out&.reserve(40);
     c := self.get_var(.I8);
@@ -546,7 +546,7 @@ fn inst_jump_if(self: *EmitLlvm, cond: EmitLlvm.Val, true: BbId, false: BbId, ar
     @fmt(self.out&.current(), "   br i1 %, label %b%, label %b%\n", c, "%", @as(i64) true.id.zext(), "%", @as(i64) false.id.zext()); 
 }
 
-fn inst_jump(self: *EmitLlvm, always: BbId, args: Slice(EmitLlvm.Val)) Unit = {
+fn inst_jump(self: *EmitLlvm, always: BbId, args: Slice(EmitLlvm.Val)) void = {
     enumerate(args){i, arg|
         self.out&.reserve(20);
         @fmt(self.out&.current(), "   store % %, ptr %a%\n", arg.ty.llvm_type(), arg[], "%", i); 
@@ -555,7 +555,7 @@ fn inst_jump(self: *EmitLlvm, always: BbId, args: Slice(EmitLlvm.Val)) Unit = {
     @fmt(self.out&.current(), "   br label %b%\n", "%", @as(i64) always.id.zext()); 
 }
 
-fn inst_return(self: *EmitLlvm, args: Slice(EmitLlvm.Val)) Unit = {
+fn inst_return(self: *EmitLlvm, args: Slice(EmitLlvm.Val)) void = {
     @switch(args.len){
         @case(0) => {
             self.out&.current().push_all("   ret void\n");
@@ -598,11 +598,11 @@ fn get_var(self: *EmitLlvm, ty: Prim) LlvmVal = {
     v
 }
 
-fn display(self: LlvmVal, out: *List(u8)) Unit = {
+fn display(self: LlvmVal, out: *List(u8)) void = {
     @fmt(out, "%v%", "%", self.id);
 }
 // TODO: this should be automatic from enum names
-fn display(self: Prim, out: *List(u8)) Unit = {
+fn display(self: Prim, out: *List(u8)) void = {
     self.llvm_type().display(out);
 }
 

@@ -437,29 +437,29 @@ pub const COMPILER: &[(&str, *const u8)] = &[
         "fn resolve_backtrace_symbol(addr: *i64, out: *RsResolvedSymbol) bool",
         resolve_backtrace_symbol as *const u8,
     ),
-    ("fn debug_log_type(ty: Type) Unit", log_type as *const u8),
+    ("fn debug_log_type(ty: Type) void", log_type as *const u8),
     ("fn IntType(bits: i64, signed: bool) Type #fold;", make_int_type as *const u8),
     // measured in bytes
     ("fn size_of(T: Type) i64 #fold", get_size_of as *const u8),
     ("fn Label(Arg: Type) Type", do_label_type as *const u8),
     // useful when everything's broken so can't even compile the one defined in the language.
-    ("fn debug_log_int(i: i64) Unit", debug_log_int as *const u8),
-    ("fn debug_log_str(s: Str) Unit", debug_log_str as *const u8),
+    ("fn debug_log_int(i: i64) void", debug_log_int as *const u8),
+    ("fn debug_log_str(s: Str) void", debug_log_str as *const u8),
     // Generated for @BITS to bootstrap encoding for inline asm.
     ("#no_tail fn __shift_or_slice(ints: Slice(i64)) u32", shift_or_slice as *const u8),
-    ("fn __save_slice_t(slice_t: Fn(Type, Type)) Unit", save_slice_t as *const u8),
+    ("fn __save_slice_t(slice_t: Fn(Type, Type)) void", save_slice_t as *const u8),
     ("fn intern_type_ref(ty: *TypeInfo) Type;", intern_type as *const u8),
     // TODO: maybe it would be nice if you could override deref so Type acts like a *TypeInfo.
     ("fn get_type_info(ty: Type) TypeInfo;", get_type_info as *const u8),
     ("fn get_type_info_raw(ty: Type) TypeInfo;", get_type_info_raw as *const u8),
     (
-        "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) Unit;",
+        "fn const_eval(expr: FatExpr, ty: Type, result: rawptr) void;",
         const_eval_any as *const u8,
     ),
     // Calls Compiler::compile_expr
     // Infers the type and avoids some redundant work if you duplicate the ast node in a bunch of places after calling this.
     ("fn compile_ast(value: FatExpr) FatExpr;", compile_ast as *const u8),
-    ("fn debug_log_ast(expr: FatExpr) Unit;", log_ast as *const u8),
+    ("fn debug_log_ast(expr: FatExpr) void;", log_ast as *const u8),
     (
         "fn unquote_macro_apply_placeholders(expr: Slice(FatExpr)) FatExpr;",
         unquote_macro_apply_placeholders as *const u8,
@@ -478,7 +478,7 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro #outputs(Type) fn struct(fields: FatExpr) FatExpr;", struct_macro as *const u8),
     ("#macro #outputs(Symbol) fn symbol(fields: FatExpr) FatExpr;", symbol_macro as *const u8),
     (
-        "#macro #outputs(Unit) fn assert_compile_error(fields: FatExpr) FatExpr;",
+        "#macro #outputs(void) fn assert_compile_error(fields: FatExpr) FatExpr;",
         assert_compile_error_macro as *const u8,
     ),
     ("#macro #outputs(Type) fn type(e: FatExpr) FatExpr;", type_macro as *const u8),
@@ -493,11 +493,11 @@ pub const COMPILER: &[(&str, *const u8)] = &[
     ("#macro fn FnPtr(Arg: FatExpr, Ret: FatExpr) FatExpr;", fn_ptr_type_macro as *const u8),
     ("#macro fn Fn(Ret: FatExpr) FatExpr;", fn_type_macro_single as *const u8),
     ("#macro fn FnPtr( Ret: FatExpr) FatExpr;", fn_ptr_type_macro_single as *const u8),
-    ("fn __compiler_save_fatexpr_type(t: Type) Unit;", compiler_save_fatexpr_type as *const u8),
+    ("fn __compiler_save_fatexpr_type(t: Type) void;", compiler_save_fatexpr_type as *const u8),
     ("#fold fn str(s: Symbol) Str", symbol_to_str as *const u8),
     ("fn get_compiler_vtable() *ImportVTable", get_compiler_vtable as *const u8),
     ("fn bake_value(v: BakedVar) BakedVarId", bake_value as *const u8),
-    ("fn __save_bake_os(os: OverloadSet) Unit", save_bake_os as *const u8),
+    ("fn __save_bake_os(os: OverloadSet) void", save_bake_os as *const u8),
     (
         "fn dyn_bake_relocatable_value(raw_bytes: Slice(u8), ty: Type) Slice(BakedEntry)",
         dyn_bake_relocatable_value as *const u8,
@@ -559,7 +559,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             Some(out)
         }
         #[cfg(feature = "cranelift")]
-        "codegen_cranelift_basic" => {
+        "codegen_cranelift_intrinsics" => {
             let mut out = String::new();
             writeln!(out, "{}", msg).unwrap();
             for (sig, ptr) in crate::cranelift::BUILTINS {
@@ -568,7 +568,7 @@ pub fn get_include_std(name: &str) -> Option<String> {
             Some(out)
         }
         #[cfg(not(feature = "cranelift"))]
-        "codegen_cranelift_basic" => Some(String::new()),
+        "codegen_cranelift_intrinsics" => Some(String::new()),
         _ => {
             // if let Some((_, src)) = INCLUDE_STD.iter().find(|(check, _)| name == *check) {
             //     return Some(src.to_string());
@@ -938,7 +938,7 @@ pub extern "C-unwind" fn tagged_macro<'p>(compile: &mut Compile<'_, 'p>, mut cas
         if let Expr::StructLiteralP(pattern) = &mut cases.expr {
             for b in &mut pattern.bindings {
                 if b.default.is_none() && matches!(b.ty, LazyType::Infer) {
-                    // @tagged(s: i64, n) is valid and infers n as Unit.
+                    // @tagged(s: i64, n) is valid and infers n as void.
                     b.ty = LazyType::Finished(TypeId::unit);
                 }
             }

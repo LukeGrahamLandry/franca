@@ -8,7 +8,7 @@ Parser :: @struct(
 );
 
 Prec      :: @enum(None, Assignment, Or, And, Equality, Comparison, Term, Factor, Unary, Call, Primary);
-ParseFn   :: @FnPtr(self: *Parser) Unit;
+ParseFn   :: @FnPtr(self: *Parser) void;
 ParseRule :: @struct(
     prefix : ParseFn,
     infix  : ParseFn,
@@ -25,7 +25,7 @@ ParseRule :: @struct(
 //       the get_rule indirection is enough to fix it for c but not for me :\
 rules :: @static(Slice(ParseRule));
 null_rule :: {
-    crash :: fn(self: *Parser) Unit = unreachable();
+    crash :: fn(self: *Parser) void = unreachable();
     crash!fn_ptr
 };
 
@@ -76,12 +76,12 @@ fn compile(source: Str, chunk: *Chunk) bool = {
     self.had_error.not()
 }
 
-fn parse(self: *Parser, prec: Prec) Unit = {
+fn parse(self: *Parser, prec: Prec) void = {
     self.advance();
     // TODO: generate fn ordinal for int enums so its more obvious what's going on. 
     rule := get_rule(self.previous.type);
-    null_rule_addr :: erase_types_fn(*Parser, Unit, null_rule).int_from_rawptr();
-    my_rule_addr := erase_types_fn(*Parser, Unit, rule.prefix).int_from_rawptr();
+    null_rule_addr :: erase_types_fn(*Parser, void, null_rule).int_from_rawptr();
+    my_rule_addr := erase_types_fn(*Parser, void, rule.prefix).int_from_rawptr();
     if(my_rule_addr.eq(null_rule_addr)) {|
         self.error_at(self.previous, "Expect expression.");
     };
@@ -97,14 +97,14 @@ fn parse(self: *Parser, prec: Prec) Unit = {
     };
 }
 
-#inline fn expression(self: *Parser) Unit = self.parse(.Assignment);
+#inline fn expression(self: *Parser) void = self.parse(.Assignment);
 
-number :: fn(self: *Parser) Unit = {
+number :: fn(self: *Parser) void = {
     value := self.previous.lexeme.float();
     self.emit(value.to_value());
 };
 
-unary :: fn(self: *Parser) Unit = {
+unary :: fn(self: *Parser) void = {
     type := self.previous.type;
     self.parse(.Unary);
     @switch(@as(i64) type) {
@@ -119,7 +119,7 @@ unary :: fn(self: *Parser) Unit = {
 };
 
 // TODO: a similar identifiers check so it can give better error message when you typo Opcode vs OpCode. 
-binary :: fn(self: *Parser) Unit = {
+binary :: fn(self: *Parser) void = {
     type := self.previous.type;
     rule := get_rule(type);
     self.parse(@as(Prec) @as(i64) (@as(i64) rule.prec).add(1));
@@ -148,12 +148,12 @@ binary :: fn(self: *Parser) Unit = {
     self.emit(op);
 };
 
-grouping :: fn(self: *Parser) Unit = {
+grouping :: fn(self: *Parser) void = {
     self.expression();
     self.consume(.RightParen, "Expect ')' after expression.");
 };
 
-parse_literal :: fn(self: *Parser) Unit = {
+parse_literal :: fn(self: *Parser) void = {
     type := self.previous.type;
     rule := get_rule(type);
     value := @switch(@as(i64) type) {
@@ -168,7 +168,7 @@ parse_literal :: fn(self: *Parser) Unit = {
 
 fn get_rule(type: TokenType) *ParseRule = rules[].index(@as(i64) type);
 
-fn advance(self: *Parser) Unit = {
+fn advance(self: *Parser) void = {
     self.previous = self.current;
     (=> {
         // TODO: wraping the loop in a lambda like this looks really dumb. 
@@ -183,15 +183,15 @@ fn advance(self: *Parser) Unit = {
     })();
 }
 
-fn consume(self: *Parser, type: TokenType, msg: Str) Unit = {
+fn consume(self: *Parser, type: TokenType, msg: Str) void = {
     if(self.current.type.eqq(type),
         => self.advance(),
         =>self.error_at(self.current, msg)
     )
 }
 
-fn error(self: *Parser, msg: Str) Unit = self.error_at(self.previous, msg);
-fn error_at(self: *Parser, token: Token, msg: Str) Unit = {
+fn error(self: *Parser, msg: Str) void = self.error_at(self.previous, msg);
+fn error_at(self: *Parser, token: Token, msg: Str) void = {
     if(not(self.panic_mode)){|
         self.panic_mode = true;
         self.had_error = true;
@@ -200,21 +200,21 @@ fn error_at(self: *Parser, token: Token, msg: Str) Unit = {
     }
 }
 
-#redirect(Ty(*Parser, i64), Unit) fn emit(self: *Parser, b: OpCode) Unit;
-fn emit(self: *Parser, b: i64) Unit = {
+#redirect(Ty(*Parser, i64), void) fn emit(self: *Parser, b: OpCode) void;
+fn emit(self: *Parser, b: i64) void = {
     self.current_chunk().push(b, self.previous.line);
 }
-fn emit(self: *Parser, a: i64, b: i64) Unit = {
+fn emit(self: *Parser, a: i64, b: i64) void = {
     self.emit(a);
     self.emit(b);
 }
-fn emit(self: *Parser, a: OpCode, b: i64) Unit = {
+fn emit(self: *Parser, a: OpCode, b: i64) void = {
     self.emit(@as(i64) (@as(u8) a).zext());
     self.emit(b);
 }
 
 // TODO: EXTRA: OpCode.Constant16
-fn emit(self: *Parser, value: Value) Unit = self.emit(OpCode.Constant, self.make_constant(value));
+fn emit(self: *Parser, value: Value) void = self.emit(OpCode.Constant, self.make_constant(value));
 
 fn make_constant(self: *Parser, value: Value) i64 = {
     c := self.current_chunk().push(value);
