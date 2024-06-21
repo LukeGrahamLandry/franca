@@ -261,6 +261,7 @@ pub mod c {
             match (f, s) {
                 (Prim::I64 | Prim::P64, Prim::I64 | Prim::P64) => to_values(program.program, (r.fst, r.snd)),
                 (Prim::I32, Prim::I32) => to_values(program.program, (r.fst as u32, r.snd as u32)),
+                (Prim::I64, Prim::I8) => to_values(program.program, (r.fst, r.snd as u8)),
                 _ => todo!(),
             }
         } else {

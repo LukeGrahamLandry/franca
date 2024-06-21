@@ -20,14 +20,12 @@ use std::{
     ffi::CString,
     fs::{self, File},
     io::Read,
-    mem::{self, transmute},
+    mem::transmute,
     os::fd::FromRawFd,
     panic::{set_hook, take_hook},
     path::PathBuf,
     process::exit,
     str::pattern::Pattern,
-    thread::sleep_until,
-    time::{Duration, Instant},
 };
 
 // TODO: Instead of cli args, what if the arg was a string of code to run so 'franca "start_lsp()"' would concat that on some compiler_cli.txt and run it.

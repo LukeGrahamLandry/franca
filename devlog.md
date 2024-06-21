@@ -1,3 +1,11 @@
+## the parser grind (Jum 21)
+
+- stmt var decl
+- tuples, struct literals
+- calls, dot calls
+- assign, update-assign
+- macro, quote, unquote
+
 ## debug x86 (Jun 20)
 
 fucking wikipedia lied to be.

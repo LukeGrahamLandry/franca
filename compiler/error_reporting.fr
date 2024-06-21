@@ -18,11 +18,10 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             out.push_all("{\n");
             each (f.body.items()) {s|
                 s.log(pool, out, depth.add(1));
-                out.push_all(",");
             };
-            // TODO: Indent
-            f.result.log(pool, out, depth);
-            // TODO: Indent
+            out.indent_by(depth.add(1));
+            f.result.log(pool, out, depth.add(1));
+            out.indent_by(depth);
             out.push_all("\n}");
         });
         (fn Tuple(args) => {
@@ -43,12 +42,7 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
             @fmt(out, "!%", pool.get(f.name));
         });
         (fn StructLiteralP(pattern) => {
-            out.push_all("(");
-            each (pattern.bindings.items()) {b|
-                b.log(pool, out, depth);
-                out.push_all(",");
-            };
-            out.push_all(")");
+            pattern.log(pool, out, depth);
         });
         (fn FieldAccess(f) => {
             f.container.log(pool, out, depth);
@@ -75,15 +69,69 @@ fn log(self: *FatExpr, pool: *StringPool, out: *List(u8), depth: i64) void = {
     };
 } 
 
+fn log(self: *Pattern, pool: *StringPool, out: *List(u8), depth: i64) void = {
+    out.push_all("(");
+    each (self.bindings.items()) {b|
+        b.log(pool, out, depth);
+        out.push_all(",");
+    };
+    out.push_all(")");
+}
+
 fn log(self: *Binding, pool: *StringPool, out: *List(u8), depth: i64) void = {
-    // format!(
-    //    "{}: ({}) = {}, ",
-    //    b.name().map_or("_", |n| pool.get(n)),
-    //    b.lazy().log(pool),
-    //    b.default.as_ref().map(|e| e.log(pool)).unwrap_or_else(|| String::from("---"))
-    //)
+    @match(self.name) {
+        (fn Ident(name) => out.push_all(pool.get(name)));
+        (fn Var(v) => out.push_all(pool.get(v.name)));
+        (fn None() => out.push_all("_"));
+    };
+    out.push_all(": "); // TODO
+    self.ty&.log(pool, out, depth);
+    ::as_ref(FatExpr); // TODO: cant do by value because it gets the wrong arity for the lambda???
+    ::if_opt(*FatExpr, void);
+    if self.default&.as_ref() {e: *FatExpr|
+        out.push_all(" = ");
+        e.log(pool, out, depth);
+    };
+}
+
+fn log(self: *LazyType, pool: *StringPool, out: *List(u8), depth: i64) void = {
+    @match(self) {
+        (fn PendingEval(e) => { e.log(pool, out, depth); });
+        (fn Infer() => out.push_all("_"));
+        @default => out.push_all("<TODO>");
+    };
+}
+
+
+fn indent_by(out: *List(u8), depth: i64) void = {
+    range(0, depth) {i|
+        out.push_all("  "); 
+    };
 }
 
 fn log(self: *FatStmt, pool: *StringPool, out: *List(u8), depth: i64) void = {
-    
+    out.indent_by(depth);
+    @match(self.stmt&) {
+        (fn Noop() => {
+            out.push_all(";\n");
+        });
+        (fn Eval(expr) => {
+            expr.log(pool, out, depth);
+            out.push_all(";\n");
+        });
+        (fn DeclNamed(f) => {
+            // TODO: kind and ty
+            out.push_all(pool.get(f.name));
+            out.push_all(":=");
+            f.value&.log(pool, out, depth);
+            out.push_all(";\n");
+        });
+        (fn Set(f) => {
+            f.place&.log(pool, out, depth);
+            out.push_all(" = ");
+            f.value&.log(pool, out, depth);
+            out.push_all(";\n");
+        });
+        @default => out.push_all("ICE:???");
+    }
 } 
